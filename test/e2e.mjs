@@ -176,7 +176,7 @@ try {
   await until('host first turn', () => host.lines.some(l => l.type === 'result'))
   check('host answers its own first prompt', /marmalade/i.test(host.text))
 
-  host.say('/share')
+  host.say('/share-session')
   const linkPattern = new RegExp(`${SERVER.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/s/[A-Za-z0-9_-]{16,}`)
   const link = await until('share link', () => linkPattern.exec(host.text)?.[0])
   const id = link.split('/s/')[1]
@@ -266,7 +266,7 @@ try {
   check('a guest cannot write on the host without approval', !existsSync(join(hostDir, 'pwned.txt')))
 
   // Stop sharing: the guest is told, the link stops working.
-  host.say('/unshare')
+  host.say('/stop-sharing')
   await until('guest told sharing ended', () => /stopped sharing|no longer shared/i.test(guest.text), 30_000)
   check('guest is told when sharing stops', true)
   const after = await roomInfo(id)

@@ -894,9 +894,10 @@ export const register: Register = (on, options) => {
 
   on('session.start', async ($, e, next) => {
     const started = await next(e)
-    await $.command.register({ name: 'share', description: 'Share this session: copies a link teammates join with' })
-    await $.command.register({ name: 'unshare', description: 'Stop sharing this session, or leave the one you joined' })
-    await $.command.register({ name: 'who', description: 'Open the Room: who is here, activity, chat' })
+    // Not /share: Claude has its own. Every name here is the plugin's alone.
+    await $.command.register({ name: 'share-session', description: 'Share this session: copies a link teammates join with' })
+    await $.command.register({ name: 'stop-sharing', description: 'Stop sharing this session, or leave the one you joined' })
+    await $.command.register({ name: 'room', description: 'Open the Room: who is here, activity, side chat' })
     // A reload keeps $.state: pick the room back up.
     const room = await read($, roomA)
     if (room && (await read($, modeA)) !== 'idle') startPolling($)
@@ -910,7 +911,7 @@ export const register: Register = (on, options) => {
     return next(e)
   })
 
-  on('command.run', { command: 'share' }, async $ => {
+  on('command.run', { command: 'share-session' }, async $ => {
     try {
       const room = await share($)
       return { text: `Sharing this session. Anyone with the link can join: ${room.url}` }
@@ -919,13 +920,13 @@ export const register: Register = (on, options) => {
     }
   })
 
-  on('command.run', { command: 'who' }, async $ => {
-    if ((await read($, modeA)) === 'idle') return { text: 'This session is not shared. Press Share above the prompt, or type /share.' }
+  on('command.run', { command: 'room' }, async $ => {
+    if ((await read($, modeA)) === 'idle') return { text: 'This session is not shared. Press Share above the prompt, or type /share-session.' }
     await openRoom($)
     return { text: 'Opened the Room.' }
   })
 
-  on('command.run', { command: 'unshare' }, async $ => {
+  on('command.run', { command: 'stop-sharing' }, async $ => {
     const mode = await read($, modeA)
     if (mode === 'host') await stopSharing($)
     else if (mode === 'guest') await leave($)
@@ -964,7 +965,7 @@ export const register: Register = (on, options) => {
             policy.prompts === 'watch'
               ? `It's watch-only for now: you'll see every turn live, and you can chat with everyone in the **Room** panel.`
               : `What you type here goes to it and runs on ${room.host}'s machine; everyone sees the replies live.`,
-            `The **Room** panel (above the prompt, or \`/who\`) shows who's here and has a side chat Claude doesn't read. To leave, press **Leave**.`,
+            `The **Room** panel (above the prompt, or \`/room\`) shows who's here and has a side chat Claude doesn't read. To leave, press **Leave**.`,
           ].join(' '),
           then: history,
         })
@@ -1262,8 +1263,8 @@ export const register: Register = (on, options) => {
     if (v.mode !== 'guest') return next(e)
     const hint =
       v.policy.prompts === 'watch'
-        ? `Watch-only · chat in the Room (/who) · Leave anytime`
-        : `↵ sends to ${v.room?.host}'s session · Esc stops the turn · /who opens the Room`
+        ? `Watch-only · chat in the Room (/room) · Leave anytime`
+        : `↵ sends to ${v.room?.host}'s session · Esc stops the turn · /room opens the Room`
     return next({ ...e, props: { ...e.props, hint } })
   })
 

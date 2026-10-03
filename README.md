@@ -35,12 +35,12 @@ Requires Claude Code 2.1.286 or later (`claude update`; Claude Desktop includes 
 ## Use it
 
 - **Join:** open a share link. Its page opens Claude Desktop with the link in a new session's prompt box, so you press Enter. Pasting a link into any Claude Code session works too. Joining needs no setup.
-- **Share:** press **Share** above the prompt, or type `/share`. The link is copied. Sharing needs a server; see below.
-- **Room:** press **Room** above the prompt, or type `/who`, for:
+- **Share:** press **Share** above the prompt, or type `/share-session`. The link is copied. Sharing needs a server; see below.
+- **Room:** press **Room** above the prompt, or type `/room`, for:
   - who's here and who Claude is working for;
   - the timeline and the side chat;
   - for the host, the controls.
-- **Stop:** press **Leave** or **Stop sharing**, or type `/unshare`. Esc in a guest stops the shared turn.
+- **Stop:** press **Leave** or **Stop sharing**, or type `/stop-sharing`. Esc in a guest stops the shared turn.
 
 ## Host a server
 
