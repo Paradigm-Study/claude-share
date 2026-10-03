@@ -641,19 +641,42 @@ async function desk($: $, server: DeskServer, tool: string, args: Record<string,
   }
 }
 
+async function sessionInfo($: $, id: string): Promise<{ sessionId?: unknown; title?: unknown; pinned?: unknown } | null> {
+  const raw = await desk($, 'ccd_session_mgmt', 'get_session', { session_id: id })
+  if (raw === null) return null
+  try {
+    return JSON.parse(raw)
+  } catch {
+    return {}
+  }
+}
+
+// The sidebar's own tools are told which session by its id: from a plugin's
+// call, "self" has been seen to change nothing there while the title, set the
+// same way through ccd_session_mgmt, did change.
+let selfId = ''
+
+// Pins or unpins this session's row, by id and then by "self", and checks it
+// took; a pin that won't stick is said in the transcript, not just the debug log.
+async function setPinned($: $, pinned: boolean) {
+  for (const id of [...new Set([selfId, 'self'].filter(Boolean))]) {
+    if ((await desk($, 'ccd_sidebar', 'set_pinned', { session_id: id, pinned })) === null) continue
+    const after = await sessionInfo($, selfId || 'self')
+    if (!after || (after.pinned === true) === pinned) return
+  }
+  if (pinned) $.ui.log("Shared session: couldn't pin this session in Claude's sidebar. Pin it by hand to keep it at the top.")
+}
+
 // Marks this session's row: retitles it (keeping what it was) and pins it.
 async function markSidebar($: $, title: (current: string) => string) {
-  const raw = await desk($, 'ccd_session_mgmt', 'get_session', { session_id: 'self' })
-  if (raw === null) return
-  let info: { title?: unknown; pinned?: unknown } = {}
-  try {
-    info = JSON.parse(raw)
-  } catch {}
+  const info = await sessionInfo($, 'self')
+  if (info === null) return
+  if (typeof info.sessionId === 'string') selfId = info.sessionId
   const current = typeof info.title === 'string' ? info.title : ''
   const pinned = info.pinned === true
-  if (!(await read($, sidebarA))) await update($, sidebarA, () => ({ title: current, pinned }))
+  if (!(await read($, sidebarA))) await update($, sidebarA, () => ({ title: current, pinned, id: selfId || undefined }))
   await desk($, 'ccd_session_mgmt', 'set_session_title', { session_id: 'self', title: title(current).slice(0, 120) })
-  if (!pinned) await desk($, 'ccd_sidebar', 'set_pinned', { session_id: 'self', pinned: true })
+  if (!pinned) await setPinned($, true)
 }
 
 // Puts the row back: the title it had (or `title`), unpinned unless it was pinned.
@@ -661,13 +684,14 @@ async function unmarkSidebar($: $, title?: string) {
   const saved = await read($, sidebarA)
   if (!saved) return
   await update($, sidebarA, () => null)
+  if (saved.id) selfId = saved.id
   const restored = title ?? saved.title
   if (restored) await desk($, 'ccd_session_mgmt', 'set_session_title', { session_id: 'self', title: restored })
-  if (!saved.pinned) await desk($, 'ccd_sidebar', 'set_pinned', { session_id: 'self', pinned: false })
+  if (!saved.pinned) await setPinned($, false)
 }
 
 function nudgeSidebar($: $) {
-  void desk($, 'ccd_sidebar', 'set_unread', { session_id: 'self', unread: true })
+  void desk($, 'ccd_sidebar', 'set_unread', { session_id: selfId || 'self', unread: true })
 }
 
 // ---------------------------------------------------------------------------

@@ -241,11 +241,18 @@ test('the host can make the session watch-only from the Room', async ($, on) => 
 })
 
 // Claude Desktop's sidebar tools, stood in for: what the plugin asked of them.
-function sidebar(on: On, start: { title: string; pinned?: boolean }) {
+// Claude Desktop's sidebar, standing in: one session, its title and pin.
+// `refuse` makes set_pinned fail, as it can in the app.
+function sidebar(on: On, start: { title: string; pinned?: boolean; refuse?: boolean }) {
   const calls: string[] = []
+  let pinned = start.pinned === true
   on('mcp.call', ($, e) => {
     calls.push(e.tool === 'get_session' ? 'get_session' : `${e.tool} ${JSON.stringify(e.args)}`)
-    const text = e.tool === 'get_session' ? JSON.stringify({ title: start.title, ...(start.pinned ? { pinned: true } : {}) }) : 'ok'
+    if (e.tool === 'set_pinned') {
+      if (start.refuse) return { value: { content: [{ type: 'text', text: 'not allowed' }], isError: true } }
+      pinned = (e.args as { pinned: boolean }).pinned
+    }
+    const text = e.tool === 'get_session' ? JSON.stringify({ sessionId: 'local_test', title: start.title, ...(pinned ? { pinned: true } : {}) }) : 'ok'
     return { value: { content: [{ type: 'text', text }], isError: false } }
   })
   return calls
@@ -257,10 +264,18 @@ test("sharing marks the session's sidebar row, and stopping puts it back", async
   const ui = await $.ui.mount(band('desktop'))
   await ui.press({ key: 'share' })
   expect(calls).toContain('set_session_title {"session_id":"self","title":"👥 Live · Fix login flow"}')
-  expect(calls).toContain('set_pinned {"session_id":"self","pinned":true}')
+  expect(calls).toContain('set_pinned {"session_id":"local_test","pinned":true}')
   await ui.press({ key: 'stop-sharing' })
-  expect(calls.at(-2)).toBe('set_session_title {"session_id":"self","title":"Fix login flow"}')
-  expect(calls.at(-1)).toBe('set_pinned {"session_id":"self","pinned":false}')
+  expect(calls.at(-3)).toBe('set_session_title {"session_id":"self","title":"Fix login flow"}')
+  expect(calls.at(-2)).toBe('set_pinned {"session_id":"local_test","pinned":false}')
+})
+
+test("a pin the app won't take is said in the transcript", async ($, on) => {
+  const asked = world(on)
+  sidebar(on, { title: 'Fix login flow', refuse: true })
+  const ui = await $.ui.mount(band('desktop'))
+  await ui.press({ key: 'share' })
+  expect(asked.logged.some(line => line.includes("couldn't pin this session"))).toBe(true)
 })
 
 test("a session that was pinned stays pinned after sharing", async ($, on) => {
@@ -281,7 +296,7 @@ test("joining names the host in the sidebar; leaving says whose session it was",
   const ui = await $.ui.mount(band('desktop'))
   await ui.press({ key: 'leave' })
   expect(calls).toContain(`set_session_title {"session_id":"self","title":"Sam's session · demo"}`)
-  expect(calls.at(-1)).toBe('set_pinned {"session_id":"self","pinned":false}')
+  expect(calls.at(-2)).toBe('set_pinned {"session_id":"local_test","pinned":false}')
 })
 
 test('with no share server set up, Share explains how and joining still works', async ($, on) => {

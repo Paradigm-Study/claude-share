@@ -69,7 +69,7 @@ declare module 'claude-code' {
       /** Host: who each tool call of a guest's turn was for, by tool_use_id. */
       owners: Record<string, string>
       /** Claude Desktop's sidebar row as it was before sharing marked it, to put back. */
-      sidebar: { title: string; pinned: boolean } | null
+      sidebar: { title: string; pinned: boolean; id?: string } | null
     }
   }
 }
