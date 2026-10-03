@@ -1,0 +1,16 @@
+{
+  "name": "claude-share",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "server": "node server/node.mjs",
+    "deploy": "wrangler deploy",
+    "set-server": "node scripts/set-server.mjs",
+    "typecheck": "cd plugin && tsc -p .",
+    "test:e2e": "node test/e2e.mjs"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0",
+    "wrangler": "^4.0.0"
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "name": "claude-share",
+  "owner": {
+    "name": "scoootscooob",
+    "url": "https://github.com/scoootscooob"
+  },
+  "metadata": {
+    "description": "Shared Claude Code sessions: share a session with a link, teammates join and talk to it"
+  },
+  "plugins": [
+    {
+      "name": "shared-session",
+      "source": "./plugin",
+      "description": "Share a Claude Code session with a link; teammates join from their own Claude Code and talk to it"
+    }
+  ]
+}

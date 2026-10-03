@@ -1,0 +1,267 @@
+// The row above the prompt, drawn and pressed the way Claude Desktop and the
+// terminal draw it, over a stand-in world: a fixed clock, a fake share server,
+// and quiet toasts. Run with `claude plugin test plugin`.
+
+import { expect, mock, test } from 'claude-code/testing'
+import type { On } from 'claude-code'
+
+const SURFACES = ['desktop', 'terminal'] as const
+const LINK = 'http://share.test/s/room0000000000000001'
+
+function band<S extends (typeof SURFACES)[number]>(surface: S) {
+  return {
+    plugin: 'shared-session',
+    surface,
+    component: 'AbovePrompt' as const,
+    props: { hasSurvey: false, isWorking: false, maxRows: 8, bodyColumns: 100, scroll: { offset: 0, bodyRows: 8 }, view: {} },
+    viewport: { columns: 100, rows: 30 },
+  }
+}
+
+// Everything beneath the plugin a session would provide, plus a share server
+// that answers from memory. Returns what the server was asked.
+function world(on: On, opts: { server?: boolean } = {}) {
+  const asked: string[] = []
+  const clock = mock.clock(on, { now: 1_000 })
+  mock.env(on, opts.server === false ? { USER: 'scott' } : { USER: 'scott', SHARED_SESSION_SERVER: 'http://localhost:8787' })
+  on('ui.toast', () => ({ value: undefined }))
+  const logged: string[] = []
+  on('ui.log', ($, e) => {
+    logged.push(e.text)
+    return { value: undefined }
+  })
+  on('ui.copy', () => ({ value: { isCopied: true } }))
+  on('session.cwd', () => ({ value: '/tmp/demo' }))
+  on('session.messages', () => ({ value: [] }))
+  on('process.run', () => ({ value: { exitCode: 1, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }))
+  on('prompt.submit', ($, e) => ({ text: e.text }))
+  // The app's own drawing beneath the plugin: just the labels it was handed.
+  on('ui.render', { component: 'SessionMode' }, ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>{e.props.modes.join(' & ')}</Text>
+  })
+  on('ui.render', { component: 'Spinner' }, ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>{e.props.message ?? e.props.word}</Text>
+  })
+  on('ui.render', { component: 'UserMessage' }, ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>{e.props.text}</Text>
+  })
+  on('http.fetch', ($, e) => {
+    const method = e.init?.method ?? 'GET'
+    const path = e.url.replace(/^https?:\/\/[^/]+/, '').replace(/\?.*$/, '')
+    asked.push(`${method} ${path}`)
+    const people = [
+      { id: 'host', name: 'Sam', role: 'host', online: true },
+      { id: 'seat1', name: 'scott', role: 'guest', online: true },
+      { id: 'seat2', name: 'Alex', role: 'guest', online: true },
+    ]
+    let body: unknown = { ok: true }
+    if (method === 'POST' && path === '/api/rooms') {
+      body = { id: 'room0000000000000002', url: 'http://localhost:8787/s/room0000000000000002', token: 't', seq: 0, title: 'demo' }
+    } else if (path.endsWith('/join')) {
+      body = { token: 'g', seat: 'seat1', title: 'demo', host: 'Sam', seq: 1, history: [], people }
+    } else if (path.endsWith('/events') && method === 'GET') {
+      body = { seq: 1, events: [], people, ended: false, title: 'demo' }
+    }
+    return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify(body) } }
+  })
+  return Object.assign(asked, { clock, logged })
+}
+
+test('a session that is not shared shows one Share button', async ($, on) => {
+  world(on)
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount(band(surface))
+    const share = await ui.find({ key: 'share' })
+    expect(share?.type).toBe('Button')
+    expect(share?.props.label).toBe('Share')
+    expect(await ui.findAll({ type: 'Button' })).toHaveLength(1)
+    await ui.unmount()
+  }
+})
+
+test('Share makes the host row; Stop sharing ends it', async ($, on) => {
+  const asked = world(on)
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount(band(surface))
+    await ui.press({ key: 'share' })
+    expect((await ui.find({ type: 'Text', text: /^Shared$/ }))?.props.bold).toBe(true)
+    expect(await ui.find({ type: 'Text', text: 'waiting for people to join' })).toBeDefined()
+    // Desktop draws the live dot and faces as vector art; the terminal, letters.
+    expect(Boolean(await ui.find({ type: 'Svg' }))).toBe(surface === 'desktop')
+    expect(await ui.find({ key: 'copy' })).toBeDefined()
+    await ui.press({ key: 'stop-sharing' })
+    expect(await ui.find({ key: 'share' })).toBeDefined()
+    await ui.unmount()
+  }
+  expect(asked).toContain('POST /api/rooms')
+  expect(asked).toContain('POST /api/rooms/room0000000000000002/end')
+})
+
+test('a link typed in Desktop joins, and the row names the host', async ($, on) => {
+  const asked = world(on)
+  const typed = await $.prompt.submit({
+    text: `<system-reminder>\nDesktop context\n</system-reminder>\n\n${LINK}`,
+    origin: { kind: 'composer' },
+    wait: false,
+  })
+  expect(typed.drop).toBeUndefined() // the link stays as typed; a reply answers it
+  expect(asked).toContain('POST /api/rooms/room0000000000000001/join')
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount(band(surface))
+    expect((await ui.find({ type: 'Text', text: /Sam's session/ }))?.props.bold).toBe(true)
+    expect(await ui.find({ type: 'Text', text: 'with Alex' })).toBeDefined()
+    expect((await ui.find({ key: 'room' }))?.props.label).toBe('Room · 3')
+    expect(await ui.find({ key: 'leave' })).toBeDefined()
+    await ui.unmount()
+  }
+  const ui = await $.ui.mount(band('desktop'))
+  await ui.press({ key: 'leave' })
+  expect(await ui.find({ key: 'share' })).toBeDefined()
+})
+
+test('a link another session sends never joins', async ($, on) => {
+  const asked = world(on)
+  const relayed = await $.prompt.submit({ text: LINK, origin: { kind: 'peer' }, wait: false })
+  expect(relayed.drop).toBeUndefined()
+  expect(asked.some(a => a.endsWith('/join'))).toBe(false)
+  const ui = await $.ui.mount(band('desktop'))
+  expect(await ui.find({ key: 'share' })).toBeDefined()
+})
+
+const ROW = (text: string, origin: Record<string, unknown>) => ({
+  plugin: 'shared-session',
+  component: 'UserMessage' as const,
+  props: { text, origin, isExpanded: false } as never,
+})
+
+test("a teammate's prompt shows their name over their words", async ($, on) => {
+  world(on)
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount({ ...ROW('Sam: Read NOTES.md, please', { kind: 'plugin', name: 'shared-session', asUser: true }), surface })
+    const name = await ui.find({ type: 'Text', text: 'Sam' })
+    expect(name?.props.bold).toBe(true)
+    expect(Boolean(await ui.find({ type: 'Svg' }))).toBe(surface === 'desktop')
+    expect((await ui.find({ key: 'said' }))?.text).toBe('Read NOTES.md, please')
+    await ui.unmount()
+    const mine = await $.ui.mount({ ...ROW('Note: this is mine', { kind: 'composer' }), surface })
+    expect(await mine.find({ type: 'Markdown' })).toBeUndefined()
+    expect((await mine.find({ type: 'Text' }))?.text).toBe('Note: this is mine')
+    await mine.unmount()
+  }
+})
+
+test('the footer and the working line say who is here and whose turn it is', async ($, on) => {
+  world(on)
+  for (const surface of SURFACES) {
+    const idle = await $.ui.mount({ plugin: 'shared-session', surface, component: 'SessionMode', props: { modes: ['plan'] } })
+    expect((await idle.find({ type: 'Text' }))?.text).toBe('plan')
+    await idle.unmount()
+  }
+  await $.prompt.submit({ text: LINK, origin: { kind: 'composer' }, wait: false })
+  for (const surface of SURFACES) {
+    const footer = await $.ui.mount({ plugin: 'shared-session', surface, component: 'SessionMode', props: { modes: ['plan'] } })
+    expect((await footer.find({ type: 'Text' }))?.text).toBe("plan & in Sam's session with Alex")
+    const spinner = await $.ui.mount({
+      plugin: 'shared-session',
+      surface,
+      component: 'Spinner',
+      props: { word: 'Working', message: null, suffix: '…', mode: 'requesting' },
+    })
+    expect((await spinner.find({ type: 'Text' }))?.text).toBe("Waiting for Sam's session")
+    await footer.unmount()
+    await spinner.unmount()
+  }
+})
+
+const PANE = { title: 'Shared session', isFocused: false, bodyColumns: 60, placement: 'dock', scroll: { offset: 0, bodyRows: 40 }, view: {} } as never
+
+test('the Room shows the banner, everyone, activity and the chat', async ($, on) => {
+  const asked = world(on)
+  await $.prompt.submit({ text: LINK, origin: { kind: 'composer' }, wait: false })
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount({ plugin: 'shared-session', surface, component: 'Pane', requestId: 'shared-room', props: PANE })
+    const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text)
+    expect(Boolean(await ui.find({ type: 'Svg' }))).toBe(surface === 'desktop')
+    for (const name of ['Sam', 'scott', 'Alex']) expect(texts).toContain(name)
+    expect(texts).toContain('PEOPLE · 3')
+    expect(texts).toContain('CHAT · Claude never sees this')
+    expect(await ui.find({ key: 'room-leave' })).toBeDefined()
+    expect(await ui.find({ key: 'policy-prompts' })).toBeUndefined() // the host's alone
+    await ui.input({ key: 'chat-input-0', text: 'hello room' })
+    await asked.clock.advance(100) // the send waits a beat to batch
+    await ui.unmount()
+  }
+  expect(asked.filter(a => a === 'POST /api/rooms/room0000000000000001/events').length).toBeGreaterThan(0)
+})
+
+test('the host can make the session watch-only from the Room', async ($, on) => {
+  const asked = world(on)
+  const band0 = await $.ui.mount(band('desktop'))
+  await band0.press({ key: 'share' })
+  const ui = await $.ui.mount({ plugin: 'shared-session', surface: 'desktop', component: 'Pane', requestId: 'shared-room', props: PANE })
+  expect(await ui.find({ key: 'room-stop' })).toBeDefined()
+  await ui.select({ key: 'policy-prompts', value: 'watch' })
+  await asked.clock.advance(100)
+  const row = await $.ui.mount(band('desktop'))
+  expect(await row.find({ type: 'Text', text: /Watch-only/ })).toBeDefined()
+  expect(asked).toContain('POST /api/rooms/room0000000000000002/events')
+})
+
+// Claude Desktop's sidebar tools, stood in for: what the plugin asked of them.
+function sidebar(on: On, start: { title: string; pinned?: boolean }) {
+  const calls: string[] = []
+  on('mcp.call', ($, e) => {
+    calls.push(e.tool === 'get_session' ? 'get_session' : `${e.tool} ${JSON.stringify(e.args)}`)
+    const text = e.tool === 'get_session' ? JSON.stringify({ title: start.title, ...(start.pinned ? { pinned: true } : {}) }) : 'ok'
+    return { value: { content: [{ type: 'text', text }], isError: false } }
+  })
+  return calls
+}
+
+test("sharing marks the session's sidebar row, and stopping puts it back", async ($, on) => {
+  world(on)
+  const calls = sidebar(on, { title: 'Fix login flow' })
+  const ui = await $.ui.mount(band('desktop'))
+  await ui.press({ key: 'share' })
+  expect(calls).toContain('set_session_title {"session_id":"self","title":"👥 Live · Fix login flow"}')
+  expect(calls).toContain('set_pinned {"session_id":"self","pinned":true}')
+  await ui.press({ key: 'stop-sharing' })
+  expect(calls.at(-2)).toBe('set_session_title {"session_id":"self","title":"Fix login flow"}')
+  expect(calls.at(-1)).toBe('set_pinned {"session_id":"self","pinned":false}')
+})
+
+test("a session that was pinned stays pinned after sharing", async ($, on) => {
+  world(on)
+  const calls = sidebar(on, { title: 'Pinned work', pinned: true })
+  const ui = await $.ui.mount(band('desktop'))
+  await ui.press({ key: 'share' })
+  await ui.press({ key: 'stop-sharing' })
+  expect(calls.some(c => c.startsWith('set_pinned'))).toBe(false)
+  expect(calls.at(-1)).toBe('set_session_title {"session_id":"self","title":"Pinned work"}')
+})
+
+test("joining names the host in the sidebar; leaving says whose session it was", async ($, on) => {
+  world(on)
+  const calls = sidebar(on, { title: 'Session room0000000000000001' })
+  await $.prompt.submit({ text: LINK, origin: { kind: 'composer' }, wait: false })
+  expect(calls).toContain('set_session_title {"session_id":"self","title":"👥 Sam · demo"}')
+  const ui = await $.ui.mount(band('desktop'))
+  await ui.press({ key: 'leave' })
+  expect(calls).toContain(`set_session_title {"session_id":"self","title":"Sam's session · demo"}`)
+  expect(calls.at(-1)).toBe('set_pinned {"session_id":"self","pinned":false}')
+})
+
+test('with no share server set up, Share explains how and joining still works', async ($, on) => {
+  const world0 = world(on, { server: false })
+  const ui = await $.ui.mount(band('desktop'))
+  await ui.press({ key: 'share' })
+  expect(await ui.find({ key: 'share' })).toBeDefined() // still not shared
+  expect(world0).not.toContain('POST /api/rooms')
+  expect(world0.logged.some(line => line.includes('Host a server') && line.includes('/plugin configure shared-session'))).toBe(true)
+  const joined = await $.prompt.submit({ text: LINK, origin: { kind: 'composer' }, wait: false })
+  expect(joined.drop).toBeUndefined()
+  expect(world0).toContain('POST /api/rooms/room0000000000000001/join')
+})

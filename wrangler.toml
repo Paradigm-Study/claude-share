@@ -1,0 +1,15 @@
+name = "claude-share"
+main = "server/worker.mjs"
+compatibility_date = "2026-04-01"
+
+# Optional: pin the origin share links use (otherwise the request's own).
+# [vars]
+# PUBLIC_URL = "https://share.example.com"
+
+[[durable_objects.bindings]]
+name = "ROOMS"
+class_name = "RoomObject"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["RoomObject"]
