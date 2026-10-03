@@ -17,7 +17,7 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const CLAUDE = process.env.CLAUDE_BIN ?? 'claude'
 const MODEL = process.env.MODEL ?? 'claude-haiku-4-5-20251001'
 const WORK = process.env.WORK_DIR ?? join(process.env.TMPDIR ?? '/tmp', 'shared-session-e2e')
-const PORT = 8787
+const PORT = Number(process.env.E2E_PORT ?? 8787)
 // A running server to test against (EXTERNAL_SERVER=1), else a local one this starts.
 const SERVER = (process.env.SHARE_SERVER ?? `http://localhost:${PORT}`).replace(/\/+$/, '')
 
@@ -69,6 +69,7 @@ function session(name, cwd, extraArgs = []) {
     SHARED_SESSION_SERVER: SERVER,
     GIT_CONFIG_GLOBAL: join(WORK, `${name}.gitconfig`),
   }
+  if (process.env.SHARED_SESSION_TRANSPORT) env.SHARED_SESSION_TRANSPORT = process.env.SHARED_SESSION_TRANSPORT
   for (const key of ['ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY']) {
     const value = MODEL_ENV[key] ?? process.env[key]
     if (value) env[key] = value
@@ -267,6 +268,14 @@ try {
   )
   await new Promise(r => setTimeout(r, 1500))
   check('a guest cannot write on the host without approval', !existsSync(join(hostDir, 'pwned.txt')))
+
+  // How everyone heard the room: one open stream each, or polls when asked to.
+  const polling = process.env.SHARED_SESSION_TRANSPORT === 'poll'
+  const heard = ['Scott', 'Alex', 'Sam'].map(n => readFileSync(join(WORK, `${n}.debug.log`), 'utf8'))
+  check(
+    polling ? 'everyone polls when told to' : 'everyone hears the room over one open stream',
+    heard.every(log => log.includes(polling ? 'Shared session: polling' : 'Shared session: listening on a stream')),
+  )
 
   // Stop sharing: the guest is told, the link stops working.
   host.say('/stop-sharing')

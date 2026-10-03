@@ -9,7 +9,7 @@
 import { createServer } from 'node:http'
 import { readFileSync, writeFileSync, renameSync } from 'node:fs'
 
-import { Room, ROOM_ID, createRoom, roomRequest, notFound, json, publicOrigin, token } from './core.mjs'
+import { Room, ROOM_ID, SEAT_TIMEOUT_MS, createRoom, roomRequest, notFound, json, publicOrigin, token } from './core.mjs'
 
 const PORT = Number(process.env.PORT ?? 8787)
 const PUBLIC_URL = process.env.PUBLIC_URL
@@ -18,10 +18,22 @@ const ROOM_TTL_MS = 24 * 60 * 60 * 1000 // ended or abandoned rooms are dropped 
 
 const rooms = new Map()
 
+// When a stream closes, check again once its grace period is over: the seat
+// may not come back, and everyone else should see that.
+function watch(room) {
+  room.onDisconnect = () => {
+    setTimeout(() => {
+      if (room.sweep(Date.now())) save()
+      room.notify()
+    }, SEAT_TIMEOUT_MS + 1000).unref()
+  }
+  return room
+}
+
 if (DATA_FILE) {
   try {
     const saved = JSON.parse(readFileSync(DATA_FILE, 'utf8'))
-    for (const data of saved.rooms ?? []) rooms.set(data.id, new Room(data))
+    for (const data of saved.rooms ?? []) rooms.set(data.id, watch(Room.resume(data, Date.now())))
     console.log(`loaded ${rooms.size} rooms from ${DATA_FILE}`)
   } catch {}
 }
@@ -37,19 +49,20 @@ function save() {
   }, 500)
 }
 
+// Seats are settled by requests (see roomRequest); this only drops rooms a day
+// after their host was last seen.
 setInterval(() => {
   const now = Date.now()
   let changed = false
   for (const room of rooms.values()) {
-    changed = room.sweep(now) || changed
-    const lastActive = Math.max(room.host.lastSeen, room.endedAt ?? 0)
+    const lastActive = !room.endedAt && room.connected('host') ? now : Math.max(room.host.lastSeen, room.endedAt ?? 0)
     if (now - lastActive > ROOM_TTL_MS) {
       rooms.delete(room.id)
       changed = true
     }
   }
   if (changed) save()
-}, 10_000).unref()
+}, 60_000).unref()
 
 async function route(req) {
   const url = new URL(req.url)
@@ -61,7 +74,7 @@ async function route(req) {
 
   if (req.method === 'POST' && url.pathname === '/api/rooms') {
     const { room, response } = await createRoom(req, token(16), now, origin)
-    rooms.set(room.id, room)
+    rooms.set(room.id, watch(room))
     save()
     return response
   }
@@ -111,7 +124,17 @@ const server = createServer(async (nodeReq, nodeRes) => {
     })
     const res = await route(req)
     nodeRes.writeHead(res.status, Object.fromEntries(res.headers))
-    nodeRes.end(Buffer.from(await res.arrayBuffer()))
+    if (!res.body) return nodeRes.end()
+    // Pass the body through as it comes: a stream stays open until either side
+    // closes it.
+    const reader = res.body.getReader()
+    nodeRes.on('close', () => reader.cancel().catch(() => {}))
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      nodeRes.write(value)
+    }
+    nodeRes.end()
   } catch (error) {
     nodeRes.writeHead(500, { 'content-type': 'application/json' })
     nodeRes.end(JSON.stringify({ error: String(error?.message ?? error) }))

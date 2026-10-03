@@ -1,9 +1,16 @@
 // Cloudflare Worker + one Durable Object per shared session.
 // Deploy with `npx wrangler deploy` (see wrangler.toml at the repo root).
+//
+// Open streams cost nothing while a room is quiet. A client's stream ends at
+// the Worker, which is billed for CPU, not for time held open; the Worker
+// talks to the room over a WebSocket the Durable Object accepts with the
+// hibernation API, so the room leaves memory between changes and the next
+// request or message wakes it. Its only timers: settle a seat that
+// disconnected once its grace period is over, and drop the room a day after
+// the host was last seen.
 
-import { Room, ROOM_ID, createRoom, roomRequest, notFound, json, publicOrigin, token } from './core.mjs'
+import { Room, ROOM_ID, SEAT_TIMEOUT_MS, KEEPALIVE_MS, STREAM_MAX_MS, createRoom, roomRequest, notFound, json, publicOrigin, token } from './core.mjs'
 
-const SWEEP_MS = 10_000
 const ROOM_TTL_MS = 24 * 60 * 60 * 1000
 const pad = seq => String(seq).padStart(12, '0')
 
@@ -34,6 +41,7 @@ export default {
     const stub = env.ROOMS.get(env.ROOMS.idFromName(id))
     const headers = new Headers(req.headers)
     headers.set('x-share-origin', origin)
+    if (rest === 'stream' && req.method === 'GET') return bridge(stub, id, url, headers)
     return stub.fetch(
       new Request(`https://room.internal/${id}/${rest}${url.search}`, {
         method: req.method,
@@ -44,18 +52,67 @@ export default {
   },
 }
 
+// A client's stream: open a WebSocket to the room and pass each message on as
+// one line, with a keepalive line between. Either side closing closes both,
+// and so does STREAM_MAX_MS passing: the client reconnects at once, and one
+// that is gone leaves the room whatever its connection seemed to say.
+async function bridge(stub, id, url, headers) {
+  headers.set('upgrade', 'websocket')
+  const upstream = await stub.fetch(`https://room.internal/${id}/socket${url.search}`, { headers })
+  const ws = upstream.webSocket
+  if (!ws) return upstream // the room's refusal (401, 404, 410), as JSON
+  ws.accept()
+  const { readable, writable } = new TransformStream()
+  const writer = writable.getWriter()
+  const enc = new TextEncoder()
+  let open = true
+  let keepalive = null
+  let maxAge = null
+  const close = () => {
+    if (!open) return
+    open = false
+    clearInterval(keepalive)
+    clearTimeout(maxAge)
+    try {
+      ws.close(1000, 'stream closed')
+    } catch {}
+    writer.close().catch(() => {})
+  }
+  const write = text => {
+    if (open) writer.write(enc.encode(`${text}\n`)).catch(close)
+  }
+  ws.addEventListener('message', e => write(typeof e.data === 'string' ? e.data : ''))
+  ws.addEventListener('close', close)
+  ws.addEventListener('error', close)
+  keepalive = setInterval(() => write(JSON.stringify({ t: Date.now() })), KEEPALIVE_MS)
+  maxAge = setTimeout(close, STREAM_MAX_MS)
+  return new Response(readable, {
+    headers: { 'content-type': 'application/x-ndjson; charset=utf-8', 'cache-control': 'no-store' },
+  })
+}
+
 export class RoomObject {
   constructor(state) {
     this.state = state
     this.room = null
     this.savedSeq = 0
+    // A socket stays in getWebSockets() while its close is being handled.
+    this.closed = new WeakSet()
     state.blockConcurrencyWhile(async () => {
       const meta = await state.storage.get('meta')
       if (!meta) return
       const stored = await state.storage.list({ prefix: 'e:' })
-      this.room = new Room({ ...meta, events: [...stored.values()] })
-      this.savedSeq = this.room.seq
+      this.attach(Room.resume({ ...meta, events: [...stored.values()] }, Date.now()))
     })
+  }
+
+  // Who is connected is whoever has a socket open, and every change goes to
+  // them.
+  attach(room) {
+    this.room = room
+    this.savedSeq = room.seq
+    room.connected = seat => this.state.getWebSockets(seat).some(ws => !this.closed.has(ws))
+    room.onChange = () => this.broadcast()
   }
 
   async fetch(req) {
@@ -68,9 +125,10 @@ export class RoomObject {
     if (rest === 'create') {
       if (this.room) return json({ error: 'exists' }, 409)
       const { room, response } = await createRoom(req, id, now, origin)
-      this.room = room
+      this.attach(room)
+      this.savedSeq = 0
       await this.persist()
-      await this.state.storage.setAlarm(now + SWEEP_MS)
+      await this.state.storage.setAlarm(now + ROOM_TTL_MS)
       return response
     }
 
@@ -83,9 +141,66 @@ export class RoomObject {
         : json({ error: 'This shared session does not exist.' }, 404)
     }
 
+    if (rest === 'socket') return this.accept(req, url, now)
+
     const { response, changed } = await roomRequest(this.room, req, rest, now, origin)
     if (changed) await this.persist()
     return response
+  }
+
+  accept(req, url, now) {
+    if (req.headers.get('upgrade')?.toLowerCase() !== 'websocket') return json({ error: 'Expected a WebSocket.' }, 426)
+    const auth = this.room.auth((req.headers.get('authorization') ?? '').replace(/^Bearer\s+/i, '').trim())
+    if (!auth) return json({ error: 'Not a member of this session.' }, 401)
+    if (this.room.endedAt) return json({ error: 'This session is no longer shared.' }, 410)
+    const [client, server] = Object.values(new WebSocketPair())
+    this.state.acceptWebSocket(server, [auth.seat])
+    server.serializeAttachment({ seat: auth.seat, role: auth.role, after: Number(url.searchParams.get('after') ?? 0) || 0 })
+    this.room.touch(auth, now)
+    this.send(server, now)
+    if (auth.role === 'host') this.broadcast() // the host is back: everyone sees it
+    return new Response(null, { status: 101, webSocket: client })
+  }
+
+  // One socket's line: everything after its cursor, and the room now.
+  send(ws, now = Date.now()) {
+    const att = ws.deserializeAttachment()
+    if (!att || !this.room) return
+    const page = this.room.page(att.after, now)
+    try {
+      ws.send(JSON.stringify(page))
+      ws.serializeAttachment({ ...att, after: page.seq })
+      if (page.ended) ws.close(1000, 'ended')
+    } catch {}
+  }
+
+  broadcast() {
+    const now = Date.now()
+    for (const ws of this.state.getWebSockets()) if (!this.closed.has(ws)) this.send(ws, now)
+  }
+
+  webSocketMessage() {}
+
+  async webSocketClose(ws) {
+    await this.disconnected(ws)
+  }
+
+  async webSocketError(ws) {
+    await this.disconnected(ws)
+  }
+
+  // A seat counts as last seen when its socket closed; look again once its
+  // grace period is over.
+  async disconnected(ws) {
+    this.closed.add(ws)
+    try {
+      ws.close(1000, 'bye')
+    } catch {}
+    const att = ws.deserializeAttachment()
+    if (!att || !this.room) return
+    this.room.touch(att, Date.now())
+    await this.persist()
+    await this.schedule()
   }
 
   async persist() {
@@ -105,16 +220,39 @@ export class RoomObject {
     }
   }
 
+  // The next thing due: a disconnected seat's grace running out, or the
+  // room's expiry.
+  async schedule() {
+    const room = this.room
+    if (!room) return
+    const now = Date.now()
+    const due = [this.lastActive(now) + ROOM_TTL_MS + 1000]
+    for (const seat of [{ id: 'host', lastSeen: room.host.lastSeen }, ...room.seats.values()]) {
+      if (!room.endedAt && !room.connected(seat.id) && now - seat.lastSeen < SEAT_TIMEOUT_MS) {
+        due.push(seat.lastSeen + SEAT_TIMEOUT_MS + 1000)
+      }
+    }
+    await this.state.storage.setAlarm(Math.min(...due))
+  }
+
+  // A host with a stream open is active now, however long ago it last spoke.
+  lastActive(now) {
+    const room = this.room
+    if (!room.endedAt && room.connected('host')) return now
+    return Math.max(room.host.lastSeen, room.endedAt ?? 0)
+  }
+
   async alarm() {
     if (!this.room) return
     const now = Date.now()
-    if (this.room.sweep(now)) await this.persist()
-    const lastActive = Math.max(this.room.host.lastSeen, this.room.endedAt ?? 0)
-    if (now - lastActive > ROOM_TTL_MS) {
+    if (now - this.lastActive(now) > ROOM_TTL_MS) {
+      for (const ws of this.state.getWebSockets()) ws.close(1000, 'expired')
       await this.state.storage.deleteAll()
       this.room = null
       return
     }
-    await this.state.storage.setAlarm(now + SWEEP_MS)
+    if (this.room.sweep(now)) await this.persist()
+    this.broadcast() // seats that left, and the host coming and going
+    await this.schedule()
   }
 }

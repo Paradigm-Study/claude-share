@@ -59,7 +59,7 @@ It stops with a `NEEDS HUMAN` line at the one or two steps that need a person. S
 
 Sharing needs a room server you run. Rooms are short-lived: they expire 24 hours after the host was last seen, and nothing is kept after that.
 
-**Cloudflare (recommended):** a Worker with one Durable Object per room; fits the free plan. From a clone of this repo:
+**Cloudflare (recommended):** a Worker with one Durable Object per room. A quiet room costs nothing: open streams end at the Worker, and the room sleeps between changes. It fits the free plan for a small team. From a clone of this repo:
 
 ```bash
 node scripts/setup.mjs deploy
@@ -104,7 +104,7 @@ PORT=8787 PUBLIC_URL=https://share.example.com DATA_FILE=./rooms.json node serve
 - **Guests see tool calls as text.** The host's tool calls appear in guests' transcripts as compact lines (`❯ Bash`, `✎ Edit` with a diff), not native tool cards.
 - **Not mirrored:** subagents' inner steps and pasted images.
 - **No "Alex is typing…".** The engine doesn't see keystrokes in Claude Desktop's composer.
-- **Polling, not streaming connections.** The plugin polls (0.4 s while active, 1.5 s idle), because a plugin request held open delays the next prompt's dispatch.
+- **Needs `curl` for live updates.** Each shared session keeps one `curl` process reading the room's stream, so a quiet room makes no requests. Without `curl`, or against a server too old to stream, the plugin polls instead, from every 0.4 s while busy down to every 15 s when quiet.
 - **Failed host turns:** guests see a note in the reply when the host's turn errors or is refused.
 - **Session list changes are Desktop-only.** The 👥 title and the pin use Claude Desktop's own sidebar tools. Elsewhere they're skipped.
 
@@ -131,7 +131,7 @@ claude plugin test plugin
 CLAUDE_BIN=$(which claude) node test/e2e.mjs
 ```
 
-Add `EXTERNAL_SERVER=1 SHARE_SERVER=https://your-server` to run it against a deployed server instead of a local one.
+Add `EXTERNAL_SERVER=1 SHARE_SERVER=https://your-server` to run it against a deployed server instead of a local one, or `SHARED_SESSION_TRANSPORT=poll` to test the polling fallback.
 
 The end-to-end run starts a host (in bypass mode, on purpose) and two guests, then checks:
 - sharing and joining;
@@ -139,6 +139,7 @@ The end-to-end run starts a host (in bypass mode, on purpose) and two guests, th
 - live replies, and that guests never call a model;
 - ordering;
 - Esc from a guest;
+- that everyone hears the room over one open stream;
 - that a guest's write is refused without approval;
 - that sharing ends cleanly.
 

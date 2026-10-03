@@ -6,11 +6,18 @@ import { CLOVER_WEBP, LOGO_PATHS } from './brand.mjs'
 //
 // A room is one shared Claude Code session. The host's session posts what its
 // transcript keeps (rows), live text (deltas) and turn state; guests post
-// prompts and stop requests; everyone long-polls `events?after=<seq>`.
+// prompts and stop requests. Everyone holds one `stream?after=<seq>` open and
+// is sent a line whenever the room changes, so a quiet room costs nothing;
+// `events?after=<seq>` answers the same question once, for pollers.
 
 const HISTORY_LIMIT = 5000 // replayable events kept per room
 const LIVE_LIMIT = 400 // ephemeral events (deltas) kept for pollers only
-const SEAT_TIMEOUT_MS = 45_000 // a seat that has not polled for this long left
+export const SEAT_TIMEOUT_MS = 45_000 // a seat neither connected nor heard from for this long left
+export const KEEPALIVE_MS = 25_000 // a line on every open stream, so proxies keep it open
+// Every stream ends itself after this long and the client reconnects at once.
+// A client that is gone (asleep, unplugged) never comes back, so it leaves
+// within this plus the seat's grace, whatever the connection seemed to say.
+export const STREAM_MAX_MS = 5 * 60_000
 const POLL_WAIT_MS = 20_000
 const MAX_TEXT = 32_000 // chars; keeps one stored event under the Durable Object value limit
 const MAX_BODY = 512_000
@@ -55,6 +62,20 @@ export class Room {
     this.seats = new Map(Object.entries(data.seats ?? {}))
     this.live = []
     this.waiters = new Set()
+    this.subscribers = new Set() // open streams this process serves: { seat, push }
+    // The host process may say who is connected (a Durable Object counts its
+    // sockets) and hear about every change (to tell those sockets).
+    this.connected = seat => [...this.subscribers].some(s => s.seat === seat)
+    this.onChange = null
+  }
+
+  // A room loaded back from storage. Live events (deltas) were never stored,
+  // so seq numbers handed out after the last save may be lost; start past any
+  // of them so no cursor a client holds can be reused.
+  static resume(data, now) {
+    const room = new Room(data)
+    room.seq = Math.max(room.seq, Math.floor(now / 10)) + 10_000
+    return room
   }
 
   static create({ id, name, title, now }) {
@@ -92,9 +113,9 @@ export class Room {
   }
 
   people(now) {
-    const online = t => !this.endedAt && now - t < SEAT_TIMEOUT_MS
+    const online = !this.endedAt && (this.connected('host') || now - this.host.lastSeen < SEAT_TIMEOUT_MS)
     return [
-      { id: 'host', name: this.host.name, role: 'host', online: online(this.host.lastSeen) },
+      { id: 'host', name: this.host.name, role: 'host', online },
       ...[...this.seats.values()].map(s => ({ id: s.id, name: s.name, role: 'guest', online: true })),
     ]
   }
@@ -111,10 +132,22 @@ export class Room {
     return event
   }
 
+  // Something changed: answer waiting polls, and tell every open stream.
   wake() {
     for (const waiter of [...this.waiters]) {
       if (this.seq > waiter.after) waiter.done()
     }
+    this.notify()
+  }
+
+  notify() {
+    for (const sub of [...this.subscribers]) sub.push()
+    this.onChange?.()
+  }
+
+  // What a client is sent: everything after its cursor, and the room now.
+  page(after, now) {
+    return { seq: this.seq, events: this.since(after), people: this.people(now), ended: Boolean(this.endedAt), title: this.title }
   }
 
   since(after) {
@@ -159,7 +192,7 @@ export class Room {
   sweep(now) {
     let changed = false
     for (const [bearer, seat] of [...this.seats]) {
-      if (now - seat.lastSeen > SEAT_TIMEOUT_MS) {
+      if (now - seat.lastSeen > SEAT_TIMEOUT_MS && !this.connected(seat.id)) {
         this.leave(bearer, 'timeout', now)
         changed = true
       }
@@ -222,7 +255,15 @@ export async function createRoom(req, id, now, origin) {
 
 // Everything under /api/rooms/:id/... and /s/:id. `changed` tells the caller
 // whether to persist the room.
+// Who is still here is settled when someone asks, not on a timer: a seat that
+// stopped polling is dropped by the next request, so a quiet room costs nothing.
 export async function roomRequest(room, req, rest, now, origin) {
+  const swept = room.sweep(now)
+  const result = await handleRoom(room, req, rest, now, origin)
+  return swept ? { ...result, changed: true } : result
+}
+
+async function handleRoom(room, req, rest, now, origin) {
   const method = req.method
   const url = new URL(req.url)
 
@@ -263,6 +304,13 @@ export async function roomRequest(room, req, rest, now, origin) {
 
   const auth = room.auth(bearerOf(req))
   if (!auth) return { response: json({ error: 'Not a member of this session.' }, 401) }
+
+  if (rest === 'stream' && method === 'GET') {
+    if (room.endedAt) return { response: json({ error: 'This session is no longer shared.' }, 410) }
+    const after = Number(url.searchParams.get('after') ?? 0) || 0
+    room.touch(auth, now)
+    return { response: streamResponse(room, auth, after) }
+  }
 
   if (rest === 'events' && method === 'GET') {
     const after = Number(url.searchParams.get('after') ?? 0) || 0
@@ -313,6 +361,63 @@ export async function roomRequest(room, req, rest, now, origin) {
   }
 
   return { response: json({ error: 'Not found' }, 404) }
+}
+
+// One open stream: a JSON line now (everything after `after`), another each
+// time the room changes, and a keepalive line between. When it ends (the
+// client went, the room ended, or STREAM_MAX_MS passed) the seat counts as
+// last seen then, and `onDisconnect` lets the host process settle who is still
+// here once the grace period is over.
+function streamResponse(room, auth, after) {
+  const enc = new TextEncoder()
+  let sub = null
+  let done = false
+  const finish = () => {
+    if (done) return false
+    done = true
+    room.subscribers.delete(sub)
+    clearInterval(sub.keepalive)
+    clearTimeout(sub.maxAge)
+    room.touch(auth, Date.now())
+    room.onDisconnect?.()
+    return true
+  }
+  const body = new ReadableStream({
+    start(controller) {
+      let cursor = after
+      const send = obj => {
+        try {
+          controller.enqueue(enc.encode(`${JSON.stringify(obj)}\n`))
+        } catch {}
+      }
+      const close = () => {
+        if (!finish()) return
+        try {
+          controller.close()
+        } catch {}
+      }
+      sub = {
+        seat: auth.seat,
+        push: () => {
+          const page = room.page(cursor, Date.now())
+          cursor = page.seq
+          send(page)
+          if (page.ended) close()
+        },
+        keepalive: setInterval(() => send({ t: Date.now() }), KEEPALIVE_MS),
+        maxAge: setTimeout(close, STREAM_MAX_MS),
+      }
+      room.subscribers.add(sub)
+      sub.push()
+      if (auth.role === 'host') room.notify() // the host is back: everyone sees it
+    },
+    cancel() {
+      finish()
+    },
+  })
+  return new Response(body, {
+    headers: { 'content-type': 'application/x-ndjson; charset=utf-8', 'cache-control': 'no-store', 'x-accel-buffering': 'no' },
+  })
 }
 
 export function notFound() {
@@ -526,10 +631,15 @@ footer q { font-family:var(--display); font-size:17px; color:var(--muted); quote
     if (d.ended) { $('eyebrow').textContent = 'Sharing ended'; $('subcopy').textContent = 'This session is no longer shared. Ask ' + data.host + ' for a new link.'; }
   }
   render(data);
-  setInterval(function () {
+  // Refresh who's here only while someone is looking, and never after the end.
+  var ended = data.ended;
+  function refresh() {
+    if (ended || document.visibilityState !== 'visible') return;
     fetch('/api/rooms/' + data.id, { cache: 'no-store' }).then(function (r) { return r.ok ? r.json() : null; })
-      .then(function (d) { if (d) render({ people: d.people, ended: d.ended }); }).catch(function () {});
-  }, 4000);
+      .then(function (d) { if (d) { ended = d.ended; render({ people: d.people, ended: d.ended }); } }).catch(function () {});
+  }
+  setInterval(refresh, 4000);
+  document.addEventListener('visibilitychange', refresh);
   function copy() { navigator.clipboard.writeText(data.url).then(function () { $('copy').textContent = 'Copied'; setTimeout(function () { $('copy').textContent = 'Copy link'; }, 1600); }); }
   $('copy').addEventListener('click', copy); $('copy2').addEventListener('click', copy);
   function opening() { $('status').textContent = 'Opening Claude… then press Enter in the new session.'; }

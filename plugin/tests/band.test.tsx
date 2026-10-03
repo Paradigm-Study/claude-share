@@ -19,9 +19,19 @@ function band<S extends (typeof SURFACES)[number]>(surface: S) {
 }
 
 // Everything beneath the plugin a session would provide, plus a share server
-// that answers from memory. Returns what the server was asked.
-function world(on: On, opts: { server?: boolean } = {}) {
+// that answers from memory. Returns what the server was asked. `stream` is
+// what the room's stream sends a curl child; without it, curl can't start and
+// the plugin polls.
+function world(on: On, opts: { server?: boolean; stream?: unknown[] } = {}) {
   const asked: string[] = []
+  const spawned: { argv: readonly string[]; input?: string }[] = []
+  on('process.spawn', async function* ($, e) {
+    spawned.push({ argv: e.argv, input: e.input })
+    if (!opts.stream) throw new Error('spawn curl ENOENT')
+    for (const line of opts.stream) yield { stream: 'stdout' as const, text: `${JSON.stringify(line)}\n` }
+    yield { stream: 'stdout' as const, text: '\n{"httpStatus":200}\n' }
+    return { value: { code: 0, signal: null } }
+  })
   const clock = mock.clock(on, { now: 1_000 })
   mock.env(on, opts.server === false ? { USER: 'scott' } : { USER: 'scott', SHARED_SESSION_SERVER: 'http://localhost:8787' })
   on('ui.toast', () => ({ value: undefined }))
@@ -67,7 +77,7 @@ function world(on: On, opts: { server?: boolean } = {}) {
     }
     return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify(body) } }
   })
-  return Object.assign(asked, { clock, logged })
+  return Object.assign(asked, { clock, logged, spawned })
 }
 
 test('a session that is not shared shows one Share button', async ($, on) => {
@@ -174,6 +184,26 @@ test('the footer and the working line say who is here and whose turn it is', asy
     await footer.unmount()
     await spinner.unmount()
   }
+})
+
+test("a joined session hears the room through curl's stream, and never polls it", async ($, on) => {
+  const people = [
+    { id: 'host', name: 'Sam', role: 'host', online: true },
+    { id: 'seat1', name: 'scott', role: 'guest', online: true },
+    { id: 'seat2', name: 'Alex', role: 'guest', online: true },
+    { id: 'seat3', name: 'Riley', role: 'guest', online: true },
+  ]
+  const asked = world(on, { stream: [{ seq: 2, events: [], people, ended: false, title: 'demo' }, { t: 1 }] })
+  await $.prompt.submit({ text: LINK, origin: { kind: 'composer' }, wait: false })
+  await asked.clock.advance(10)
+  const footer = await $.ui.mount({ plugin: 'shared-session', surface: 'desktop', component: 'SessionMode', props: { modes: [] } })
+  expect((await footer.find({ type: 'Text' }))?.text).toBe("in Sam's session with Alex and Riley")
+  await footer.unmount()
+  expect(asked.filter(a => a.startsWith('GET ') && a.endsWith('/events'))).toEqual([])
+  // The room's address and the seat's token go to curl on stdin, not in argv.
+  expect(asked.spawned[0]?.argv).toEqual(['curl', '-K', '-'])
+  expect(asked.spawned[0]?.input).toContain('/api/rooms/room0000000000000001/stream?after=1')
+  expect(asked.spawned[0]?.input).toContain('Authorization: Bearer g')
 })
 
 const PANE = { title: 'Shared session', isFocused: false, bodyColumns: 60, placement: 'dock', scroll: { offset: 0, bodyRows: 40 }, view: {} } as never

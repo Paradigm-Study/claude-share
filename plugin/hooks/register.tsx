@@ -16,7 +16,7 @@
 // a side chat Claude never reads, and the host's controls).
 
 import { atom, read, update } from 'claude-code'
-import type { Elements, EngineInterface, Register, RenderSurface, Timer, TurnStepChunk } from 'claude-code'
+import type { Elements, EngineInterface, HookStream, ProcessSpawnChunk, ProcessSpawnResult, Register, RenderSurface, Timer, TurnStepChunk } from 'claude-code'
 
 import type { ShareActivity, ShareChat, ShareMode, SharePerson, SharePolicy, ShareRoom, ShareWorking } from '../types'
 import { ACCENT, BAD, GOOD, ROSE, ago, avatarSvg, bannerSvg, labelsFor, stackSvg, toolGlyph } from './look'
@@ -31,14 +31,18 @@ type UI = Elements[RenderSurface]
 const PLUGIN = 'shared-session'
 const ROOM = 'shared-room' // the Room panel's id
 const ASK_HEADER = 'Shared' // marks the approval question this plugin asks
-// While a plugin has a request in flight, the engine holds the next prompt's
-// dispatch to it, so nothing here long-polls: background polls return at once
-// on a cadence, and a riding turn's polls wait on the server for well under a
-// second (a sleep there would spend the hook's own time budget).
+// How this session hears about the room. While a plugin has a request in
+// flight, the engine holds every prompt after the first until it returns, so
+// the plugin never long-polls. Instead a `curl` child, whose open stream holds
+// nothing, keeps `stream?after=<seq>` open for the session's life, and the
+// room sends a line whenever it changes: a quiet room costs no requests at
+// all. Where curl can't start, or the server has no stream, the plugin polls
+// with requests that return at once, less often the longer nothing happens.
+const STREAM_STALE_MS = 70_000 // no line for this long (keepalives come every 25 s): reconnect
 const POLL_HOT_MS = 400 // something happened in the last few seconds
 const POLL_IDLE_MS = 1_500
 const HOT_FOR_MS = 15_000
-const RIDE_WAIT_MS = 600
+const RIDE_WAIT_MS = 600 // a riding turn waits this long for news at a time
 const TAIL_CHARS = 600
 
 // Tools a guest's turn runs without asking the host (policy `edits`): they only read.
@@ -131,9 +135,18 @@ let myName: string | undefined
 let outbox: { type: string; body: Record<string, unknown> }[] = []
 let flushTimer: Timer | null = null
 let flushing = false
-let pollGeneration = 0
+let pollGeneration = 0 // the room feed's run; a new one ends the old
 let pollFailures = 0
+let pollDelay = 0 // the wait before the next background poll
 let lastActivity = 0
+// The open stream: its child, the cursor it started after, the events it has
+// brought since (riding turns read them), and those waiting for more.
+let feedStream: HookStream<ProcessSpawnChunk, ProcessSpawnResult> | null = null
+let streamUp = false
+let streamFloor = 0
+let streamEnded = false
+const streamed: ServerEvent[] = []
+const feedWaiters = new Set<() => void>()
 let roomOpen = false
 
 // Host: guest prompts submitted and not yet started, oldest first.
@@ -189,6 +202,12 @@ function send($: $, type: string, body: Record<string, unknown>) {
     outbox.push({ type, body })
   }
   scheduleFlush($, type === 'delta' ? 120 : 30)
+  if (type !== 'delta') {
+    void $.clock.now().then(now => {
+      lastActivity = now
+    })
+    kickPoll($)
+  }
 }
 
 function scheduleFlush($: $, ms: number) {
@@ -230,9 +249,183 @@ async function flush($: $) {
   else if (outbox.length) scheduleFlush($, 30)
 }
 
-function startPolling($: $) {
+// Starts hearing about the room: the stream, or polls where it can't run.
+function startFeed($: $) {
   const generation = ++pollGeneration
   pollFailures = 0
+  stopStream()
+  $.clock.after(0, () => void runStream($, generation))
+}
+
+function stopStream() {
+  const child = feedStream
+  feedStream = null
+  streamUp = false
+  if (child) void child.return(undefined as never).catch(() => {})
+  wakeFeedWaiters()
+}
+
+function wakeFeedWaiters() {
+  for (const done of [...feedWaiters]) done()
+}
+
+// One curl per connection, its address and token on stdin (not in argv, where
+// other local users could read them). Ends when the room is gone, this run is
+// replaced, or curl can't run at all; otherwise reconnects, backing off.
+async function runStream($: $, generation: number) {
+  let failures = 0
+  while (generation === pollGeneration) {
+    const room = await read($, roomA)
+    if (!room || (await read($, modeA)) === 'idle') return
+    if ((await $.env.get('SHARED_SESSION_TRANSPORT')) === 'poll') return void startPolls($, generation, 'SHARED_SESSION_TRANSPORT=poll')
+    const config = [
+      `url = "${room.server}/api/rooms/${room.id}/stream?after=${room.seq}"`,
+      `header = "Authorization: Bearer ${room.token}"`,
+      'header = "Accept: application/x-ndjson"',
+      'no-buffer',
+      'silent',
+      'connect-timeout = 10',
+      'write-out = "\\n{\\"httpStatus\\":%{http_code}}\\n"',
+    ].join('\n')
+    const child = $.process.spawn({ argv: ['curl', '-K', '-'], input: `${config}\n` })
+    feedStream = child
+    streamFloor = room.seq
+    streamEnded = false
+    streamed.length = 0
+    let started = false
+    let delivered = false
+    let status = 0
+    let refusal = ''
+    let buffer = ''
+    const opened = await $.clock.now()
+    let lastLine = opened
+    const watch = () => {
+      if (feedStream !== child) return
+      void $.clock.now().then(now => {
+        if (feedStream !== child) return
+        if (now - lastLine > STREAM_STALE_MS) stopStream()
+        else $.clock.after(20_000, watch)
+      })
+    }
+    $.clock.after(20_000, watch)
+    try {
+      for await (const chunk of child) {
+        started = true
+        if (generation !== pollGeneration) break
+        if (chunk.stream === 'stderr') continue
+        buffer += chunk.text
+        let i: number
+        while ((i = buffer.indexOf('\n')) >= 0) {
+          const line = buffer.slice(0, i).trim()
+          buffer = buffer.slice(i + 1)
+          if (!line) continue
+          let message: Record<string, unknown>
+          try {
+            message = JSON.parse(line)
+          } catch {
+            continue
+          }
+          lastLine = await $.clock.now()
+          if (typeof message.httpStatus === 'number') status = message.httpStatus
+          else if (typeof message.error === 'string') refusal = message.error
+          else if (Array.isArray(message.events)) {
+            if (!streamUp && !delivered) $.ui.log('Shared session: listening on a stream', { to: 'debug' })
+            streamUp = true
+            delivered = true
+            failures = 0
+            await streamPage($, generation, message as unknown as EventsPage)
+          }
+        }
+      }
+    } catch {
+      // The first pull rejects when curl can't start: poll instead.
+      if (!started) {
+        if (feedStream === child) feedStream = null
+        if (generation === pollGeneration) startPolls($, generation, 'curl could not start')
+        return
+      }
+    }
+    if (feedStream === child) {
+      feedStream = null
+      streamUp = false
+      wakeFeedWaiters()
+    }
+    if (generation !== pollGeneration) return
+    if ([401, 404, 410].includes(status)) {
+      // A server without streams answers the address itself with "Not found".
+      if (status === 404 && refusal === 'Not found') return void startPolls($, generation, 'the server has no stream')
+      const mode = await read($, modeA)
+      await reset($)
+      $.ui.log(mode === 'guest' ? `${room.host}'s session is no longer shared.` : 'Sharing ended.')
+      return
+    }
+    // The server ends every stream after a few minutes: pick it up again at
+    // once. One that never got going, or ended soon after, backs off, so a
+    // proxy that cuts streams short is not hammered.
+    if (delivered && (await $.clock.now()) - opened > 60_000) continue
+    failures += 1
+    await new Promise<void>(resolve => $.clock.after(Math.min(30_000, 500 * 2 ** failures), resolve))
+  }
+}
+
+function startPolls($: $, generation: number, why: string) {
+  $.ui.log(`Shared session: polling (${why})`, { to: 'debug' })
+  void pollOnce($, generation)
+}
+
+// A line from the stream: what a poll would have answered.
+async function streamPage($: $, generation: number, page: EventsPage) {
+  const room = await read($, roomA)
+  const mode = await read($, modeA)
+  if (!room || mode === 'idle' || generation !== pollGeneration) return
+  streamed.push(...page.events)
+  if (streamed.length > 2000) {
+    streamFloor = Math.max(streamFloor, streamed[streamed.length - 2001]?.seq ?? streamFloor)
+    streamed.splice(0, streamed.length - 2000)
+  }
+  if (page.ended) streamEnded = true
+  if (page.events.length > 0) lastActivity = await $.clock.now()
+  await receive($, mode, room, page)
+  wakeFeedWaiters()
+}
+
+// What a riding turn reads next: from the stream when it is up and reaches
+// back far enough, else one short poll of its own.
+async function ridePage($: $, room: ShareRoom, cursor: number): Promise<EventsPage> {
+  if (streamUp && cursor >= streamFloor) {
+    const after = () => streamed.filter(e => e.seq > cursor)
+    if (after().length === 0 && !streamEnded) {
+      await new Promise<void>(resolve => {
+        const done = () => {
+          feedWaiters.delete(done)
+          resolve()
+        }
+        feedWaiters.add(done)
+        $.clock.after(RIDE_WAIT_MS, done)
+      })
+    }
+    const events = after()
+    return { seq: Math.max(cursor, ...events.map(e => e.seq)), events, people: await read($, peopleA), ended: streamEnded, title: room.title }
+  }
+  return api<EventsPage>($, room.server, `/api/rooms/${room.id}/events?after=${cursor}&wait=${RIDE_WAIT_MS}`, { token: room.token })
+}
+
+// Without a stream: poll, fast while something is happening, then less and
+// less often (well inside the server's 45 s grace for a seat).
+function pollWait(now: number): number {
+  const quiet = now - lastActivity
+  if (localTurnActive) return POLL_IDLE_MS
+  if (quiet < HOT_FOR_MS) return POLL_HOT_MS
+  if (quiet < 2 * 60_000) return POLL_IDLE_MS
+  if (quiet < 10 * 60_000) return 5_000
+  return 15_000
+}
+
+// Something happened here: a quiet poller looks now instead of in 15 s.
+function kickPoll($: $) {
+  if (feedStream || streamUp || pollDelay < 5_000) return
+  const generation = ++pollGeneration
+  pollDelay = 0
   $.clock.after(0, () => void pollOnce($, generation))
 }
 
@@ -251,9 +444,8 @@ async function pollOnce($: $, generation: number) {
     if (page.events.length > 0 || (await read($, workingA))) lastActivity = now
     await receive($, mode, room, page)
     if (generation === pollGeneration && (await read($, modeA)) !== 'idle') {
-      // A riding turn reads the room itself; the background only keeps up.
-      const hot = now - lastActivity < HOT_FOR_MS && !localTurnActive
-      $.clock.after(hot ? POLL_HOT_MS : POLL_IDLE_MS, () => void pollOnce($, generation))
+      pollDelay = pollWait(now)
+      $.clock.after(pollDelay, () => void pollOnce($, generation))
     }
   } catch (error) {
     if (generation !== pollGeneration) return
@@ -263,7 +455,8 @@ async function pollOnce($: $, generation: number) {
       return
     }
     pollFailures += 1
-    $.clock.after(Math.min(15_000, 500 * 2 ** pollFailures), () => void pollOnce($, generation))
+    pollDelay = Math.min(15_000, 500 * 2 ** pollFailures)
+    $.clock.after(pollDelay, () => void pollOnce($, generation))
   }
 }
 
@@ -386,6 +579,7 @@ async function reset($: $) {
   const wasMode = await read($, modeA)
   await unmarkSidebar($, wasMode === 'guest' && was ? `${was.host}'s session · ${was.title}`.slice(0, 120) : undefined)
   pollGeneration += 1
+  stopStream()
   outbox = []
   hostTurns.length = 0
   ownPending.clear()
@@ -522,7 +716,7 @@ async function share($: $, surface?: RenderSurface): Promise<ShareRoom> {
   for (const message of messages) {
     for (const row of rowsFromMessage(message, name, cwd)) send($, 'row', row)
   }
-  startPolling($)
+  startFeed($)
   await copyLink($, room.url, surface)
   await markSidebar($, current => `👥 Live · ${current || room.title}`)
   return room
@@ -631,7 +825,7 @@ async function join($: $, server: string, id: string) {
   const running = starts.filter(e => !ends.has(e.body.turnId)).at(-1)
   const past = joined.history.filter(e => e.type === 'row' && (!running || e.seq < running.seq))
   if (running) noteHostTurn(running)
-  startPolling($)
+  startFeed($)
   await markSidebar($, () => `👥 ${room.host} · ${room.title}`)
   return { room, history: exchanges(past.map(e => e.body as unknown as Row), joined.host) }
 }
@@ -902,7 +1096,7 @@ export const register: Register = (on, options) => {
     await $.command.register({ name: 'room', description: 'Open the Room: who is here, activity, side chat' })
     // A reload keeps $.state: pick the room back up.
     const room = await read($, roomA)
-    if (room && (await read($, modeA)) !== 'idle') startPolling($)
+    if (room && (await read($, modeA)) !== 'idle') startFeed($)
     return started
   })
 
@@ -1065,9 +1259,7 @@ export const register: Register = (on, options) => {
         while (!state.done && !next.signal.aborted) {
           let page: EventsPage
           try {
-            page = await api<EventsPage>($, room.server, `/api/rooms/${room.id}/events?after=${cursor}&wait=${RIDE_WAIT_MS}`, {
-              token: room.token,
-            })
+            page = await ridePage($, room, cursor)
           } catch (error) {
             if (isGone(error)) break
             continue
@@ -1142,7 +1334,13 @@ export const register: Register = (on, options) => {
     const policy = await read($, policyA)
     if (policy.approvals === 'none') return verdict
     if (policy.approvals === 'edits' && READ_ONLY.has(e.tool)) return verdict
-    if ((await read($, trustedA)).includes(working.by)) return verdict
+    // "Always allow" is the host's answer for this person's later calls too, so
+    // it settles them the way "Allow once" settles one, not back to the host's
+    // own permission prompt.
+    if ((await read($, trustedA)).includes(working.by)) {
+      const room = await read($, roomA)
+      return { decision: 'allow', reason: `${room?.host ?? 'The host'} always allows ${working.by}` }
+    }
 
     const cwd = await $.session.cwd()
     const { text } = summarizeTool(e.tool, e.input, cwd)

@@ -51,7 +51,7 @@ EXTERNAL_SERVER=1 SHARE_SERVER=https://… node test/e2e.mjs   # …or through a
   - `atom(...)` references use literal plugin and key strings;
   - a link element accepts only `https:` (or `http://localhost`) addresses.
 - **Behavior that shaped the design.** Don't undo these without new evidence:
-  - **No long-polling.** While a plugin has a request in flight, the engine holds the next prompt's dispatch to it. So background polls return at once on a cadence, and a riding turn's polls wait under a second.
+  - **No long-polling from the plugin; updates come through a `curl` child.** While a plugin has a request in flight, the engine holds every prompt after the first until it returns. A child process's open stream holds nothing. So each shared session runs one `curl` (via `$.process.spawn`) reading `stream?after=<seq>`, one JSON line per room change. Riding turns read what it brings, too. Its address and token go to curl on stdin, never in argv. Without curl, or when the server has no stream, it polls: requests that return at once, every 0.4 s when busy, down to every 15 s when quiet.
   - **No prompts from inside another hook's dispatch.** A prompt submitted there is refused, so the plugin's prompts go out from a timer (`submitLater`).
   - **No running its own commands for output.** A plugin's own `$.command.run` skips that plugin's command hooks, so guest transcripts are drawn by riding turns (`turn.step` answered from the room, no model call) instead.
   - **Strip the app's context.** Claude Desktop puts a `<system-reminder>` into a first prompt. `typedText()` strips it before matching links or forwarding prompts.
@@ -61,4 +61,9 @@ EXTERNAL_SERVER=1 SHARE_SERVER=https://… node test/e2e.mjs   # …or through a
   2. Run the checks above.
   3. Push to `main`. Installs update with `claude plugin marketplace update claude-share && claude plugin update shared-session@claude-share`.
 - **Server:** `server/core.mjs` is shared by `node.mjs` (Node 20+) and `worker.mjs` (Cloudflare Worker + Durable Object, deploy with `npx wrangler deploy`). Keep `wrangler.toml`'s `compatibility_date` no newer than the wrangler you deploy with supports.
+  - **Nothing runs on a timer while a room is quiet.** Who is still here is settled by the next request, or by an alarm a disconnect sets for when its 45 s grace ends. The only other timer is the room's expiry.
+  - **On Cloudflare, streams end at the Worker, not the Durable Object.** A Durable Object holding an open HTTP response is billed for every second. So the Worker holds the client's stream and talks to the room over a WebSocket the object accepts with the hibernation API; the object sleeps between changes. A closing socket is still listed by `getWebSockets()` while its close is handled; `worker.mjs` tracks closed ones itself.
+  - **Every stream ends itself after 5 minutes** (`STREAM_MAX_MS`), and the plugin reconnects at once. Presence doesn't depend on noticing a dead connection (a sleeping laptop's can look alive for many minutes): a client that's gone just never reconnects. A stream that ends within a minute backs off instead, so a proxy that cuts streams short isn't hammered.
+  - **A room loaded from storage starts its seq numbers past any it may have handed out** (`Room.resume`), because live events (deltas) are never stored.
+  - `npx wrangler dev` runs the Worker locally (real Durable Objects and WebSockets); point the e2e at it with `EXTERNAL_SERVER=1 SHARE_SERVER=http://127.0.0.1:8787`.
 - **Never commit `rooms.json`.** It holds room tokens; it is git-ignored.
