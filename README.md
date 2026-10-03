@@ -21,7 +21,15 @@ One line in a terminal:
 claude plugin marketplace add Paradigm-Study/claude-share && claude plugin install shared-session@claude-share
 ```
 
-Requires Claude Code 2.1.286 or later (`claude update`; Claude Desktop includes it). New sessions pick it up. (Claude Code installs third-party plugins from a marketplace it knows, hence the two steps in one line.)
+Requires Claude Code 2.1.286 or later (`claude update`; Claude Desktop includes it). New sessions pick it up; quit and reopen Claude Desktop for sessions already open. (Claude Code installs third-party plugins from a marketplace it knows, hence the two steps in one line.)
+
+**Or let the setup script do it.** It works for a person or an agent; see [AGENTS.md](AGENTS.md). From a clone of this repo:
+
+```bash
+node scripts/setup.mjs join
+```
+
+It also handles `host --server <url>` (share through your team's server), `deploy` (make a server on Cloudflare) and `check --live` (verify everything). It stops with a `NEEDS HUMAN` line at the one or two steps that need a person.
 
 **For a whole team, nothing to type:** in your organization's managed settings (or a project's checked-in `.claude/settings.json`), add:
 
@@ -46,17 +54,13 @@ Requires Claude Code 2.1.286 or later (`claude update`; Claude Desktop includes 
 
 Sharing needs a room server you run. Rooms are short-lived: they expire 24 hours after the host was last seen, and nothing is kept after that.
 
-**Cloudflare (recommended):** a Worker with one Durable Object per room; fits the free plan.
+**Cloudflare (recommended):** a Worker with one Durable Object per room; fits the free plan. From a clone of this repo:
 
 ```bash
-git clone https://github.com/Paradigm-Study/claude-share && cd claude-share
+node scripts/setup.mjs deploy
 ```
-```bash
-npx wrangler login
-```
-```bash
-npx wrangler deploy
-```
+
+That signs you in (`npx wrangler login` in a browser), deploys and waits for the server. It then points this machine at it and prints the one-line install for teammates. By hand, it's `npx wrangler login` then `npx wrangler deploy`.
 
 **Anywhere else:** any machine with Node 20 behind HTTPS.
 
@@ -69,6 +73,19 @@ PORT=8787 PUBLIC_URL=https://share.example.com DATA_FILE=./rooms.json node serve
 - run `/plugin configure shared-session` and enter the address;
 - set `SHARED_SESSION_SERVER` in the `env` block of `~/.claude/settings.json`, or in your organization's managed settings so a whole team gets it;
 - in your own fork, bake the address in with `node scripts/set-server.mjs https://your-server`.
+
+## Troubleshooting
+
+| You see | What it means |
+| --- | --- |
+| No Share button, or `Unknown command: /share-session` | The session started before the plugin was installed. Start a new session, or quit and reopen Claude Desktop. |
+| An old error after updating the plugin | Same cause: a session keeps the plugin copy it started with, and `/reload-plugins` re-reads that copy. Restart Desktop or use a new session. |
+| `Couldn't share: Sharing needs a share server…` | No server is set. Run `node scripts/setup.mjs host --server <url>`, or `deploy` to make one. |
+| `ECONNREFUSED` when sharing | The server address points at a machine that isn't running a server. Run `node scripts/setup.mjs check` to see which address is set. |
+| `hooks: Invalid input` from `claude plugin …` | That `claude` is older than 2.1.286. Run `claude update`; `setup.mjs` also finds Claude Desktop's bundled one. |
+| `You need a workers.dev subdomain` on deploy | One-time Cloudflare setup: open Workers & Pages in the dashboard once, then deploy again. |
+| TLS handshake errors right after the first deploy | The new certificate takes a minute or so. |
+| A pasted link goes to Claude as a normal prompt | The plugin isn't loaded in that session (see the first row), or the link was edited. |
 
 ## Security model
 
