@@ -82,10 +82,24 @@ const previewsA = atom({ plugin: 'shared-session', key: 'previews' } as const, {
 
 // Context a host app puts into the person's message (Claude Desktop adds a
 // <system-reminder> to a first prompt): not typed, and never shared.
-const SYSTEM_BLOCKS = /<system-reminder>[\s\S]*?<\/system-reminder>/g
+const SYSTEM_BLOCKS = /<(system-reminder|task-notification)>[\s\S]*?<\/\1>/g
 
 function typedText(text: string): string {
   return text.replace(SYSTEM_BLOCKS, '').trim()
+}
+
+// Guest: the ride a starting turn is. Its text can differ from what the
+// plugin submitted (an app's prompt hooks add to it, a long prompt is cut),
+// so: the exact text, else the same beginning, else the oldest waiting.
+function takeRide(text: string): Ride | undefined {
+  const exact = ridesByText.get(text)?.shift()
+  if (exact) return exact
+  const head = (t: string) => t.slice(0, 200)
+  for (const [key, list] of ridesByText) {
+    if (list.length && (text.startsWith(head(key)) || key.startsWith(head(text)))) return list.shift()
+  }
+  for (const list of ridesByText.values()) if (list.length) return list.shift()
+  return undefined
 }
 
 // Prompts a person typed: at the prompt box, through the Desktop app or an SDK
@@ -1149,7 +1163,7 @@ async function replayOf($: $, room: ShareRoom, event: ServerEvent): Promise<Repl
       if (!shown.pid) return null
       const url = await previewTicket($, room, shown.pid)
       if (!url) return { label, note: 'the preview could not be opened' }
-      if (!(await hasTool($, 'mcp__Claude_Browser__preview_start'))) return { label, note: `open it in a browser within a minute: ${url}` }
+      if (!(await hasTool($, 'mcp__Claude_Browser__preview_start'))) return { label, note: `open it in a browser (the link works once, for 10 minutes): ${url}` }
       return { label, call: { name: 'mcp__Claude_Browser__preview_start', input: { url } } }
     }
     case 'link':
@@ -1158,7 +1172,20 @@ async function replayOf($: $, room: ShareRoom, event: ServerEvent): Promise<Repl
   }
 }
 
-// A one-time link (a minute) that opens a preview on the preview host name.
+// Guest: what to do when this Claude Code wouldn't open what was shown (auto
+// mode refuses a plugin's step to the browser pane): a fresh link for a
+// preview, where the file is for anything else, and the Room's Open.
+async function refusedNote($: $, room: ShareRoom, event: ServerEvent, reason: string): Promise<string> {
+  const shown = shownOf(event)
+  const why = /auto mode/i.test(reason) ? 'auto mode only opens what you asked for' : 'it was not allowed'
+  if (shown?.kind === 'preview' && shown.pid) {
+    const url = await previewTicket($, room, shown.pid)
+    if (url) return `\n\n> This session didn't open it in the browser pane (${why}). [Open the preview](${url}) in your browser (the link works once, for 10 minutes), or press **Open** in the Room panel.\n\n`
+  }
+  return `\n\n> This session didn't open it (${why}). Press **Open** in the Room panel${shown?.files?.length ? `, or find it in \`.shared-session/\`` : ''}.\n\n`
+}
+
+// A one-time link (ten minutes) that opens a preview on the preview host name.
 async function previewTicket($: $, room: ShareRoom, pid: string): Promise<string | null> {
   try {
     return (await api<{ url: string }>($, room.server, `/api/rooms/${room.id}/previews/${pid}/ticket`, { method: 'POST', token: room.token })).url
@@ -1179,7 +1206,7 @@ async function openShown($: $, shown: ShareShown, surface?: RenderSurface) {
     const opened = await $.mcp.call('Claude_Browser', 'preview_start', { url }).catch(() => null)
     if (!opened || opened.isError) {
       await $.ui.copy({ text: url, surface }).catch(() => {})
-      $.ui.toast('Preview link copied: open it within a minute')
+      $.ui.toast('Preview link copied: open it within 10 minutes')
     }
     return
   }
@@ -1311,7 +1338,10 @@ async function openRoom($: $) {
 
 // What one riding poll adds to the reply being shown.
 // A ride between its steps: what it has read and what is still to show.
-type RideRun = { state: RideState; cursor: number; failures?: number }
+type RideRun = { state: RideState; cursor: number; failures?: number; lastCall?: { id: string; event: ServerEvent } }
+// Guest: calls a riding turn made that this Claude Code refused (auto mode
+// gives a plugin's step no verdict), by tool_use_id, with the reason.
+const refusedCalls = new Map<string, string>()
 const ridesInStep = new Map<string, RideRun>()
 
 type RideState = {
@@ -1640,7 +1670,7 @@ export const register: Register = (on, options) => {
   on('turn.start', async ($, e, next) => {
     const mode = await read($, modeA)
     if (mode !== 'host') {
-      const ride = ridesByText.get(typedText(e.text))?.shift()
+      const ride = mode === 'guest' ? takeRide(typedText(e.text)) : ridesByText.get(typedText(e.text))?.shift()
       if (ride) {
         ridesByTurn.set(e.turnId, ride)
         localTurnActive = true
@@ -1705,6 +1735,14 @@ export const register: Register = (on, options) => {
         }
         ridesInStep.delete(e.turnId)
         const state = run.state
+        const refused = run.lastCall ? refusedCalls.get(run.lastCall.id) : undefined
+        if (run.lastCall && refused !== undefined) {
+          const line = await refusedNote($, room, run.lastCall.event, refused)
+          answer += line
+          yield { kind: 'text', index: 0, text: line } satisfies TurnStepChunk
+        }
+        if (run.lastCall) refusedCalls.delete(run.lastCall.id)
+        run.lastCall = undefined
         // Esc here stops the shared turn. The engine stops reading this stream
         // on an interrupt, so the stop goes out from the abort itself.
         const onAbort = () => {
@@ -1722,6 +1760,7 @@ export const register: Register = (on, options) => {
             yield { kind: 'text', index: 0, text: line } satisfies TurnStepChunk
             if (replay.call) {
               call = replay.call
+              run.lastCall = { id: '', event: action }
               break
             }
             continue
@@ -1754,6 +1793,7 @@ export const register: Register = (on, options) => {
         if (call && !next.signal.aborted) {
           ridesInStep.set(e.turnId, run)
           const id = `toolu_${newId()}${newId()}`
+          if (run.lastCall) run.lastCall.id = id
           yield { kind: 'tool', index: 1, id, name: call.name } satisfies TurnStepChunk
           yield { kind: 'input', index: 1, json: JSON.stringify(call.input) } satisfies TurnStepChunk
           yield { kind: 'stop', stopReason: 'tool_use', usage: null } satisfies TurnStepChunk
@@ -1762,6 +1802,17 @@ export const register: Register = (on, options) => {
       }
       yield { kind: 'stop', stopReason: 'end_turn', usage: null } satisfies TurnStepChunk
       return { turnId: e.turnId, index: e.index, answer, toolUses: [], stopReason: 'end_turn', usage: null }
+    }
+
+    // A guest's own model is never called: everything a guest session shows
+    // comes from the room. A turn nothing here accounts for (a notice the app
+    // delivered, a ride that couldn't be matched) gets a note, not a model call.
+    if (mode === 'guest' && e.agentId === undefined && e.index === 0) {
+      const room = await read($, roomA)
+      const note = `_This session is attached to ${room?.host ?? 'the host'}'s; what you type goes there._`
+      yield { kind: 'text', index: 0, text: note } satisfies TurnStepChunk
+      yield { kind: 'stop', stopReason: 'end_turn', usage: null } satisfies TurnStepChunk
+      return { turnId: e.turnId, index: e.index, answer: note, toolUses: [], stopReason: 'end_turn', usage: null }
     }
 
     const stream = next(e)
@@ -1803,6 +1854,9 @@ export const register: Register = (on, options) => {
       }
     }
     const result = await next(e)
+    if (result && typeof result === 'object' && 'deny' in result && typeof result.deny === 'string' && (await read($, modeA)) === 'guest') {
+      refusedCalls.set(e.tool_use_id, result.deny)
+    }
     // Host: what Claude showed goes to the room for guests (not awaited:
     // uploads shouldn't hold the turn).
     if (e.agentId === undefined && (await read($, modeA)) === 'host') void captureShown($, e as unknown as Record<string, unknown>, result).catch(() => {})
@@ -1814,6 +1868,9 @@ export const register: Register = (on, options) => {
   // permission mode; "Always allow" trusts that person for the session.
   on('tool.check', async ($, e, next) => {
     const verdict = await next(e)
+    if (e.tool_use_id && verdict.decision === 'deny' && (await read($, modeA)) === 'guest') {
+      refusedCalls.set(e.tool_use_id, 'reason' in verdict && typeof verdict.reason === 'string' ? verdict.reason : '')
+    }
     if (!e.tool_use_id || verdict.decision === 'deny') return verdict
     if ((await read($, modeA)) !== 'host') return verdict
     const working = await read($, workingA)

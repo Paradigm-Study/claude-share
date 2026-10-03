@@ -25,13 +25,14 @@ type Block = {
   is_error?: boolean
 }
 
-// User-side text the engine records around a command or injects as context:
-// none of it is something a person typed.
+// User-side text the engine records around a command or injects as context
+// (a skill's instructions, a compacted conversation's summary, a background
+// task's notice): none of it is something a person typed.
 const ENGINE_TEXT =
-  /^\s*<(command-name|command-message|command-args|local-command-stdout|local-command-stderr|local-command-caveat|system-reminder|bash-input|bash-stdout|bash-stderr|task-notification|user-prompt-submit-hook)\b/
+  /^\s*(<(command-name|command-message|command-args|local-command-stdout|local-command-stderr|local-command-caveat|system-reminder|bash-input|bash-stdout|bash-stderr|task-notification|user-prompt-submit-hook)\b|Base directory for this skill:|This session is being continued from a previous conversation|\[SYSTEM NOTIFICATION)/
 
-// Context a host app puts into a user message; never shown to others.
-const SYSTEM_BLOCKS = /<system-reminder>[\s\S]*?<\/system-reminder>/g
+// Context a host app or the engine puts into a user message; never shown to others.
+const SYSTEM_BLOCKS = /<(system-reminder|task-notification)>[\s\S]*?<\/\1>/g
 
 const RESULT_LINES = 8
 const RESULT_CHARS = 1200

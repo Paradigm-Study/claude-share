@@ -102,7 +102,7 @@ Previews are served on a second port (`PREVIEW_PORT`, default `PORT` + 1); set `
 - **The server relays plaintext.** It sees the shared transcript: prompts, replies, tool calls and results. Run it somewhere you trust.
 - **Guests can't act on the host's machine without the host.** By default, a guest's request to edit, run commands or use the web asks the host. "Always allow" trusts one person for the session. The host can require approval for every tool, or none.
 - **What Claude shows travels too, unless the host keeps it.** Files Claude shows go through the server (10 MB each, deleted with the room). The host can keep them in Room → Host controls.
-- **Previews are for the room only.** Each guest opens a preview with a one-time link that lasts a minute. The host's plugin only fetches ports the host shared, and previews end with the room.
+- **Previews are for the room only.** Each guest opens a preview with a one-time link that lasts ten minutes. The host's plugin only fetches ports the host shared, and previews end with the room.
 - **Only what a person types travels.** Desktop's hidden context notes are stripped from prompts before they leave a machine. A link relayed by another session, a channel or a task never joins anything.
 
 ## Limits

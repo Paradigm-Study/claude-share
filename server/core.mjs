@@ -27,7 +27,7 @@ const FILE_MAX = 10 * 1024 * 1024
 const ROOM_FILES_MAX = 100 * 1024 * 1024
 // Previews: a guest's browser asks the room, the room asks the host's stream,
 // the host's plugin asks its own localhost and posts the answer back.
-const TICKET_MS = 60_000
+const TICKET_MS = 10 * 60_000 // long enough to click from a transcript; still single-use
 const PREVIEW_SESSION_MS = 12 * 60 * 60 * 1000
 const PROXY_TIMEOUT_MS = 30_000
 const PROXY_BODY_MAX = 1024 * 1024
@@ -610,7 +610,7 @@ export async function previewRequest(room, req, now, { secure = true } = {}) {
     const ticket = room.tickets.get(url.searchParams.get('ticket') ?? '')
     room.tickets.delete(url.searchParams.get('ticket') ?? '')
     if (!ticket || ticket.exp < now || !room.previews.has(ticket.pid)) {
-      return { response: previewPage(403, 'This preview link has expired', 'Open the preview again from Claude Code: each link works once, for a minute.') }
+      return { response: previewPage(403, 'This preview link has expired', 'Open the preview again from Claude Code: each link works once, for ten minutes.') }
     }
     const sid = token(18)
     room.previewSessions.set(sid, { pid: ticket.pid, exp: now + PREVIEW_SESSION_MS })
