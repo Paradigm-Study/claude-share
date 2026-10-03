@@ -15,7 +15,8 @@ const CLAUDE = process.env.CLAUDE_BIN ?? 'claude'
 const MODEL = process.env.MODEL ?? 'claude-haiku-4-5-20251001'
 const WORK = process.env.WORK_DIR ?? join(process.env.TMPDIR ?? '/tmp', 'shared-session-e2e')
 const PORT = 8787
-const SERVER = `http://localhost:${PORT}`
+// A running server to test against (EXTERNAL_SERVER=1), else a local one this starts.
+const SERVER = (process.env.SHARE_SERVER ?? `http://localhost:${PORT}`).replace(/\/+$/, '')
 
 // Model access as the machine's user has it: their settings' env, else ours.
 const MODEL_ENV = (() => {
@@ -176,7 +177,8 @@ try {
   check('host answers its own first prompt', /marmalade/i.test(host.text))
 
   host.say('/share')
-  const link = await until('share link', () => /http:\/\/localhost:8787\/s\/[A-Za-z0-9_-]{16,}/.exec(host.text)?.[0])
+  const linkPattern = new RegExp(`${SERVER.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/s/[A-Za-z0-9_-]{16,}`)
+  const link = await until('share link', () => linkPattern.exec(host.text)?.[0])
   const id = link.split('/s/')[1]
   check('Share creates a link', true, link)
 

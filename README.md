@@ -100,6 +100,8 @@ claude plugin test plugin
 CLAUDE_BIN=$(which claude) node test/e2e.mjs
 ```
 
+Add `EXTERNAL_SERVER=1 SHARE_SERVER=https://your-server` to run it against a deployed server instead of a local one.
+
 The end-to-end run starts a host (in bypass mode, on purpose) and two guests, then checks:
 - sharing and joining;
 - history and attribution;
