@@ -4,18 +4,28 @@ Shared Sessions for Claude Code: a Claude Code plugin (`plugin/`, function hooks
 
 ## Setting it up for someone
 
-Use `scripts/setup.mjs`; it is non-interactive and safe to re-run. Every step prints one line, `OK …`, `NEEDS HUMAN …` or `FAIL …`, and it exits 0 (all OK), 2 (a person must act) or 1 (failed). On `NEEDS HUMAN`, stop and relay that line to the person verbatim, then re-run the same command once they say it's done.
+Use `scripts/setup.mjs`; it is non-interactive and safe to re-run. Every step prints one line, `OK …`, `NOTE …` (informational), `NEEDS HUMAN …` or `FAIL …`, and it exits 0 (all OK), 2 (a person must act) or 1 (failed). On `NEEDS HUMAN`, stop and relay that line to the person verbatim, then re-run the same command once they say it's done. Relay `NOTE` lines too.
+
+It finds a Claude Code new enough for this plugin: `CLAUDE_BIN` if set, else `claude` on PATH, else (macOS) the newest one Claude Desktop bundles. If it FAILs on the version, set `CLAUDE_BIN=/path/to/claude` to a 2.1.286+ binary.
 
 | The person wants | Run |
 | --- | --- |
-| to join links teammates send | `node scripts/setup.mjs join` |
-| to share, and the team already has a server | `node scripts/setup.mjs host --server <https://…>` |
+| only to join links teammates send | `node scripts/setup.mjs join` |
+| to share (and join), and the team already has a server | `node scripts/setup.mjs host --server <https://…>` (includes `join`) |
 | to share, and nobody has a server yet | `node scripts/setup.mjs deploy` (Cloudflare; prints the teammates' one-line install) |
 | to know whether it works | `node scripts/setup.mjs check --live` |
 
+What `check --live` proves:
+- the plugin is installed and the saved server answers;
+- the server can create, seat, serve and end a room;
+- a real throwaway session shares using the saved setting, and its room ends when it exits;
+- a real throwaway session joins a room from its link.
+
+Its throwaway sessions run in the system temp folder, and their transcripts are deleted afterwards. It can't see Claude Desktop's UI (the Share button, the Room panel): ask the person to look.
+
 Facts that matter:
 
-- **Joining needs no server, no account, no sign-in.** The link carries its server. Only sharing needs a server address, set in the plugin's `server` option (what `setup.mjs` sets), or in `SHARED_SESSION_SERVER`.
+- **Joining needs the plugin and nothing else: no server, no account, no sign-in.** The link carries its server. Only sharing needs a server address, set in the plugin's `server` option (what `setup.mjs` sets), or in `SHARED_SESSION_SERVER`.
 - **Steps only a person can do.** Never attempt these yourself; `setup.mjs` stops at each with a `NEEDS HUMAN` line.
   - `npx wrangler login`, which is a browser OAuth approval.
   - Creating the Cloudflare account's `workers.dev` subdomain, once, in the dashboard.
@@ -28,10 +38,10 @@ Facts that matter:
 ## Changing it
 
 ```bash
-cd plugin && npx -y -p typescript@5 tsc -p .          # type-check against the engine's API
+cd plugin && npx -y -p typescript@5 tsc -p .          # type-check against the engine's API (needs plugin/.claude/types, below)
 claude plugin validate --strict plugin                  # what the engine and the plugin directory check
 claude plugin test plugin                               # UI tests (desktop + terminal surfaces)
-CLAUDE_BIN=$(which claude) node test/e2e.mjs            # real host + guests through a local server
+CLAUDE_BIN=$(which claude) node test/e2e.mjs            # real host + guests through a local server (needs model access)
 EXTERNAL_SERVER=1 SHARE_SERVER=https://… node test/e2e.mjs   # …or through a deployed one
 ```
 

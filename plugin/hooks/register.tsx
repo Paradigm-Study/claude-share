@@ -795,6 +795,8 @@ function rideStep(ride: Ride, state: RideState, event: ServerEvent, host: string
     const mine = ride.kind === 'turn' || (ride.kind === 'own' && current.pid === ride.pid)
     state.current = null
     if (mine) state.done = true
+    if (body.reason === 'error') return `\n\n> ✕ ${host}'s Claude couldn't finish this turn (an error on ${host}'s side).\n\n`
+    if (body.reason === 'refusal') return `\n\n> ✕ ${host}'s Claude declined this request.\n\n`
     return body.aborted ? '\n\n_(stopped)_' : mine ? '' : '\n\n'
   }
   return ''
@@ -1021,7 +1023,7 @@ export const register: Register = (on, options) => {
     const mode = await read($, modeA)
     if (mode === 'host') {
       await update($, workingA, w => (w?.turnId === e.turnId ? null : w))
-      send($, 'turn', { state: 'end', turnId: e.turnId, aborted: e.isAborted, durationMs: e.durationMs })
+      send($, 'turn', { state: 'end', turnId: e.turnId, aborted: e.isAborted, durationMs: e.durationMs, reason: e.reason })
     } else {
       const ride = ridesByTurn.get(e.turnId)
       if (ride) {

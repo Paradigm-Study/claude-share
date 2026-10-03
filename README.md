@@ -29,7 +29,12 @@ Requires Claude Code 2.1.286 or later (`claude update`; Claude Desktop includes 
 node scripts/setup.mjs join
 ```
 
-It also handles `host --server <url>` (share through your team's server), `deploy` (make a server on Cloudflare) and `check --live` (verify everything). It stops with a `NEEDS HUMAN` line at the one or two steps that need a person.
+It also handles three more cases:
+- `host --server <url>` installs too, then shares through your team's server.
+- `deploy` makes a server on Cloudflare.
+- `check --live` has real throwaway sessions share and join, then removes them.
+
+It stops with a `NEEDS HUMAN` line at the one or two steps that need a person. Set `CLAUDE_BIN=/path/to/claude` to use a particular Claude Code binary.
 
 **For a whole team, nothing to type:** in your organization's managed settings (or a project's checked-in `.claude/settings.json`), add:
 
@@ -42,7 +47,7 @@ It also handles `host --server <url>` (share through your team's server), `deplo
 
 ## Use it
 
-- **Join:** open a share link. Its page opens Claude Desktop with the link in a new session's prompt box, so you press Enter. Pasting a link into any Claude Code session works too. Joining needs no setup.
+- **Join:** open a share link. Its page opens Claude Desktop with the link in a new session's prompt box, so you press Enter. Pasting a link into any Claude Code session works too. Joining needs only the plugin: no server, account or sign-in.
 - **Share:** press **Share** above the prompt, or type `/share-session`. The link is copied. Sharing needs a server; see below.
 - **Room:** press **Room** above the prompt, or type `/room`, for:
   - who's here and who Claude is working for;
@@ -82,14 +87,14 @@ PORT=8787 PUBLIC_URL=https://share.example.com DATA_FILE=./rooms.json node serve
 | An old error after updating the plugin | Same cause: a session keeps the plugin copy it started with, and `/reload-plugins` re-reads that copy. Restart Desktop or use a new session. |
 | `Couldn't share: Sharing needs a share server…` | No server is set. Run `node scripts/setup.mjs host --server <url>`, or `deploy` to make one. |
 | `ECONNREFUSED` when sharing | The server address points at a machine that isn't running a server. Run `node scripts/setup.mjs check` to see which address is set. |
-| `hooks: Invalid input` from `claude plugin …` | That `claude` is older than 2.1.286. Run `claude update`; `setup.mjs` also finds Claude Desktop's bundled one. |
+| `hooks: Invalid input` from `claude plugin …` | That `claude` is older than 2.1.286. Run `claude update`. `setup.mjs` uses Claude Desktop's bundled one instead on a Mac, or whatever you set in `CLAUDE_BIN`; it then notes that your terminal `claude` still needs `claude update`. |
 | `You need a workers.dev subdomain` on deploy | One-time Cloudflare setup: open Workers & Pages in the dashboard once, then deploy again. |
 | TLS handshake errors right after the first deploy | The new certificate takes a minute or so. |
 | A pasted link goes to Claude as a normal prompt | The plugin isn't loaded in that session (see the first row), or the link was edited. |
 
 ## Security model
 
-- **The link is the key.** Room ids are 128-bit random values; anyone holding a link can join while the host shares. Names are self-declared (`git config user.name`).
+- **The link is the key.** Room ids are 128-bit random values; anyone holding a link can join while the host shares. Names are self-declared: `git config user.name`, else the computer's username.
 - **The server relays plaintext.** It sees the shared transcript: prompts, replies, tool calls and results. Run it somewhere you trust.
 - **Guests can't act on the host's machine without the host.** By default, a guest's request to edit, run commands or use the web asks the host. "Always allow" trusts one person for the session. The host can require approval for every tool, or none.
 - **Only what a person types travels.** Desktop's hidden context notes are stripped from prompts before they leave a machine. A link relayed by another session, a channel or a task never joins anything.
@@ -100,6 +105,7 @@ PORT=8787 PUBLIC_URL=https://share.example.com DATA_FILE=./rooms.json node serve
 - **Not mirrored:** subagents' inner steps and pasted images.
 - **No "Alex is typing…".** The engine doesn't see keystrokes in Claude Desktop's composer.
 - **Polling, not streaming connections.** The plugin polls (0.4 s while active, 1.5 s idle), because a plugin request held open delays the next prompt's dispatch.
+- **Failed host turns:** guests see a note in the reply when the host's turn errors or is refused.
 - **Session list changes are Desktop-only.** The 👥 title and the pin use Claude Desktop's own sidebar tools. Elsewhere they're skipped.
 
 ## Develop

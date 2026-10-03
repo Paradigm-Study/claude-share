@@ -9,14 +9,17 @@
 //
 // Non-interactive and safe to re-run. Every step prints one line:
 //   OK ...           done or already so
+//   NOTE ...         worth knowing, changes nothing (e.g. an old terminal `claude`)
 //   NEEDS HUMAN ...  a person must act (sign in, approve in a browser); the line says what
 //   FAIL ...         could not be done; the line says why
+// Set CLAUDE_BIN=/path/to/claude to use a particular Claude Code binary.
 // Exit codes: 0 all OK, 2 a person must act, 1 something failed.
 // Nothing here prints a token or credential.
 
 import { spawnSync } from 'node:child_process'
 import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs'
-import { homedir, tmpdir } from 'node:os'
+import { homedir, tmpdir, userInfo } from 'node:os'
+import { basename } from 'node:path'
 import { join } from 'node:path'
 
 const MARKETPLACE = 'Paradigm-Study/claude-share'
@@ -31,6 +34,7 @@ const flag = name => {
 
 let status = 0
 const ok = line => console.log(`OK ${line}`)
+const note = line => console.log(`NOTE ${line}`)
 const human = line => {
   console.log(`NEEDS HUMAN ${line}`)
   status = Math.max(status, 2)
@@ -50,6 +54,11 @@ const atLeast = (v, min) => {
   for (let i = 0; i < 3; i++) if ((v[i] ?? 0) !== min[i]) return (v[i] ?? 0) > min[i]
   return true
 }
+const newestFirst = (a, b) => {
+  const [x, y] = [versionOf(a), versionOf(b)]
+  for (let i = 0; i < 3; i++) if ((x[i] ?? 0) !== (y[i] ?? 0)) return (y[i] ?? 0) - (x[i] ?? 0)
+  return 0
+}
 
 // A Claude Code new enough for function-hook plugins: $CLAUDE_BIN, `claude` on
 // PATH, or the newest one Claude Desktop bundles (macOS).
@@ -57,9 +66,10 @@ function findClaude() {
   const candidates = []
   if (process.env.CLAUDE_BIN) candidates.push(process.env.CLAUDE_BIN)
   candidates.push('claude')
-  const bundled = join(homedir(), 'Library/Application Support/Claude/claude-code')
+  // The account's real home, even when HOME is overridden (a sandbox, CI).
+  const bundled = join(userInfo().homedir, 'Library/Application Support/Claude/claude-code')
   if (existsSync(bundled)) {
-    for (const version of readdirSync(bundled).sort().reverse()) {
+    for (const version of readdirSync(bundled).sort(newestFirst)) {
       const dir = join(bundled, version)
       for (const build of existsSync(dir) ? readdirSync(dir) : []) {
         candidates.push(join(dir, build, 'claude.app/Contents/MacOS/claude'))
@@ -82,12 +92,20 @@ function needClaude() {
   if (!bin) {
     fail(
       version
-        ? `Claude Code ${version} is too old for this plugin; it needs ${MIN_VERSION.join('.')} or newer. Run \`claude update\` (or install Claude Desktop, which bundles a current one).`
-        : 'Claude Code is not installed. Install it (https://claude.com/claude-code) or Claude Desktop, then run this again.',
+        ? `Claude Code ${version} is too old for this plugin; it needs ${MIN_VERSION.join('.')} or newer. Run \`claude update\`, or point at a newer binary with CLAUDE_BIN=/path/to/claude (Claude Desktop bundles one).`
+        : 'Claude Code is not installed. Install it (https://claude.com/claude-code) or Claude Desktop, or set CLAUDE_BIN=/path/to/claude, then run this again.',
     )
     process.exit(status)
   }
   ok(`Claude Code ${version} (${bin === 'claude' ? 'on PATH' : bin})`)
+  if (bin !== 'claude') {
+    const onPath = run('claude', ['--version'], { timeout: 20_000 })
+    if (!onPath.error && onPath.code === 0 && !atLeast(versionOf(onPath.out), MIN_VERSION)) {
+      note(
+        `your terminal \`claude\` is ${versionOf(onPath.out).join('.')}, older than ${MIN_VERSION.join('.')}: Claude Desktop sessions get the plugin, terminal sessions won't until you run \`claude update\``,
+      )
+    }
+  }
   return bin
 }
 
@@ -183,30 +201,59 @@ async function deploy(claude) {
   console.log(`\nTeammates install with one line:\n  claude plugin marketplace add ${MARKETPLACE} && claude plugin install ${PLUGIN} --config server=${url}`)
 }
 
+// The session transcripts a check's throwaway sessions leave, removed by the
+// throwaway folder's unique name.
+function forgetSessions(dir) {
+  const projects = join(process.env.HOME || homedir(), '.claude', 'projects')
+  if (!existsSync(projects)) return
+  for (const entry of readdirSync(projects)) if (entry.includes(basename(dir))) rmSync(join(projects, entry), { recursive: true, force: true })
+}
+
 async function check(claude) {
   const listed = run(claude, ['plugin', 'list'])
   const block = listed.out.slice(listed.out.indexOf(PLUGIN), listed.out.indexOf(PLUGIN) + 200)
   if (!listed.out.includes(PLUGIN)) fail('the plugin is not installed: run `node scripts/setup.mjs join`')
   else ok(`plugin installed${/Version: (\S+)/.exec(block) ? ` (${/Version: (\S+)/.exec(block)[1]})` : ''}${/enabled/.test(block) ? ', enabled' : ''}`)
 
-  const server = validServer(flag('server')) ?? validServer(configuredServer(claude))
+  const saved = validServer(configuredServer(claude))
+  const server = validServer(flag('server')) ?? saved
   if (!server) {
     ok('no share server set: this machine can join links but not share. To share, run `node scripts/setup.mjs host --server <url>` (or `deploy`)')
     return
   }
+  if (!saved) note(`no share server is saved on this machine; checking ${server} as given`)
   const up = await health(server)
   if (up !== true) return fail(`share server ${server} is not answering (${up})`)
   ok(`share server ${server} is up`)
-  if (await roomRoundTrip(server)) ok('a room can be created, joined, opened and ended')
-  else fail('the room round trip failed')
+  if (await roomRoundTrip(server)) ok('the server can create a room, let a seat in over HTTP, serve its link page and end it')
+  else fail('the server room round trip failed')
 
-  if (flag('live')) {
-    // A real Claude Code session shares and stops, with nothing of this machine's sessions involved.
-    const dir = mkdtempSync(join(tmpdir(), 'shared-session-check-'))
-    const r = run(claude, ['-p', '/share-session'], { cwd: dir, env: { ...process.env, SHARED_SESSION_SERVER: server }, timeout: 120_000 })
+  if (!flag('live')) return
+  // Real Claude Code sessions in a throwaway folder: one shares with this
+  // machine's saved settings, one joins a room by its link. Neither touches
+  // this machine's other sessions; their transcripts are removed after.
+  const dir = mkdtempSync(join(tmpdir(), 'shared-session-check-'))
+  try {
+    const env = flag('server') && !saved ? { ...process.env, SHARED_SESSION_SERVER: server } : process.env
+    const shared = run(claude, ['-p', '/share-session'], { cwd: dir, env, timeout: 120_000 })
+    const link = new RegExp(`${server.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/s/([A-Za-z0-9_-]{16,})`).exec(shared.out)
+    if (!link) fail(`a real session could not share: ${shared.out.trim().split('\n').pop()}`)
+    else {
+      const room = await fetch(`${server}/api/rooms/${link[1]}`).then(r => r.json()).catch(() => ({}))
+      if (room.ended) ok(`a real session shared${saved ? ' with the saved setting' : ''}, and its room ended when the session did`)
+      else fail('a real session shared, but its room was still open after the session ended')
+    }
+
+    const host = await fetch(`${server}/api/rooms`, { method: 'POST', body: JSON.stringify({ name: 'setup-check', title: 'setup check' }) }).then(r => r.json())
+    run(claude, ['-p', host.url], { cwd: dir, timeout: 120_000 })
+    const page = await fetch(`${server}/api/rooms/${host.id}/events?after=0&wait=0`, { headers: { authorization: `Bearer ${host.token}` } }).then(r => r.json())
+    await fetch(`${server}/api/rooms/${host.id}/end`, { method: 'POST', headers: { authorization: `Bearer ${host.token}` } })
+    const joined = (page.events ?? []).find(e => e.type === 'join' && e.from?.role === 'guest')
+    if (joined) ok(`a real session joined a room from its link (as "${joined.from.name}")`)
+    else fail('a real session given a share link did not join it')
+  } finally {
     rmSync(dir, { recursive: true, force: true })
-    if (r.out.includes(`${server}/s/`)) ok('a real session shared (and stopped when it exited)')
-    else fail(`a real session could not share: ${r.out.trim().split('\n').pop()}`)
+    forgetSessions(dir)
   }
 }
 

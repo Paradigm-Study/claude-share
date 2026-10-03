@@ -1,5 +1,8 @@
-// End-to-end: a real host Claude Code session and a real guest session,
-// both headless (stream-json), talking through a local room server.
+// End-to-end: a real host Claude Code session and real guest sessions, all
+// headless (stream-json), talking through a room server: a local one this
+// starts, or a deployed one (EXTERNAL_SERVER=1 SHARE_SERVER=https://…). They
+// load this repo's plugin with --plugin-dir, which a headless run only does
+// with CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 (installed plugins don't need it).
 //
 //   CLAUDE_BIN=/path/to/claude node test/e2e.mjs
 //

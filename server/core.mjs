@@ -92,7 +92,7 @@ export class Room {
   }
 
   people(now) {
-    const online = t => now - t < SEAT_TIMEOUT_MS
+    const online = t => !this.endedAt && now - t < SEAT_TIMEOUT_MS
     return [
       { id: 'host', name: this.host.name, role: 'host', online: online(this.host.lastSeen) },
       ...[...this.seats.values()].map(s => ({ id: s.id, name: s.name, role: 'guest', online: true })),
