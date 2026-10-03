@@ -246,6 +246,11 @@ async function deploy(claude) {
   const url = validServer(/https:\/\/[^\s]+\.workers\.dev/.exec(out)?.[0])
   if (!url) return fail(`deploy: ${out.trim().split('\n').slice(-3).join(' | ')}`)
   ok(`deployed to ${url}`)
+  // Previews of a host's localhost: the same script as a second Worker, on its own host name.
+  const preview = run(npx, ['-y', 'wrangler@4', 'deploy', '-c', 'wrangler.preview.toml'], { env, timeout: 300_000 }).out
+  const previewUrl = /https:\/\/[^\s]+\.workers\.dev/.exec(preview)?.[0]
+  if (previewUrl) ok(`previews deployed to ${previewUrl}`)
+  else note(`previews didn't deploy (${preview.trim().split('\n').slice(-2).join(' | ')}); sharing works, previews of localhost won't until \`npx wrangler deploy -c wrangler.preview.toml\` succeeds`)
   const ready = await health(url, { waitMs: 300_000 }) // a new subdomain's certificate takes a minute or so
   if (ready !== true) return fail(`the server is not answering yet (${ready}); a new workers.dev certificate can take a few minutes — run \`node scripts/setup.mjs check --server ${url}\` shortly`)
   ok('server is up')

@@ -8,14 +8,57 @@
 // request or message wakes it. Its only timers: settle a seat that
 // disconnected once its grace period is over, and drop the room a day after
 // the host was last seen.
+//
+// Previews run on a second Worker from this same script (ROLE = "preview",
+// wrangler.preview.toml), its own workers.dev host name, bound to the rooms
+// here: every path there is the host's app.
 
-import { Room, ROOM_ID, SEAT_TIMEOUT_MS, KEEPALIVE_MS, STREAM_MAX_MS, createRoom, roomRequest, notFound, json, publicOrigin, token } from './core.mjs'
+import {
+  Room,
+  ROOM_ID,
+  SEAT_TIMEOUT_MS,
+  KEEPALIVE_MS,
+  STREAM_MAX_MS,
+  createRoom,
+  roomRequest,
+  previewRequest,
+  previewRoomOf,
+  notFound,
+  json,
+  publicOrigin,
+  token,
+} from './core.mjs'
 
 const ROOM_TTL_MS = 24 * 60 * 60 * 1000
 const pad = seq => String(seq).padStart(12, '0')
+const CHUNK = 512 * 1024 // file bytes per storage value
+
+// Where previews are served: PREVIEW_URL, else this Worker's workers.dev name
+// with "-preview" (claude-share.x.workers.dev → claude-share-preview.x.workers.dev).
+function previewOriginOf(req, env) {
+  if (env.PREVIEW_URL) return env.PREVIEW_URL.replace(/\/+$/, '')
+  const m = /^([^.]+)\.(.+\.workers\.dev)$/.exec(new URL(req.url).hostname)
+  return m ? `https://${m[1]}-preview.${m[2]}` : ''
+}
+
+async function previewFetch(req, env) {
+  const id = previewRoomOf(req)
+  if (!id || !ROOM_ID.test(id)) return new Response('This preview does not exist.', { status: 404 })
+  const url = new URL(req.url)
+  const stub = env.ROOMS.get(env.ROOMS.idFromName(id))
+  return stub.fetch(
+    new Request(`https://room.internal/${id}/__preview${url.pathname}${url.search}`, {
+      method: req.method,
+      headers: req.headers,
+      body: req.method === 'GET' || req.method === 'HEAD' ? undefined : await req.arrayBuffer(),
+      redirect: 'manual',
+    }),
+  )
+}
 
 export default {
   async fetch(req, env) {
+    if (env.ROLE === 'preview') return previewFetch(req, env)
     const url = new URL(req.url)
     const origin = publicOrigin(req, env.PUBLIC_URL)
     const parts = url.pathname.split('/').filter(Boolean)
@@ -41,6 +84,7 @@ export default {
     const stub = env.ROOMS.get(env.ROOMS.idFromName(id))
     const headers = new Headers(req.headers)
     headers.set('x-share-origin', origin)
+    headers.set('x-preview-origin', previewOriginOf(req, env))
     if (rest === 'stream' && req.method === 'GET') return bridge(stub, id, url, headers)
     return stub.fetch(
       new Request(`https://room.internal/${id}/${rest}${url.search}`, {
@@ -113,6 +157,40 @@ export class RoomObject {
     this.savedSeq = room.seq
     room.connected = seat => this.state.getWebSockets(seat).some(ws => !this.closed.has(ws))
     room.onChange = () => this.broadcast()
+    room.toHost = message => {
+      let sent = false
+      for (const ws of this.state.getWebSockets('host')) {
+        if (this.closed.has(ws)) continue
+        try {
+          ws.send(JSON.stringify(message))
+          sent = true
+        } catch {}
+      }
+      return sent
+    }
+    // File bytes in storage, in chunks; deleteAll() at expiry takes them too.
+    const storage = this.state.storage
+    room.store = {
+      put: async (id, data, type) => {
+        const entries = { [`bm:${id}`]: { type, size: data.length, chunks: Math.ceil(data.length / CHUNK) || 1 } }
+        for (let i = 0, n = 0; i < Math.max(1, data.length); i += CHUNK, n++) entries[`b:${id}:${n}`] = data.slice(i, i + CHUNK)
+        await storage.put(entries)
+      },
+      get: async id => {
+        const meta = await storage.get(`bm:${id}`)
+        if (!meta) return null
+        const parts = await storage.get(Array.from({ length: meta.chunks }, (_, n) => `b:${id}:${n}`))
+        const data = new Uint8Array(meta.size)
+        let at = 0
+        for (let n = 0; n < meta.chunks; n++) {
+          const part = parts.get(`b:${id}:${n}`)
+          if (!part) return null
+          data.set(new Uint8Array(part), at)
+          at += part.byteLength
+        }
+        return { data, type: meta.type }
+      },
+    }
   }
 
   async fetch(req) {
@@ -143,7 +221,16 @@ export class RoomObject {
 
     if (rest === 'socket') return this.accept(req, url, now)
 
-    const { response, changed } = await roomRequest(this.room, req, rest, now, origin)
+    if (rest === '__preview' || rest.startsWith('__preview/')) {
+      const path = url.pathname.slice(`/${id}/__preview`.length) || '/'
+      const inner = new Request(new URL(`${path}${url.search}`, 'https://preview.local'), req)
+      const { response, changed } = await previewRequest(this.room, inner, now)
+      if (changed) await this.persist()
+      return response
+    }
+
+    const ctx = { previewOrigin: req.headers.get('x-preview-origin') ?? '' }
+    const { response, changed } = await roomRequest(this.room, req, rest, now, origin, ctx)
     if (changed) await this.persist()
     return response
   }

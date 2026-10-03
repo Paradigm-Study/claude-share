@@ -13,3 +13,13 @@ class_name = "RoomObject"
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["RoomObject"]
+
+# v2 and v3: a second store tried and removed (October 2026); kept so
+# deployments that ran them stay in step.
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["SharedRoom"]
+
+[[migrations]]
+tag = "v3"
+deleted_classes = ["SharedRoom"]

@@ -27,6 +27,13 @@ function world(on: On, opts: { server?: boolean; stream?: unknown[] } = {}) {
   const spawned: { argv: readonly string[]; input?: string }[] = []
   on('process.spawn', async function* ($, e) {
     spawned.push({ argv: e.argv, input: e.input })
+    // Shell work: an upload answers with the file's id; anything else succeeds.
+    if (e.argv[0] === '/bin/sh') {
+      if (e.input?.includes('/files"') && e.input.includes('--data-binary')) {
+        yield { stream: 'stdout' as const, text: JSON.stringify({ id: 'f'.repeat(64), name: 'chart.html', type: 'text/html', size: 42 }) }
+      }
+      return { value: { code: 0, signal: null } }
+    }
     if (!opts.stream) throw new Error('spawn curl ENOENT')
     for (const line of opts.stream) yield { stream: 'stdout' as const, text: `${JSON.stringify(line)}\n` }
     yield { stream: 'stdout' as const, text: '\n{"httpStatus":200}\n' }
@@ -58,10 +65,12 @@ function world(on: On, opts: { server?: boolean; stream?: unknown[] } = {}) {
     const { Text } = $.ui.resolve(e)
     return <Text>{e.props.text}</Text>
   })
+  const posted: { type: string; body: Record<string, unknown> }[] = []
   on('http.fetch', ($, e) => {
     const method = e.init?.method ?? 'GET'
     const path = e.url.replace(/^https?:\/\/[^/]+/, '').replace(/\?.*$/, '')
     asked.push(`${method} ${path}`)
+    if (method === 'POST' && path.endsWith('/events') && e.init?.body) posted.push(...(JSON.parse(e.init.body).events ?? []))
     const people = [
       { id: 'host', name: 'Sam', role: 'host', online: true },
       { id: 'seat1', name: 'scott', role: 'guest', online: true },
@@ -74,10 +83,12 @@ function world(on: On, opts: { server?: boolean; stream?: unknown[] } = {}) {
       body = { token: 'g', seat: 'seat1', title: 'demo', host: 'Sam', seq: 1, history: [], people }
     } else if (path.endsWith('/events') && method === 'GET') {
       body = { seq: 1, events: [], people, ended: false, title: 'demo' }
+    } else if (path.endsWith('/previews') && method === 'POST') {
+      body = { pid: 'pv1' }
     }
     return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify(body) } }
   })
-  return Object.assign(asked, { clock, logged, spawned })
+  return Object.assign(asked, { clock, logged, spawned, posted })
 }
 
 test('a session that is not shared shows one Share button', async ($, on) => {
@@ -309,4 +320,46 @@ test('with no share server set up, Share explains how and joining still works', 
   const joined = await $.prompt.submit({ text: LINK, origin: { kind: 'composer' }, wait: false })
   expect(joined.drop).toBeUndefined()
   expect(world0).toContain('POST /api/rooms/room0000000000000001/join')
+})
+
+test("what the host's Claude shows goes to the room, its files uploaded", async ($, on) => {
+  const asked = world(on)
+  on('tool.call', { tool: 'SendUserFile' }, () => ({ result: { attachments: [] }, text: '1 file delivered to user.' }) as never)
+  const ui = await $.ui.mount(band('desktop'))
+  await ui.press({ key: 'share' })
+  await $.tool.call({ tool: 'SendUserFile', files: ['chart.html'], display: 'render', status: 'normal', caption: 'The chart' } as never)
+  await asked.clock.advance(200)
+  const upload = asked.spawned.find(s => s.argv[0] === '/bin/sh' && s.input?.includes('/files"'))
+  expect(upload?.input).toContain("--data-binary @'/tmp/demo/chart.html'")
+  expect(upload?.input).not.toContain('Bearer t\'') // the token goes in curl's config on stdin
+  const shown = asked.posted.find(e => e.type === 'artifact')
+  expect(shown?.body.kind).toBe('send')
+  expect((shown?.body.files as { name: string }[])[0]?.name).toBe('chart.html')
+  expect(shown?.body.caption).toBe('The chart')
+})
+
+test('a host who keeps what Claude shows sends nothing', async ($, on) => {
+  const asked = world(on)
+  on('tool.call', { tool: 'SendUserFile' }, () => ({ result: { attachments: [] }, text: 'ok' }) as never)
+  const ui = await $.ui.mount(band('desktop'))
+  await ui.press({ key: 'share' })
+  const pane = await $.ui.mount({ plugin: 'shared-session', surface: 'desktop', component: 'Pane', requestId: 'shared-room', props: PANE })
+  await pane.select({ key: 'policy-files', value: 'off' })
+  await $.tool.call({ tool: 'SendUserFile', files: ['chart.html'], display: 'render', status: 'normal' } as never)
+  await asked.clock.advance(200)
+  expect(asked.posted.some(e => e.type === 'artifact')).toBe(false)
+})
+
+test('a guest sees what the host showed in the Room, with Open', async ($, on) => {
+  const people = [
+    { id: 'host', name: 'Sam', role: 'host', online: true },
+    { id: 'seat1', name: 'scott', role: 'guest', online: true },
+  ]
+  const shown = { seq: 2, type: 'artifact', ts: 900, from: { seat: 'host', name: 'Sam', role: 'host' }, body: { kind: 'send', files: [{ id: 'f'.repeat(64), name: 'chart.html', type: 'text/html', size: 42 }], display: 'render' } }
+  const asked = world(on, { stream: [{ seq: 2, events: [shown], people, ended: false, title: 'demo' }] })
+  await $.prompt.submit({ text: LINK, origin: { kind: 'composer' }, wait: false })
+  await asked.clock.advance(10)
+  const pane = await $.ui.mount({ plugin: 'shared-session', surface: 'desktop', component: 'Pane', requestId: 'shared-room', props: PANE })
+  expect(await pane.find({ type: 'Text', text: /chart\.html/ })).toBeDefined()
+  expect(await pane.find({ key: 'open-seq:2' })).toBeDefined()
 })

@@ -9,7 +9,8 @@ Share a Claude Code session with a link. Teammates open it, land in a Claude Cod
   - a teammate's prompts carry their dot avatar and name;
   - the footer and working line say who's here and whose turn it is;
   - a Room panel has people, activity, host controls and a side chat Claude never reads;
-  - in Desktop, the session list marks shared sessions.
+  - in Desktop, the session list marks and pins shared sessions.
+- **What Claude shows, everyone sees.** When the host's Claude opens a file in the side panel or the Files pane, draws a widget, or opens a page or a local dev server in the browser pane, each guest's own Claude Code opens the same thing. Files are saved in the guest's project under `.shared-session/` (kept out of git), and a dev server is reached through the room server.
 
 Built as a Claude Code plugin of function hooks (a "mod"), plus a small room server that runs on Cloudflare or as a single Node process.
 
@@ -53,6 +54,7 @@ It stops with a `NEEDS HUMAN` line at the one or two steps that need a person. S
   - who's here and who Claude is working for;
   - the timeline and the side chat;
   - for the host, the controls.
+- **Show:** what the host's Claude shows reaches everyone by itself. The host can also type `/share-file <path>` to show a file, or `/share-preview <port>` to let teammates open a local dev server. Both are listed in the Room, where guests reopen them and the host stops previews.
 - **Stop:** press **Leave** or **Stop sharing**, or type `/stop-sharing`. Esc in a guest stops the shared turn.
 
 ## Host a server
@@ -65,13 +67,15 @@ Sharing needs a room server you run. Rooms are short-lived: they expire 24 hours
 node scripts/setup.mjs deploy
 ```
 
-That signs you in (`npx wrangler login` in a browser), deploys and waits for the server. It then points this machine at it and prints the one-line install for teammates. By hand, it's `npx wrangler login` then `npx wrangler deploy`.
+That signs you in (`npx wrangler login` in a browser), deploys and waits for the server. It then points this machine at it and prints the one-line install for teammates. By hand, it's `npx wrangler login`, `npx wrangler deploy`, then `npx wrangler deploy -c wrangler.preview.toml`. The second Worker serves previews of a host's localhost on a host name of its own.
 
 **Anywhere else:** any machine with Node 20 behind HTTPS.
 
 ```bash
 PORT=8787 PUBLIC_URL=https://share.example.com DATA_FILE=./rooms.json node server/node.mjs
 ```
+
+Previews are served on a second port (`PREVIEW_PORT`, default `PORT` + 1); set `PREVIEW_URL` to how people reach it, such as `https://preview.example.com`.
 
 **Then point Claude Code at it.** Use any one of these:
 
@@ -97,6 +101,8 @@ PORT=8787 PUBLIC_URL=https://share.example.com DATA_FILE=./rooms.json node serve
 - **The link is the key.** Room ids are 128-bit random values; anyone holding a link can join while the host shares. Names are self-declared: `git config user.name`, else the computer's username.
 - **The server relays plaintext.** It sees the shared transcript: prompts, replies, tool calls and results. Run it somewhere you trust.
 - **Guests can't act on the host's machine without the host.** By default, a guest's request to edit, run commands or use the web asks the host. "Always allow" trusts one person for the session. The host can require approval for every tool, or none.
+- **What Claude shows travels too, unless the host keeps it.** Files Claude shows go through the server (10 MB each, deleted with the room). The host can keep them in Room → Host controls.
+- **Previews are for the room only.** Each guest opens a preview with a one-time link that lasts a minute. The host's plugin only fetches ports the host shared, and previews end with the room.
 - **Only what a person types travels.** Desktop's hidden context notes are stripped from prompts before they leave a machine. A link relayed by another session, a channel or a task never joins anything.
 
 ## Limits
@@ -106,6 +112,8 @@ PORT=8787 PUBLIC_URL=https://share.example.com DATA_FILE=./rooms.json node serve
 - **No "Alex is typing…".** The engine doesn't see keystrokes in Claude Desktop's composer.
 - **Needs `curl` for live updates.** Each shared session keeps one `curl` process reading the room's stream, so a quiet room makes no requests. Without `curl`, or against a server too old to stream, the plugin polls instead, from every 0.4 s while busy down to every 15 s when quiet.
 - **Failed host turns:** guests see a note in the reply when the host's turn errors or is refused.
+- **Previews are plain HTTP.** No WebSockets, so a dev server's hot reload doesn't reach guests; they reload. Request bodies are limited to 1 MB and responses to 20 MB. The host needs `sh` and `curl` (macOS or Linux).
+- **The browser pane asks first.** Opening a page or a preview in a guest's browser pane asks that guest. A terminal guest gets the file saved and a note instead of a viewer.
 - **Session list changes are Desktop-only.** The 👥 title and the pin use Claude Desktop's own sidebar tools. Elsewhere they're skipped.
 
 ## Develop
@@ -140,6 +148,7 @@ The end-to-end run starts a host (in bypass mode, on purpose) and two guests, th
 - ordering;
 - Esc from a guest;
 - that everyone hears the room over one open stream;
+- that a file the host shares lands in the guest's project, and that a guest opens the host's localhost through a preview;
 - that a guest's write is refused without approval;
 - that sharing ends cleanly.
 

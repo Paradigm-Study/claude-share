@@ -21,11 +21,22 @@ export const STREAM_MAX_MS = 5 * 60_000
 const POLL_WAIT_MS = 20_000
 const MAX_TEXT = 32_000 // chars; keeps one stored event under the Durable Object value limit
 const MAX_BODY = 512_000
+// Files the host's Claude shows (a page, an image, a widget too big for an
+// event): kept by the room, read with a member's token, gone with the room.
+const FILE_MAX = 10 * 1024 * 1024
+const ROOM_FILES_MAX = 100 * 1024 * 1024
+// Previews: a guest's browser asks the room, the room asks the host's stream,
+// the host's plugin asks its own localhost and posts the answer back.
+const TICKET_MS = 60_000
+const PREVIEW_SESSION_MS = 12 * 60 * 60 * 1000
+const PROXY_TIMEOUT_MS = 30_000
+const PROXY_BODY_MAX = 1024 * 1024
+const PROXY_RESPONSE_MAX = 20 * 1024 * 1024
 
 // What each seat may post. `chat` is the room's side channel: people talk,
 // Claude never reads it. `policy` is the host's say over what guests may do;
 // `declined` answers a guest prompt the host's policy turned away.
-const HOST_TYPES = new Set(['row', 'delta', 'turn', 'approval', 'title', 'policy', 'declined', 'chat'])
+const HOST_TYPES = new Set(['row', 'delta', 'turn', 'approval', 'title', 'policy', 'declined', 'chat', 'artifact'])
 const GUEST_TYPES = new Set(['prompt', 'stop', 'chat'])
 const LIVE_TYPES = new Set(['delta'])
 
@@ -62,7 +73,15 @@ export class Room {
     this.seats = new Map(Object.entries(data.seats ?? {}))
     this.live = []
     this.waiters = new Set()
-    this.subscribers = new Set() // open streams this process serves: { seat, push }
+    this.files = new Map(Object.entries(data.files ?? {})) // id → { id, name, type, size, ts }
+    this.previews = new Map(Object.entries(data.previews ?? {})) // pid → { pid, port, title, ts }
+    this.previewSessions = new Map(Object.entries(data.previewSessions ?? {})) // sid → { pid, exp }
+    this.tickets = new Map() // one-time: ticket → { pid, exp }
+    this.proxied = new Map() // in flight: request id → settle(Response)
+    // Where file bytes live: memory here; a Durable Object keeps them in storage.
+    const bytes = new Map()
+    this.store = { put: async (id, data, type) => void bytes.set(id, { data, type }), get: async id => bytes.get(id) ?? null }
+    this.subscribers = new Set() // open streams this process serves: { seat, push, send }
     // The host process may say who is connected (a Durable Object counts its
     // sockets) and hear about every change (to tell those sockets).
     this.connected = seat => [...this.subscribers].some(s => s.seat === seat)
@@ -97,7 +116,22 @@ export class Room {
       seq: this.seq,
       events: this.events,
       seats: Object.fromEntries(this.seats),
+      files: Object.fromEntries(this.files),
+      previews: Object.fromEntries(this.previews),
+      previewSessions: Object.fromEntries(this.previewSessions),
     }
+  }
+
+  // A message for the host's open stream only (proxied preview requests).
+  // Returns whether anyone got it.
+  toHost(message) {
+    let sent = false
+    for (const sub of this.subscribers) {
+      if (sub.seat !== 'host') continue
+      sub.send(message)
+      sent = true
+    }
+    return sent
   }
 
   auth(bearer) {
@@ -257,13 +291,15 @@ export async function createRoom(req, id, now, origin) {
 // whether to persist the room.
 // Who is still here is settled when someone asks, not on a timer: a seat that
 // stopped polling is dropped by the next request, so a quiet room costs nothing.
-export async function roomRequest(room, req, rest, now, origin) {
+// `ctx.previewOrigin` is where previews are served (a host name of their own,
+// so an app's root-relative paths work); absent, previews are off.
+export async function roomRequest(room, req, rest, now, origin, ctx = {}) {
   const swept = room.sweep(now)
-  const result = await handleRoom(room, req, rest, now, origin)
+  const result = await handleRoom(room, req, rest, now, origin, ctx)
   return swept ? { ...result, changed: true } : result
 }
 
-async function handleRoom(room, req, rest, now, origin) {
+async function handleRoom(room, req, rest, now, origin, ctx) {
   const method = req.method
   const url = new URL(req.url)
 
@@ -304,6 +340,11 @@ async function handleRoom(room, req, rest, now, origin) {
 
   const auth = room.auth(bearerOf(req))
   if (!auth) return { response: json({ error: 'Not a member of this session.' }, 401) }
+
+  const files = await fileRoutes(room, req, rest, auth, now)
+  if (files) return files
+  const previews = await previewRoutes(room, req, rest, auth, now, ctx)
+  if (previews) return previews
 
   if (rest === 'stream' && method === 'GET') {
     if (room.endedAt) return { response: json({ error: 'This session is no longer shared.' }, 410) }
@@ -398,6 +439,7 @@ function streamResponse(room, auth, after) {
       }
       sub = {
         seat: auth.seat,
+        send,
         push: () => {
           const page = room.page(cursor, Date.now())
           cursor = page.seq
@@ -418,6 +460,218 @@ function streamResponse(room, auth, after) {
   return new Response(body, {
     headers: { 'content-type': 'application/x-ndjson; charset=utf-8', 'cache-control': 'no-store', 'x-accel-buffering': 'no' },
   })
+}
+
+// ---------------------------------------------------------------------------
+// Files: POST files (host; the bytes, x-file-name) → { id, name, type, size };
+// GET files/<id> (any member) → the bytes. The id is the bytes' SHA-256.
+
+async function sha256(bytes) {
+  const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))
+  return [...digest].map(b => b.toString(16).padStart(2, '0')).join('')
+}
+
+const fileName = raw => {
+  let name = String(raw ?? '')
+  try {
+    name = decodeURIComponent(name)
+  } catch {}
+  return name.split(/[\\/]/).pop().replace(/[\u0000-\u001f]/g, '').slice(0, 120) || 'file'
+}
+
+async function fileRoutes(room, req, rest, auth, now) {
+  if (rest === 'files' && req.method === 'POST') {
+    if (auth.role !== 'host') return { response: json({ error: 'Only the host shares files.' }, 403) }
+    if (room.endedAt) return { response: json({ error: 'This session is no longer shared.' }, 410) }
+    const bytes = new Uint8Array(await req.arrayBuffer())
+    if (bytes.length > FILE_MAX) return { response: json({ error: `Files are limited to ${FILE_MAX / 1024 / 1024} MB.` }, 413) }
+    const id = await sha256(bytes)
+    const used = [...room.files.values()].reduce((n, f) => n + (f.id === id ? 0 : f.size), 0)
+    if (used + bytes.length > ROOM_FILES_MAX) return { response: json({ error: 'This room is out of room for files.' }, 413) }
+    const meta = { id, name: fileName(req.headers.get('x-file-name')), type: req.headers.get('content-type') || 'application/octet-stream', size: bytes.length, ts: now }
+    await room.store.put(id, bytes, meta.type)
+    room.files.set(id, meta)
+    return { changed: true, response: json(meta) }
+  }
+  if (rest.startsWith('files/') && req.method === 'GET') {
+    const meta = room.files.get(rest.slice(6))
+    const stored = meta ? await room.store.get(meta.id) : null
+    if (!stored) return { response: json({ error: 'No such file.' }, 404) }
+    return {
+      response: new Response(stored.data, {
+        headers: { 'content-type': meta.type, 'content-length': String(meta.size), 'cache-control': 'private, max-age=3600' },
+      }),
+    }
+  }
+  return null
+}
+
+// ---------------------------------------------------------------------------
+// Previews: the host shares a localhost port; members get one-time tickets
+// that open it on the preview host name.
+//   POST previews { port, title } (host) → { pid }
+//   POST previews/<pid>/end (host)
+//   POST previews/<pid>/ticket (any member) → { url }
+//   POST proxy/<request id> (host): a proxied request's answer; the body is
+//     the response body, x-proxy-status its status, x-proxy-headers its
+//     header block (base64)
+
+async function previewRoutes(room, req, rest, auth, now, ctx) {
+  const method = req.method
+  if (rest === 'previews' && method === 'POST') {
+    if (auth.role !== 'host') return { response: json({ error: 'Only the host shares previews.' }, 403) }
+    if (room.endedAt) return { response: json({ error: 'This session is no longer shared.' }, 410) }
+    const body = await readJson(req)
+    const port = Number(body.port)
+    if (!Number.isInteger(port) || port < 1 || port > 65535) return { response: json({ error: 'A port from 1 to 65535.' }, 400) }
+    const existing = [...room.previews.values()].find(p => p.port === port)
+    if (existing) return { response: json({ pid: existing.pid }) }
+    const preview = { pid: token(8), port, title: String(body.title ?? '').slice(0, 120) || `localhost:${port}`, ts: now }
+    room.previews.set(preview.pid, preview)
+    room.append({ seat: 'host', name: room.host.name, role: 'host' }, 'preview', { ...preview, state: 'open' }, now)
+    room.wake()
+    return { changed: true, response: json({ pid: preview.pid }) }
+  }
+  const match = /^previews\/([A-Za-z0-9_-]+)\/(end|ticket)$/.exec(rest)
+  if (match && method === 'POST') {
+    const preview = room.previews.get(match[1])
+    if (!preview) return { response: json({ error: 'No such preview.' }, 404) }
+    if (match[2] === 'end') {
+      if (auth.role !== 'host') return { response: json({ error: 'Only the host stops previews.' }, 403) }
+      room.previews.delete(preview.pid)
+      for (const [sid, s] of room.previewSessions) if (s.pid === preview.pid) room.previewSessions.delete(sid)
+      room.append({ seat: 'host', name: room.host.name, role: 'host' }, 'preview', { pid: preview.pid, port: preview.port, state: 'closed' }, now)
+      room.wake()
+      return { changed: true, response: json({ ok: true }) }
+    }
+    if (!ctx.previewOrigin) return { response: json({ error: 'This server does not serve previews.' }, 501) }
+    const ticket = token(18)
+    room.tickets.set(ticket, { pid: preview.pid, exp: now + TICKET_MS })
+    for (const [t, v] of room.tickets) if (v.exp < now) room.tickets.delete(t)
+    return { response: json({ url: `${ctx.previewOrigin}/__share/enter?room=${room.id}&ticket=${ticket}` }) }
+  }
+  if (rest.startsWith('proxy/') && method === 'POST') {
+    if (auth.role !== 'host') return { response: json({ error: 'Only the host answers previews.' }, 403) }
+    const settle = room.proxied.get(rest.slice(6))
+    if (!settle) return { response: json({ error: 'That request is no longer waiting.' }, 410) }
+    const bytes = new Uint8Array(await req.arrayBuffer())
+    settle(proxiedResponse(req.headers.get('x-proxy-status'), req.headers.get('x-proxy-headers'), bytes))
+    return { response: json({ ok: true }) }
+  }
+  return null
+}
+
+const HOP = new Set(['connection', 'keep-alive', 'transfer-encoding', 'content-length', 'proxy-connection', 'upgrade', 'te', 'trailer', 'alt-svc'])
+
+// The host's answer as the guest's browser gets it. The header block is what
+// curl wrote (every response of a redirect chain): the last one counts.
+function proxiedResponse(statusText, headerBlock, bytes) {
+  const status = Number(statusText) || 502
+  const headers = new Headers({ 'cache-control': 'no-store' })
+  let raw = ''
+  try {
+    raw = new TextDecoder().decode(fromBase64(headerBlock ?? ''))
+  } catch {}
+  const blocks = raw.split(/\r?\n\r?\n/).filter(b => /^HTTP\//.test(b.trim()))
+  const lines = (blocks.at(-1) ?? '').trim().split(/\r?\n/).slice(1)
+  for (const line of lines) {
+    const i = line.indexOf(':')
+    if (i <= 0) continue
+    const name = line.slice(0, i).trim().toLowerCase()
+    let value = line.slice(i + 1).trim()
+    if (HOP.has(name)) continue
+    if (name === 'location') value = value.replace(/^https?:\/\/(localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])(:\d+)?/i, '') || '/'
+    headers.append(name, value)
+  }
+  const body = status === 204 || status === 304 || bytes.length > PROXY_RESPONSE_MAX ? null : bytes
+  return new Response(body, { status: status < 200 || status > 599 ? 502 : status, headers })
+}
+
+const COOKIE = 'cs_pv'
+const previewPage = (status, title, text) =>
+  new Response(
+    `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}</title><body style="margin:0;display:grid;place-items:center;min-height:100vh;font-family:-apple-system,Helvetica,sans-serif;background:#faf8f7;color:#011121"><div style="max-width:420px;padding:24px;text-align:center"><h1 style="font-weight:400;font-size:26px">${title}</h1><p style="color:#4b5563">${text}</p></div>`,
+    { status, headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' } },
+  )
+
+// The room id a preview request is for: the enter link's, else the cookie's.
+export function previewRoomOf(req) {
+  const url = new URL(req.url)
+  if (url.pathname === '/__share/enter') return url.searchParams.get('room')
+  const cookie = (req.headers.get('cookie') ?? '').split(/;\s*/).find(c => c.startsWith(`${COOKIE}=`))
+  return cookie ? cookie.slice(COOKIE.length + 1).split('.')[0] : null
+}
+
+// Everything on the preview host name. /__share/enter trades a ticket for a
+// cookie; anything else, with the cookie, goes to the host's localhost.
+export async function previewRequest(room, req, now, { secure = true } = {}) {
+  const url = new URL(req.url)
+  if (url.pathname === '/__share/enter') {
+    const ticket = room.tickets.get(url.searchParams.get('ticket') ?? '')
+    room.tickets.delete(url.searchParams.get('ticket') ?? '')
+    if (!ticket || ticket.exp < now || !room.previews.has(ticket.pid)) {
+      return { response: previewPage(403, 'This preview link has expired', 'Open the preview again from Claude Code: each link works once, for a minute.') }
+    }
+    const sid = token(18)
+    room.previewSessions.set(sid, { pid: ticket.pid, exp: now + PREVIEW_SESSION_MS })
+    return {
+      changed: true,
+      response: new Response(null, {
+        status: 302,
+        headers: { location: '/', 'cache-control': 'no-store', 'set-cookie': `${COOKIE}=${room.id}.${sid}; Path=/; HttpOnly; SameSite=Lax${secure ? '; Secure' : ''}` },
+      }),
+    }
+  }
+  const cookie = (req.headers.get('cookie') ?? '').split(/;\s*/).find(c => c.startsWith(`${COOKIE}=`))
+  const sid = cookie?.slice(COOKIE.length + 1).split('.')[1]
+  const session = sid ? room.previewSessions.get(sid) : null
+  const preview = session && session.exp > now ? room.previews.get(session.pid) : null
+  if (!preview || room.endedAt) return { response: previewPage(404, 'This preview has ended', `${room.host.name} is no longer sharing it.`) }
+  const body = req.method === 'GET' || req.method === 'HEAD' ? new Uint8Array() : new Uint8Array(await req.arrayBuffer())
+  if (body.length > PROXY_BODY_MAX) return { response: previewPage(413, 'Too large', 'Request bodies through a preview are limited to 1 MB.') }
+  const headers = []
+  for (const [name, value] of req.headers) {
+    const n = name.toLowerCase()
+    if (HOP.has(n) || n === 'host' || n === 'accept-encoding' || n.startsWith('cf-') || n.startsWith('x-forwarded') || n === 'x-real-ip') continue
+    if (n === 'cookie') {
+      const rest = value.split(/;\s*/).filter(c => !c.startsWith(`${COOKIE}=`)).join('; ')
+      if (rest) headers.push([name, rest])
+      continue
+    }
+    headers.push([name, value])
+  }
+  const id = token(12)
+  const answer = new Promise(resolve => {
+    const timer = setTimeout(() => {
+      room.proxied.delete(id)
+      resolve(previewPage(504, 'The preview did not answer', `${room.host.name}'s app took too long to respond.`))
+    }, PROXY_TIMEOUT_MS)
+    room.proxied.set(id, response => {
+      clearTimeout(timer)
+      room.proxied.delete(id)
+      resolve(response)
+    })
+  })
+  const sent = room.toHost({
+    proxy: { id, pid: preview.pid, port: preview.port, method: req.method, path: `${url.pathname}${url.search}`, headers, body: body.length ? toBase64(body) : '' },
+  })
+  if (!sent) {
+    room.proxied.get(id)?.(previewPage(503, 'The preview is not reachable', `${room.host.name}'s Claude Code isn't connected right now.`))
+  }
+  return { response: await answer }
+}
+
+function toBase64(bytes) {
+  let out = ''
+  for (let i = 0; i < bytes.length; i += 0x8000) out += String.fromCharCode(...bytes.subarray(i, i + 0x8000))
+  return btoa(out)
+}
+
+function fromBase64(text) {
+  const raw = atob(text)
+  const out = new Uint8Array(raw.length)
+  for (let i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i)
+  return out
 }
 
 export function notFound() {

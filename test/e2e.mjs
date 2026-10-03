@@ -9,6 +9,7 @@
 // The engine needs model access the usual way (a login, or ANTHROPIC_* env).
 
 import { spawn } from 'node:child_process'
+import { createServer } from 'node:http'
 import { mkdirSync, existsSync, rmSync, writeFileSync, createWriteStream, readdirSync, readFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -269,6 +270,55 @@ try {
   await new Promise(r => setTimeout(r, 1500))
   check('a guest cannot write on the host without approval', !existsSync(join(hostDir, 'pwned.txt')))
 
+  // What the host shows reaches guests: a file, saved in the guest's project.
+  writeFileSync(join(hostDir, 'report.html'), '<h1>Report 42</h1>\n')
+  host.say('/share-file report.html')
+  const saved = join(guestDir, '.shared-session', 'Scott', 'report.html')
+  await until('guest saved the shared file', () => existsSync(saved), 60_000).catch(() => null)
+  check("a file the host shares lands in the guest's project", existsSync(saved) && readFileSync(saved, 'utf8') === '<h1>Report 42</h1>\n')
+
+  // A preview of the host's localhost: a stand-in dev app, opened through the
+  // one-time link the guest is given, root-relative paths and all.
+  const app = createServer((req, res) => {
+    if (req.url === '/assets/app.js') return res.writeHead(200, { 'content-type': 'text/javascript' }).end('console.log("app")')
+    if (req.url === '/redirect') return res.writeHead(302, { location: `http://localhost:${app.address().port}/` }).end()
+    if (req.url === '/echo' && req.method === 'POST') {
+      let body = ''
+      req.on('data', c => (body += c))
+      return req.on('end', () => res.writeHead(200, { 'content-type': 'text/plain', 'set-cookie': 'app=1; Path=/' }).end(`echo:${body}`))
+    }
+    res.writeHead(200, { 'content-type': 'text/html' }).end('<!doctype html><script src="/assets/app.js"></script><h1>dev server ok</h1>')
+  })
+  await new Promise(r => app.listen(0, '127.0.0.1', r))
+  children.push({ kill: () => app.close() })
+  host.say(`/share-preview ${app.address().port} Dev app`)
+  const enter = await until('guest got a preview link', () => /https?:\/\/[^\s)`'"]+\/__share\/enter\?room=[\w-]+&ticket=[\w-]+/.exec(guest.text)?.[0], 60_000).catch(() => null)
+  let previewed = false
+  let cookie = ''
+  let origin = ''
+  if (enter) {
+    origin = new URL(enter).origin
+    const opened = await fetch(enter, { redirect: 'manual' })
+    cookie = (opened.headers.get('set-cookie') ?? '').split(';')[0]
+    const page = await fetch(`${origin}/`, { headers: { cookie } }).then(r => r.text())
+    const asset = await fetch(`${origin}/assets/app.js`, { headers: { cookie } })
+    const echo = await fetch(`${origin}/echo`, { method: 'POST', body: 'ping', headers: { cookie } })
+    const echoed = await echo.text()
+    const moved = await fetch(`${origin}/redirect`, { headers: { cookie }, redirect: 'manual' })
+    const again = await fetch(enter, { redirect: 'manual' })
+    previewed =
+      opened.status === 302 &&
+      page.includes('dev server ok') &&
+      asset.ok &&
+      (asset.headers.get('content-type') ?? '').includes('javascript') &&
+      echoed === 'echo:ping' &&
+      (echo.headers.get('set-cookie') ?? '').includes('app=1') &&
+      moved.status === 302 &&
+      moved.headers.get('location') === '/' &&
+      again.status === 403
+  }
+  check("a teammate opens the host's localhost through a preview", previewed, enter ?? 'no link')
+
   // How everyone heard the room: one open stream each, or polls when asked to.
   const polling = process.env.SHARED_SESSION_TRANSPORT === 'poll'
   const heard = ['Scott', 'Alex', 'Sam'].map(n => readFileSync(join(WORK, `${n}.debug.log`), 'utf8'))
@@ -283,6 +333,10 @@ try {
   check('guest is told when sharing stops', true)
   const after = await roomInfo(id)
   check('the room is ended on the server', after.ended === true)
+  if (origin) {
+    const gone = await fetch(`${origin}/`, { headers: { cookie } })
+    check('previews end with the room', gone.status === 404)
+  }
 } catch (error) {
   check('run', false, String(error?.message ?? error))
 } finally {

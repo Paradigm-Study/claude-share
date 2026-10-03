@@ -4,17 +4,28 @@
 //
 // PUBLIC_URL is optional: without it, links use the request's Host (and
 // X-Forwarded-* behind a proxy or tunnel). DATA_FILE is optional: without it,
-// rooms live in memory only.
+// rooms live in memory only. Previews of a host's localhost are served on a
+// second port (PREVIEW_PORT, default PORT + 1), a host name of their own so an
+// app's root-relative paths work; PREVIEW_URL says how people reach it.
 
 import { createServer } from 'node:http'
 import { readFileSync, writeFileSync, renameSync } from 'node:fs'
 
-import { Room, ROOM_ID, SEAT_TIMEOUT_MS, createRoom, roomRequest, notFound, json, publicOrigin, token } from './core.mjs'
+import { Room, ROOM_ID, SEAT_TIMEOUT_MS, createRoom, roomRequest, previewRequest, previewRoomOf, notFound, json, publicOrigin, token } from './core.mjs'
 
 const PORT = Number(process.env.PORT ?? 8787)
 const PUBLIC_URL = process.env.PUBLIC_URL
 const DATA_FILE = process.env.DATA_FILE
 const ROOM_TTL_MS = 24 * 60 * 60 * 1000 // ended or abandoned rooms are dropped after a day
+const PREVIEW_PORT = Number(process.env.PREVIEW_PORT ?? PORT + 1)
+const PREVIEW_URL = process.env.PREVIEW_URL
+
+// Where previews are reached: PREVIEW_URL, else this request's host on PREVIEW_PORT.
+function previewOrigin(req) {
+  if (PREVIEW_URL) return PREVIEW_URL.replace(/\/+$/, '')
+  const url = new URL(publicOrigin(req, PUBLIC_URL))
+  return `${url.protocol}//${url.hostname}:${PREVIEW_PORT}`
+}
 
 const rooms = new Map()
 
@@ -102,12 +113,21 @@ async function route(req) {
       : json({ error: 'This shared session does not exist.' }, 404)
   }
 
-  const { response, changed } = await roomRequest(room, req, rest, now, origin)
+  const { response, changed } = await roomRequest(room, req, rest, now, origin, { previewOrigin: previewOrigin(req) })
   if (changed) save()
   return response
 }
 
-const server = createServer(async (nodeReq, nodeRes) => {
+async function previewRoute(req) {
+  const id = previewRoomOf(req)
+  const room = id && ROOM_ID.test(id) ? rooms.get(id) : undefined
+  if (!room) return new Response('This preview does not exist.', { status: 404, headers: { 'content-type': 'text/plain; charset=utf-8' } })
+  const { response, changed } = await previewRequest(room, req, Date.now(), { secure: new URL(previewOrigin(req)).protocol === 'https:' })
+  if (changed) save()
+  return response
+}
+
+const serve = route => async (nodeReq, nodeRes) => {
   try {
     const chunks = []
     for await (const chunk of nodeReq) chunks.push(chunk)
@@ -123,7 +143,10 @@ const server = createServer(async (nodeReq, nodeRes) => {
       body: nodeReq.method === 'GET' || nodeReq.method === 'HEAD' ? undefined : body,
     })
     const res = await route(req)
-    nodeRes.writeHead(res.status, Object.fromEntries(res.headers))
+    const out = Object.fromEntries([...res.headers].filter(([k]) => k !== 'set-cookie'))
+    const cookies = res.headers.getSetCookie?.() ?? []
+    if (cookies.length) out['set-cookie'] = cookies
+    nodeRes.writeHead(res.status, out)
     if (!res.body) return nodeRes.end()
     // Pass the body through as it comes: a stream stays open until either side
     // closes it.
@@ -139,7 +162,12 @@ const server = createServer(async (nodeReq, nodeRes) => {
     nodeRes.writeHead(500, { 'content-type': 'application/json' })
     nodeRes.end(JSON.stringify({ error: String(error?.message ?? error) }))
   }
-})
+}
 
+const server = createServer(serve(route))
 server.requestTimeout = 60_000
 server.listen(PORT, () => console.log(`shared sessions on http://localhost:${PORT}`))
+
+const previews = createServer(serve(previewRoute))
+previews.requestTimeout = 60_000
+previews.listen(PREVIEW_PORT, () => console.log(`previews on http://localhost:${PREVIEW_PORT}`))

@@ -1,0 +1,14 @@
+# The preview host name: the same script as wrangler.toml, every path served
+# as the host's app (see server/worker.mjs). Deploy after the main Worker:
+#   npx wrangler deploy -c wrangler.preview.toml
+name = "claude-share-preview"
+main = "server/worker.mjs"
+compatibility_date = "2026-04-01"
+
+[vars]
+ROLE = "preview"
+
+[[durable_objects.bindings]]
+name = "ROOMS"
+class_name = "RoomObject"
+script_name = "claude-share"

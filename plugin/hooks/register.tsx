@@ -18,7 +18,7 @@
 import { atom, read, update } from 'claude-code'
 import type { Elements, EngineInterface, HookStream, ProcessSpawnChunk, ProcessSpawnResult, Register, RenderSurface, Timer, TurnStepChunk } from 'claude-code'
 
-import type { ShareActivity, ShareChat, ShareMode, SharePerson, SharePolicy, ShareRoom, ShareWorking } from '../types'
+import type { ShareActivity, ShareChat, ShareFileMeta, ShareMode, SharePerson, SharePolicy, ShareRoom, ShareShown, ShareWorking } from '../types'
 import { ACCENT, BAD, GOOD, ROSE, ago, avatarSvg, bannerSvg, labelsFor, stackSvg, toolGlyph } from './look'
 import type { Face } from './look'
 import { rowsFromMessage, rowsToMarkdown, splitSpeaker, summarizeTool } from './rows'
@@ -64,7 +64,7 @@ const READ_ONLY = new Set([
   'TaskOutput',
 ])
 
-const DEFAULT_POLICY: SharePolicy = { prompts: 'everyone', approvals: 'edits' }
+const DEFAULT_POLICY: SharePolicy = { prompts: 'everyone', approvals: 'edits', files: 'on' }
 
 const modeA = atom({ plugin: 'shared-session', key: 'mode' } as const, 'idle' as ShareMode)
 const roomA = atom({ plugin: 'shared-session', key: 'room' } as const, null as ShareRoom | null)
@@ -76,7 +76,9 @@ const unreadA = atom({ plugin: 'shared-session', key: 'unread' } as const, 0)
 const policyA = atom({ plugin: 'shared-session', key: 'policy' } as const, DEFAULT_POLICY)
 const trustedA = atom({ plugin: 'shared-session', key: 'trusted' } as const, [] as string[])
 const ownersA = atom({ plugin: 'shared-session', key: 'owners' } as const, {} as Record<string, string>)
-const sidebarA = atom({ plugin: 'shared-session', key: 'sidebar' } as const, null as { title: string; pinned: boolean } | null)
+const sidebarA = atom({ plugin: 'shared-session', key: 'sidebar' } as const, null as { title: string; pinned: boolean; id?: string } | null)
+const shownA = atom({ plugin: 'shared-session', key: 'shown' } as const, [] as ShareShown[])
+const previewsA = atom({ plugin: 'shared-session', key: 'previews' } as const, {} as Record<string, string>)
 
 // Context a host app puts into the person's message (Claude Desktop adds a
 // <system-reminder> to a first prompt): not typed, and never shared.
@@ -135,6 +137,7 @@ let myName: string | undefined
 let outbox: { type: string; body: Record<string, unknown> }[] = []
 let flushTimer: Timer | null = null
 let flushing = false
+let flushFailures = 0
 let pollGeneration = 0 // the room feed's run; a new one ends the old
 let pollFailures = 0
 let pollDelay = 0 // the wait before the next background poll
@@ -161,6 +164,7 @@ type Ride =
   | { kind: 'turn'; turnId: string } // someone else's turn
   | { kind: 'static'; rows: Row[] } // what happened before this session joined
   | { kind: 'note'; text: string; then: Exchange[] } // an answer from the plugin itself
+  | { kind: 'artifact'; event: ServerEvent } // something the host showed outside a turn
 type Exchange = { prompt: string; rows: Row[] }
 const hostTurns: HostTurn[] = []
 const ownPending = new Set<string>()
@@ -245,8 +249,11 @@ async function flush($: $) {
   } finally {
     flushing = false
   }
-  if (retry) scheduleFlush($, 2000)
-  else if (outbox.length) scheduleFlush($, 30)
+  if (retry) scheduleFlush($, Math.min(30_000, 2000 * 2 ** Math.min(flushFailures++, 4)))
+  else {
+    flushFailures = 0
+    if (outbox.length) scheduleFlush($, 30)
+  }
 }
 
 // Starts hearing about the room: the stream, or polls where it can't run.
@@ -328,6 +335,10 @@ async function runStream($: $, generation: number) {
           lastLine = await $.clock.now()
           if (typeof message.httpStatus === 'number') status = message.httpStatus
           else if (typeof message.error === 'string') refusal = message.error
+          else if (message.proxy && typeof message.proxy === 'object') {
+            // Host: a guest's browser, through a preview, asking this machine.
+            void answerProxy($, room, message.proxy as Record<string, unknown>)
+          }
           else if (Array.isArray(message.events)) {
             if (!streamUp && !delivered) $.ui.log('Shared session: listening on a stream', { to: 'debug' })
             streamUp = true
@@ -502,10 +513,50 @@ async function absorb($: $, room: ShareRoom, mode: ShareMode, event: ServerEvent
     case 'policy': {
       const prompts = body.prompts === 'watch' ? 'watch' : 'everyone'
       const approvals = body.approvals === 'all' || body.approvals === 'none' ? body.approvals : 'edits'
-      await update($, policyA, () => ({ prompts, approvals }))
-      await note({ ts: event.ts, who: room.host, kind: 'policy', text: describePolicy({ prompts, approvals }) })
+      const files = body.files === 'off' ? 'off' : 'on'
+      await update($, policyA, (): SharePolicy => ({ prompts, approvals, files }))
+      await note({ ts: event.ts, who: room.host, kind: 'policy', text: describePolicy({ prompts, approvals, files }) })
       break
     }
+    case 'artifact': {
+      const shown = shownOf(event)
+      if (!shown) break
+      await update($, shownA, list => [...list.filter(s => s.key !== shown.key), shown].slice(-40))
+      await note({ ts: event.ts, who: room.host, kind: 'shown', text: shown.name })
+      break
+    }
+    case 'preview':
+      if (body.state === 'closed' && typeof body.pid === 'string') {
+        const pid = body.pid
+        await update($, shownA, list => list.map(s => (s.pid === pid ? { ...s, closed: true } : s)))
+      }
+      break
+  }
+}
+
+// What the Room panel lists for an artifact event.
+function shownOf(event: ServerEvent): ShareShown | null {
+  const body = event.body
+  const kind = body.kind
+  if (kind !== 'send' && kind !== 'widget' && kind !== 'file' && kind !== 'page' && kind !== 'preview' && kind !== 'link') return null
+  const files = Array.isArray(body.files) ? (body.files as ShareFileMeta[]) : undefined
+  const name =
+    kind === 'preview'
+      ? `${typeof body.title === 'string' && body.title ? body.title : 'localhost'} (preview)`
+      : kind === 'widget'
+        ? `a widget${typeof body.title === 'string' ? `: ${body.title.replaceAll('_', ' ')}` : ''}`
+        : kind === 'link'
+          ? String(body.url ?? 'a page')
+          : (files ?? []).map(f => f.name).join(', ') || 'a file'
+  return {
+    key: kind === 'preview' && typeof body.pid === 'string' ? `preview:${body.pid}` : `seq:${event.seq}`,
+    kind,
+    name,
+    ts: event.ts,
+    files,
+    pid: typeof body.pid === 'string' ? body.pid : undefined,
+    port: typeof body.port === 'number' ? body.port : undefined,
+    url: typeof body.url === 'string' ? body.url : undefined,
   }
 }
 
@@ -524,6 +575,14 @@ async function receive($: $, mode: ShareMode, room: ShareRoom, page: EventsPage)
         break
       case 'stop':
         if (mode === 'host') await stopTurn($, event.from.name)
+        break
+      case 'artifact':
+        // Shown during a host turn: that turn's ride makes the call. Otherwise
+        // (a /share-file, say) it gets a short turn of its own.
+        if (mode === 'guest' && !(typeof body.turnId === 'string' && hostTurns.some(t => t.turnId === body.turnId))) {
+          const shown = shownOf(event)
+          if (shown) queueRide($, `${room.host} shared ${shown.name}`, { kind: 'artifact', event })
+        }
         break
       case 'delta':
         if (mode === 'guest' && typeof body.text === 'string') {
@@ -595,6 +654,9 @@ async function reset($: $) {
   await update($, policyA, () => DEFAULT_POLICY)
   await update($, trustedA, () => [])
   await update($, ownersA, () => ({}))
+  await update($, shownA, () => [])
+  await update($, previewsA, () => ({}))
+  savedNames.clear()
 }
 
 async function whoami($: $): Promise<string> {
@@ -612,6 +674,11 @@ function newId(): string {
 }
 
 function describePolicy(policy: SharePolicy): string {
+  if (policy.files === 'off') return `${describePolicyCore(policy)}, files kept to the host`
+  return describePolicyCore(policy)
+}
+
+function describePolicyCore(policy: SharePolicy): string {
   const prompts = policy.prompts === 'watch' ? 'watch-only' : 'everyone can prompt'
   const approvals =
     policy.approvals === 'none' ? 'no approvals' : policy.approvals === 'all' ? 'every tool needs approval' : 'edits and commands need approval'
@@ -624,7 +691,7 @@ function describePolicy(policy: SharePolicy): string {
 // "👥" title and a pin while it is shared, and a blue dot when teammates talk.
 // Elsewhere (a terminal, a headless run) the servers are absent: no-ops.
 
-type DeskServer = 'ccd_session_mgmt' | 'ccd_sidebar'
+type DeskServer = 'ccd_session_mgmt' | 'ccd_sidebar' | 'ccd_view'
 
 async function desk($: $, server: DeskServer, tool: string, args: Record<string, unknown>) {
   try {
@@ -854,6 +921,317 @@ async function join($: $, server: string, id: string) {
   return { room, history: exchanges(past.map(e => e.body as unknown as Row), joined.host) }
 }
 
+// ---------------------------------------------------------------------------
+// What the host's Claude shows: files in the side panel or the Files pane,
+// widgets, pages, previews of the host's localhost. The host's plugin sends
+// each to the room (bytes as files); each guest's riding turn saves the files
+// in .shared-session/ and makes the same call locally, so Claude Code's own
+// viewers show it. A plugin's own call outside a turn opens nothing there; a
+// call made as a step of a turn does.
+//
+// Shell work runs through `sh -s` from stdin, so room tokens never sit in a
+// process's argv, and through $.process.spawn, whose open stream holds no
+// prompt the way a $.http.fetch in flight does.
+
+const MIME: Record<string, string> = {
+  html: 'text/html', htm: 'text/html', svg: 'image/svg+xml', png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif',
+  webp: 'image/webp', pdf: 'application/pdf', md: 'text/markdown', txt: 'text/plain', csv: 'text/csv', json: 'application/json',
+  js: 'text/javascript', css: 'text/css', mp4: 'video/mp4', mov: 'video/quicktime', webm: 'video/webm', mmd: 'text/plain',
+}
+const mimeOf = (path: string) => MIME[(path.split('.').pop() ?? '').toLowerCase()] ?? 'application/octet-stream'
+const baseName = (path: string) => path.split('/').filter(Boolean).at(-1) ?? 'file'
+// A value inside a curl config file's double quotes.
+const cfg = (value: string) => `"${value.replace(/[\r\n]/g, ' ').replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`
+// A string inside a shell script's single quotes.
+const sq = (value: string) => `'${value.replace(/'/g, `'\\''`)}'`
+// A here-document delimiter that the body can't contain.
+const fence = (body: string) => {
+  let tag = 'CS_EOF'
+  while (body.includes(tag)) tag += '_X'
+  return tag
+}
+const LOCAL_URL = /https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\]):(\d{2,5})(\/[^\s"'\\)<>]*)?/i
+
+// Guest: the names files were saved under in this session, so a second file
+// of the same name doesn't overwrite the first.
+const savedNames = new Map<string, string>()
+let excluded = false
+let toolNames: Set<string> | null = null
+
+async function sh($: $, script: string): Promise<{ out: string; code: number | null }> {
+  let out = ''
+  try {
+    const child = $.process.spawn({ argv: ['/bin/sh', '-s'], input: script })
+    for await (const chunk of child) if (chunk.stream === 'stdout') out += chunk.text
+    return { out, code: (await child.result.catch(() => ({ code: null }))).code }
+  } catch {
+    return { out, code: null }
+  }
+}
+
+function roomConfig(room: ShareRoom, path: string): string {
+  return [`url = ${cfg(`${room.server}/api/rooms/${room.id}/${path}`)}`, `header = ${cfg(`Authorization: Bearer ${room.token}`)}`, 'silent'].join('\n')
+}
+
+// Host: one file to the room. Returns its id, name, type and size.
+async function uploadFile($: $, room: ShareRoom, path: string, name = baseName(path)): Promise<ShareFileMeta | null> {
+  const config = [roomConfig(room, 'files'), `header = ${cfg(`x-file-name: ${encodeURIComponent(name)}`)}`, `header = ${cfg(`content-type: ${mimeOf(name)}`)}`].join('\n')
+  const tag = fence(config)
+  const { out } = await sh($, `[ -f ${sq(path)} ] || exit 1\ncurl -K - -X POST --data-binary @${sq(path)} <<'${tag}'\n${config}\n${tag}\n`)
+  try {
+    const meta = JSON.parse(out) as Partial<ShareFileMeta>
+    return typeof meta.id === 'string' ? (meta as ShareFileMeta) : null
+  } catch {
+    return null
+  }
+}
+
+// Host: text (a widget too big for an event) to the room, as a file.
+async function uploadText($: $, room: ShareRoom, text: string, name: string): Promise<ShareFileMeta | null> {
+  const tag = fence(text)
+  const { out } = await sh($, `d=$(mktemp -d) || exit 1\ntrap 'rm -rf "$d"' EXIT\ncat > "$d/f" <<'${tag}'\n${text}\n${tag}\nprintf '%s' "$d/f"\n`)
+  return out ? uploadFile($, room, out, name) : null
+}
+
+// Guest: a room file into .shared-session/<host>/ in this session's folder
+// (inside the project, so the browser pane runs its pages live), kept out of git.
+async function downloadFile($: $, room: ShareRoom, meta: ShareFileMeta): Promise<string | null> {
+  const cwd = await $.session.cwd()
+  const dir = `${cwd}/.shared-session/${room.host.replace(/[^\w.-]+/g, '-').slice(0, 40) || 'host'}`
+  const clean = meta.name.replace(/[^\w.\- ()]+/g, '-').replace(/^\.+/, '') || 'file'
+  const owner = savedNames.get(`${dir}/${clean}`)
+  const dot = clean.lastIndexOf('.')
+  const name = !owner || owner === meta.id ? clean : dot > 0 ? `${clean.slice(0, dot)}-${meta.id.slice(0, 6)}${clean.slice(dot)}` : `${clean}-${meta.id.slice(0, 6)}`
+  const path = `${dir}/${name}`
+  const config = roomConfig(room, `files/${meta.id}`)
+  const tag = fence(config)
+  const exclude = excluded
+    ? ''
+    : `f=$(git rev-parse --git-path info/exclude 2>/dev/null) && { mkdir -p "$(dirname "$f")"; grep -qxF '.shared-session/' "$f" 2>/dev/null || echo '.shared-session/' >> "$f"; }\n`
+  const { code } = await sh($, `mkdir -p ${sq(dir)} || exit 1\n${exclude}curl -K - -f -o ${sq(path)} <<'${tag}'\n${config}\n${tag}\n`)
+  if (code !== 0) return null
+  excluded = true
+  savedNames.set(path, meta.id)
+  return path
+}
+
+async function hasTool($: $, name: string): Promise<boolean> {
+  if (!toolNames) toolNames = new Set((await $.tool.list().catch(() => [])).map(t => t.name))
+  return toolNames.has(name)
+}
+
+async function widgetTool($: $): Promise<string | null> {
+  if (await hasTool($, 'mcp__visualize__show_widget')) return 'mcp__visualize__show_widget'
+  return [...(toolNames ?? [])].find(n => n.endsWith('__show_widget')) ?? null
+}
+
+// Host: a preview of one localhost port, made once per port.
+async function ensurePreview($: $, room: ShareRoom, port: number, title: string): Promise<string | null> {
+  const known = (await read($, previewsA))[String(port)]
+  if (known) return known
+  try {
+    const { pid } = await api<{ pid: string }>($, room.server, `/api/rooms/${room.id}/previews`, { method: 'POST', token: room.token, body: { port, title } })
+    await update($, previewsA, map => ({ ...map, [String(port)]: pid }))
+    return pid
+  } catch (error) {
+    $.ui.log(`Couldn't share localhost:${port}: ${String((error as Error)?.message ?? error)}`)
+    return null
+  }
+}
+
+async function stopPreview($: $, pid: string) {
+  const room = await read($, roomA)
+  if (!room) return
+  await update($, previewsA, map => Object.fromEntries(Object.entries(map).filter(([, p]) => p !== pid)))
+  await api($, room.server, `/api/rooms/${room.id}/previews/${pid}/end`, { method: 'POST', token: room.token }).catch(() => {})
+}
+
+// Host: a tool call that showed something, sent to the room for guests.
+async function captureShown($: $, e: Record<string, unknown>, result: unknown) {
+  if ((await read($, modeA)) !== 'host' || (await read($, policyA)).files === 'off') return
+  if (result && typeof result === 'object' && 'deny' in result && (result as { deny?: unknown }).deny) return
+  const room = await read($, roomA)
+  if (!room) return
+  const tool = String(e.tool ?? '')
+  const input = (e.input && typeof e.input === 'object' ? e.input : e) as Record<string, unknown>
+  const str = (v: unknown) => (typeof v === 'string' ? v : '')
+  const cwd = await $.session.cwd()
+  const abs = (p: string) => (p.startsWith('/') ? p : `${cwd}/${p}`)
+  const turnId = (await read($, workingA))?.turnId
+  const uploads = async (paths: string[]) => (await Promise.all(paths.map(p => uploadFile($, room, abs(p))))).filter((m): m is ShareFileMeta => Boolean(m))
+
+  if (tool === 'SendUserFile') {
+    const files = await uploads((Array.isArray(input.files) ? input.files : []).filter((f): f is string => typeof f === 'string').slice(0, 10))
+    if (files.length) send($, 'artifact', { kind: 'send', turnId, files, display: input.display === 'attach' ? 'attach' : 'render', caption: str(input.caption).slice(0, 300) })
+  } else if (tool.endsWith('__show_widget')) {
+    const code = str(input.widget_code)
+    if (!code) return
+    const title = str(input.title).slice(0, 80)
+    const loading = Array.isArray(input.loading_messages) ? input.loading_messages.filter(m => typeof m === 'string').slice(0, 4) : []
+    if (code.length <= 30_000) send($, 'artifact', { kind: 'widget', turnId, title, loading, code })
+    else {
+      const file = await uploadText($, room, code, `${title || 'widget'}.html`)
+      if (file) send($, 'artifact', { kind: 'widget', turnId, title, loading, files: [file] })
+    }
+  } else if (tool === 'mcp__ccd_view__show_pane' && input.pane === 'file' && str(input.path)) {
+    const files = await uploads([str(input.path)])
+    if (files.length) send($, 'artifact', { kind: 'file', turnId, files, line: typeof input.line === 'number' ? input.line : undefined })
+  } else if (/^mcp__Claude_Browser__(preview_start|navigate)$/.test(tool)) {
+    let url = str(input.url)
+    if (!url) url = LOCAL_URL.exec(JSON.stringify(result ?? ''))?.[0] ?? ''
+    if (url.startsWith('file://')) {
+      const files = await uploads([decodeURIComponent(url.slice(7).split(/[?#]/)[0] ?? '')])
+      if (files.length) send($, 'artifact', { kind: 'page', turnId, files })
+      return
+    }
+    const local = LOCAL_URL.exec(url)
+    if (local) {
+      const port = Number(local[1])
+      const title = str(input.name) || `localhost:${port}`
+      const pid = await ensurePreview($, room, port, title)
+      if (pid) send($, 'artifact', { kind: 'preview', turnId, pid, port, title, path: local[2] ?? '/' })
+    } else if (/^https:\/\//.test(url)) {
+      send($, 'artifact', { kind: 'link', turnId, url })
+    }
+  } else if (tool === 'Artifact' && str(input.file_path) && (!input.action || input.action === 'publish')) {
+    const files = await uploads([str(input.file_path)])
+    if (files.length) send($, 'artifact', { kind: 'send', turnId, files, display: 'render', caption: 'A page Claude published' })
+  }
+}
+
+type Replay = { label: string; call?: { name: string; input: Record<string, unknown> }; note?: string }
+
+// Guest: how to show an artifact here, as one step of a riding turn: the call
+// to make (after saving its files), or a note where this Claude Code has no
+// viewer for it (a terminal).
+async function replayOf($: $, room: ShareRoom, event: ServerEvent): Promise<Replay | null> {
+  const body = event.body
+  const shown = shownOf(event)
+  if (!shown) return null
+  const host = room.host
+  const paths: string[] = []
+  for (const meta of shown.files ?? []) {
+    const path = await downloadFile($, room, meta)
+    if (path) paths.push(path)
+  }
+  const cwd = await $.session.cwd()
+  const rel = (p: string) => (p.startsWith(`${cwd}/`) ? p.slice(cwd.length + 1) : p)
+  const savedNote = paths.length ? `saved to ${paths.map(p => `\`${rel(p)}\``).join(', ')}` : ''
+  const label = `◧ **${host}'s Claude showed** ${shown.name}`
+  switch (shown.kind) {
+    case 'send':
+      if (!paths.length) return { label, note: "the file didn't come through" }
+      if (!(await hasTool($, 'SendUserFile'))) return { label, note: savedNote }
+      return {
+        label,
+        call: {
+          name: 'SendUserFile',
+          input: { files: paths, display: body.display === 'attach' ? 'attach' : 'render', status: 'normal', caption: `From ${host}'s session${typeof body.caption === 'string' && body.caption ? `: ${body.caption}` : ''}` },
+        },
+      }
+    case 'widget': {
+      let code = typeof body.code === 'string' ? body.code : ''
+      if (!code && paths[0]) code = (await sh($, `cat ${sq(paths[0])}\n`)).out
+      const tool = code ? await widgetTool($) : null
+      if (!tool) return { label, note: code ? 'this Claude Code has no widget viewer' : "the widget didn't come through" }
+      const loading = Array.isArray(body.loading) && body.loading.length ? body.loading : [`Drawing what ${host} saw`]
+      return { label, call: { name: tool, input: { title: typeof body.title === 'string' && body.title ? body.title : 'shared_widget', loading_messages: loading, widget_code: code } } }
+    }
+    case 'file':
+      if (!paths[0]) return { label, note: "the file didn't come through" }
+      if (!(await hasTool($, 'mcp__ccd_view__show_pane'))) return { label, note: savedNote }
+      return { label, call: { name: 'mcp__ccd_view__show_pane', input: { pane: 'file', path: paths[0], ...(typeof body.line === 'number' ? { line: body.line } : {}) } } }
+    case 'page':
+      if (!paths[0]) return { label, note: "the page didn't come through" }
+      if (!(await hasTool($, 'mcp__Claude_Browser__preview_start'))) return { label, note: savedNote }
+      return { label, call: { name: 'mcp__Claude_Browser__preview_start', input: { url: `file://${paths[0]}` } } }
+    case 'preview': {
+      if (!shown.pid) return null
+      const url = await previewTicket($, room, shown.pid)
+      if (!url) return { label, note: 'the preview could not be opened' }
+      if (!(await hasTool($, 'mcp__Claude_Browser__preview_start'))) return { label, note: `open it in a browser within a minute: ${url}` }
+      return { label, call: { name: 'mcp__Claude_Browser__preview_start', input: { url } } }
+    }
+    case 'link':
+      if (!shown.url || !(await hasTool($, 'mcp__Claude_Browser__preview_start'))) return { label, note: shown.url ?? '' }
+      return { label, call: { name: 'mcp__Claude_Browser__preview_start', input: { url: shown.url } } }
+  }
+}
+
+// A one-time link (a minute) that opens a preview on the preview host name.
+async function previewTicket($: $, room: ShareRoom, pid: string): Promise<string | null> {
+  try {
+    return (await api<{ url: string }>($, room.server, `/api/rooms/${room.id}/previews/${pid}/ticket`, { method: 'POST', token: room.token })).url
+  } catch {
+    return null
+  }
+}
+
+// Guest: the Room panel's Open, outside any turn. The Files pane opens from
+// a plugin's own call; the browser pane may ask first, or (in auto mode)
+// refuse, and then the link is copied instead.
+async function openShown($: $, shown: ShareShown, surface?: RenderSurface) {
+  const room = await read($, roomA)
+  if (!room) return
+  if (shown.kind === 'preview' && shown.pid) {
+    const url = await previewTicket($, room, shown.pid)
+    if (!url) return void $.ui.toast('That preview has ended')
+    const opened = await $.mcp.call('Claude_Browser', 'preview_start', { url }).catch(() => null)
+    if (!opened || opened.isError) {
+      await $.ui.copy({ text: url, surface }).catch(() => {})
+      $.ui.toast('Preview link copied: open it within a minute')
+    }
+    return
+  }
+  const meta = shown.files?.[0]
+  const path = meta ? await downloadFile($, room, meta) : null
+  if (!path) return void $.ui.toast("Couldn't get that file")
+  const result = await desk($, 'ccd_view', 'show_pane', { pane: 'file', path })
+  if (result === null) $.ui.log(`Saved to ${path}`)
+}
+
+// Host: a guest's browser asked a preview for something. Ask this machine's
+// localhost (only ports this session shares) and post the answer back.
+async function answerProxy($: $, room: ShareRoom, ask: Record<string, unknown>) {
+  const port = Number(ask.port)
+  const id = typeof ask.id === 'string' ? ask.id : ''
+  const path = typeof ask.path === 'string' && ask.path.startsWith('/') ? ask.path : '/'
+  const method = typeof ask.method === 'string' && /^[A-Z]{3,7}$/.test(ask.method) ? ask.method : 'GET'
+  const shared = Object.values(await read($, previewsA))
+  if (!id || !Number.isInteger(port) || !shared.includes(String(ask.pid ?? ''))) return
+  const headers = Array.isArray(ask.headers) ? (ask.headers as unknown[]) : []
+  const request = [
+    `url = ${cfg(`http://localhost:${port}${path}`)}`,
+    `request = ${cfg(method)}`,
+    ...headers.filter((h): h is [string, string] => Array.isArray(h) && typeof h[0] === 'string' && typeof h[1] === 'string').map(([k, v]) => `header = ${cfg(`${k}: ${v}`)}`),
+  ].join('\n')
+  const body = typeof ask.body === 'string' && /^[A-Za-z0-9+/=]*$/.test(ask.body) ? ask.body : ''
+  const answer = roomConfig(room, `proxy/${id}`)
+  const t1 = fence(request)
+  const t2 = fence(answer)
+  await sh(
+    $,
+    [
+      'd=$(mktemp -d) || exit 1',
+      `trap 'rm -rf "$d"' EXIT`,
+      `cat > "$d/req" <<'${t1}'`,
+      request,
+      t1,
+      `printf '%s' ${sq(body)} | base64 --decode > "$d/body" 2>/dev/null || : > "$d/body"`,
+      `if [ -s "$d/body" ]; then data="--data-binary @$d/body"; else data=; fi`,
+      `status=$(curl -s -K "$d/req" $data -D "$d/h" -o "$d/b" -w '%{http_code}' --max-time 25) || status=502`,
+      `[ -f "$d/b" ] || : > "$d/b"; [ -f "$d/h" ] || : > "$d/h"`,
+      `hdr=$(base64 < "$d/h" | tr -d '\\n')`,
+      `{ cat <<'${t2}'`,
+      answer,
+      t2,
+      `printf 'header = "x-proxy-status: %s"\\nheader = "x-proxy-headers: %s"\\n' "$status" "$hdr"; } > "$d/up"`,
+      `curl -K "$d/up" -X POST --data-binary @"$d/b" -o /dev/null`,
+      '',
+    ].join('\n'),
+  )
+}
+
 // Groups rows into prompt + reply exchanges.
 function exchanges(rows: Row[], host: string): Exchange[] {
   const out: Exchange[] = []
@@ -932,10 +1310,17 @@ async function openRoom($: $) {
 }
 
 // What one riding poll adds to the reply being shown.
+// A ride between its steps: what it has read and what is still to show.
+type RideRun = { state: RideState; cursor: number; failures?: number }
+const ridesInStep = new Map<string, RideRun>()
+
 type RideState = {
   current: HostTurn | null
   streamed: boolean
   done: boolean
+  // What the host's Claude showed during the turn, still to show here: each
+  // one becomes a step of this turn that makes the same call locally.
+  actions: ServerEvent[]
 }
 
 // A file read's lines come numbered ("   12\tcode"); older hosts send them so.
@@ -1002,6 +1387,10 @@ function rideStep(ride: Ride, state: RideState, event: ServerEvent, host: string
     if (row.kind === 'result') {
       return `  ⎿ ${row.isError ? '**Error:** ' : ''}${(stripLineNumbers(row.text).split('\n')[0] ?? '').slice(0, 200)}\n\n`
     }
+  }
+  if (event.type === 'artifact' && body.turnId === current.turnId) {
+    state.actions.push(event)
+    return ''
   }
   if (event.type === 'approval' && body.pending && typeof body.what === 'string') {
     return `\n> ⏳ Waiting for **${host}** to allow \`${body.what}\`\n\n`
@@ -1099,8 +1488,12 @@ function describe(a: ShareActivity): string {
       return `${a.who} stopped the turn`
     case 'policy':
       return `${a.who} set: ${a.text ?? ''}`
+    case 'shown':
+      return `${a.who}'s Claude showed ${a.text ?? 'something'}`
   }
 }
+
+const shownGlyph = (item: ShareShown) => (item.kind === 'preview' ? '◍' : item.kind === 'widget' ? '◆' : item.kind === 'link' ? '↗' : '◧')
 
 const svgOf = (el: UI) => ('Svg' in el ? el.Svg : undefined)
 // Fields and pickers: every surface but mobile draws them.
@@ -1118,6 +1511,8 @@ export const register: Register = (on, options) => {
     await $.command.register({ name: 'share-session', description: 'Share this session: copies a link teammates join with' })
     await $.command.register({ name: 'stop-sharing', description: 'Stop sharing this session, or leave the one you joined' })
     await $.command.register({ name: 'room', description: 'Open the Room: who is here, activity, side chat' })
+    await $.command.register({ name: 'share-file', description: 'Show a file to everyone in the shared session: /share-file <path>' })
+    await $.command.register({ name: 'share-preview', description: "Let teammates open this machine's localhost: /share-preview <port> [title]" })
     // A reload keeps $.state: pick the room back up.
     const room = await read($, roomA)
     if (room && (await read($, modeA)) !== 'idle') startFeed($)
@@ -1144,6 +1539,32 @@ export const register: Register = (on, options) => {
     if ((await read($, modeA)) === 'idle') return { text: 'This session is not shared. Press Share above the prompt, or type /share-session.' }
     await openRoom($)
     return { text: 'Opened the Room.' }
+  })
+
+  on('command.run', { command: 'share-file' }, async ($, e) => {
+    const room = await read($, roomA)
+    if ((await read($, modeA)) !== 'host' || !room) return { text: 'Share this session first: press Share or type /share-session.' }
+    const arg = e.args.trim().replace(/^["']|["']$/g, '')
+    if (!arg) return { text: 'Which file? /share-file <path>' }
+    const cwd = await $.session.cwd()
+    const path = arg.startsWith('/') ? arg : `${cwd}/${arg}`
+    const file = await uploadFile($, room, path)
+    if (!file) return { text: `Couldn't share ${arg}: no such file, or over 10 MB.` }
+    send($, 'artifact', { kind: 'send', files: [file], display: 'render', caption: '' })
+    return { text: `Shared ${file.name} with everyone here.` }
+  })
+
+  on('command.run', { command: 'share-preview' }, async ($, e) => {
+    const room = await read($, roomA)
+    if ((await read($, modeA)) !== 'host' || !room) return { text: 'Share this session first: press Share or type /share-session.' }
+    const [first, ...rest] = e.args.trim().split(/\s+/)
+    const port = Number(LOCAL_URL.exec(first ?? '')?.[1] ?? first)
+    if (!Number.isInteger(port) || port < 1 || port > 65535) return { text: 'Which port? /share-preview <port> [title], e.g. /share-preview 3000' }
+    const title = rest.join(' ') || `localhost:${port}`
+    const pid = await ensurePreview($, room, port, title)
+    if (!pid) return { text: `Couldn't share localhost:${port}.` }
+    send($, 'artifact', { kind: 'preview', pid, port, title, path: '/' })
+    return { text: `Sharing localhost:${port}. Teammates can open it from their Room panel; stop it there too.` }
   })
 
   on('command.run', { command: 'stop-sharing' }, async $ => {
@@ -1244,6 +1665,7 @@ export const register: Register = (on, options) => {
       send($, 'turn', { state: 'end', turnId: e.turnId, aborted: e.isAborted, durationMs: e.durationMs, reason: e.reason })
     } else {
       const ride = ridesByTurn.get(e.turnId)
+      ridesInStep.delete(e.turnId)
       if (ride) {
         ridesByTurn.delete(e.turnId)
         localTurnActive = false
@@ -1262,34 +1684,63 @@ export const register: Register = (on, options) => {
     const ride = e.agentId === undefined ? ridesByTurn.get(e.turnId) : undefined
     const mode = await read($, modeA)
 
-    if (ride && e.index === 0) {
+    const progress = ridesInStep.get(e.turnId)
+    if (ride && (e.index === 0 || progress)) {
       const room = await read($, roomA)
       let answer = ''
       if (ride.kind === 'static' || ride.kind === 'note') {
         answer = ride.kind === 'note' ? ride.text : rowsToMarkdown(ride.rows) || '(no reply)'
         yield { kind: 'text', index: 0, text: answer } satisfies TurnStepChunk
       } else if (room) {
-        const state: RideState = { current: null, streamed: false, done: false }
+        // A ride can take several steps: each thing the host's Claude showed
+        // is a call made here, and the next step picks up where this one left.
+        const run: RideRun = progress ?? {
+          state: { current: null, streamed: false, done: ride.kind === 'artifact', actions: ride.kind === 'artifact' ? [ride.event] : [] },
+          cursor:
+            ride.kind === 'turn'
+              ? (hostTurns.find(t => t.turnId === ride.turnId)?.startSeq ?? room.seq)
+              : ride.kind === 'own'
+                ? Math.min(ride.fromSeq, ...hostTurns.filter(t => !t.shown).map(t => t.startSeq))
+                : room.seq,
+        }
+        ridesInStep.delete(e.turnId)
+        const state = run.state
         // Esc here stops the shared turn. The engine stops reading this stream
         // on an interrupt, so the stop goes out from the abort itself.
         const onAbort = () => {
           if (state.current && !state.done) send($, 'stop', {})
         }
         next.signal.addEventListener('abort', onAbort, { once: true })
-        let cursor =
-          ride.kind === 'turn'
-            ? (hostTurns.find(t => t.turnId === ride.turnId)?.startSeq ?? room.seq)
-            : Math.min(ride.fromSeq, ...hostTurns.filter(t => !t.shown).map(t => t.startSeq))
-        while (!state.done && !next.signal.aborted) {
+        let call: Replay['call'] | undefined
+        while (!next.signal.aborted) {
+          const action = state.actions.shift()
+          if (action) {
+            const replay = await replayOf($, room, action).catch(() => null)
+            if (!replay) continue
+            const line = `\n\n${replay.label}${replay.note ? ` · ${replay.note}` : ''}\n\n`
+            answer += line
+            yield { kind: 'text', index: 0, text: line } satisfies TurnStepChunk
+            if (replay.call) {
+              call = replay.call
+              break
+            }
+            continue
+          }
+          if (state.done) break
           let page: EventsPage
           try {
-            page = await ridePage($, room, cursor)
+            page = await ridePage($, room, run.cursor)
+            run.failures = 0
           } catch (error) {
             if (isGone(error)) break
+            // A server that refuses at once must not be asked again at once:
+            // back off, up to 10 s, so a stuck ride can't flood it.
+            run.failures = (run.failures ?? 0) + 1
+            await new Promise<void>(resolve => $.clock.after(Math.min(10_000, 250 * 2 ** run.failures!), resolve))
             continue
           }
           for (const event of page.events) {
-            cursor = Math.max(cursor, event.seq)
+            run.cursor = Math.max(run.cursor, event.seq)
             const piece = rideStep(ride, state, event, room.host)
             if (piece) {
               answer += piece
@@ -1300,6 +1751,14 @@ export const register: Register = (on, options) => {
           if (page.ended) state.done = true
         }
         next.signal.removeEventListener('abort', onAbort)
+        if (call && !next.signal.aborted) {
+          ridesInStep.set(e.turnId, run)
+          const id = `toolu_${newId()}${newId()}`
+          yield { kind: 'tool', index: 1, id, name: call.name } satisfies TurnStepChunk
+          yield { kind: 'input', index: 1, json: JSON.stringify(call.input) } satisfies TurnStepChunk
+          yield { kind: 'stop', stopReason: 'tool_use', usage: null } satisfies TurnStepChunk
+          return { turnId: e.turnId, index: e.index, answer, toolUses: [{ name: call.name, input: call.input }], stopReason: 'tool_use', usage: null }
+        }
       }
       yield { kind: 'stop', stopReason: 'end_turn', usage: null } satisfies TurnStepChunk
       return { turnId: e.turnId, index: e.index, answer, toolUses: [], stopReason: 'end_turn', usage: null }
@@ -1343,7 +1802,11 @@ export const register: Register = (on, options) => {
         })
       }
     }
-    return next(e)
+    const result = await next(e)
+    // Host: what Claude showed goes to the room for guests (not awaited:
+    // uploads shouldn't hold the turn).
+    if (e.agentId === undefined && (await read($, modeA)) === 'host') void captureShown($, e as unknown as Record<string, unknown>, result).catch(() => {})
+    return result
   })
 
   // Host: a guest's prompt runs tools on this machine. What the host's policy
@@ -1518,6 +1981,7 @@ export const register: Register = (on, options) => {
     const activity = await read($, activityA)
     const chat = await read($, chatA)
     const trusted = await read($, trustedA)
+    const shown = await read($, shownA)
     const people = faces(v)
     const online = people.filter(p => p.online).length
     const isHost = v.mode === 'host'
@@ -1615,6 +2079,35 @@ export const register: Register = (on, options) => {
             ))}
         </Box>
 
+        <Box flexDirection="column">
+          {section('SHOWN · files, widgets, pages, previews')}
+          {shown.length === 0 ? (
+            <Text dimColor>
+              {isHost
+                ? v.policy.files === 'off'
+                  ? 'What Claude shows stays with you (see Host controls).'
+                  : 'What Claude shows (files, widgets, pages, previews of localhost) goes to everyone here.'
+                : `What ${room.host}'s Claude shows opens here too, and is listed here.`}
+            </Text>
+          ) : null}
+          {shown
+            .slice(-8)
+            .reverse()
+            .map(item => (
+              <Box key={`shown-${item.key}`} flexDirection="row" gap={1} alignItems="center">
+                <Text dimColor={item.closed}>{shownGlyph(item)}</Text>
+                <Text dimColor>{ago(item.ts, now).padEnd(8)}</Text>
+                <Text wrap="truncate-end" dimColor={item.closed}>{`${item.name}${item.closed ? ' · ended' : ''}`}</Text>
+                {!isHost && !item.closed && item.kind !== 'widget' && item.kind !== 'link' ? (
+                  <Button key={`open-${item.key}`} label="Open" plain onPress={press => void openShown($, item, press.surface)} />
+                ) : null}
+                {isHost && item.kind === 'preview' && item.pid && !item.closed ? (
+                  <Button key={`stop-${item.key}`} label="Stop" plain onPress={() => void stopPreview($, item.pid as string)} />
+                ) : null}
+              </Box>
+            ))}
+        </Box>
+
         <Box flexDirection="column" gap={0}>
           {section('CHAT · Claude never sees this')}
           {chat.length === 0 ? <Text dimColor>Say hi. Messages here go to people, not to Claude.</Text> : null}
@@ -1666,6 +2159,18 @@ export const register: Register = (on, options) => {
               ]}
               onSelect={(value: string) => void setPolicy($, { approvals: value === 'all' || value === 'none' ? value : 'edits' })}
             />
+            ) : null}
+            {Select ? (
+              <Select
+                key="policy-files"
+                label="What Claude shows: files, widgets, pages, previews"
+                value={v.policy.files ?? 'on'}
+                options={[
+                  { value: 'on', label: 'Goes to everyone here' },
+                  { value: 'off', label: 'Stays with me' },
+                ]}
+                onSelect={(value: string) => void setPolicy($, { files: value === 'off' ? 'off' : 'on' })}
+              />
             ) : null}
             {trusted.length ? (
               <Box flexDirection="row" gap={1} alignItems="center">

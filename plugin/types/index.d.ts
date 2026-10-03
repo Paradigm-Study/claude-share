@@ -37,7 +37,7 @@ export type ShareWorking = {
 export type ShareActivity = {
   ts: number
   who: string
-  kind: 'join' | 'leave' | 'prompt' | 'allowed' | 'denied' | 'stop' | 'policy'
+  kind: 'join' | 'leave' | 'prompt' | 'allowed' | 'denied' | 'stop' | 'policy' | 'shown'
   text?: string
 }
 
@@ -50,6 +50,28 @@ export type SharePolicy = {
   prompts: 'everyone' | 'watch'
   /** Which of a guest's tool calls ask the host first. */
   approvals: 'edits' | 'all' | 'none'
+  /** Whether what the host's Claude shows (files, widgets, pages, previews) reaches guests. */
+  files?: 'on' | 'off'
+}
+
+/** A file as the room keeps it: its bytes are at files/<id>. */
+export type ShareFileMeta = { id: string; name: string; type: string; size: number }
+
+/**
+ * Something the host's Claude showed: a file in the side panel or the Files
+ * pane, a widget, a page, or a preview of the host's localhost.
+ */
+export type ShareShown = {
+  key: string
+  kind: 'send' | 'widget' | 'file' | 'page' | 'preview' | 'link'
+  name: string
+  ts: number
+  files?: ShareFileMeta[]
+  pid?: string
+  port?: number
+  url?: string
+  /** A preview the host has stopped. */
+  closed?: boolean
 }
 
 declare module 'claude-code' {
@@ -68,6 +90,10 @@ declare module 'claude-code' {
       trusted: string[]
       /** Host: who each tool call of a guest's turn was for, by tool_use_id. */
       owners: Record<string, string>
+      /** What the host's Claude showed, newest last (the Room panel's Files). */
+      shown: ShareShown[]
+      /** Host: the previews this session shares, port → preview id. */
+      previews: Record<string, string>
       /** Claude Desktop's sidebar row as it was before sharing marked it, to put back. */
       sidebar: { title: string; pinned: boolean; id?: string } | null
     }
