@@ -156,12 +156,64 @@ async function health(server, { waitMs = 0 } = {}) {
   return last
 }
 
+// One request; never throws. A body that isn't JSON (a proxy's or Cloudflare's
+// error page) reads as {}, and the status says what happened.
+async function call(url, init = {}) {
+  try {
+    const res = await fetch(url, { ...init, signal: AbortSignal.timeout(15_000) })
+    const text = await res.text()
+    let body = {}
+    try {
+      body = JSON.parse(text)
+    } catch {}
+    return { ok: res.ok, status: res.status, body }
+  } catch (error) {
+    return { ok: false, status: 0, body: {}, error: String(error?.cause?.code ?? error?.message ?? error) }
+  }
+}
+
+const why = r => (r.status ? `HTTP ${r.status}${r.body.error ? `: ${r.body.error}` : ''}` : r.error)
+
+// Create a room, seat a guest, open the guest's stream, serve the link page,
+// end the room. Returns { ok, stream } or { reason }.
 async function roomRoundTrip(server) {
-  const created = await fetch(`${server}/api/rooms`, { method: 'POST', body: JSON.stringify({ name: 'setup-check', title: 'setup check' }) }).then(r => r.json())
-  const joined = await fetch(`${server}/api/rooms/${created.id}/join`, { method: 'POST', body: JSON.stringify({ name: 'setup-guest' }) }).then(r => r.json())
-  const page = await fetch(created.url)
-  await fetch(`${server}/api/rooms/${created.id}/end`, { method: 'POST', headers: { authorization: `Bearer ${created.token}` } })
-  return Boolean(created.url?.startsWith(server) && joined.token && page.ok)
+  const created = await call(`${server}/api/rooms`, { method: 'POST', body: JSON.stringify({ name: 'setup-check', title: 'setup check' }) })
+  if (!created.ok) return { reason: `creating a room: ${why(created)}` }
+  const { id, url, token } = created.body
+  try {
+    const joined = await call(`${server}/api/rooms/${id}/join`, { method: 'POST', body: JSON.stringify({ name: 'setup-guest' }) })
+    if (!joined.ok) return { reason: `joining it: ${why(joined)}` }
+    const page = await call(url)
+    if (!page.ok || !url?.startsWith(server)) return { reason: `its link page: ${why(page)}` }
+    return { ok: true, stream: await firstStreamLine(`${server}/api/rooms/${id}/stream?after=0`, joined.body.token) }
+  } finally {
+    await call(`${server}/api/rooms/${id}/end`, { method: 'POST', headers: { authorization: `Bearer ${token}` } })
+  }
+}
+
+// The first line a room's stream sends: true when it is the room as it stands,
+// else why not (a server too old to stream answers "Not found").
+async function firstStreamLine(url, token) {
+  const ctl = new AbortController()
+  const timer = setTimeout(() => ctl.abort(), 10_000)
+  try {
+    const res = await fetch(url, { headers: { authorization: `Bearer ${token}` }, signal: ctl.signal })
+    if (!res.ok) return `HTTP ${res.status}`
+    const reader = res.body.getReader()
+    let text = ''
+    while (!text.includes('\n')) {
+      const { done, value } = await reader.read()
+      if (done) break
+      text += new TextDecoder().decode(value)
+    }
+    const line = JSON.parse(text.split('\n')[0])
+    return Array.isArray(line.events) && line.people?.some(p => p.name === 'setup-guest') ? true : 'an unexpected first line'
+  } catch (error) {
+    return String(error?.name === 'AbortError' ? 'no line within 10 s' : error?.message ?? error)
+  } finally {
+    clearTimeout(timer)
+    ctl.abort()
+  }
 }
 
 function configuredServer(claude) {
@@ -225,8 +277,11 @@ async function check(claude) {
   const up = await health(server)
   if (up !== true) return fail(`share server ${server} is not answering (${up})`)
   ok(`share server ${server} is up`)
-  if (await roomRoundTrip(server)) ok('the server can create a room, let a seat in over HTTP, serve its link page and end it')
-  else fail('the server room round trip failed')
+  const trip = await roomRoundTrip(server)
+  if (!trip.ok) return fail(`the server's room round trip failed (${trip.reason})`)
+  ok('the server can create a room, let a seat in over HTTP, serve its link page and end it')
+  if (trip.stream === true) ok('the server streams room changes, so quiet rooms cost no requests')
+  else note(`the server has no stream (${trip.stream}); Claude Code will poll it instead. Deploy the current server to fix that`)
 
   if (!flag('live')) return
   // Real Claude Code sessions in a throwaway folder: one shares with this
@@ -239,15 +294,17 @@ async function check(claude) {
     const link = new RegExp(`${server.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/s/([A-Za-z0-9_-]{16,})`).exec(shared.out)
     if (!link) fail(`a real session could not share: ${shared.out.trim().split('\n').pop()}`)
     else {
-      const room = await fetch(`${server}/api/rooms/${link[1]}`).then(r => r.json()).catch(() => ({}))
+      const room = (await call(`${server}/api/rooms/${link[1]}`)).body
       if (room.ended) ok(`a real session shared${saved ? ' with the saved setting' : ''}, and its room ended when the session did`)
       else fail('a real session shared, but its room was still open after the session ended')
     }
 
-    const host = await fetch(`${server}/api/rooms`, { method: 'POST', body: JSON.stringify({ name: 'setup-check', title: 'setup check' }) }).then(r => r.json())
+    const made = await call(`${server}/api/rooms`, { method: 'POST', body: JSON.stringify({ name: 'setup-check', title: 'setup check' }) })
+    if (!made.ok) return fail(`could not make a room for the join check (${why(made)})`)
+    const host = made.body
     run(claude, ['-p', host.url], { cwd: dir, timeout: 120_000 })
-    const page = await fetch(`${server}/api/rooms/${host.id}/events?after=0&wait=0`, { headers: { authorization: `Bearer ${host.token}` } }).then(r => r.json())
-    await fetch(`${server}/api/rooms/${host.id}/end`, { method: 'POST', headers: { authorization: `Bearer ${host.token}` } })
+    const page = (await call(`${server}/api/rooms/${host.id}/events?after=0&wait=0`, { headers: { authorization: `Bearer ${host.token}` } })).body
+    await call(`${server}/api/rooms/${host.id}/end`, { method: 'POST', headers: { authorization: `Bearer ${host.token}` } })
     const joined = (page.events ?? []).find(e => e.type === 'join' && e.from?.role === 'guest')
     if (joined) ok(`a real session joined a room from its link (as "${joined.from.name}")`)
     else fail('a real session given a share link did not join it')
