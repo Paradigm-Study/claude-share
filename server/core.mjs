@@ -439,6 +439,13 @@ h1 { font-family:var(--display); font-weight:400; font-size:46px; line-height:1.
 .composer code { flex:1; min-width:0; font:12.5px var(--mono); color:var(--ink-soft); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .composer button { flex:none; border:0; background:none; color:var(--muted); cursor:pointer; padding:2px; transition:color .15s, transform .14s var(--ease); }
 .composer button:hover { color:var(--ink); transform:translateY(-1px); }
+.first { margin-top:6px; font-size:13px; color:var(--muted); }
+.first summary { cursor:pointer; list-style:none; color:var(--accent-ink); font-weight:500; }
+.first summary::-webkit-details-marker { display:none; }
+.first summary::before { content:"+ "; font-family:var(--mono); }
+.first[open] summary::before { content:"– "; }
+.first p { margin:8px 0; }
+.first .composer { margin-top:0; }
 footer { padding:0 0 40px; color:var(--faint); font-size:13px; }
 footer q { font-family:var(--display); font-size:17px; color:var(--muted); quotes:"\\201C" "\\201D"; }
 [hidden] { display:none !important; }
@@ -473,6 +480,11 @@ footer q { font-family:var(--display); font-size:17px; color:var(--muted); quote
         <div class="step"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 10 4 15l5 5"/><path d="M20 4v7a4 4 0 0 1-4 4H4"/></svg><span><b>Press Enter</b> to join. The conversation so far plays back first</span></div>
         <a class="step go" id="go" href="#"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg><span><b>Open in Claude Code</b> and talk to it together</span></a>
         <div class="composer"><span class="slash">/</span><code id="link"></code><button id="copy2" title="Copy link" aria-label="Copy link"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2.5"/><path d="M5 15V6a2 2 0 0 1 2-2h9"/></svg></button></div>
+        <details class="first" id="first">
+          <summary>First time? Install the plugin once</summary>
+          <p>Paste this in a terminal, then start a new Claude Code session (or restart Claude Desktop):</p>
+          <div class="composer"><span class="slash">$</span><code id="install"></code><button id="copy3" title="Copy command" aria-label="Copy install command"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2.5"/><path d="M5 15V6a2 2 0 0 1 2-2h9"/></svg></button></div>
+        </details>
       </div>
     </div>
   </section>
@@ -495,6 +507,9 @@ footer q { font-family:var(--display); font-size:17px; color:var(--muted); quote
     d.setAttribute('data-name', p.name + (p.role === 'host' ? ' · host' : '') + (p.online ? '' : ' · away')); return d; }
   $('title').textContent = data.title;
   $('link').textContent = data.url;
+  var INSTALL = 'claude plugin marketplace add Paradigm-Study/claude-share && claude plugin install shared-session@claude-share';
+  $('install').textContent = INSTALL;
+  $('copy3').addEventListener('click', function () { navigator.clipboard.writeText(INSTALL).then(function () { $('install').textContent = 'Copied. Paste it in a terminal.'; setTimeout(function () { $('install').textContent = INSTALL; }, 1800); }); });
   Array.prototype.forEach.call(document.querySelectorAll('.hn'), function (n) { n.textContent = data.host; });
   $('open').href = data.deepLink; $('go').href = data.deepLink;
   function render(d) {

@@ -15,14 +15,22 @@ Built as a Claude Code plugin of function hooks (a "mod"), plus a small room ser
 
 ## Install
 
+One line in a terminal:
+
 ```bash
-claude plugin marketplace add Paradigm-Study/claude-share
-```
-```bash
-claude plugin install shared-session@claude-share
+claude plugin marketplace add Paradigm-Study/claude-share && claude plugin install shared-session@claude-share
 ```
 
-Requires Claude Code 2.1.286 or later (`claude update`; Claude Desktop includes it). New sessions pick it up.
+Requires Claude Code 2.1.286 or later (`claude update`; Claude Desktop includes it). New sessions pick it up. (Claude Code installs third-party plugins from a marketplace it knows, hence the two steps in one line.)
+
+**For a whole team, nothing to type:** in your organization's managed settings (or a project's checked-in `.claude/settings.json`), add:
+
+```json
+{
+  "extraKnownMarketplaces": { "claude-share": { "source": { "source": "github", "repo": "Paradigm-Study/claude-share" } } },
+  "enabledPlugins": { "shared-session@claude-share": true }
+}
+```
 
 ## Use it
 
