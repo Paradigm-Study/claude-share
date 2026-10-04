@@ -27,7 +27,7 @@ const FILE_MAX = 10 * 1024 * 1024
 const ROOM_FILES_MAX = 100 * 1024 * 1024
 // Previews: a guest's browser asks the room, the room asks the host's stream,
 // the host's plugin asks its own localhost and posts the answer back.
-const TICKET_MS = 10 * 60_000 // long enough to click from a transcript; still single-use
+const TICKET_MS = 10 * 60_000 // long enough to click from a transcript; one browser only
 const PREVIEW_SESSION_MS = 12 * 60 * 60 * 1000
 const PROXY_TIMEOUT_MS = 30_000
 const PROXY_BODY_MAX = 1024 * 1024
@@ -76,7 +76,7 @@ export class Room {
     this.files = new Map(Object.entries(data.files ?? {})) // id → { id, name, type, size, ts }
     this.previews = new Map(Object.entries(data.previews ?? {})) // pid → { pid, port, title, ts }
     this.previewSessions = new Map(Object.entries(data.previewSessions ?? {})) // sid → { pid, exp }
-    this.tickets = new Map() // one-time: ticket → { pid, exp }
+    this.tickets = new Map() // ticket → { pid, exp, used }: opens one browser, which may come back
     this.proxied = new Map() // in flight: request id → settle(Response)
     // Where file bytes live: memory here; a Durable Object keeps them in storage.
     const bytes = new Map()
@@ -507,7 +507,7 @@ async function fileRoutes(room, req, rest, auth, now) {
 }
 
 // ---------------------------------------------------------------------------
-// Previews: the host shares a localhost port; members get one-time tickets
+// Previews: the host shares a localhost port; members get tickets (one browser each)
 // that open it on the preview host name.
 //   POST previews { port, title } (host) → { pid }
 //   POST previews/<pid>/end (host)
@@ -602,16 +602,31 @@ export function previewRoomOf(req) {
   return cookie ? cookie.slice(COOKIE.length + 1).split('.')[0] : null
 }
 
+// The preview session a request's cookie holds in this room, while it lasts.
+function previewSession(room, req, now) {
+  const cookie = (req.headers.get('cookie') ?? '').split(/;\s*/).find(c => c.startsWith(`${COOKIE}=`))
+  const [rid, sid] = cookie ? cookie.slice(COOKIE.length + 1).split('.') : []
+  const session = rid === room.id && sid ? room.previewSessions.get(sid) : null
+  return session && session.exp > now ? session : null
+}
+
 // Everything on the preview host name. /__share/enter trades a ticket for a
 // cookie; anything else, with the cookie, goes to the host's localhost.
 export async function previewRequest(room, req, now, { secure = true } = {}) {
   const url = new URL(req.url)
   if (url.pathname === '/__share/enter') {
     const ticket = room.tickets.get(url.searchParams.get('ticket') ?? '')
-    room.tickets.delete(url.searchParams.get('ticket') ?? '')
-    if (!ticket || ticket.exp < now || !room.previews.has(ticket.pid)) {
-      return { response: previewPage(403, 'This preview link has expired', 'Open the preview again from Claude Code: each link works once, for ten minutes.') }
+    if (!ticket || ticket.used || ticket.exp < now || !room.previews.has(ticket.pid)) {
+      // The browser that used the link already has its way in (a reload, a
+      // second click, a pane reopened later): it goes straight back.
+      const own = previewSession(room, req, now)
+      if (own && (!ticket || own.pid === ticket.pid) && room.previews.has(own.pid) && !room.endedAt) {
+        return { response: new Response(null, { status: 302, headers: { location: '/', 'cache-control': 'no-store' } }) }
+      }
+      return { response: previewPage(403, 'This preview link has been used', 'Each link opens the preview in one browser, within ten minutes. For a new one, press <b>Open</b> in the Room panel in Claude Code.') }
     }
+    // Spent, but kept until it expires, so the browser that used it is known.
+    ticket.used = true
     const sid = token(18)
     room.previewSessions.set(sid, { pid: ticket.pid, exp: now + PREVIEW_SESSION_MS })
     return {
@@ -622,10 +637,8 @@ export async function previewRequest(room, req, now, { secure = true } = {}) {
       }),
     }
   }
-  const cookie = (req.headers.get('cookie') ?? '').split(/;\s*/).find(c => c.startsWith(`${COOKIE}=`))
-  const sid = cookie?.slice(COOKIE.length + 1).split('.')[1]
-  const session = sid ? room.previewSessions.get(sid) : null
-  const preview = session && session.exp > now ? room.previews.get(session.pid) : null
+  const session = previewSession(room, req, now)
+  const preview = session ? room.previews.get(session.pid) : null
   if (!preview || room.endedAt) return { response: previewPage(404, 'This preview has ended', `${room.host.name} is no longer sharing it.`) }
   const body = req.method === 'GET' || req.method === 'HEAD' ? new Uint8Array() : new Uint8Array(await req.arrayBuffer())
   if (body.length > PROXY_BODY_MAX) return { response: previewPage(413, 'Too large', 'Request bodies through a preview are limited to 1 MB.') }

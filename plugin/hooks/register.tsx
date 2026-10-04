@@ -79,6 +79,7 @@ const ownersA = atom({ plugin: 'shared-session', key: 'owners' } as const, {} as
 const sidebarA = atom({ plugin: 'shared-session', key: 'sidebar' } as const, null as { title: string; pinned: boolean; id?: string } | null)
 const shownA = atom({ plugin: 'shared-session', key: 'shown' } as const, [] as ShareShown[])
 const previewsA = atom({ plugin: 'shared-session', key: 'previews' } as const, {} as Record<string, string>)
+const autoOpenA = atom({ plugin: 'shared-session', key: 'autoOpen' } as const, true)
 
 // Context a host app puts into the person's message (Claude Desktop adds a
 // <system-reminder> to a first prompt): not typed, and never shared.
@@ -177,7 +178,7 @@ type Ride =
   | { kind: 'own'; pid: string; fromSeq: number } // a prompt typed here
   | { kind: 'turn'; turnId: string } // someone else's turn
   | { kind: 'static'; rows: Row[] } // what happened before this session joined
-  | { kind: 'note'; text: string; then: Exchange[] } // an answer from the plugin itself
+  | { kind: 'note'; text: string; then: Exchange[]; open?: ServerEvent[] } // an answer from the plugin itself
   | { kind: 'artifact'; event: ServerEvent } // something the host showed outside a turn
 type Exchange = { prompt: string; rows: Row[] }
 const hostTurns: HostTurn[] = []
@@ -185,6 +186,11 @@ const ownPending = new Set<string>()
 const ridesByText = new Map<string, Ride[]>()
 const ridesByTurn = new Map<string, Ride>()
 let localTurnActive = false
+// Guest: turns this plugin starts go out one at a time (prompts submitted
+// together reach the engine as one turn): what waits, and whether one has
+// gone out and not started yet.
+const laterRides: { text: string; ride: Ride }[] = []
+let rideSubmitted = false
 
 // ---------------------------------------------------------------------------
 // Server
@@ -595,7 +601,10 @@ async function receive($: $, mode: ShareMode, room: ShareRoom, page: EventsPage)
         // (a /share-file, say) it gets a short turn of its own.
         if (mode === 'guest' && !(typeof body.turnId === 'string' && hostTurns.some(t => t.turnId === body.turnId))) {
           const shown = shownOf(event)
-          if (shown) queueRide($, `${room.host} shared ${shown.name}`, { kind: 'artifact', event })
+          if (shown) {
+            laterRides.push({ text: `${room.host} shared ${shown.name}`, ride: { kind: 'artifact', event } })
+            scheduleRides($)
+          }
         }
         break
       case 'delta':
@@ -657,6 +666,8 @@ async function reset($: $) {
   hostTurns.length = 0
   ownPending.clear()
   ridesByText.clear()
+  laterRides.length = 0
+  rideSubmitted = false
   pendingGuestPrompts.length = 0
   await update($, modeA, () => 'idle')
   await update($, roomA, () => null)
@@ -930,9 +941,18 @@ async function join($: $, server: string, id: string) {
   const running = starts.filter(e => !ends.has(e.body.turnId)).at(-1)
   const past = joined.history.filter(e => e.type === 'row' && (!running || e.seq < running.seq))
   if (running) noteHostTurn(running)
+  // Previews the host still has open open here too, after the history (one
+  // shown in the running turn opens as that turn plays out).
+  const closed = new Set(joined.history.filter(e => e.type === 'preview' && e.body.state === 'closed').map(e => e.body.pid))
+  const open = new Map<string, ServerEvent>()
+  for (const e of joined.history) {
+    if (e.type !== 'artifact' || e.body.kind !== 'preview' || typeof e.body.pid !== 'string' || closed.has(e.body.pid)) continue
+    if (running && e.seq > running.seq) continue
+    open.set(e.body.pid, e)
+  }
   startFeed($)
   await markSidebar($, () => `👥 ${room.host} · ${room.title}`)
-  return { room, history: exchanges(past.map(e => e.body as unknown as Row), joined.host) }
+  return { room, history: exchanges(past.map(e => e.body as unknown as Row), joined.host), open: [...open.values()] }
 }
 
 // ---------------------------------------------------------------------------
@@ -1163,7 +1183,7 @@ async function replayOf($: $, room: ShareRoom, event: ServerEvent): Promise<Repl
       if (!shown.pid) return null
       const url = await previewTicket($, room, shown.pid)
       if (!url) return { label, note: 'the preview could not be opened' }
-      if (!(await hasTool($, 'mcp__Claude_Browser__preview_start'))) return { label, note: `open it in a browser (the link works once, for 10 minutes): ${url}` }
+      if (!(await hasTool($, 'mcp__Claude_Browser__preview_start'))) return { label, note: `open it in a browser within 10 minutes (the link opens in one browser): ${url}` }
       return { label, call: { name: 'mcp__Claude_Browser__preview_start', input: { url } } }
     }
     case 'link':
@@ -1180,12 +1200,12 @@ async function refusedNote($: $, room: ShareRoom, event: ServerEvent, reason: st
   const why = /auto mode/i.test(reason) ? 'auto mode only opens what you asked for' : 'it was not allowed'
   if (shown?.kind === 'preview' && shown.pid) {
     const url = await previewTicket($, room, shown.pid)
-    if (url) return `\n\n> This session didn't open it in the browser pane (${why}). [Open the preview](${url}) in your browser (the link works once, for 10 minutes), or press **Open** in the Room panel.\n\n`
+    if (url) return `\n\n> This session didn't open it in the browser pane (${why}). [Open the preview](${url}) in your browser within 10 minutes (the link opens in one browser), or press **Open** in the Room panel.\n\n`
   }
   return `\n\n> This session didn't open it (${why}). Press **Open** in the Room panel${shown?.files?.length ? `, or find it in \`.shared-session/\`` : ''}.\n\n`
 }
 
-// A one-time link (ten minutes) that opens a preview on the preview host name.
+// A link (ten minutes, one browser) that opens a preview on the preview host name.
 async function previewTicket($: $, room: ShareRoom, pid: string): Promise<string | null> {
   try {
     return (await api<{ url: string }>($, room.server, `/api/rooms/${room.id}/previews/${pid}/ticket`, { method: 'POST', token: room.token })).url
@@ -1288,31 +1308,53 @@ function noteHostTurn(event: ServerEvent): HostTurn {
   return turn
 }
 
-function queueRide($: $, text: string, ride: Ride) {
+function queueRide($: $, text: string, ride: Ride, refused?: () => void) {
   const list = ridesByText.get(text) ?? []
   list.push(ride)
   ridesByText.set(text, list)
-  submitLater($, text)
+  submitLater($, text, () => {
+    const left = (ridesByText.get(text) ?? []).filter(r => r !== ride)
+    if (left.length) ridesByText.set(text, left)
+    else ridesByText.delete(text)
+    refused?.()
+  })
 }
 
 // A prompt submitted from inside another hook's dispatch is refused, so every
 // prompt this plugin starts goes out from a timer of its own.
-function submitLater($: $, text: string) {
+function submitLater($: $, text: string, refused?: () => void) {
   $.clock.after(0, () => {
     void $.prompt.submit({ text, asUser: true }).catch(error => {
       $.ui.log(`prompt.submit refused: ${String(error?.message ?? error)}`, { to: 'debug' })
+      refused?.()
     })
   })
 }
 
-// Starts a local turn for the next host turn nobody here has shown yet. A
-// prompt typed here that is still waiting shows the turns ahead of it itself.
+// Starts the next local turn: what was queued first (what happened before
+// joining, something shown outside a turn), then the next host turn nobody
+// here has shown yet. A prompt typed here that is still waiting shows the
+// turns ahead of it itself.
 function scheduleRides($: $) {
-  if (localTurnActive || ownPending.size > 0) return
+  if (localTurnActive || rideSubmitted || ownPending.size > 0) return
+  const retry = () => {
+    rideSubmitted = false
+    scheduleRides($)
+  }
+  const later = laterRides.shift()
+  if (later) {
+    rideSubmitted = true
+    queueRide($, later.text, later.ride, retry)
+    return
+  }
   const next = hostTurns.find(t => !t.shown && !t.claimed && !(t.pid && ownPending.has(t.pid)))
   if (!next) return
   next.claimed = true
-  queueRide($, `${next.by}: ${next.prompt || '(continued)'}`, { kind: 'turn', turnId: next.turnId })
+  rideSubmitted = true
+  queueRide($, `${next.by}: ${next.prompt || '(continued)'}`, { kind: 'turn', turnId: next.turnId }, () => {
+    next.claimed = false
+    retry()
+  })
 }
 
 async function leave($: $) {
@@ -1342,6 +1384,21 @@ type RideRun = { state: RideState; cursor: number; failures?: number; lastCall?:
 // Guest: calls a riding turn made that this Claude Code refused (auto mode
 // gives a plugin's step no verdict), by tool_use_id, with the reason.
 const refusedCalls = new Map<string, string>()
+// Every argument the ride gave comes back unchanged (the engine may add its own).
+function sameArgs(given: string, actual: unknown): boolean {
+  let want: Record<string, unknown>
+  try {
+    want = JSON.parse(given)
+  } catch {
+    return false
+  }
+  const got = (actual && typeof actual === 'object' ? actual : {}) as Record<string, unknown>
+  return Object.entries(want).every(([k, v]) => JSON.stringify(got[k]) === JSON.stringify(v))
+}
+
+// Guest: the calls riding turns made, by tool_use_id, and whether this
+// plugin may approve them itself (everything but a public link).
+const rideCalls = new Map<string, { name: string; input: string; approve: boolean }>()
 const ridesInStep = new Map<string, RideRun>()
 
 type RideState = {
@@ -1627,7 +1684,7 @@ export const register: Register = (on, options) => {
       // did, then what happened before plays back, all without a model call.
       try {
         if (mode === 'guest') await leave($)
-        const { room, history } = await join($, link[1], link[2])
+        const { room, history, open } = await join($, link[1], link[2])
         const policy = await read($, policyA)
         answerWith({
           kind: 'note',
@@ -1639,6 +1696,7 @@ export const register: Register = (on, options) => {
             `The **Room** panel (above the prompt, or \`/room\`) shows who's here and has a side chat Claude doesn't read. To leave, press **Leave**.`,
           ].join(' '),
           then: history,
+          open,
         })
       } catch (error) {
         answerWith({ kind: 'note', text: `Couldn't join that shared session: ${String((error as Error)?.message ?? error)}`, then: [] })
@@ -1670,6 +1728,7 @@ export const register: Register = (on, options) => {
   on('turn.start', async ($, e, next) => {
     const mode = await read($, modeA)
     if (mode !== 'host') {
+      rideSubmitted = false // whatever went out has started, alone or with others
       const ride = mode === 'guest' ? takeRide(typedText(e.text)) : ridesByText.get(typedText(e.text))?.shift()
       if (ride) {
         ridesByTurn.set(e.turnId, ride)
@@ -1700,10 +1759,15 @@ export const register: Register = (on, options) => {
         ridesByTurn.delete(e.turnId)
         localTurnActive = false
         if (ride.kind === 'note' && mode === 'guest') {
-          for (const exchange of ride.then) queueRide($, exchange.prompt, { kind: 'static', rows: exchange.rows })
+          for (const exchange of ride.then) laterRides.push({ text: exchange.prompt, ride: { kind: 'static', rows: exchange.rows } })
+          const room = await read($, roomA)
+          for (const event of ride.open ?? []) {
+            const shown = shownOf(event)
+            if (shown) laterRides.push({ text: `${room?.host ?? 'The host'} has ${shown.name} open`, ride: { kind: 'artifact', event } })
+          }
         }
-        if (mode === 'guest') scheduleRides($)
       }
+      if (mode === 'guest') scheduleRides($)
     }
     return next(e)
   })
@@ -1794,10 +1858,18 @@ export const register: Register = (on, options) => {
           ridesInStep.set(e.turnId, run)
           const id = `toolu_${newId()}${newId()}`
           if (run.lastCall) run.lastCall.id = id
+          rideCalls.set(id, { name: call.name, input: JSON.stringify(call.input), approve: shownOf(run.lastCall?.event ?? ({ body: {} } as ServerEvent))?.kind !== 'link' })
+          if (rideCalls.size > 50) rideCalls.delete(rideCalls.keys().next().value as string)
           yield { kind: 'tool', index: 1, id, name: call.name } satisfies TurnStepChunk
           yield { kind: 'input', index: 1, json: JSON.stringify(call.input) } satisfies TurnStepChunk
           yield { kind: 'stop', stopReason: 'tool_use', usage: null } satisfies TurnStepChunk
           return { turnId: e.turnId, index: e.index, answer, toolUses: [{ name: call.name, input: call.input }], stopReason: 'tool_use', usage: null }
+        }
+        // The step after a call ends with something to read: an empty reply
+        // makes the engine ask for one more step.
+        if (!answer && e.index > 0) {
+          answer = 'Opened.'
+          yield { kind: 'text', index: 0, text: answer } satisfies TurnStepChunk
         }
       }
       yield { kind: 'stop', stopReason: 'end_turn', usage: null } satisfies TurnStepChunk
@@ -1805,12 +1877,14 @@ export const register: Register = (on, options) => {
     }
 
     // A guest's own model is never called: everything a guest session shows
-    // comes from the room. A turn nothing here accounts for (a notice the app
-    // delivered, a ride that couldn't be matched) gets a note, not a model call.
-    if (mode === 'guest' && e.agentId === undefined && e.index === 0) {
+    // comes from the room. Any step not answered above ends here: a turn
+    // nothing accounts for (a notice the app delivered, a ride that couldn't
+    // be matched) gets a note; a step after a ride has finished (a Stop hook
+    // in the guest's settings can ask the engine to keep going) gets nothing.
+    if (mode === 'guest' && e.agentId === undefined) {
       const room = await read($, roomA)
-      const note = `_This session is attached to ${room?.host ?? 'the host'}'s; what you type goes there._`
-      yield { kind: 'text', index: 0, text: note } satisfies TurnStepChunk
+      const note = e.index === 0 && !ride ? `_This session is attached to ${room?.host ?? 'the host'}'s; what you type goes there._` : ''
+      if (note) yield { kind: 'text', index: 0, text: note } satisfies TurnStepChunk
       yield { kind: 'stop', stopReason: 'end_turn', usage: null } satisfies TurnStepChunk
       return { turnId: e.turnId, index: e.index, answer: note, toolUses: [], stopReason: 'end_turn', usage: null }
     }
@@ -1867,6 +1941,18 @@ export const register: Register = (on, options) => {
   // names asks first (edits, commands and the web by default), whatever the
   // permission mode; "Always allow" trusts that person for the session.
   on('tool.check', async ($, e, next) => {
+    // Guest: a riding turn's own call to a viewer (what the host's Claude
+    // showed, made again here) is this plugin's to approve, so it opens like
+    // it did for the host. Only that exact call, never a public link, never
+    // over an explicit deny; and not when the guest asked to be asked.
+    const own = e.tool_use_id ? rideCalls.get(e.tool_use_id) : undefined
+    if (own && own.approve && own.name === e.tool && sameArgs(own.input, e.input) && (await read($, modeA)) === 'guest' && (await read($, autoOpenA))) {
+      const native = await next(e)
+      const reason = 'reason' in native && typeof native.reason === 'string' ? native.reason : ''
+      if (native.decision === 'allow' || (native.decision === 'deny' && !/auto mode|classifier|verdict/i.test(reason))) return native
+      const room = await read($, roomA)
+      return { decision: 'allow', reason: `Shown by ${room?.host ?? 'the host'}'s Claude in the shared session` }
+    }
     const verdict = await next(e)
     if (e.tool_use_id && verdict.decision === 'deny' && (await read($, modeA)) === 'guest') {
       refusedCalls.set(e.tool_use_id, 'reason' in verdict && typeof verdict.reason === 'string' ? verdict.reason : '')
@@ -2238,7 +2324,21 @@ export const register: Register = (on, options) => {
             <Button key="room-stop" label="Stop sharing" variant="primary" onPress={() => void stopSharing($)} />
           </Box>
         ) : (
-          <Button key="room-leave" label={`Leave ${room.host}'s session`} variant="primary" onPress={() => void leave($)} />
+          <Box flexDirection="column" gap={1}>
+            {Select ? (
+              <Select
+                key="auto-open"
+                label={`What ${room.host}'s Claude shows`}
+                value={(await read($, autoOpenA)) ? 'auto' : 'ask'}
+                options={[
+                  { value: 'auto', label: 'Opens here by itself' },
+                  { value: 'ask', label: 'Ask me each time' },
+                ]}
+                onSelect={(value: string) => void update($, autoOpenA, () => value !== 'ask')}
+              />
+            ) : null}
+            <Button key="room-leave" label={`Leave ${room.host}'s session`} variant="primary" onPress={() => void leave($)} />
+          </Box>
         )}
       </Box>
     )

@@ -363,3 +363,15 @@ test('a guest sees what the host showed in the Room, with Open', async ($, on) =
   expect(await pane.find({ type: 'Text', text: /chart\.html/ })).toBeDefined()
   expect(await pane.find({ key: 'open-seq:2' })).toBeDefined()
 })
+
+test('a guest can choose to be asked before what the host shows opens', async ($, on) => {
+  const asked = world(on, { stream: [{ seq: 1, events: [], people: [{ id: 'host', name: 'Sam', role: 'host', online: true }], ended: false, title: 'demo' }] })
+  await $.prompt.submit({ text: LINK, origin: { kind: 'composer' }, wait: false })
+  await asked.clock.advance(10)
+  const pane = await $.ui.mount({ plugin: 'shared-session', surface: 'desktop', component: 'Pane', requestId: 'shared-room', props: PANE })
+  expect(await pane.find({ key: 'auto-open' })).toBeDefined()
+  await pane.select({ key: 'auto-open', value: 'ask' })
+  await pane.unmount()
+  const again = await $.ui.mount({ plugin: 'shared-session', surface: 'desktop', component: 'Pane', requestId: 'shared-room', props: PANE })
+  expect((await again.find({ key: 'auto-open' }))?.props.value).toBe('ask')
+})

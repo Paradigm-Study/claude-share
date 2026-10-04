@@ -92,6 +92,8 @@ declare module 'claude-code' {
       owners: Record<string, string>
       /** What the host's Claude showed, newest last (the Room panel's Files). */
       shown: ShareShown[]
+      /** Guest: open what the host's Claude shows without asking (default), or ask each time. */
+      autoOpen: boolean
       /** Host: the previews this session shares, port → preview id. */
       previews: Record<string, string>
       /** Claude Desktop's sidebar row as it was before sharing marked it, to put back. */

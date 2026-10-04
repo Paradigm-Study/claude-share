@@ -54,7 +54,7 @@ It stops with a `NEEDS HUMAN` line at the one or two steps that need a person. S
   - who's here and who Claude is working for;
   - the timeline and the side chat;
   - for the host, the controls.
-- **Show:** what the host's Claude shows reaches everyone by itself. The host can also type `/share-file <path>` to show a file, or `/share-preview <port>` to let teammates open a local dev server. Both are listed in the Room, where guests reopen them and the host stops previews.
+- **Show:** what the host's Claude shows reaches everyone by itself. The host can also type `/share-file <path>` to show a file, or `/share-preview <port>` to let teammates open a local dev server. Both are listed in the Room, where guests reopen them and the host stops previews. Someone who joins later gets any preview still open.
 - **Stop:** press **Leave** or **Stop sharing**, or type `/stop-sharing`. Esc in a guest stops the shared turn.
 
 ## Host a server
@@ -102,7 +102,7 @@ Previews are served on a second port (`PREVIEW_PORT`, default `PORT` + 1); set `
 - **The server relays plaintext.** It sees the shared transcript: prompts, replies, tool calls and results. Run it somewhere you trust.
 - **Guests can't act on the host's machine without the host.** By default, a guest's request to edit, run commands or use the web asks the host. "Always allow" trusts one person for the session. The host can require approval for every tool, or none.
 - **What Claude shows travels too, unless the host keeps it.** Files Claude shows go through the server (10 MB each, deleted with the room). The host can keep them in Room → Host controls.
-- **Previews are for the room only.** Each guest opens a preview with a one-time link that lasts ten minutes. The host's plugin only fetches ports the host shared, and previews end with the room.
+- **Previews are for the room only.** Each guest opens a preview with a link that lasts ten minutes and lets in only the first browser that uses it. The host's plugin only fetches ports the host shared, and previews end with the room.
 - **Only what a person types travels.** Desktop's hidden context notes are stripped from prompts before they leave a machine. A link relayed by another session, a channel or a task never joins anything.
 
 ## Limits
@@ -113,7 +113,7 @@ Previews are served on a second port (`PREVIEW_PORT`, default `PORT` + 1); set `
 - **Needs `curl` for live updates.** Each shared session keeps one `curl` process reading the room's stream, so a quiet room makes no requests. Without `curl`, or against a server too old to stream, the plugin polls instead, from every 0.4 s while busy down to every 15 s when quiet.
 - **Failed host turns:** guests see a note in the reply when the host's turn errors or is refused.
 - **Previews are plain HTTP.** No WebSockets, so a dev server's hot reload doesn't reach guests; they reload. Request bodies are limited to 1 MB and responses to 20 MB. The host needs `sh` and `curl` (macOS or Linux).
-- **The browser pane asks first.** Opening a page or a preview in a guest's browser pane asks that guest. A terminal guest gets the file saved and a note instead of a viewer.
+- **What's shown opens by itself.** A page or preview opens in a guest's browser pane without asking, even in auto mode; a guest can choose in the Room to be asked first, and a public link always asks. A terminal guest gets the file saved and a note instead of a viewer.
 - **Session list changes are Desktop-only.** The 👥 title and the pin use Claude Desktop's own sidebar tools. Elsewhere they're skipped.
 
 ## Develop
@@ -148,7 +148,7 @@ The end-to-end run starts a host (in bypass mode, on purpose) and two guests, th
 - ordering;
 - Esc from a guest;
 - that everyone hears the room over one open stream;
-- that a file the host shares lands in the guest's project, and that a guest opens the host's localhost through a preview;
+- that a file the host shares lands in the guest's project, that a guest opens the host's localhost through a preview, and that someone who joins later is handed it with every exchange before;
 - that a guest's write is refused without approval;
 - that sharing ends cleanly.
 

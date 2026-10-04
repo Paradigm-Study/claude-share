@@ -306,6 +306,7 @@ try {
     const echoed = await echo.text()
     const moved = await fetch(`${origin}/redirect`, { headers: { cookie }, redirect: 'manual' })
     const again = await fetch(enter, { redirect: 'manual' })
+    const back = await fetch(enter, { headers: { cookie }, redirect: 'manual' })
     previewed =
       opened.status === 302 &&
       page.includes('dev server ok') &&
@@ -315,9 +316,19 @@ try {
       (echo.headers.get('set-cookie') ?? '').includes('app=1') &&
       moved.status === 302 &&
       moved.headers.get('location') === '/' &&
-      again.status === 403
+      again.status === 403 &&
+      back.status === 302 &&
+      back.headers.get('location') === '/'
   }
-  check("a teammate opens the host's localhost through a preview", previewed, enter ?? 'no link')
+  check("a teammate opens the host's localhost through a preview (its link lets in one browser, which can come back)", previewed, enter ?? 'no link')
+
+  // Someone who joins while the preview is open is handed it too, after the history.
+  mkdirSync(join(WORK, 'lee'), { recursive: true })
+  const lee = session('Lee', join(WORK, 'lee'))
+  lee.say(link)
+  const late = await until('late joiner got the preview', () => /https?:\/\/[^\s)`'"]+\/__share\/enter\?room=[\w-]+&ticket=[\w-]+/.exec(lee.text)?.[0], 60_000).catch(() => null)
+  check('someone who joins later is handed the open preview', Boolean(late) && late !== enter, late ?? 'no link')
+  check('and sees each exchange before it, one turn apiece', ['marmalade', 'pineapple', 'kiwi'].every(w => assistantText(lee).some(t => t.toLowerCase().includes(w))), String(lee.lines.filter(l => l.type === 'result').length) + ' turns')
 
   // How everyone heard the room: one open stream each, or polls when asked to.
   const polling = process.env.SHARED_SESSION_TRANSPORT === 'poll'
