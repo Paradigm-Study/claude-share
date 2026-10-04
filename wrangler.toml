@@ -2,13 +2,41 @@ name = "claude-share"
 main = "server/worker.mjs"
 compatibility_date = "2026-04-01"
 
+[vars]
+# "off" stops new rooms at once (joining existing links still works):
+#   npx wrangler deploy --var NEW_ROOMS:off
+NEW_ROOMS = "on"
+# New rooms the whole server makes in a day (default 3000).
+MAX_ROOMS_PER_DAY = "3000"
 # Optional: pin the origin share links use (otherwise the request's own).
-# [vars]
 # PUBLIC_URL = "https://share.example.com"
+# Secret, for ending a room that's being abused (POST /api/admin/rooms/<id>/end):
+#   npx wrangler secret put ADMIN_TOKEN
+
+# What one network address or one room may do (server/core.mjs LIMITS says the same).
+[[ratelimits]]
+name = "CREATE_LIMIT"
+namespace_id = "7101"
+simple = { limit = 6, period = 60 }
+
+[[ratelimits]]
+name = "JOIN_LIMIT"
+namespace_id = "7102"
+simple = { limit = 30, period = 60 }
+
+[[ratelimits]]
+name = "EVENTS_LIMIT"
+namespace_id = "7103"
+simple = { limit = 900, period = 60 }
 
 [[durable_objects.bindings]]
 name = "ROOMS"
 class_name = "RoomObject"
+
+# Counts new rooms exactly (per address, and per day for the whole server).
+[[durable_objects.bindings]]
+name = "GATE"
+class_name = "GateObject"
 
 [[migrations]]
 tag = "v1"
@@ -23,3 +51,7 @@ new_sqlite_classes = ["SharedRoom"]
 [[migrations]]
 tag = "v3"
 deleted_classes = ["SharedRoom"]
+
+[[migrations]]
+tag = "v4"
+new_sqlite_classes = ["GateObject"]

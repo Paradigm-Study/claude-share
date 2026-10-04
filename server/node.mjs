@@ -11,7 +11,7 @@
 import { createServer } from 'node:http'
 import { readFileSync, writeFileSync, renameSync } from 'node:fs'
 
-import { Room, ROOM_ID, SEAT_TIMEOUT_MS, createRoom, roomRequest, previewRequest, previewRoomOf, notFound, json, publicOrigin, token, missingPage, previewMissing, outdatedClient, versionInfo } from './core.mjs'
+import { Room, ROOM_ID, SEAT_TIMEOUT_MS, createRoom, roomRequest, previewRequest, previewRoomOf, notFound, json, publicOrigin, token, missingPage, previewMissing, homePage, outdatedClient, versionInfo, limitOf, limitedResponse, closedResponse, Windows } from './core.mjs'
 
 const PORT = Number(process.env.PORT ?? 8787)
 const PUBLIC_URL = process.env.PUBLIC_URL
@@ -75,6 +75,9 @@ setInterval(() => {
   if (changed) save()
 }, 60_000).unref()
 
+const windows = new Windows()
+const clientIp = req => req.headers.get('x-client-ip') ?? 'unknown'
+
 async function route(req) {
   const url = new URL(req.url)
   const origin = publicOrigin(req, PUBLIC_URL)
@@ -83,10 +86,13 @@ async function route(req) {
 
   if (url.pathname === '/api/health') return json({ ok: true, rooms: rooms.size })
   if (url.pathname === '/api/version') return versionInfo()
+  if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/privacy')) return homePage(origin)
 
   if (req.method === 'POST' && url.pathname === '/api/rooms') {
     const outdated = outdatedClient(req)
     if (outdated) return outdated
+    if (process.env.NEW_ROOMS === 'off') return closedResponse()
+    if (!windows.hit('create', `c:${clientIp(req)}`, now)) return limitedResponse('create')
     const { room, response } = await createRoom(req, token(16), now, origin)
     rooms.set(room.id, watch(room))
     save()
@@ -102,9 +108,14 @@ async function route(req) {
   } else if (parts[0] === 'api' && parts[1] === 'rooms' && parts.length >= 3) {
     id = parts[2]
     rest = parts.slice(3).join('/')
+  } else if (req.method === 'POST' && parts[0] === 'api' && parts[1] === 'admin' && parts[2] === 'rooms' && parts.length === 5 && parts[4] === 'end') {
+    id = parts[3]
+    rest = 'admin-end'
   } else {
     return notFound()
   }
+  const limit = limitOf(req, id, rest, clientIp(req))
+  if (limit && !windows.hit(limit.kind, limit.key, now)) return limitedResponse(limit.kind)
 
   const room = ROOM_ID.test(id) ? rooms.get(id) : undefined
   if (!room) {
@@ -113,7 +124,8 @@ async function route(req) {
       : json({ error: 'This shared session does not exist.' }, 404)
   }
 
-  const { response, changed } = await roomRequest(room, req, rest, now, origin, { previewOrigin: previewOrigin(req) })
+  const admin = Boolean(process.env.ADMIN_TOKEN) && req.headers.get('authorization') === `Bearer ${process.env.ADMIN_TOKEN}`
+  const { response, changed } = await roomRequest(room, req, rest, now, origin, { previewOrigin: previewOrigin(req), admin })
   if (changed) save()
   return response
 }
@@ -137,6 +149,10 @@ const serve = route => async (nodeReq, nodeRes) => {
       if (typeof v === 'string') headers.set(k, v)
       else if (Array.isArray(v)) headers.set(k, v.join(', '))
     }
+    // Who asked, for the limits: the socket's address (behind a proxy, set
+    // TRUST_PROXY=1 to use its X-Forwarded-For).
+    const forwarded = process.env.TRUST_PROXY === '1' ? String(nodeReq.headers['x-forwarded-for'] ?? '').split(',')[0].trim() : ''
+    headers.set('x-client-ip', forwarded || nodeReq.socket.remoteAddress || 'unknown')
     const req = new Request(`http://${nodeReq.headers.host ?? 'localhost'}${nodeReq.url}`, {
       method: nodeReq.method,
       headers,

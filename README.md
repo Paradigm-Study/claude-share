@@ -12,7 +12,7 @@ Share a Claude Code session with a link. Teammates open it, land in a Claude Cod
   - in Desktop, the session list marks and pins shared sessions.
 - **What Claude shows, everyone sees.** When the host's Claude opens a file in the side panel or the Files pane, draws a widget, or opens a page or a local dev server in the browser pane, each guest's own Claude Code opens the same thing. Files are saved in the guest's project under `.shared-session/` (kept out of git), and a dev server is reached through the room server.
 
-Built as a Claude Code plugin of function hooks (a "mod"), plus a small room server that runs on Cloudflare or as a single Node process.
+Built as a Claude Code plugin of function hooks (a "mod"), plus a small room server that runs on Cloudflare or as a single Node process. **It works right after install:** sharing goes through a public server this project runs ([what it sees and keeps](#privacy-and-the-public-server)), and teams can point it at their own.
 
 ## Install
 
@@ -55,7 +55,7 @@ It stops with a `NEEDS HUMAN` line at the one or two steps that need a person. S
 ## Use it
 
 - **Join:** open a share link. Its page opens Claude Desktop with the link in a new session's prompt box, so you press Enter. Pasting a link into any Claude Code session works too. Joining needs only the plugin: no server, account or sign-in.
-- **Share:** press **Share** above the prompt, or type `/share-session`. In a session that already has prompts, it asks first whether teammates may see them: **Share everything**, or **Only from now on** (`/share-session all` or `/share-session new`). The link is copied. Sharing needs a server; see below.
+- **Share:** press **Share** above the prompt, or type `/share-session`. In a session that already has prompts, it asks first whether teammates may see them: **Share everything**, or **Only from now on** (`/share-session all` or `/share-session new`). The link is copied. It goes through the public server unless you set your own (below).
 - **Room:** press **Room** above the prompt, or type `/room`, for:
   - who's here and who Claude is working for;
   - the side chat, what was shown, and the activity;
@@ -64,9 +64,20 @@ It stops with a `NEEDS HUMAN` line at the one or two steps that need a person. S
 - **Stop:** press **Leave**, or **Stop sharing** twice (it ends the room for everyone), or type `/stop-sharing`. Esc in a guest stops the shared turn.
 - **Connection:** if the room can't be reached, the row above the prompt says it is reconnecting; anything sent meanwhile goes out once it's back.
 
+## Privacy and the public server
+
+Out of the box, Share uses `https://claude-share.proud-limit-da0a.workers.dev`, run by this project ([its page](https://claude-share.proud-limit-da0a.workers.dev/)). Joining a link always uses the server in that link.
+
+- **What it sees:** while a session is shared, its prompts, Claude's replies, the tools it runs with the first lines of their results, the side chat, and files or local previews the host's Claude shows. Sharing a session that already has history asks first whether to include it.
+- **How long:** a room and everything in it is deleted 24 hours after the host stops sharing or was last seen. No accounts, no analytics, no request logs.
+- **Who can see it:** anyone with the room's link. It's encrypted in transit, not end to end: the server can read what passes through it.
+- **Limits:** per network, 6 new rooms and 30 joins a minute; per room, 20 people, 50 MB of files and 900 posts a minute. Abused rooms get ended.
+
+To keep sessions on your own infrastructure, run your own server (below) and set it in the plugin's `server` option or `SHARED_SESSION_SERVER`.
+
 ## Host a server
 
-Sharing needs a room server you run. Rooms are short-lived: they expire 24 hours after the host was last seen, and nothing is kept after that.
+Teams can run their own room server instead of the public one. Rooms are short-lived: they expire 24 hours after the host was last seen, and nothing is kept after that.
 
 **Cloudflare (recommended):** a Worker with one Durable Object per room. A quiet room costs nothing: open streams end at the Worker, and the room sleeps between changes. It fits the free plan for a small team. From a clone of this repo:
 
@@ -107,7 +118,7 @@ Previews are served on a second port (`PREVIEW_PORT`, default `PORT` + 1); set `
 
 - **The link is the key.** Room ids are 128-bit random values; anyone holding a link can join while the host shares. Names are self-declared: `git config user.name`, else the computer's username.
 - **The server relays plaintext.** It sees the shared transcript: prompts, replies, tool calls and results. Run it somewhere you trust.
-- **Guests can't act on the host's machine without the host.** By default, a guest's request to edit, run commands or use the web asks the host. "Always allow" trusts one person for the session. The host can require approval for every tool, or none.
+- **Guests can't act on the host's machine without the host.** By default, only reads inside the host's project run without asking; a guest's request to read anywhere else, edit, run commands or use the web asks the host first. "Always allow" trusts one person for the session. The host can require approval for every tool, or none.
 - **What Claude shows travels too, unless the host keeps it.** Files Claude shows go through the server (10 MB each, deleted with the room). The host can keep them in Room → Host controls.
 - **Previews are for the room only.** Each guest opens a preview with a link that lasts ten minutes and lets in only the first browser that uses it. The host's plugin only fetches ports the host shared, and previews end with the room.
 - **Only what a person types travels.** Desktop's hidden context notes are stripped from prompts before they leave a machine. A link relayed by another session, a channel or a task never joins anything.

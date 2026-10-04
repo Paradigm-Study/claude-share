@@ -4,6 +4,7 @@
 
 import { expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
+import { readsInside } from '../hooks/paths'
 
 const SURFACES = ['desktop', 'terminal'] as const
 const LINK = 'http://share.test/s/room0000000000000001'
@@ -83,7 +84,9 @@ function world(on: On, opts: { server?: boolean; stream?: unknown[]; history?: u
   })
   const posted: { type: string; body: Record<string, unknown> }[] = []
   const versions: string[] = []
+  const urls: string[] = []
   on('http.fetch', ($, e) => {
+    urls.push(e.url)
     const method = e.init?.method ?? 'GET'
     const path = e.url.replace(/^https?:\/\/[^/]+/, '').replace(/\?.*$/, '')
     asked.push(`${method} ${path}`)
@@ -107,7 +110,7 @@ function world(on: On, opts: { server?: boolean; stream?: unknown[]; history?: u
     }
     return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify(body) } }
   })
-  return Object.assign(asked, { clock, logged, spawned, posted, versions, written })
+  return Object.assign(asked, { clock, logged, spawned, posted, versions, written, urls })
 }
 
 test('a session that is not shared shows one Share button', async ($, on) => {
@@ -336,13 +339,13 @@ test("joining names the host in the sidebar; leaving says whose session it was",
   expect(calls.at(-2)).toBe('set_pinned {"session_id":"local_test","pinned":false}')
 })
 
-test('with no share server set up, Share explains how and joining still works', async ($, on) => {
+test('with no share server set up, Share uses the public one, and joining still works', async ($, on) => {
   const world0 = world(on, { server: false })
   const ui = await $.ui.mount(band('desktop'))
   await ui.press({ key: 'share' })
-  expect(await ui.find({ key: 'share' })).toBeDefined() // still not shared
-  expect(world0).not.toContain('POST /api/rooms')
-  expect(world0.logged.some(line => line.includes('Host a server') && line.includes('/plugin configure shared-session'))).toBe(true)
+  expect(world0.urls).toContain('https://claude-share.proud-limit-da0a.workers.dev/api/rooms')
+  await ui.press({ key: 'stop-sharing' })
+  await ui.press({ key: 'stop-sharing' })
   const joined = await $.prompt.submit({ text: LINK, origin: { kind: 'composer' }, wait: false })
   expect(joined.drop).toBeUndefined()
   expect(world0).toContain('POST /api/rooms/room0000000000000001/join')
@@ -472,4 +475,17 @@ test("the Room's Updates setting turns on auto-update in the person's settings, 
   const saved = JSON.parse(asked.written.at(-1)?.text ?? '{}')
   expect(saved.theme).toBe('dark')
   expect(saved.extraKnownMarketplaces['claude-share']).toEqual({ source: { source: 'github', repo: 'Paradigm-Study/claude-share' }, autoUpdate: true })
+})
+
+test("a guest's read runs without asking only inside the host's project", async () => {
+  const cwd = '/tmp/demo'
+  expect(readsInside('Read', { file_path: '/tmp/demo/src/app.ts' }, cwd)).toBe(true)
+  expect(readsInside('Read', { file_path: 'src/app.ts' }, cwd)).toBe(true)
+  expect(readsInside('Grep', { pattern: 'TODO' }, cwd)).toBe(true) // no path: the project
+  expect(readsInside('Read', { file_path: '/Users/scott/.ssh/id_ed25519' }, cwd)).toBe(false)
+  expect(readsInside('Read', { file_path: '~/.aws/credentials' }, cwd)).toBe(false)
+  expect(readsInside('Read', { file_path: '../other/secrets.env' }, cwd)).toBe(false)
+  expect(readsInside('Read', { file_path: '/tmp/demo/../demo-other/x' }, cwd)).toBe(false)
+  expect(readsInside('Glob', { pattern: '/etc/**' }, cwd)).toBe(false)
+  expect(readsInside('Grep', { pattern: 'key', path: '/' }, cwd)).toBe(false)
 })

@@ -25,7 +25,7 @@ Its throwaway sessions run in the system temp folder, and their transcripts are 
 
 Facts that matter:
 
-- **Joining needs the plugin and nothing else: no server, no account, no sign-in.** The link carries its server. Only sharing needs a server address, set in the plugin's `server` option (what `setup.mjs` sets), or in `SHARED_SESSION_SERVER`.
+- **Joining needs the plugin and nothing else: no server, no account, no sign-in.** The link carries its server. Sharing uses the public server unless the plugin's `server` option (what `setup.mjs` sets) or `SHARED_SESSION_SERVER` names another.
 - **Steps only a person can do.** Never attempt these yourself; `setup.mjs` stops at each with a `NEEDS HUMAN` line.
   - `npx wrangler login`, which is a browser OAuth approval.
   - Creating the Cloudflare account's `workers.dev` subdomain, once, in the dashboard.
@@ -74,4 +74,9 @@ EXTERNAL_SERVER=1 SHARE_SERVER=https://… node test/e2e.mjs   # …or through a
   - **A room loaded from storage starts its seq numbers past any it may have handed out** (`Room.resume`), because live events (deltas) are never stored.
   - **Previews run on a second Worker from the same script** (`wrangler.preview.toml`, `ROLE = "preview"`), its own workers.dev host name, so an app's root-relative paths work. A ticket becomes a cookie there; it lets in one browser, which may use it again (a reload, a reopened pane), and no other. Requests go room → host's stream → the host's plugin (`sh` + `curl` against localhost, only ports it shared) → `POST proxy/<id>` back.
   - `npx wrangler dev` runs the Worker locally (real Durable Objects and WebSockets); point the e2e at it with `EXTERNAL_SERVER=1 SHARE_SERVER=http://127.0.0.1:8787`.
+- **The public server.** The plugin shares through `SERVER_URL` (`plugin/hooks/server.ts`) unless its `server` option or `SHARED_SESSION_SERVER` says otherwise. Running it:
+  - **Costs** are bounded by `LIMITS` in `server/core.mjs` (enforced on Cloudflare by the `[[ratelimits]]` bindings in `wrangler.toml`, which must say the same), `ROOM_SEATS_MAX`, `ROOM_FILES_MAX` and the 24 h expiry. Cloudflare has no hard spending cap; a person sets a budget alert in the dashboard (Billing → Budget alerts).
+  - **Stop new rooms at once:** `npx wrangler deploy --var NEW_ROOMS:off` (joining existing links keeps working); deploy again without it to reopen.
+  - **End an abused room:** `curl -X POST -H "Authorization: Bearer $ADMIN_TOKEN" <server>/api/admin/rooms/<id>/end`, with the token set by `npx wrangler secret put ADMIN_TOKEN` (Node: the `ADMIN_TOKEN` environment variable).
+  - **What it may say it keeps** is on its home page (`homePage` in `server/core.mjs`) and in the README's "Privacy and the public server": change both with any change to what's stored or for how long.
 - **Never commit `rooms.json`.** It holds room tokens; it is git-ignored.

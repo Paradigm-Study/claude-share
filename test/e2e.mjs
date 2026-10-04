@@ -179,6 +179,8 @@ try {
   // share or join, and is told the command that updates it.
   const outdated = await fetch(`${SERVER}/api/rooms`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: 'old', title: 'old' }) })
   const outdatedBody = await outdated.json().catch(() => ({}))
+  const home = await fetch(`${SERVER}/`).then(r => r.text()).catch(() => '')
+  check("the server's page says how to install and what it keeps", home.includes('claude plugin install shared-session@claude-share') && home.includes('What this server sees and keeps'))
   check('an out-of-date plugin is told how to update', outdated.status === 426 && String(outdatedBody.error).includes('claude plugin update shared-session@claude-share'), `HTTP ${outdated.status}`)
 
   // Scott's session: a normal session with some history, then Share.

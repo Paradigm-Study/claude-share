@@ -29,8 +29,16 @@ import {
   token,
   missingPage,
   previewMissing,
+  homePage,
   outdatedClient,
   versionInfo,
+  limitOf,
+  limitedResponse,
+  closedResponse,
+  busyResponse,
+  Windows,
+  ROOMS_PER_ADDRESS_DAY,
+  ROOMS_PER_DAY,
 } from './core.mjs'
 
 const ROOM_TTL_MS = 24 * 60 * 60 * 1000
@@ -69,14 +77,23 @@ export default {
 
     if (url.pathname === '/api/health') return json({ ok: true })
     if (url.pathname === '/api/version') return versionInfo()
+    if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/privacy')) return homePage(origin)
 
     let id
     let rest
     if (req.method === 'POST' && url.pathname === '/api/rooms') {
       const outdated = outdatedClient(req)
       if (outdated) return outdated
+      if (env.NEW_ROOMS === 'off') return closedResponse()
+      // The rate-limit binding below is loose (cached counts let a burst
+      // through); the gate counts new rooms exactly, per address and per day.
+      const gate = env.GATE ? await env.GATE.get(env.GATE.idFromName('gate')).fetch('https://gate.internal/', { method: 'POST', body: JSON.stringify({ ip: req.headers.get('cf-connecting-ip') ?? 'unknown', max: Number(env.MAX_ROOMS_PER_DAY) || ROOMS_PER_DAY }) }).then(r => r.json()).catch(() => ({ ok: true })) : { ok: true }
+      if (!gate.ok) return gate.reason === 'day' ? busyResponse() : limitedResponse('create')
       id = token(16)
       rest = 'create'
+    } else if (req.method === 'POST' && parts[0] === 'api' && parts[1] === 'admin' && parts[2] === 'rooms' && parts.length === 5 && parts[4] === 'end') {
+      id = parts[3]
+      rest = 'admin-end'
     } else if (parts[0] === 's' && parts.length === 2) {
       id = parts[1]
       rest = 'page'
@@ -87,6 +104,9 @@ export default {
       return notFound()
     }
     if (!ROOM_ID.test(id)) return notFound()
+    const limit = limitOf(req, id, rest, req.headers.get('cf-connecting-ip') ?? 'unknown')
+    const limiter = limit && { create: env.CREATE_LIMIT, join: env.JOIN_LIMIT, events: env.EVENTS_LIMIT }[limit.kind]
+    if (limiter && !(await limiter.limit({ key: limit.key })).success) return limitedResponse(limit.kind)
 
     const stub = env.ROOMS.get(env.ROOMS.idFromName(id))
     const headers = new Headers(req.headers)
@@ -143,8 +163,9 @@ async function bridge(stub, id, url, headers) {
 }
 
 export class RoomObject {
-  constructor(state) {
+  constructor(state, env) {
     this.state = state
+    this.env = env
     this.room = null
     this.savedSeq = 0
     // A socket stays in getWebSockets() while its close is being handled.
@@ -233,7 +254,8 @@ export class RoomObject {
       return response
     }
 
-    const ctx = { previewOrigin: req.headers.get('x-preview-origin') ?? '' }
+    const admin = Boolean(this.env?.ADMIN_TOKEN) && req.headers.get('authorization') === `Bearer ${this.env.ADMIN_TOKEN}`
+    const ctx = { previewOrigin: req.headers.get('x-preview-origin') ?? '', admin }
     const { response, changed } = await roomRequest(this.room, req, rest, now, origin, ctx)
     if (changed) await this.persist()
     return response
@@ -345,5 +367,33 @@ export class RoomObject {
     if (this.room.sweep(now)) await this.persist()
     this.broadcast() // seats that left, and the host coming and going
     await this.schedule()
+  }
+}
+
+// Counts new rooms exactly: per address this minute and today, and for the
+// whole server today (kept in storage, so a restart doesn't reset the day).
+// Only a Share reaches it, so it costs one request per room made.
+export class GateObject {
+  constructor(state) {
+    this.state = state
+    this.minute = new Windows()
+    this.addresses = new Map() // ip → rooms today
+    this.day = { key: '', count: 0 }
+  }
+
+  async fetch(req) {
+    const { ip, max } = await req.json()
+    const now = Date.now()
+    const key = new Date(now).toISOString().slice(0, 10)
+    if (this.day.key !== key) {
+      this.day = { key, count: (await this.state.storage.get(`day:${key}`)) ?? 0 }
+      this.addresses.clear()
+    }
+    if (this.day.count >= max) return json({ ok: false, reason: 'day' })
+    if ((this.addresses.get(ip) ?? 0) >= ROOMS_PER_ADDRESS_DAY || !this.minute.hit('create', ip, now)) return json({ ok: false, reason: 'address' })
+    this.addresses.set(ip, (this.addresses.get(ip) ?? 0) + 1)
+    this.day.count += 1
+    await this.state.storage.put(`day:${key}`, this.day.count)
+    return json({ ok: true })
   }
 }

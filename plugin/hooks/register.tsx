@@ -24,6 +24,7 @@ import type { Face } from './look'
 import { rowsFromMessage, rowsToMarkdown, splitSpeaker, summarizeTool } from './rows'
 import type { Row } from './rows'
 import { SERVER_URL } from './server'
+import { readsInside } from './paths'
 
 type $ = EngineInterface
 type UI = Elements[RenderSurface]
@@ -316,7 +317,7 @@ function send($: $, type: string, body: Record<string, unknown>) {
   } else {
     outbox.push({ type, body })
   }
-  scheduleFlush($, type === 'delta' ? 120 : 30)
+  scheduleFlush($, type === 'delta' ? 250 : 30)
   if (type !== 'delta') {
     void $.clock.now().then(now => {
       lastActivity = now
@@ -815,7 +816,7 @@ function describePolicy(policy: SharePolicy): string {
 function describePolicyCore(policy: SharePolicy): string {
   const prompts = policy.prompts === 'watch' ? 'watch-only' : 'everyone can prompt'
   const approvals =
-    policy.approvals === 'none' ? 'no approvals' : policy.approvals === 'all' ? 'every tool needs approval' : 'edits and commands need approval'
+    policy.approvals === 'none' ? 'no approvals' : policy.approvals === 'all' ? 'every tool needs approval' : 'anything beyond reading the project needs approval'
   return `${prompts}, ${approvals}`
 }
 
@@ -1781,7 +1782,7 @@ function joinFailure(error: unknown, server: string): string {
 function rulesLine(policy: SharePolicy, host: string): string {
   if (policy.prompts === 'watch') return `◎ Watch-only: you follow along and chat; ${host} prompts Claude`
   const asks =
-    policy.approvals === 'none' ? 'nothing asks first' : policy.approvals === 'all' ? `every tool asks ${host} first` : `edits and commands ask ${host} first`
+    policy.approvals === 'none' ? 'nothing asks first' : policy.approvals === 'all' ? `every tool asks ${host} first` : `anything beyond reading the project asks ${host} first`
   return `✎ Everyone can prompt · ${asks}`
 }
 
@@ -2207,7 +2208,7 @@ export const register: Register = (on, options) => {
     if (!working?.byGuest) return verdict
     const policy = await read($, policyA)
     if (policy.approvals === 'none') return verdict
-    if (policy.approvals === 'edits' && READ_ONLY.has(e.tool)) return verdict
+    if (policy.approvals === 'edits' && READ_ONLY.has(e.tool) && readsInside(e.tool, (e.input ?? {}) as Record<string, unknown>, await $.session.cwd())) return verdict
     // "Always allow" is the host's answer for this person's later calls too, so
     // it settles them the way "Allow once" settles one, not back to the host's
     // own permission prompt.
@@ -2599,7 +2600,7 @@ export const register: Register = (on, options) => {
                         key="policy-approvals"
                         value={v.policy.approvals}
                         options={[
-                          { value: 'edits', label: 'Edits, commands and web' },
+                          { value: 'edits', label: 'Anything but reading this project' },
                           { value: 'all', label: 'Every tool, reads too' },
                           { value: 'none', label: 'Nothing' },
                         ]}

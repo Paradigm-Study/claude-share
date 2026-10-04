@@ -25,7 +25,8 @@ const MAX_BODY = 512_000
 // Files the host's Claude shows (a page, an image, a widget too big for an
 // event): kept by the room, read with a member's token, gone with the room.
 const FILE_MAX = 10 * 1024 * 1024
-const ROOM_FILES_MAX = 100 * 1024 * 1024
+const ROOM_FILES_MAX = 50 * 1024 * 1024
+export const ROOM_SEATS_MAX = 20 // people in one room besides the host
 // Previews: a guest's browser asks the room, the room asks the host's stream,
 // the host's plugin asks its own localhost and posts the answer back.
 const TICKET_MS = 10 * 60_000 // long enough to click from a transcript; one browser only
@@ -73,6 +74,7 @@ export class Room {
     this.events = data.events ?? []
     this.seats = new Map(Object.entries(data.seats ?? {}))
     this.live = []
+    this.posts = new Windows() // posts this minute, counted exactly here
     this.waiters = new Set()
     this.files = new Map(Object.entries(data.files ?? {})) // id → { id, name, type, size, ts }
     this.previews = new Map(Object.entries(data.previews ?? {})) // pid → { pid, port, title, ts }
@@ -305,6 +307,52 @@ export function outdatedClient(req) {
 
 export const versionInfo = () => json({ latest: PLUGIN_LATEST, min: PLUGIN_MIN, update: UPDATE_COMMAND })
 
+// What a public server limits, so a busy day stays affordable and one person
+// can't flood it: rooms made and joins per network address, posts per room.
+// Cloudflare counts with its rate-limit bindings (wrangler.toml); the Node
+// server with an in-memory window of the same size.
+export const LIMITS = {
+  create: { limit: 6, periodMs: 60_000, message: 'Too many new shared sessions from your network. Try again in a minute.' },
+  join: { limit: 30, periodMs: 60_000, message: 'Too many joins from your network. Try again in a minute.' },
+  events: { limit: 900, periodMs: 60_000, message: 'This session is sending too fast; slowing down.' },
+}
+export const limitedResponse = kind => json({ error: LIMITS[kind].message }, 429)
+// New rooms one network address may make in a day, and the whole server: past
+// the second, sharing waits for tomorrow (or another server), joining goes on.
+export const ROOMS_PER_ADDRESS_DAY = 60
+export const ROOMS_PER_DAY = 3000
+export const busyResponse = () =>
+  json({ error: 'The public share server has made as many shared sessions as it will today. Joining links still works; to share now, run your own server (see the README).' }, 503)
+export const closedResponse = () =>
+  json({ error: 'This share server is not taking new shared sessions right now. Joining links still works; to share, run your own server (see the README).' }, 503)
+
+// Which limit a request counts against, and under what key; null for none.
+export function limitOf(req, id, rest, ip) {
+  if (req.method !== 'POST') return null
+  if (rest === 'create') return { kind: 'create', key: `c:${ip}` }
+  if (rest === 'join') return { kind: 'join', key: `j:${ip}` }
+  if (rest === 'events') return { kind: 'events', key: `e:${id}` }
+  return null
+}
+
+// The Node server's counter: one window per key.
+export class Windows {
+  constructor() {
+    this.windows = new Map()
+  }
+  hit(kind, key, now) {
+    const { limit, periodMs } = LIMITS[kind]
+    const w = this.windows.get(key)
+    if (!w || now - w.start >= periodMs) {
+      this.windows.set(key, { start: now, count: 1 })
+      if (this.windows.size > 50_000) for (const [k, v] of this.windows) if (now - v.start >= periodMs) this.windows.delete(k)
+      return true
+    }
+    w.count += 1
+    return w.count <= limit
+  }
+}
+
 // POST /api/rooms: the host's Share. Returns the room and the host's token.
 export async function createRoom(req, id, now, origin) {
   const body = await readJson(req)
@@ -358,6 +406,7 @@ async function handleRoom(room, req, rest, now, origin, ctx) {
     if (room.endedAt) return { response: json({ error: 'This session is no longer shared.' }, 410) }
     const outdated = outdatedClient(req)
     if (outdated) return { response: outdated }
+    if (room.seats.size >= ROOM_SEATS_MAX) return { response: json({ error: `This session is full: ${ROOM_SEATS_MAX} people have joined.` }, 403) }
     const body = await readJson(req)
     const { token: seatToken, seat } = room.join(body.name, now)
     return {
@@ -374,6 +423,13 @@ async function handleRoom(room, req, rest, now, origin, ctx) {
         latest: PLUGIN_LATEST,
       }),
     }
+  }
+
+  // The operator ends a room (abuse): its admin token, checked by the host.
+  if (rest === 'admin-end' && method === 'POST') {
+    if (!ctx.admin) return { response: json({ error: 'Not found' }, 404) }
+    room.end(now)
+    return { changed: true, response: json({ ok: true }) }
   }
 
   const auth = room.auth(bearerOf(req))
@@ -411,6 +467,7 @@ async function handleRoom(room, req, rest, now, origin, ctx) {
 
   if (rest === 'events' && method === 'POST') {
     if (room.endedAt) return { response: json({ error: 'This session is no longer shared.' }, 410) }
+    if (!room.posts.hit('events', 'all', now)) return { response: limitedResponse('events') }
     const body = await readJson(req)
     const allowed = auth.role === 'host' ? HOST_TYPES : GUEST_TYPES
     const from = { seat: auth.seat, name: auth.name, role: auth.role }
@@ -631,6 +688,71 @@ const previewPage = (status, title, text) =>
     `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}</title><body style="margin:0;display:grid;place-items:center;min-height:100vh;font-family:-apple-system,Helvetica,sans-serif;background:#faf8f7;color:#011121"><div style="max-width:420px;padding:24px;text-align:center"><h1 style="font-weight:400;font-size:26px">${title}</h1><p style="color:#4b5563">${text}</p></div>`,
     { status, headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' } },
   )
+
+// The server's own front page: what this is, the one-line install, and what
+// the server sees and keeps (the disclosure a public server owes its users).
+export function homePage(origin) {
+  const install = 'claude plugin marketplace add Paradigm-Study/claude-share && claude plugin install shared-session@claude-share'
+  const html = `<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Shared Sessions for Claude Code</title>
+<meta name="description" content="Share a Claude Code session with a link. Teammates join from their own Claude Code and work in it together.">
+<meta property="og:title" content="Shared Sessions for Claude Code">
+<meta property="og:description" content="Share a Claude Code session with a link. Teammates join from their own Claude Code and work in it together.">
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@500;600&family=Gowun+Batang:wght@400;700&display=swap" rel="stylesheet">
+<style>
+${PAGE_CSS}
+.prose { max-width:64ch; color:var(--muted); font-size:15px; line-height:1.6; }
+.prose h2 { font-family:var(--display); font-weight:400; font-size:26px; color:var(--ink); margin:0 0 12px; }
+.prose ul { padding-left:18px; margin:10px 0; } .prose li { margin:6px 0; }
+.prose b { color:var(--ink); font-weight:600; }
+.prose a { color:var(--accent-ink); text-decoration:underline; text-underline-offset:2px; }
+.install { max-width:640px; margin-top:28px; }
+.install .composer code { white-space:normal; overflow-wrap:anywhere; }
+section.more { padding:0 0 72px; }
+</style></head>
+<body>
+<header class="wrap nav">
+  <a class="brand" href="/"><svg viewBox="0 0 500 500" aria-hidden="true">${LOGO_PATHS}</svg><span class="word">Paradigm</span><span class="sub">Shared sessions</span></a>
+  <a class="btn-ghost" href="https://github.com/Paradigm-Study/claude-share">GitHub</a>
+</header>
+<main class="wrap">
+  <section class="hero" style="grid-template-columns:minmax(0,1fr);padding-bottom:56px">
+    <div>
+      <span class="eyebrow">A Claude Code plugin</span>
+      <h1>Share a Claude Code session with a link</h1>
+      <p class="sub-copy">Teammates join from their own Claude Code and talk to it. One session does the work, everyone sees every turn as it streams, and the host approves what runs on their machine.</p>
+      <div class="install">
+        <div class="composer"><span class="slash">$</span><code id="install">${install}</code><button id="copy" title="Copy" aria-label="Copy install command"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2.5"/><path d="M5 15V6a2 2 0 0 1 2-2h9"/></svg></button></div>
+        <p class="status">Then start a new session and press <b>Share</b> above the prompt (or type /share-session). Requires Claude Code 2.1.286 or later.</p>
+      </div>
+    </div>
+  </section>
+  <section class="more prose" id="privacy">
+    <h2>What this server sees and keeps</h2>
+    <ul>
+      <li><b>What passes through:</b> while a session is shared, its prompts, Claude's replies, the tools it runs with the first lines of their results, the side chat, and any files or local previews the host's Claude shows. Sharing a session that already has history asks first whether to include it.</li>
+      <li><b>How long:</b> a room and everything in it is deleted 24 hours after the host stops sharing or was last seen. There are no accounts, no analytics, and no request logs kept.</li>
+      <li><b>Who can see it:</b> anyone with the room's link. Links are long and random; forward one only to people you'd hand the session to. Content is encrypted in transit, not end to end: the server can read what passes through it.</li>
+      <li><b>What runs where:</b> a teammate's prompt runs on the host's machine. Reads inside the host's project run without asking; everything else asks the host first, by default.</li>
+      <li><b>Limits:</b> new rooms and joins are rate-limited per network, rooms hold up to 20 people and 50 MB of files. Rooms that are abused get ended.</li>
+      <li><b>Your own server:</b> teams that want their sessions on their own infrastructure can run the same server on Cloudflare or Node in a few minutes (<a href="https://github.com/Paradigm-Study/claude-share#host-a-server">how</a>), and set it in the plugin.</li>
+    </ul>
+    <p>Questions or abuse reports: open an issue on <a href="https://github.com/Paradigm-Study/claude-share/issues">GitHub</a>.</p>
+  </section>
+</main>
+<footer class="wrap"><q>Everyone in one session, Claude in the middle.</q></footer>
+<script>
+document.getElementById('copy').addEventListener('click', function () {
+  var code = document.getElementById('install'); var text = code.textContent;
+  navigator.clipboard.writeText(text).then(function () { code.textContent = 'Copied. Paste it in a terminal.'; setTimeout(function () { code.textContent = text; }, 1600); });
+});
+</script>
+</body></html>`
+  return new Response(html, { headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'public, max-age=300' } })
+}
 
 // A link to a room that isn't here (ended long ago and swept, or mistyped):
 // the landing page's look, and what to do.
