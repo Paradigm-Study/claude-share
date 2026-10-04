@@ -1805,6 +1805,30 @@ const selectOf = (el: UI) => ('Select' in el ? el.Select : undefined)
 
 // ---------------------------------------------------------------------------
 
+// /share-session: shares, or in a session with earlier prompts asks first.
+async function shareCommand($: $, e: { args: string }): Promise<{ text: string }> {
+  const choice = e.args.trim().toLowerCase()
+  try {
+    if ((await read($, modeA)) === 'idle' && choice !== 'all' && choice !== 'new') {
+      const prompts = await earlierPrompts($)
+      if (prompts > 0) {
+        return {
+          text: [
+            `This session has ${prompts} earlier prompt${prompts === 1 ? '' : 's'}. Everyone with the link would see them, and Claude's replies.`,
+            '',
+            '- `/share-session all` shares the session as it is',
+            '- `/share-session new` shares only what happens from now on',
+          ].join('\n'),
+        }
+      }
+    }
+    const room = await share($, undefined, { history: choice !== 'new' })
+    return { text: `Sharing this session${choice === 'new' ? ' from now on' : ''}. Anyone with the link can join: ${room.url}` }
+  } catch (error) {
+    return { text: `Couldn't share: ${String((error as Error)?.message ?? error)}` }
+  }
+}
+
 export const register: Register = (on, options) => {
   configuredServer = typeof options.server === 'string' ? options.server : ''
 
@@ -1830,28 +1854,11 @@ export const register: Register = (on, options) => {
     return next(e)
   })
 
-  on('command.run', { command: 'share-session' }, async ($, e) => {
-    const choice = e.args.trim().toLowerCase()
-    try {
-      if ((await read($, modeA)) === 'idle' && choice !== 'all' && choice !== 'new') {
-        const prompts = await earlierPrompts($)
-        if (prompts > 0) {
-          return {
-            text: [
-              `This session has ${prompts} earlier prompt${prompts === 1 ? '' : 's'}. Everyone with the link would see them, and Claude's replies.`,
-              '',
-              '- `/share-session all` shares the session as it is',
-              '- `/share-session new` shares only what happens from now on',
-            ].join('\n'),
-          }
-        }
-      }
-      const room = await share($, undefined, { history: choice !== 'new' })
-      return { text: `Sharing this session${choice === 'new' ? ' from now on' : ''}. Anyone with the link can join: ${room.url}` }
-    } catch (error) {
-      return { text: `Couldn't share: ${String((error as Error)?.message ?? error)}` }
-    }
-  })
+  // Both names: the markdown fallback (commands/share-session.md) is listed
+  // under the plugin-qualified one, and here, where this module loaded, it
+  // never reaches the model.
+  on('command.run', { command: 'share-session' }, ($, e) => shareCommand($, e))
+  on('command.run', { command: 'shared-session:share-session' }, ($, e) => shareCommand($, e))
 
   on('command.run', { command: 'room' }, async $ => {
     if ((await read($, modeA)) === 'idle') return { text: 'This session is not shared. Press Share above the prompt, or type /share-session.' }
