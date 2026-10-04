@@ -175,6 +175,12 @@ try {
   if (!process.env.EXTERNAL_SERVER) startServer()
   await until('server', async () => (await fetch(`${SERVER}/api/health`).catch(() => null))?.ok)
 
+  // A plugin older than the server's minimum (or one that doesn't say) can't
+  // share or join, and is told the command that updates it.
+  const outdated = await fetch(`${SERVER}/api/rooms`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: 'old', title: 'old' }) })
+  const outdatedBody = await outdated.json().catch(() => ({}))
+  check('an out-of-date plugin is told how to update', outdated.status === 426 && String(outdatedBody.error).includes('claude plugin update shared-session@claude-share'), `HTTP ${outdated.status}`)
+
   // Scott's session: a normal session with some history, then Share.
   const host = session('Scott', hostDir, ['--permission-mode', 'bypassPermissions', '--allow-dangerously-skip-permissions'])
   host.say('Read README.md and tell me the secret word in one word.')
@@ -222,6 +228,18 @@ try {
   check('the host never sees context from Alex\'s app', !hostTranscript.includes('GUEST-ONLY-CONTEXT'))
   await until('answer streamed into the guest', () => assistantText(guest).some(t => /\b51\b/.test(t)), 30_000)
   check('guest sees the answer as a normal reply', true)
+
+  // A host turn that goes quiet for longer than a step's 10 s budget (a slow
+  // tool, a long think): the guest still shows it, never answering it itself.
+  const quiet = host.lines.length
+  host.say('Use the Bash tool to run `sleep 15`, then reply with just the word lantern.')
+  await until('host ran the quiet turn', () => host.lines.slice(quiet).some(l => l.type === 'result' && /lantern/i.test(l.result ?? '')), 120_000).catch(() => null)
+  await until('guest shows the quiet turn', () => assistantText(guest).some(t => /lantern/i.test(t)), 30_000).catch(() => null)
+  check(
+    'a host turn quiet for over 10 s plays in the guest, not its own model',
+    assistantText(guest).some(t => /lantern/i.test(t)) && guest.lines.filter(l => l.type === 'result').every(l => !(l.total_cost_usd > 0)),
+    guest.lines.filter(l => l.type === 'result').map(l => l.total_cost_usd).join(','),
+  )
 
   // The host's own prompts play out in the guest too.
   host.say('Say the word "pineapple" and nothing else.')

@@ -16,7 +16,7 @@
 // a side chat Claude never reads, and the host's controls).
 
 import { atom, read, update } from 'claude-code'
-import type { Elements, EngineInterface, HookStream, ProcessSpawnChunk, ProcessSpawnResult, Register, RenderSurface, Timer, TurnStepChunk } from 'claude-code'
+import type { Elements, EngineInterface, HookStream, ProcessSpawnChunk, ProcessSpawnResult, Register, RenderChildren, RenderSurface, Timer, TurnStepChunk } from 'claude-code'
 
 import type { ShareActivity, ShareChat, ShareFileMeta, ShareMode, SharePerson, SharePolicy, ShareRoom, ShareShown, ShareWorking } from '../types'
 import { ACCENT, BAD, GOOD, ROSE, ago, avatarSvg, bannerSvg, labelsFor, stackSvg, toolGlyph } from './look'
@@ -83,6 +83,8 @@ const autoOpenA = atom({ plugin: 'shared-session', key: 'autoOpen' } as const, t
 const askingA = atom({ plugin: 'shared-session', key: 'asking' } as const, null as { prompts: number } | null)
 const connectionA = atom({ plugin: 'shared-session', key: 'connection' } as const, 'live' as 'live' | 'reconnecting')
 const confirmingA = atom({ plugin: 'shared-session', key: 'confirming' } as const, null as 'stop' | null)
+const newerA = atom({ plugin: 'shared-session', key: 'newer' } as const, null as string | null)
+const updatesA = atom({ plugin: 'shared-session', key: 'updates' } as const, null as boolean | null)
 
 // Context a host app puts into the person's message (Claude Desktop adds a
 // <system-reminder> to a first prompt): not typed, and never shared.
@@ -142,6 +144,90 @@ let configuredServer = ''
 
 const NO_SERVER =
   'Sharing needs a share server, and none is set up yet. Run your own (README: "Host a server"), then set it with `/plugin configure shared-session` or the SHARED_SESSION_SERVER environment variable. Joining a link someone sent you needs nothing.'
+
+// ---------------------------------------------------------------------------
+// Updates. The plugin says its version on every request: the server turns a
+// version known to misbehave away (with the command that updates it) and says
+// which is newest. Claude Code installs updates by itself when the marketplace
+// has `autoUpdate` on, which the Room's Updates setting turns on.
+
+const MARKETPLACE = 'claude-share'
+const MARKETPLACE_SOURCE = { source: 'github', repo: 'Paradigm-Study/claude-share' }
+const UPDATE_COMMAND = 'claude plugin marketplace update claude-share && claude plugin update shared-session@claude-share'
+let pluginVersion: string | undefined
+
+async function ownVersion($: $): Promise<string> {
+  if (pluginVersion === undefined) {
+    try {
+      pluginVersion = String(JSON.parse(await $.fs.read(`${$.plugin.root}/.claude-plugin/plugin.json`)).version ?? '')
+    } catch {
+      pluginVersion = ''
+    }
+  }
+  return pluginVersion
+}
+
+function newerThan(a: string, b: string): boolean {
+  const x = a.split('.').map(n => Number.parseInt(n, 10) || 0)
+  const y = b.split('.').map(n => Number.parseInt(n, 10) || 0)
+  for (let i = 0; i < Math.max(x.length, y.length); i++) if ((x[i] ?? 0) !== (y[i] ?? 0)) return (x[i] ?? 0) > (y[i] ?? 0)
+  return false
+}
+
+// What the server said is newest: noted once, and shown in the Room.
+async function noteLatest($: $, latest: unknown) {
+  const mine = await ownVersion($)
+  if (typeof latest !== 'string' || !mine || !newerThan(latest, mine) || (await read($, newerA)) === latest) return
+  await update($, newerA, () => latest)
+  const auto = await read($, updatesA)
+  $.ui.log(
+    auto
+      ? `Shared Sessions ${latest} is out (this session runs ${mine}). Claude Code installs it by itself; new sessions get it.`
+      : `Shared Sessions ${latest} is out (this session runs ${mine}). Turn on Updates in the Room, or run: ${UPDATE_COMMAND}`,
+  )
+}
+
+async function settingsFile($: $): Promise<string | null> {
+  const home = await $.env.get('HOME')
+  return home ? `${home}/.claude/settings.json` : null
+}
+
+// Whether the marketplace auto-updates, from the person's settings.
+async function readUpdates($: $) {
+  const path = await settingsFile($)
+  let on: boolean | null = null
+  try {
+    if (path) on = JSON.parse(await $.fs.read(path))?.extraKnownMarketplaces?.[MARKETPLACE]?.autoUpdate === true
+  } catch {
+    on = path && !(await $.fs.exists(path).catch(() => true)) ? false : null
+  }
+  await update($, updatesA, () => on)
+}
+
+// The Room's Updates setting: the marketplace's `autoUpdate` in the person's
+// own settings, everything else there left as it was.
+async function writeUpdates($: $, on: boolean) {
+  const path = await settingsFile($)
+  if (!path) return
+  let settings: Record<string, unknown> = {}
+  try {
+    if (await $.fs.exists(path)) settings = JSON.parse(await $.fs.read(path))
+  } catch {
+    $.ui.toast("Couldn't read ~/.claude/settings.json, so nothing changed")
+    return
+  }
+  const known = (settings.extraKnownMarketplaces ?? {}) as Record<string, Record<string, unknown>>
+  const entry = known[MARKETPLACE] ?? { source: MARKETPLACE_SOURCE }
+  settings.extraKnownMarketplaces = { ...known, [MARKETPLACE]: { ...entry, autoUpdate: on } }
+  try {
+    await $.fs.write(path, `${JSON.stringify(settings, null, 2)}\n`)
+  } catch {
+    $.ui.toast('Couldn\'t change it here: use /plugin → Marketplaces → claude-share')
+    return
+  }
+  await update($, updatesA, () => on)
+  $.ui.toast(on ? 'Updates: automatic' : 'Updates: manual')
+}
 
 // Where Share creates rooms: the plugin's option, the environment, or the
 // build's default, in that order.
@@ -206,6 +292,8 @@ async function api<T>(
 ): Promise<T> {
   const headers: Record<string, string> = { 'content-type': 'application/json' }
   if (init.token) headers.authorization = `Bearer ${init.token}`
+  const version = await ownVersion($)
+  if (version) headers['x-shared-session-version'] = version
   const res = await $.http.fetch(`${server}${path}`, {
     method: init.method ?? 'GET',
     headers,
@@ -431,21 +519,26 @@ async function streamPage($: $, generation: number, page: EventsPage) {
   wakeFeedWaiters()
 }
 
+// A wait inside a riding turn that its step's budget doesn't pay for. Each
+// turn.step dispatch may spend 10 s of its own time, and past that the engine
+// calls the model in its place; the clock stops while a $ call is in flight,
+// but not for a plain timer (nor $.clock.sleep), and a host's Claude can think
+// for much longer than 10 s before a word arrives. So waits are `sleep`s.
+async function pause($: $, ms: number) {
+  try {
+    await $.process.run(['sleep', (ms / 1000).toFixed(2)], { timeoutMs: ms + 2_000 })
+  } catch {
+    await new Promise<void>(resolve => $.clock.after(ms, resolve))
+  }
+}
+
 // What a riding turn reads next: from the stream when it is up and reaches
 // back far enough, else one short poll of its own.
 async function ridePage($: $, room: ShareRoom, cursor: number): Promise<EventsPage> {
   if (streamUp && cursor >= streamFloor) {
     const after = () => streamed.filter(e => e.seq > cursor)
-    if (after().length === 0 && !streamEnded) {
-      await new Promise<void>(resolve => {
-        const done = () => {
-          feedWaiters.delete(done)
-          resolve()
-        }
-        feedWaiters.add(done)
-        $.clock.after(RIDE_WAIT_MS, done)
-      })
-    }
+    const until = (await $.clock.now()) + RIDE_WAIT_MS
+    while (after().length === 0 && !streamEnded && streamUp && (await $.clock.now()) < until) await pause($, 150)
     const events = after()
     return { seq: Math.max(cursor, ...events.map(e => e.seq)), events, people: await read($, peopleA), ended: streamEnded, title: room.title }
   }
@@ -846,7 +939,7 @@ async function share($: $, surface?: RenderSurface, opts: { history?: boolean } 
   const folder = cwd.split('/').filter(Boolean).at(-1) ?? 'session'
   const title = firstPrompt ? `${folder}: ${(firstPrompt.split('\n')[0] ?? '').slice(0, 80)}` : folder
 
-  const created = await api<{ id: string; url: string; token: string; seq: number; title: string }>(
+  const created = await api<{ id: string; url: string; token: string; seq: number; title: string; latest?: string }>(
     $,
     server,
     '/api/rooms',
@@ -865,6 +958,7 @@ async function share($: $, surface?: RenderSurface, opts: { history?: boolean } 
   }
   await update($, roomA, () => room)
   await update($, modeA, () => 'host')
+  void noteLatest($, created.latest)
   await update($, peopleA, () => [{ id: 'host', name, role: 'host', online: true }])
 
   // What happened before Share, so people who join see the whole session.
@@ -879,6 +973,12 @@ async function share($: $, surface?: RenderSurface, opts: { history?: boolean } 
   )
   await markSidebar($, current => `👥 Live · ${current || room.title}`)
   return room
+}
+
+async function copyText($: $, text: string, done: string, surface?: RenderSurface) {
+  const copied = await $.ui.copy({ text, surface }).catch(() => ({ isCopied: false }))
+  if (copied.isCopied) $.ui.toast(done)
+  else $.ui.log(text)
 }
 
 async function copyLink($: $, url: string, surface?: RenderSurface) {
@@ -970,7 +1070,9 @@ async function join($: $, server: string, id: string) {
     seq: number
     history: ServerEvent[]
     people: SharePerson[]
+    latest?: string
   }>($, server, `/api/rooms/${id}/join`, { method: 'POST', body: { name } })
+  void noteLatest($, joined.latest)
   const room: ShareRoom = {
     server,
     id,
@@ -1454,6 +1556,8 @@ function sameArgs(given: string, actual: unknown): boolean {
 // Guest: the calls riding turns made, by tool_use_id, and whether this
 // plugin may approve them itself (everything but a public link).
 const rideCalls = new Map<string, { name: string; input: string; approve: boolean }>()
+// Guest: the ride each running turn is showing, while it shows it.
+const liveRuns = new Map<string, RideRun>()
 const ridesInStep = new Map<string, RideRun>()
 
 type RideState = {
@@ -1701,6 +1805,7 @@ export const register: Register = (on, options) => {
     await $.command.register({ name: 'room', description: 'Open the Room: who is here, activity, side chat' })
     await $.command.register({ name: 'share-file', description: 'Show a file to everyone in the shared session: /share-file <path>' })
     await $.command.register({ name: 'share-preview', description: "Let teammates open this machine's localhost: /share-preview <port> [title]" })
+    void readUpdates($)
     // A reload keeps $.state: pick the room back up.
     const room = await read($, roomA)
     if (room && (await read($, modeA)) !== 'idle') startFeed($)
@@ -1870,6 +1975,7 @@ export const register: Register = (on, options) => {
     } else {
       const ride = ridesByTurn.get(e.turnId)
       ridesInStep.delete(e.turnId)
+      liveRuns.delete(e.turnId)
       if (ride) {
         ridesByTurn.delete(e.turnId)
         localTurnActive = false
@@ -1913,6 +2019,7 @@ export const register: Register = (on, options) => {
                 : room.seq,
         }
         ridesInStep.delete(e.turnId)
+        liveRuns.set(e.turnId, run)
         const state = run.state
         const refused = run.lastCall ? refusedCalls.get(run.lastCall.id) : undefined
         if (run.lastCall && refused !== undefined) {
@@ -1954,7 +2061,7 @@ export const register: Register = (on, options) => {
             // A server that refuses at once must not be asked again at once:
             // back off, up to 10 s, so a stuck ride can't flood it.
             run.failures = (run.failures ?? 0) + 1
-            await new Promise<void>(resolve => $.clock.after(Math.min(10_000, 250 * 2 ** run.failures!), resolve))
+            await pause($, Math.min(10_000, 250 * 2 ** run.failures!))
             continue
           }
           for (const event of page.events) {
@@ -2011,6 +2118,28 @@ export const register: Register = (on, options) => {
       yield chunk
     }
     return await stream.result
+  }).catch(async function* ($, e, next) {
+    // A step of this hook threw or outran its budget. The engine would run
+    // the model in its place: in a guest that answers the host's prompt with
+    // this person's own Claude, on this machine. Never: end the turn here,
+    // and let the host turn it was showing play again, whole, after it.
+    if ((await read($, modeA)) !== 'guest' || e.agentId !== undefined) return yield* next(e)
+    const ride = ridesByTurn.get(e.turnId)
+    const run = liveRuns.get(e.turnId)
+    liveRuns.delete(e.turnId)
+    ridesInStep.delete(e.turnId)
+    const current = run?.state.current
+    if (current) {
+      current.shown = false
+      current.claimed = false
+    }
+    if (ride?.kind === 'own') ownPending.delete(ride.pid)
+    $.ui.log(`Shared session: a riding step failed (${next.error.kind}${next.error.message ? `: ${next.error.message}` : ''})`, { to: 'debug' })
+    const room = await read($, roomA)
+    const note = e.index === 0 || current ? `\n\n_Lost the thread of ${room?.host ?? 'the host'}'s reply here; it plays again below._` : ''
+    if (note) yield { kind: 'text', index: 0, text: note } satisfies TurnStepChunk
+    yield { kind: 'stop', stopReason: 'end_turn', usage: null } satisfies TurnStepChunk
+    return { turnId: e.turnId, index: e.index, answer: note, toolUses: [], stopReason: 'end_turn', usage: null }
   })
 
   // Host: every row the conversation keeps goes to the room.
@@ -2214,30 +2343,43 @@ export const register: Register = (on, options) => {
   })
 
   // The Room: who's here, the side chat, what was shown, what happened, and
-  // the settings, in that order; the one button that ends it last.
+  // the settings, in that order; the one button that ends it last. Plain rows
+  // in the app's own type, grouped by space, with the meta on the right.
   on('ui.render', { component: 'Pane', requestId: ROOM }, async ($, e) => {
     const el = $.ui.resolve(e)
-    const { Box, Text, Button, Link } = el
+    const { Box, Text, Button } = el
     const Svg = svgOf(el)
     const Input = inputOf(el)
     const Select = selectOf(el)
     const v = await view($)
     const room = v.room
-    const section = (title: string, note?: string) => (
-      <Box flexDirection="row" gap={1}>
-        <Text bold dimColor>
-          {title}
-        </Text>
-        {note ? <Text dimColor>{note}</Text> : null}
+    // A section: its name, what it holds on the right, then its rows.
+    const section = (key: string, title: string, meta: string, rows: RenderChildren) => (
+      <Box key={key} flexDirection="column" gap={1}>
+        <Box flexDirection="row" justifyContent="space-between" alignItems="center">
+          <Text bold>{title}</Text>
+          {meta ? <Text dimColor>{meta}</Text> : null}
+        </Box>
+        {rows}
       </Box>
     )
+    // A setting: its name in a fixed column, the picker beside it.
+    const setting = (label: string, picker: RenderChildren) => (
+      <Box flexDirection="row" alignItems="center" gap={1}>
+        <Box width="40%" flexShrink={0}>
+          <Text dimColor>{label}</Text>
+        </Box>
+        <Box flexGrow={1}>{picker}</Box>
+      </Box>
+    )
+
     if (v.mode === 'idle' || !room) {
       if (v.asking) return shareChoice($, el, v.asking.prompts, 'room')
       return (
         <Box flexDirection="column" gap={1}>
           <Text bold>This session isn't shared</Text>
-          <Text dimColor>Share it and teammates join from their own Claude Code with a link. They see the conversation live and can prompt Claude here.</Text>
-          <Box flexDirection="row">
+          <Text dimColor>Share it, and teammates join from their own Claude Code with a link. They see the conversation live and can prompt Claude here.</Text>
+          <Box flexDirection="row" marginTop={1}>
             <Button
               key="room-share"
               label="Share this session"
@@ -2248,214 +2390,282 @@ export const register: Register = (on, options) => {
         </Box>
       )
     }
+
     const now = await $.clock.now()
     const activity = await read($, activityA)
     const chat = await read($, chatA)
     const trusted = await read($, trustedA)
     const shown = await read($, shownA)
+    const newer = await read($, newerA)
+    const updates = await read($, updatesA)
     const people = faces(v)
     const online = people.filter(p => p.online).length
     const isHost = v.mode === 'host'
     const live = v.connection === 'live'
+    const updatesSetting = Select
+      ? setting(
+          'Updates',
+          <Select
+            key="updates"
+            value={updates ? 'auto' : 'manual'}
+            options={[
+              { value: 'auto', label: 'Install by themselves' },
+              { value: 'manual', label: 'Only when I update' },
+            ]}
+            onSelect={(value: string) => void writeUpdates($, value === 'auto')}
+          />,
+        )
+      : null
     const joinedAt = (name: string) => activity.find(a => a.kind === 'join' && a.who === name)?.ts
     const prompts = (name: string) => activity.filter(a => a.kind === 'prompt' && a.who === name).length
-    const detail = live ? `${isHost ? "You're sharing this session" : `Hosted by ${room.host}`} · ${online} here` : 'Reconnecting to the room…'
+    const detail = live ? `${isHost ? "You're sharing" : `Hosted by ${room.host}`} · ${online} here` : 'Reconnecting to the room…'
+    const roles = (p: Face) =>
+      [p.note?.includes('host') ? 'Host' : '', p.note?.includes('you') ? 'You' : '', p.online ? '' : 'Away'].filter(Boolean).join(' · ')
 
     return (
-      <Box flexDirection="column" gap={1}>
-        {Svg ? (
-          <Svg
-            source={bannerSvg({ title: room.title, host: room.host, live, detail, status: 'RECONNECTING' })}
-            alt={`${room.title}, hosted by ${room.host}, ${live ? 'live' : 'reconnecting'}`}
-          />
-        ) : (
-          <Box flexDirection="column">
-            <Text bold>{`${live ? '● LIVE' : '↻ RECONNECTING'}  ${room.title}`}</Text>
-            <Text dimColor>{detail}</Text>
+      <Box flexDirection="column" gap={2}>
+        <Box flexDirection="column" gap={1}>
+          {Svg ? (
+            <Svg
+              source={bannerSvg({ title: room.title, host: room.host, live, detail, status: 'RECONNECTING' })}
+              alt={`${room.title}, hosted by ${room.host}, ${live ? 'live' : 'reconnecting'}`}
+            />
+          ) : (
+            <Box flexDirection="column">
+              <Text bold>{room.title}</Text>
+              <Text dimColor>{`${live ? '● Live' : '↻ Reconnecting'} · ${detail}`}</Text>
+            </Box>
+          )}
+          <Box flexDirection="row" alignItems="center" gap={1} borderStyle="round" borderDimColor paddingX={1}>
+            <Box flexGrow={1} flexShrink={1}>
+              <Text dimColor wrap="truncate-middle">
+                {room.url.replace(/^https?:\/\//, '')}
+              </Text>
+            </Box>
+            <Button key="room-copy" label="Copy link" plain onPress={press => void copyLink($, room.url, press.surface)} />
           </Box>
-        )}
-
-        {isHost ? null : <Text dimColor>{rulesLine(v.policy, room.host)}</Text>}
-
-        <Box flexDirection="row" gap={1} alignItems="center">
-          <Text dimColor wrap="truncate-middle">
-            {room.url}
-          </Text>
-          <Button key="room-copy" label="Copy link" onPress={press => void copyLink($, room.url, press.surface)} />
-          {/^(https:|http:\/\/(localhost|127\.0\.0\.1)(:|\/))/.test(room.url) ? <Link href={room.url} label="Open page" /> : null}
+          {isHost ? null : <Text dimColor>{rulesLine(v.policy, room.host)}</Text>}
+          {newer ? (
+            <Box flexDirection="row" gap={1} alignItems="center" justifyContent="space-between">
+              <Text dimColor>{updates ? `Version ${newer} installs by itself; new sessions get it` : `Version ${newer} is out`}</Text>
+              {updates ? null : <Button key="copy-update" label="Copy update command" plain onPress={press => void copyText($, UPDATE_COMMAND, 'Update command copied: paste it in a terminal', press.surface)} />}
+            </Box>
+          ) : null}
         </Box>
 
-        <Box flexDirection="column">
-          {section('PEOPLE', `${online} here`)}
-          {people.map(p => {
-            const joined = joinedAt(p.name)
-            const asked = prompts(p.name)
-            return (
-              <Box key={`person-${p.name}`} flexDirection="row" gap={1} alignItems="center">
-                {Svg ? (
-                  <Svg source={avatarSvg(p, 24)} alt={p.name} width={24} height={24} />
-                ) : (
-                  <Text dimColor={!p.online}>{p.online ? '●' : '○'}</Text>
-                )}
-                <Text bold={p.online} dimColor={!p.online}>
-                  {p.name}
-                </Text>
-                <Text dimColor>
-                  {[p.note, p.active ? (v.working?.waitingFor ? 'waiting for approval' : 'Claude is working for them') : '']
-                    .filter(Boolean)
-                    .join(' · ')}
-                </Text>
-                <Box position="absolute" top={-1} left={6} display="none" hover={{ display: 'flex' }} paddingX={1} backgroundColor="#011121">
-                  <Text color="#faf8f7">
-                    {[
-                      p.note?.includes('host') ? 'hosting' : joined ? `joined ${ago(joined, now)}` : 'here',
-                      asked ? `${asked} prompt${asked === 1 ? '' : 's'}` : 'no prompts yet',
-                      trusted.includes(p.name) ? 'always allowed' : '',
-                    ]
-                      .filter(Boolean)
-                      .join(' · ')}
+        {section(
+          'people',
+          'People',
+          `${online} here`,
+          <Box flexDirection="column" gap={1}>
+            {people.map(p => {
+              const joined = joinedAt(p.name)
+              const asked = prompts(p.name)
+              return (
+                <Box key={`person-${p.name}`} flexDirection="row" gap={1} alignItems="center" justifyContent="space-between">
+                  <Box flexDirection="row" gap={1} alignItems="center" flexShrink={1}>
+                    {Svg ? (
+                      <Svg source={avatarSvg(p, 24)} alt={p.name} width={24} height={24} />
+                    ) : (
+                      <Text dimColor={!p.online}>{p.online ? '●' : '○'}</Text>
+                    )}
+                    <Text bold={p.online} dimColor={!p.online} wrap="truncate-end">
+                      {p.name}
+                    </Text>
+                    {roles(p) ? <Text dimColor>{roles(p)}</Text> : null}
+                  </Box>
+                  <Text dimColor wrap="truncate-end">
+                    {p.active
+                      ? v.working?.waitingFor
+                        ? 'Waiting for approval'
+                        : 'Claude is working'
+                      : p.note?.includes('host')
+                        ? ''
+                        : [joined ? `Joined ${ago(joined, now)}` : '', asked ? `${asked} prompt${asked === 1 ? '' : 's'}` : '', trusted.includes(p.name) ? 'Always allowed' : '']
+                            .filter(Boolean)
+                            .join(' · ')}
                   </Text>
                 </Box>
-              </Box>
-            )
-          })}
-          {isHost && people.length <= 1 ? <Text dimColor>No one has joined yet. Send the link to a teammate: it opens in their Claude Code.</Text> : null}
-        </Box>
+              )
+            })}
+            {isHost && people.length <= 1 ? <Text dimColor>No one yet. Send the link to a teammate; it opens in their Claude Code.</Text> : null}
+          </Box>,
+        )}
 
-        <Box flexDirection="column">
-          {section('CHAT', 'people only · Claude never reads it')}
-          {chat.length === 0 ? <Text dimColor>Nothing yet. Say hi, or talk about the work without prompting Claude.</Text> : null}
-          {chat.slice(-12).map((c, i) => (
-            <Box key={`chat-${c.ts}-${i}`} flexDirection="column">
-              <Box flexDirection="row" gap={1}>
-                <Text bold>{c.seat === v.me ? 'You' : c.who}</Text>
-                <Text dimColor>{ago(c.ts, now)}</Text>
-              </Box>
-              <Text>{c.text}</Text>
-            </Box>
-          ))}
-          {Input ? (
-            <Input key={`chat-input-${chat.length}`} placeholder="Message everyone…" submitLabel="Send" onSubmit={(value: string) => void postChat($, value)} />
-          ) : (
-            <Text dimColor>Chat from Claude Code on desktop or in a terminal.</Text>
-          )}
-        </Box>
-
-        {shown.length ? (
-          <Box flexDirection="column">
-            {section('SHOWN', isHost ? 'what Claude showed everyone' : `what ${room.host}'s Claude showed`)}
-            {shown
-              .slice(-8)
-              .reverse()
-              .map(item => (
-                <Box key={`shown-${item.key}`} flexDirection="row" gap={1} alignItems="center">
-                  <Text dimColor={item.closed}>{shownGlyph(item)}</Text>
-                  <Text dimColor>{ago(item.ts, now).padEnd(8)}</Text>
-                  <Text wrap="truncate-end" dimColor={item.closed}>{`${item.name}${item.closed ? ' · ended' : ''}`}</Text>
-                  {!isHost && !item.closed && item.kind !== 'widget' && item.kind !== 'link' ? (
-                    <Button key={`open-${item.key}`} label="Open" plain onPress={press => void openShown($, item, press.surface)} />
-                  ) : null}
-                  {isHost && item.kind === 'preview' && item.pid && !item.closed ? (
-                    <Button key={`stop-${item.key}`} label="Stop" plain onPress={() => void stopPreview($, item.pid as string)} />
-                  ) : null}
+        {section(
+          'chat',
+          'Chat',
+          "Claude doesn't read this",
+          <Box flexDirection="column" gap={1}>
+            {chat.slice(-12).map((c, i) => (
+              <Box key={`chat-${c.ts}-${i}`} flexDirection="column">
+                <Box flexDirection="row" gap={1} justifyContent="space-between">
+                  <Text bold>{c.seat === v.me ? 'You' : c.who}</Text>
+                  <Text dimColor>{ago(c.ts, now)}</Text>
                 </Box>
-              ))}
-          </Box>
-        ) : null}
-
-        <Box flexDirection="column">
-          {section('ACTIVITY')}
-          {activity.length === 0 ? <Text dimColor>Joins, prompts and approvals show up here.</Text> : null}
-          {activity
-            .slice(-8)
-            .reverse()
-            .map((a, i) => (
-              <Box key={`act-${a.ts}-${i}`} flexDirection="row" gap={1}>
-                {a.kind === 'allowed' || a.kind === 'denied' ? (
-                  <Text color={a.kind === 'allowed' ? GOOD : BAD}>{a.kind === 'allowed' ? '✓' : '✕'}</Text>
-                ) : (
-                  <Text dimColor={a.kind === 'leave'}>{a.kind === 'leave' ? '○' : '●'}</Text>
-                )}
-                <Text dimColor>{ago(a.ts, now).padEnd(8)}</Text>
-                <Text wrap="truncate-end">{describe(a)}</Text>
+                <Text>{c.text}</Text>
               </Box>
             ))}
-        </Box>
+            {Input ? (
+              <Input key={`chat-input-${chat.length}`} placeholder="Message everyone…" submitLabel="Send" onSubmit={(value: string) => void postChat($, value)} />
+            ) : (
+              <Text dimColor>Chat from Claude Code on desktop or in a terminal.</Text>
+            )}
+          </Box>,
+        )}
+
+        {shown.length
+          ? section(
+              'shown',
+              'Shown',
+              isHost ? 'what Claude showed everyone' : `from ${room.host}'s Claude`,
+              <Box flexDirection="column">
+                {shown
+                  .slice(-8)
+                  .reverse()
+                  .map(item => (
+                    <Box key={`shown-${item.key}`} flexDirection="row" gap={1} alignItems="center" justifyContent="space-between">
+                      <Box flexDirection="row" gap={1} flexShrink={1}>
+                        <Text dimColor={item.closed}>{shownGlyph(item)}</Text>
+                        <Text wrap="truncate-end" dimColor={item.closed}>{`${item.name}${item.closed ? ' · ended' : ''}`}</Text>
+                      </Box>
+                      <Box flexDirection="row" gap={1} alignItems="center" flexShrink={0}>
+                        <Text dimColor>{ago(item.ts, now)}</Text>
+                        {!isHost && !item.closed && item.kind !== 'widget' && item.kind !== 'link' ? (
+                          <Button key={`open-${item.key}`} label="Open" plain onPress={press => void openShown($, item, press.surface)} />
+                        ) : null}
+                        {isHost && item.kind === 'preview' && item.pid && !item.closed ? (
+                          <Button key={`stop-${item.key}`} label="Stop" plain onPress={() => void stopPreview($, item.pid as string)} />
+                        ) : null}
+                      </Box>
+                    </Box>
+                  ))}
+              </Box>,
+            )
+          : null}
+
+        {activity.length
+          ? section(
+              'activity',
+              'Activity',
+              '',
+              <Box flexDirection="column">
+                {activity
+                  .slice(-8)
+                  .reverse()
+                  .map((a, i) => (
+                    <Box key={`act-${a.ts}-${i}`} flexDirection="row" gap={1} justifyContent="space-between">
+                      <Box flexDirection="row" gap={1} flexShrink={1}>
+                        {a.kind === 'allowed' || a.kind === 'denied' ? (
+                          <Text color={a.kind === 'allowed' ? GOOD : BAD}>{a.kind === 'allowed' ? '✓' : '✕'}</Text>
+                        ) : (
+                          <Text dimColor>{a.kind === 'leave' ? '○' : '●'}</Text>
+                        )}
+                        <Text wrap="truncate-end">{describe(a)}</Text>
+                      </Box>
+                      <Box flexShrink={0}>
+                        <Text dimColor>{ago(a.ts, now)}</Text>
+                      </Box>
+                    </Box>
+                  ))}
+              </Box>,
+            )
+          : null}
+
+        {isHost
+          ? section(
+              'settings',
+              'Settings',
+              'for everyone here',
+              <Box flexDirection="column" gap={1}>
+                {Select
+                  ? setting(
+                      'Teammates can',
+                      <Select
+                        key="policy-prompts"
+                        value={v.policy.prompts}
+                        options={[
+                          { value: 'everyone', label: 'Prompt Claude' },
+                          { value: 'watch', label: 'Only watch and chat' },
+                        ]}
+                        onSelect={(value: string) => void setPolicy($, { prompts: value === 'watch' ? 'watch' : 'everyone' })}
+                      />,
+                    )
+                  : null}
+                {Select
+                  ? setting(
+                      'Ask me before',
+                      <Select
+                        key="policy-approvals"
+                        value={v.policy.approvals}
+                        options={[
+                          { value: 'edits', label: 'Edits, commands and web' },
+                          { value: 'all', label: 'Every tool, reads too' },
+                          { value: 'none', label: 'Nothing' },
+                        ]}
+                        onSelect={(value: string) => void setPolicy($, { approvals: value === 'all' || value === 'none' ? value : 'edits' })}
+                      />,
+                    )
+                  : null}
+                {Select
+                  ? setting(
+                      'What Claude shows',
+                      <Select
+                        key="policy-files"
+                        value={v.policy.files ?? 'on'}
+                        options={[
+                          { value: 'on', label: 'Goes to everyone' },
+                          { value: 'off', label: 'Stays with me' },
+                        ]}
+                        onSelect={(value: string) => void setPolicy($, { files: value === 'off' ? 'off' : 'on' })}
+                      />,
+                    )
+                  : null}
+                {updatesSetting}
+                {trusted.length ? (
+                  <Box flexDirection="row" gap={1} alignItems="center" justifyContent="space-between">
+                    <Text dimColor wrap="truncate-end">{`Always allowed: ${listNames(trusted)}`}</Text>
+                    <Button key="untrust" label="Ask again" plain onPress={() => void update($, trustedA, () => [])} />
+                  </Box>
+                ) : null}
+              </Box>,
+            )
+          : section(
+              'settings',
+              'Settings',
+              'just for you',
+              <Box flexDirection="column" gap={1}>
+                {Select
+                  ? setting(
+                      `${room.host}'s Claude shows`,
+                      <Select
+                        key="auto-open"
+                        value={(await read($, autoOpenA)) ? 'auto' : 'ask'}
+                        options={[
+                          { value: 'auto', label: 'Open it here' },
+                          { value: 'ask', label: 'Ask me first' },
+                        ]}
+                        onSelect={(value: string) => void update($, autoOpenA, () => value !== 'ask')}
+                      />,
+                    )
+                  : null}
+                {updatesSetting}
+              </Box>,
+            )}
 
         {isHost ? (
-          <Box flexDirection="column" gap={1}>
-            {section('SETTINGS', 'everyone here sees these')}
-            {Select ? (
-              <Select
-                key="policy-prompts"
-                label="Teammates can"
-                value={v.policy.prompts}
-                options={[
-                  { value: 'everyone', label: 'Prompt Claude' },
-                  { value: 'watch', label: 'Only watch and chat' },
-                ]}
-                onSelect={(value: string) => void setPolicy($, { prompts: value === 'watch' ? 'watch' : 'everyone' })}
-              />
-            ) : null}
-            {Select ? (
-              <Select
-                key="policy-approvals"
-                label="Ask me before a teammate's request runs"
-                value={v.policy.approvals}
-                options={[
-                  { value: 'edits', label: 'Edits, commands and web (recommended)' },
-                  { value: 'all', label: 'Every tool, reads included' },
-                  { value: 'none', label: "Nothing: I trust everyone here" },
-                ]}
-                onSelect={(value: string) => void setPolicy($, { approvals: value === 'all' || value === 'none' ? value : 'edits' })}
-              />
-            ) : null}
-            {Select ? (
-              <Select
-                key="policy-files"
-                label="What Claude shows (files, widgets, pages, previews)"
-                value={v.policy.files ?? 'on'}
-                options={[
-                  { value: 'on', label: 'Goes to everyone here' },
-                  { value: 'off', label: 'Stays with me' },
-                ]}
-                onSelect={(value: string) => void setPolicy($, { files: value === 'off' ? 'off' : 'on' })}
-              />
-            ) : null}
-            {trusted.length ? (
-              <Box flexDirection="row" gap={1} alignItems="center">
-                <Text dimColor>{`Always allowed: ${listNames(trusted)}`}</Text>
-                <Button key="untrust" label="Ask again" plain onPress={() => void update($, trustedA, () => [])} />
-              </Box>
-            ) : null}
-            <Box flexDirection="row" gap={1} alignItems="center">
-              <Button
-                key="room-stop"
-                label={v.confirming === 'stop' ? 'Stop for everyone?' : 'Stop sharing'}
-                variant="primary"
-                onPress={() => void confirmStop($)}
-              />
-              {v.confirming === 'stop' ? <Text dimColor>Press again to end the room. The link stops working.</Text> : null}
-            </Box>
+          <Box flexDirection="row" gap={1} alignItems="center">
+            <Button
+              key="room-stop"
+              label={v.confirming === 'stop' ? 'Stop for everyone' : 'Stop sharing'}
+              variant={v.confirming === 'stop' ? 'primary' : 'secondary'}
+              onPress={() => void confirmStop($)}
+            />
+            <Text dimColor>{v.confirming === 'stop' ? 'Press again to end the room. The link stops working.' : ''}</Text>
           </Box>
         ) : (
-          <Box flexDirection="column" gap={1}>
-            {section('SETTINGS', 'just for you')}
-            {Select ? (
-              <Select
-                key="auto-open"
-                label={`What ${room.host}'s Claude shows`}
-                value={(await read($, autoOpenA)) ? 'auto' : 'ask'}
-                options={[
-                  { value: 'auto', label: 'Opens here by itself' },
-                  { value: 'ask', label: 'Ask me each time' },
-                ]}
-                onSelect={(value: string) => void update($, autoOpenA, () => value !== 'ask')}
-              />
-            ) : null}
-            <Box flexDirection="row">
-              <Button key="room-leave" label={`Leave ${room.host}'s session`} onPress={() => void leave($)} />
-            </Box>
+          <Box flexDirection="row">
+            <Button key="room-leave" label={`Leave ${room.host}'s session`} variant="secondary" onPress={() => void leave($)} />
           </Box>
         )}
       </Box>

@@ -24,6 +24,12 @@ claude plugin marketplace add Paradigm-Study/claude-share && claude plugin insta
 
 Requires Claude Code 2.1.286 or later (`claude update`; Claude Desktop includes it). New sessions pick it up; quit and reopen Claude Desktop for sessions already open. (Claude Code installs third-party plugins from a marketplace it knows, hence the two steps in one line.)
 
+**Updates.** Claude Code updates a marketplace's plugins by itself only when that marketplace has auto-update on, and for one like this it starts off. Turn it on once: **Room → Settings → Updates → Install by themselves**, or `/plugin` → Marketplaces → claude-share → Enable auto-update (the setup script does it for you). After that, a new version arrives within minutes of starting a session and new sessions run it. A share server also turns away versions too old to work right, and says the one command that updates them:
+
+```bash
+claude plugin marketplace update claude-share && claude plugin update shared-session@claude-share
+```
+
 **Or let the setup script do it.** It works for a person or an agent; see [AGENTS.md](AGENTS.md). From a clone of this repo:
 
 ```bash
@@ -41,7 +47,7 @@ It stops with a `NEEDS HUMAN` line at the one or two steps that need a person. S
 
 ```json
 {
-  "extraKnownMarketplaces": { "claude-share": { "source": { "source": "github", "repo": "Paradigm-Study/claude-share" } } },
+  "extraKnownMarketplaces": { "claude-share": { "source": { "source": "github", "repo": "Paradigm-Study/claude-share" }, "autoUpdate": true } },
   "enabledPlugins": { "shared-session@claude-share": true }
 }
 ```

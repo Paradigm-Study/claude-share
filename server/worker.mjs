@@ -29,6 +29,8 @@ import {
   token,
   missingPage,
   previewMissing,
+  outdatedClient,
+  versionInfo,
 } from './core.mjs'
 
 const ROOM_TTL_MS = 24 * 60 * 60 * 1000
@@ -66,10 +68,13 @@ export default {
     const parts = url.pathname.split('/').filter(Boolean)
 
     if (url.pathname === '/api/health') return json({ ok: true })
+    if (url.pathname === '/api/version') return versionInfo()
 
     let id
     let rest
     if (req.method === 'POST' && url.pathname === '/api/rooms') {
+      const outdated = outdatedClient(req)
+      if (outdated) return outdated
       id = token(16)
       rest = 'create'
     } else if (parts[0] === 's' && parts.length === 2) {

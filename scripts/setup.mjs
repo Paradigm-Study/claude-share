@@ -17,13 +17,22 @@
 // Nothing here prints a token or credential.
 
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync, mkdirSync } from 'node:fs'
 import { homedir, tmpdir, userInfo } from 'node:os'
 import { basename } from 'node:path'
 import { join } from 'node:path'
 
 const MARKETPLACE = 'Paradigm-Study/claude-share'
 const PLUGIN = 'shared-session@claude-share'
+// This checkout's plugin version: what setup's own requests to a server say
+// they are (a server turns away plugins older than its minimum).
+const PLUGIN_VERSION = (() => {
+  try {
+    return JSON.parse(readFileSync(new URL('../plugin/.claude-plugin/plugin.json', import.meta.url), 'utf8')).version
+  } catch {
+    return ''
+  }
+})()
 const MIN_VERSION = [2, 1, 286]
 
 const [command, ...rest] = process.argv.slice(2)
@@ -130,7 +139,28 @@ function installPlugin(claude, server) {
     ok('plugin installed')
   }
   if (server) configureServer(claude, server)
+  enableAutoUpdate()
   ok('new Claude Code sessions load it; quit and reopen Claude Desktop so open sessions do too (a session keeps the plugin copy it started with)')
+}
+
+// Claude Code updates a third-party marketplace's plugins by itself only when
+// the marketplace has `autoUpdate` on (off by default): this turns it on in
+// the person's settings, leaving everything else there as it was.
+function enableAutoUpdate() {
+  const path = join(homedir(), '.claude', 'settings.json')
+  let settings = {}
+  try {
+    if (existsSync(path)) settings = JSON.parse(readFileSync(path, 'utf8'))
+  } catch {
+    return note(`couldn't read ${path}, so updates stay manual; turn them on in /plugin → Marketplaces → claude-share`)
+  }
+  const known = settings.extraKnownMarketplaces ?? {}
+  const entry = known['claude-share'] ?? { source: { source: 'github', repo: MARKETPLACE } }
+  if (entry.autoUpdate === true) return ok('updates install by themselves')
+  settings.extraKnownMarketplaces = { ...known, 'claude-share': { ...entry, autoUpdate: true } }
+  mkdirSync(join(homedir(), '.claude'), { recursive: true })
+  writeFileSync(path, `${JSON.stringify(settings, null, 2)}\n`)
+  ok('updates now install by themselves (the marketplace\'s autoUpdate is on)')
 }
 
 function configureServer(claude, server) {
@@ -160,7 +190,8 @@ async function health(server, { waitMs = 0 } = {}) {
 // error page) reads as {}, and the status says what happened.
 async function call(url, init = {}) {
   try {
-    const res = await fetch(url, { ...init, signal: AbortSignal.timeout(15_000) })
+    const headers = { 'content-type': 'application/json', 'x-shared-session-version': PLUGIN_VERSION, ...(init.headers ?? {}) }
+    const res = await fetch(url, { ...init, headers, signal: AbortSignal.timeout(15_000) })
     const text = await res.text()
     let body = {}
     try {

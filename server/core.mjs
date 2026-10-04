@@ -1,4 +1,5 @@
 import { CLOVER_WEBP, LOGO_PATHS } from './brand.mjs'
+import manifest from '../plugin/.claude-plugin/plugin.json' with { type: 'json' }
 
 // Room logic shared by the Node server (node.mjs) and the Cloudflare Durable
 // Object (worker.mjs). Everything speaks the Fetch API: a Request in, a
@@ -271,6 +272,39 @@ export function shareUrl(origin, id) {
   return `${origin}/s/${id}`
 }
 
+// Plugin versions. The newest is the plugin this server was deployed with;
+// clients say theirs in a header. Older than PLUGIN_MIN can't share or join:
+// up to 0.7.0, a guest step that waited more than 10 s on a slow host fell
+// through to the guest's own model, which then acted on the guest's machine.
+export const PLUGIN_LATEST = manifest.version
+export const PLUGIN_MIN = '0.7.1'
+export const UPDATE_COMMAND = 'claude plugin marketplace update claude-share && claude plugin update shared-session@claude-share'
+
+const versionParts = v => String(v).split('.').map(n => Number.parseInt(n, 10) || 0)
+export function compareVersions(a, b) {
+  const x = versionParts(a)
+  const y = versionParts(b)
+  for (let i = 0; i < Math.max(x.length, y.length); i++) if ((x[i] ?? 0) !== (y[i] ?? 0)) return (x[i] ?? 0) < (y[i] ?? 0) ? -1 : 1
+  return 0
+}
+
+// A client too old to share or join: told why, and the one command that fixes it.
+export function outdatedClient(req) {
+  const version = req.headers.get('x-shared-session-version')
+  if (version && compareVersions(version, PLUGIN_MIN) >= 0) return null
+  return json(
+    {
+      error: `This Shared Sessions plugin is out of date${version ? ` (${version})` : ''}. Update it in a terminal: ${UPDATE_COMMAND} — then start a new Claude Code session (or quit and reopen Claude Desktop).`,
+      latest: PLUGIN_LATEST,
+      min: PLUGIN_MIN,
+      update: UPDATE_COMMAND,
+    },
+    426,
+  )
+}
+
+export const versionInfo = () => json({ latest: PLUGIN_LATEST, min: PLUGIN_MIN, update: UPDATE_COMMAND })
+
 // POST /api/rooms: the host's Share. Returns the room and the host's token.
 export async function createRoom(req, id, now, origin) {
   const body = await readJson(req)
@@ -283,6 +317,7 @@ export async function createRoom(req, id, now, origin) {
       token: room.host.token,
       seq: room.seq,
       title: room.title,
+      latest: PLUGIN_LATEST,
     }),
   }
 }
@@ -321,6 +356,8 @@ async function handleRoom(room, req, rest, now, origin, ctx) {
 
   if (rest === 'join' && method === 'POST') {
     if (room.endedAt) return { response: json({ error: 'This session is no longer shared.' }, 410) }
+    const outdated = outdatedClient(req)
+    if (outdated) return { response: outdated }
     const body = await readJson(req)
     const { token: seatToken, seat } = room.join(body.name, now)
     return {
@@ -334,6 +371,7 @@ async function handleRoom(room, req, rest, now, origin, ctx) {
         seq: room.seq,
         history: room.events,
         people: room.people(now),
+        latest: PLUGIN_LATEST,
       }),
     }
   }

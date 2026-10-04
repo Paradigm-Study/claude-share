@@ -104,6 +104,10 @@ declare module 'claude-code' {
       connection: 'live' | 'reconnecting'
       /** A button pressed once that ends something for everyone, waiting for its second press. */
       confirming: 'stop' | null
+      /** A newer plugin than this one, as the share server last said. */
+      newer: string | null
+      /** Whether Claude Code updates this plugin by itself (the marketplace's `autoUpdate`); null when unknown. */
+      updates: boolean | null
     }
   }
 }

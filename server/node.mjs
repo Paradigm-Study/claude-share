@@ -11,7 +11,7 @@
 import { createServer } from 'node:http'
 import { readFileSync, writeFileSync, renameSync } from 'node:fs'
 
-import { Room, ROOM_ID, SEAT_TIMEOUT_MS, createRoom, roomRequest, previewRequest, previewRoomOf, notFound, json, publicOrigin, token, missingPage, previewMissing } from './core.mjs'
+import { Room, ROOM_ID, SEAT_TIMEOUT_MS, createRoom, roomRequest, previewRequest, previewRoomOf, notFound, json, publicOrigin, token, missingPage, previewMissing, outdatedClient, versionInfo } from './core.mjs'
 
 const PORT = Number(process.env.PORT ?? 8787)
 const PUBLIC_URL = process.env.PUBLIC_URL
@@ -82,8 +82,11 @@ async function route(req) {
   const parts = url.pathname.split('/').filter(Boolean)
 
   if (url.pathname === '/api/health') return json({ ok: true, rooms: rooms.size })
+  if (url.pathname === '/api/version') return versionInfo()
 
   if (req.method === 'POST' && url.pathname === '/api/rooms') {
+    const outdated = outdatedClient(req)
+    if (outdated) return outdated
     const { room, response } = await createRoom(req, token(16), now, origin)
     rooms.set(room.id, watch(room))
     save()

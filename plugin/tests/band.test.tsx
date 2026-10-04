@@ -22,7 +22,7 @@ function band<S extends (typeof SURFACES)[number]>(surface: S) {
 // that answers from memory. Returns what the server was asked. `stream` is
 // what the room's stream sends a curl child; without it, curl can't start and
 // the plugin polls.
-function world(on: On, opts: { server?: boolean; stream?: unknown[]; history?: unknown[]; down?: boolean } = {}) {
+function world(on: On, opts: { server?: boolean; stream?: unknown[]; history?: unknown[]; down?: boolean; latest?: string; settings?: string } = {}) {
   const asked: string[] = []
   const spawned: { argv: readonly string[]; input?: string }[] = []
   on('process.spawn', async function* ($, e) {
@@ -40,7 +40,23 @@ function world(on: On, opts: { server?: boolean; stream?: unknown[]; history?: u
     return { value: { code: 0, signal: null } }
   })
   const clock = mock.clock(on, { now: 1_000 })
-  mock.env(on, opts.server === false ? { USER: 'scott' } : { USER: 'scott', SHARED_SESSION_SERVER: 'http://localhost:8787' })
+  mock.env(on, opts.server === false ? { USER: 'scott', HOME: '/home/scott' } : { USER: 'scott', HOME: '/home/scott', SHARED_SESSION_SERVER: 'http://localhost:8787' })
+  // The files the plugin reads: its own manifest, and the person's settings.
+  const files = new Map<string, string>()
+  if (opts.settings !== undefined) files.set('/home/scott/.claude/settings.json', opts.settings)
+  const written: { path: string; text: string }[] = []
+  on('fs.read', ($, e) => {
+    if (e.path.endsWith('/.claude-plugin/plugin.json')) return { value: '{"name":"shared-session","version":"0.7.1"}' }
+    const text = files.get(e.path)
+    if (text === undefined) throw new Error(`ENOENT: ${e.path}`)
+    return { value: text }
+  })
+  on('fs.exists', ($, e) => ({ value: files.has(e.path) }))
+  on('fs.write', ($, e) => {
+    files.set(e.path, e.text)
+    written.push({ path: e.path, text: e.text })
+    return { value: undefined }
+  })
   on('ui.toast', () => ({ value: undefined }))
   const logged: string[] = []
   on('ui.log', ($, e) => {
@@ -66,10 +82,12 @@ function world(on: On, opts: { server?: boolean; stream?: unknown[]; history?: u
     return <Text>{e.props.text}</Text>
   })
   const posted: { type: string; body: Record<string, unknown> }[] = []
+  const versions: string[] = []
   on('http.fetch', ($, e) => {
     const method = e.init?.method ?? 'GET'
     const path = e.url.replace(/^https?:\/\/[^/]+/, '').replace(/\?.*$/, '')
     asked.push(`${method} ${path}`)
+    versions.push(String((e.init?.headers as Record<string, string> | undefined)?.['x-shared-session-version'] ?? ''))
     if (opts.down && path.endsWith('/events') && method === 'GET') return { value: { status: 503, ok: false, headers: {}, text: '{"error":"unavailable"}' } }
     if (method === 'POST' && path.endsWith('/events') && e.init?.body) posted.push(...(JSON.parse(e.init.body).events ?? []))
     const people = [
@@ -81,7 +99,7 @@ function world(on: On, opts: { server?: boolean; stream?: unknown[]; history?: u
     if (method === 'POST' && path === '/api/rooms') {
       body = { id: 'room0000000000000002', url: 'http://localhost:8787/s/room0000000000000002', token: 't', seq: 0, title: 'demo' }
     } else if (path.endsWith('/join')) {
-      body = { token: 'g', seat: 'seat1', title: 'demo', host: 'Sam', seq: 1, history: [], people }
+      body = { token: 'g', seat: 'seat1', title: 'demo', host: 'Sam', seq: 1, history: [], people, latest: opts.latest }
     } else if (path.endsWith('/events') && method === 'GET') {
       body = { seq: 1, events: [], people, ended: false, title: 'demo' }
     } else if (path.endsWith('/previews') && method === 'POST') {
@@ -89,7 +107,7 @@ function world(on: On, opts: { server?: boolean; stream?: unknown[]; history?: u
     }
     return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify(body) } }
   })
-  return Object.assign(asked, { clock, logged, spawned, posted })
+  return Object.assign(asked, { clock, logged, spawned, posted, versions, written })
 }
 
 test('a session that is not shared shows one Share button', async ($, on) => {
@@ -231,10 +249,10 @@ test('the Room shows the banner, everyone, activity and the chat', async ($, on)
     const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text)
     expect(Boolean(await ui.find({ type: 'Svg' }))).toBe(surface === 'desktop')
     for (const name of ['Sam', 'scott', 'Alex']) expect(texts).toContain(name)
-    expect(texts).toContain('PEOPLE')
+    expect(texts).toContain('People')
     expect(texts).toContain('3 here')
-    expect(texts).toContain('CHAT')
-    expect(texts).toContain('people only · Claude never reads it')
+    expect(texts).toContain('Chat')
+    expect(texts).toContain("Claude doesn't read this")
     expect(await ui.find({ key: 'room-leave' })).toBeDefined()
     expect(await ui.find({ key: 'policy-prompts' })).toBeUndefined() // the host's alone
     await ui.input({ key: 'chat-input-0', text: 'hello room' })
@@ -430,4 +448,28 @@ test("a room this session can't reach says it is reconnecting", async ($, on) =>
     if (surface === 'desktop') expect((await ui.find({ type: 'Svg' }))?.props.alt).toMatch(/^Reconnecting/)
     await ui.unmount()
   }
+})
+
+test('every request says the plugin version, and a newer one shows in the Room with its command', async ($, on) => {
+  const asked = world(on, { latest: '9.9.9', settings: '{}' })
+  await $.prompt.submit({ text: LINK, origin: { kind: 'composer' }, wait: false })
+  await asked.clock.advance(10)
+  expect(asked.versions.length).toBeGreaterThan(0)
+  expect(asked.versions.every(v => v === '0.7.1')).toBe(true)
+  expect(asked.logged.some(line => line.includes('9.9.9 is out'))).toBe(true)
+  const pane = await $.ui.mount({ plugin: 'shared-session', surface: 'desktop', component: 'Pane', requestId: 'shared-room', props: PANE })
+  expect(await pane.find({ type: 'Text', text: /Version 9\.9\.9 is out/ })).toBeDefined()
+  expect(await pane.find({ key: 'copy-update' })).toBeDefined()
+})
+
+test("the Room's Updates setting turns on auto-update in the person's settings, keeping the rest", async ($, on) => {
+  const asked = world(on, { settings: '{\n  "theme": "dark"\n}\n' })
+  await $.prompt.submit({ text: LINK, origin: { kind: 'composer' }, wait: false })
+  await asked.clock.advance(10)
+  const pane = await $.ui.mount({ plugin: 'shared-session', surface: 'desktop', component: 'Pane', requestId: 'shared-room', props: PANE })
+  expect((await pane.find({ key: 'updates' }))?.props.value).toBe('manual')
+  await pane.select({ key: 'updates', value: 'auto' })
+  const saved = JSON.parse(asked.written.at(-1)?.text ?? '{}')
+  expect(saved.theme).toBe('dark')
+  expect(saved.extraKnownMarketplaces['claude-share']).toEqual({ source: { source: 'github', repo: 'Paradigm-Study/claude-share' }, autoUpdate: true })
 })
