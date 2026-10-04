@@ -22,7 +22,7 @@ One line in a terminal:
 claude plugin marketplace add Paradigm-Study/claude-share && claude plugin install shared-session@claude-share
 ```
 
-Requires Claude Code 2.1.286 or later (`claude update`; Claude Desktop includes it). New sessions pick it up; quit and reopen Claude Desktop for sessions already open. (Claude Code installs third-party plugins from a marketplace it knows, hence the two steps in one line.)
+Requires Claude Code 2.1.286 or later (`claude update`; Claude Desktop includes it). The installer mentions one optional setting (the share server); leave it, and sharing uses the public server. New sessions pick it up; quit and reopen Claude Desktop for sessions already open. (Claude Code installs third-party plugins from a marketplace it knows, hence the two steps in one line.)
 
 **Updates.** Claude Code updates a marketplace's plugins by itself only when that marketplace has auto-update on, and for one like this it starts off. Turn it on once: **Room → Settings → Updates → Install by themselves**, or `/plugin` → Marketplaces → claude-share → Enable auto-update (the setup script does it for you). After that, a new version arrives within minutes of starting a session and new sessions run it. A share server also turns away versions too old to work right, and says the one command that updates them:
 
