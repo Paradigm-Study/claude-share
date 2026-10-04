@@ -34,6 +34,8 @@ const PLUGIN_VERSION = (() => {
   }
 })()
 const MIN_VERSION = [2, 1, 286]
+// 2.1.285 runs the plugin too, with function hooks turned on (early access there).
+const EARLY_VERSION = [2, 1, 285]
 
 const [command, ...rest] = process.argv.slice(2)
 const flag = name => {
@@ -86,14 +88,38 @@ function findClaude() {
     }
   }
   let newestSeen = null
+  let early = null
   for (const bin of candidates) {
     const r = run(bin, ['--version'], { timeout: 20_000 })
     if (r.error || r.code !== 0) continue
     const v = versionOf(r.out)
     if (atLeast(v, MIN_VERSION)) return { bin, version: v.join('.') }
+    if (atLeast(v, EARLY_VERSION)) early ??= { bin, version: v.join('.') }
     newestSeen ??= v.join('.')
   }
+  if (early) {
+    enableFunctionHooks(early.version)
+    return early
+  }
   return { bin: null, version: newestSeen }
+}
+
+// Claude Code 2.1.285 loads function-hook plugins only with this switch on
+// (2.1.286 and newer have it on): set in the person's settings, nothing else
+// there touched.
+function enableFunctionHooks(version) {
+  const path = join(homedir(), '.claude', 'settings.json')
+  let settings = {}
+  try {
+    if (existsSync(path)) settings = JSON.parse(readFileSync(path, 'utf8'))
+  } catch {
+    return note(`Claude Code ${version} needs CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 for this plugin, and ${path} couldn't be read to set it; set it in your environment, or run \`claude update\``)
+  }
+  if (settings.env?.CLAUDE_CODE_ENABLE_FUNCTION_HOOKS === '1') return
+  settings.env = { ...(settings.env ?? {}), CLAUDE_CODE_ENABLE_FUNCTION_HOOKS: '1' }
+  mkdirSync(join(homedir(), '.claude'), { recursive: true })
+  writeFileSync(path, `${JSON.stringify(settings, null, 2)}\n`)
+  ok(`Claude Code ${version} runs this plugin with function hooks on: set CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 in ${path} (\`claude update\` to 2.1.286 or newer makes it unnecessary)`)
 }
 
 function needClaude() {
@@ -109,7 +135,9 @@ function needClaude() {
   ok(`Claude Code ${version} (${bin === 'claude' ? 'on PATH' : bin})`)
   if (bin !== 'claude') {
     const onPath = run('claude', ['--version'], { timeout: 20_000 })
-    if (!onPath.error && onPath.code === 0 && !atLeast(versionOf(onPath.out), MIN_VERSION)) {
+    if (!onPath.error && onPath.code === 0 && atLeast(versionOf(onPath.out), EARLY_VERSION) && !atLeast(versionOf(onPath.out), MIN_VERSION)) {
+      enableFunctionHooks(versionOf(onPath.out).join('.'))
+    } else if (!onPath.error && onPath.code === 0 && !atLeast(versionOf(onPath.out), MIN_VERSION)) {
       note(
         `your terminal \`claude\` is ${versionOf(onPath.out).join('.')}, older than ${MIN_VERSION.join('.')}: Claude Desktop sessions get the plugin, terminal sessions won't until you run \`claude update\``,
       )

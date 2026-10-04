@@ -828,7 +828,13 @@ function describePolicyCore(policy: SharePolicy): string {
 
 type DeskServer = 'ccd_session_mgmt' | 'ccd_sidebar' | 'ccd_view'
 
+// Only Claude Desktop has these servers. Elsewhere a call to one can sit
+// unanswered while a turn runs (the interactive terminal), holding up every
+// other call this plugin makes, so outside Desktop it isn't made at all.
+let inDesktop: boolean | undefined
 async function desk($: $, server: DeskServer, tool: string, args: Record<string, unknown>) {
+  if (inDesktop === undefined) inDesktop = (await $.env.get('CLAUDE_CODE_ENTRYPOINT')) === 'claude-desktop'
+  if (!inDesktop) return null
   try {
     const result = await $.mcp.call(server, tool, args)
     const text = result.content.map(block => ('text' in block && typeof block.text === 'string' ? block.text : '')).join('')
@@ -1381,7 +1387,8 @@ async function openShown($: $, shown: ShareShown, surface?: RenderSurface) {
   if (shown.kind === 'preview' && shown.pid) {
     const url = await previewTicket($, room, shown.pid)
     if (!url) return void $.ui.toast('That preview has ended')
-    const opened = await $.mcp.call('Claude_Browser', 'preview_start', { url }).catch(() => null)
+    if (inDesktop === undefined) inDesktop = (await $.env.get('CLAUDE_CODE_ENTRYPOINT')) === 'claude-desktop'
+    const opened = inDesktop ? await $.mcp.call('Claude_Browser', 'preview_start', { url }).catch(() => null) : null
     if (!opened || opened.isError) {
       await $.ui.copy({ text: url, surface }).catch(() => {})
       $.ui.toast('Preview link copied: open it within 10 minutes')
@@ -1749,7 +1756,7 @@ function describe(a: ShareActivity): string {
 
 // Share pressed in a session with history: everything earlier would go to
 // everyone with the link, so the row (or the Room) asks first.
-function shareChoice($: $, el: UI, prompts: number, where: 'band' | 'room') {
+function shareChoice($: $, el: UI, prompts: number, where: 'band' | 'room', surface: RenderSurface) {
   const { Box, Text, Button } = el
   const go = (history: boolean, surface?: RenderSurface) =>
     void share($, surface, { history }).catch(error => {
@@ -1757,7 +1764,7 @@ function shareChoice($: $, el: UI, prompts: number, where: 'band' | 'room') {
       $.ui.log(`Couldn't share: ${String(error?.message ?? error)}`)
     })
   return (
-    <Box flexDirection="column" gap={where === 'room' ? 1 : 0}>
+    <Box flexDirection="column" gap={where === 'room' ? 1 : 0} paddingRight={where === 'band' && surface === 'terminal' ? 4 : 0}>
       <Box flexDirection="row" gap={1} flexWrap="wrap">
         <Text bold>Share this session?</Text>
         <Text dimColor>{`Everyone with the link will see its ${prompts} earlier prompt${prompts === 1 ? '' : 's'} and Claude's replies.`}</Text>
@@ -1788,7 +1795,10 @@ function rulesLine(policy: SharePolicy, host: string): string {
 
 const shownGlyph = (item: ShareShown) => (item.kind === 'preview' ? '◍' : item.kind === 'widget' ? '◆' : item.kind === 'link' ? '↗' : '◧')
 
-const svgOf = (el: UI) => ('Svg' in el ? el.Svg : undefined)
+// Vector drawings only where the surface paints them: Claude Desktop. A
+// terminal's table can carry an Svg it draws as nothing, so there the
+// letters-and-dots fallbacks are drawn instead.
+const svgOf = (el: UI, surface: RenderSurface) => (surface === 'desktop' && 'Svg' in el ? el.Svg : undefined)
 // Fields and pickers: every surface but mobile draws them.
 const inputOf = (el: UI) => ('Input' in el ? el.Input : undefined)
 const selectOf = (el: UI) => ('Select' in el ? el.Select : undefined)
@@ -2263,7 +2273,7 @@ export const register: Register = (on, options) => {
     if (!spoken) return next(e)
     const el = $.ui.resolve(e)
     const { Box, Text, Markdown } = el
-    const Svg = svgOf(el)
+    const Svg = svgOf(el, e.surface)
     return (
       <Box flexDirection="row" gap={1}>
         {Svg ? (
@@ -2349,7 +2359,7 @@ export const register: Register = (on, options) => {
   on('ui.render', { component: 'Pane', requestId: ROOM }, async ($, e) => {
     const el = $.ui.resolve(e)
     const { Box, Text, Button } = el
-    const Svg = svgOf(el)
+    const Svg = svgOf(el, e.surface)
     const Input = inputOf(el)
     const Select = selectOf(el)
     const v = await view($)
@@ -2375,7 +2385,7 @@ export const register: Register = (on, options) => {
     )
 
     if (v.mode === 'idle' || !room) {
-      if (v.asking) return shareChoice($, el, v.asking.prompts, 'room')
+      if (v.asking) return shareChoice($, el, v.asking.prompts, 'room', e.surface)
       return (
         <Box flexDirection="column" gap={1}>
           <Text bold>This session isn't shared</Text>
@@ -2678,13 +2688,13 @@ export const register: Register = (on, options) => {
     if (e.props.hasSurvey) return next(e)
     const el = $.ui.resolve(e)
     const { Box, Text, Button } = el
-    const Svg = svgOf(el)
+    const Svg = svgOf(el, e.surface)
     const v = await view($)
 
     if (v.mode === 'idle') {
-      if (v.asking) return shareChoice($, el, v.asking.prompts, 'band')
+      if (v.asking) return shareChoice($, el, v.asking.prompts, 'band', e.surface)
       return (
-        <Box flexDirection="row" justifyContent="flex-end">
+        <Box flexDirection="row" justifyContent="flex-end" paddingRight={e.surface === 'terminal' ? 4 : 0}>
           <Button
             key="share"
             label="Share"
@@ -2710,7 +2720,7 @@ export const register: Register = (on, options) => {
     const stopping = v.confirming === 'stop'
 
     return (
-      <Box flexDirection="column">
+      <Box flexDirection="column" paddingRight={e.surface === 'terminal' ? 4 : 0}>
         <Box flexDirection="row" gap={1} alignItems="center" justifyContent="space-between">
           <Box flexDirection="row" gap={1} alignItems="center" flexShrink={1}>
             {Svg ? (
@@ -2721,16 +2731,10 @@ export const register: Register = (on, options) => {
                 height={24}
               />
             ) : (
-              <Box flexDirection="row">
-                <Text color={live ? ROSE : undefined} dimColor={!live}>
-                  {live ? '● ' : '↻ '}
-                </Text>
-                {people.map(p => (
-                  <Text key={`dot-${p.name}`} dimColor={!p.online}>
-                    {p.online ? '●' : '○'}
-                  </Text>
-                ))}
-              </Box>
+              // In letters, one live mark: who's here is said in words beside it.
+              <Text color={live ? ROSE : undefined} dimColor={!live}>
+                {live ? '●' : '↻'}
+              </Text>
             )}
             <Text bold>{v.mode === 'host' ? 'Sharing' : `${v.room?.host}'s session`}</Text>
             {here ? (

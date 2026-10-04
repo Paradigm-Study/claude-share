@@ -41,7 +41,9 @@ function world(on: On, opts: { server?: boolean; stream?: unknown[]; history?: u
     return { value: { code: 0, signal: null } }
   })
   const clock = mock.clock(on, { now: 1_000 })
-  mock.env(on, opts.server === false ? { USER: 'scott', HOME: '/home/scott' } : { USER: 'scott', HOME: '/home/scott', SHARED_SESSION_SERVER: 'http://localhost:8787' })
+  // A Claude Desktop session, unless a test says otherwise.
+  const desktop = { CLAUDE_CODE_ENTRYPOINT: 'claude-desktop' }
+  mock.env(on, opts.server === false ? { USER: 'scott', HOME: '/home/scott', ...desktop } : { USER: 'scott', HOME: '/home/scott', SHARED_SESSION_SERVER: 'http://localhost:8787', ...desktop })
   // The files the plugin reads: its own manifest, and the person's settings.
   const files = new Map<string, string>()
   if (opts.settings !== undefined) files.set('/home/scott/.claude/settings.json', opts.settings)

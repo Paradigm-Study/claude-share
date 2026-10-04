@@ -1056,7 +1056,7 @@ ${PAGE_CSS}</style></head>
         <div class="composer join"><span class="slash">/</span><code id="link"></code><button id="copy2" title="Copy link" aria-label="Copy link"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2.5"/><path d="M5 15V6a2 2 0 0 1 2-2h9"/></svg></button></div>
         <details class="first join" id="first">
           <summary>First time? Install the plugin once</summary>
-          <p>Paste this in a terminal, then start a new Claude Code session (or quit and reopen Claude Desktop):</p>
+          <p>Paste this in a terminal, then start a new Claude Code session (or quit and reopen Claude Desktop). Needs Claude Code 2.1.286 or newer: <code class="inline">claude update</code>.</p>
           <div class="composer"><span class="slash">$</span><code id="install"></code><button id="copy3" title="Copy command" aria-label="Copy install command"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2.5"/><path d="M5 15V6a2 2 0 0 1 2-2h9"/></svg></button></div>
           <p>In a terminal instead? Start <code class="inline">claude</code> and paste the link as your first message.</p>
         </details>

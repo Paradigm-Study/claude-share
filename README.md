@@ -22,7 +22,7 @@ One line in a terminal:
 claude plugin marketplace add Paradigm-Study/claude-share && claude plugin install shared-session@claude-share
 ```
 
-Requires Claude Code 2.1.286 or later (`claude update`; Claude Desktop includes it). The installer mentions one optional setting (the share server); leave it, and sharing uses the public server. New sessions pick it up; quit and reopen Claude Desktop for sessions already open. (Claude Code installs third-party plugins from a marketplace it knows, hence the two steps in one line.)
+Works in Claude Desktop and in the terminal. Requires Claude Code 2.1.286 or later: `claude update` (or `npm install -g @anthropic-ai/claude-code@latest` for an npm install); Claude Desktop includes it. On 2.1.285 (the "stable" channel today) it works with `"env": { "CLAUDE_CODE_ENABLE_FUNCTION_HOOKS": "1" }` in `~/.claude/settings.json`, which the setup script sets for you. An older Claude Code answers `/share-session` with how to update. The installer mentions one optional setting (the share server); leave it, and sharing uses the public server. New sessions pick it up; quit and reopen Claude Desktop for sessions already open. (Claude Code installs third-party plugins from a marketplace it knows, hence the two steps in one line.)
 
 **Updates.** Claude Code updates a marketplace's plugins by itself only when that marketplace has auto-update on, and for one like this it starts off. Turn it on once: **Room → Settings → Updates → Install by themselves**, or `/plugin` → Marketplaces → claude-share → Enable auto-update (the setup script does it for you). After that, a new version arrives within minutes of starting a session and new sessions run it. A share server also turns away versions too old to work right, and says the one command that updates them:
 
@@ -61,6 +61,7 @@ It stops with a `NEEDS HUMAN` line at the one or two steps that need a person. S
   - the side chat, what was shown, and the activity;
   - settings: the host's rules for everyone, and each guest's own.
 - **Show:** what the host's Claude shows reaches everyone by itself. The host can also type `/share-file <path>` to show a file, or `/share-preview <port>` to let teammates open a local dev server. Both are listed in the Room, where guests reopen them and the host stops previews. Someone who joins later gets any preview still open.
+- **In a terminal:** the same, by keyboard. Type `/share-session`, `/room` and `/stop-sharing`; paste a link as a prompt to join. The row above the prompt says who's here and whose turn it is, and its buttons take focus like the rest of the prompt area. What the host's Claude shows reaches a terminal guest as a saved file or a link to open in a browser.
 - **Stop:** press **Leave**, or **Stop sharing** twice (it ends the room for everyone), or type `/stop-sharing`. Esc in a guest stops the shared turn.
 - **Connection:** if the room can't be reached, the row above the prompt says it is reconnecting; anything sent meanwhile goes out once it's back.
 
