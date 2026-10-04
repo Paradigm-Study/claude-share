@@ -27,6 +27,8 @@ import {
   json,
   publicOrigin,
   token,
+  missingPage,
+  previewMissing,
 } from './core.mjs'
 
 const ROOM_TTL_MS = 24 * 60 * 60 * 1000
@@ -43,7 +45,7 @@ function previewOriginOf(req, env) {
 
 async function previewFetch(req, env) {
   const id = previewRoomOf(req)
-  if (!id || !ROOM_ID.test(id)) return new Response('This preview does not exist.', { status: 404 })
+  if (!id || !ROOM_ID.test(id)) return previewMissing()
   const url = new URL(req.url)
   const stub = env.ROOMS.get(env.ROOMS.idFromName(id))
   return stub.fetch(
@@ -212,10 +214,7 @@ export class RoomObject {
 
     if (!this.room) {
       return rest === 'page'
-        ? new Response('<!doctype html><meta charset="utf-8"><title>Not found</title><p>This shared session does not exist.', {
-            status: 404,
-            headers: { 'content-type': 'text/html; charset=utf-8' },
-          })
+        ? missingPage()
         : json({ error: 'This shared session does not exist.' }, 404)
     }
 

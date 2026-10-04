@@ -98,6 +98,12 @@ declare module 'claude-code' {
       previews: Record<string, string>
       /** Claude Desktop's sidebar row as it was before sharing marked it, to put back. */
       sidebar: { title: string; pinned: boolean; id?: string } | null
+      /** Share was pressed in a session with history: the row asks whether to include it. */
+      asking: { prompts: number } | null
+      /** Whether this session hears the room: `live`, or `reconnecting` after failed tries. */
+      connection: 'live' | 'reconnecting'
+      /** A button pressed once that ends something for everyone, waiting for its second press. */
+      confirming: 'stop' | null
     }
   }
 }

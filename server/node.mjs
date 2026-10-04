@@ -11,7 +11,7 @@
 import { createServer } from 'node:http'
 import { readFileSync, writeFileSync, renameSync } from 'node:fs'
 
-import { Room, ROOM_ID, SEAT_TIMEOUT_MS, createRoom, roomRequest, previewRequest, previewRoomOf, notFound, json, publicOrigin, token } from './core.mjs'
+import { Room, ROOM_ID, SEAT_TIMEOUT_MS, createRoom, roomRequest, previewRequest, previewRoomOf, notFound, json, publicOrigin, token, missingPage, previewMissing } from './core.mjs'
 
 const PORT = Number(process.env.PORT ?? 8787)
 const PUBLIC_URL = process.env.PUBLIC_URL
@@ -106,10 +106,7 @@ async function route(req) {
   const room = ROOM_ID.test(id) ? rooms.get(id) : undefined
   if (!room) {
     return rest === 'page'
-      ? new Response('<!doctype html><meta charset="utf-8"><title>Not found</title><p>This shared session does not exist.', {
-          status: 404,
-          headers: { 'content-type': 'text/html; charset=utf-8' },
-        })
+      ? missingPage()
       : json({ error: 'This shared session does not exist.' }, 404)
   }
 
@@ -121,7 +118,7 @@ async function route(req) {
 async function previewRoute(req) {
   const id = previewRoomOf(req)
   const room = id && ROOM_ID.test(id) ? rooms.get(id) : undefined
-  if (!room) return new Response('This preview does not exist.', { status: 404, headers: { 'content-type': 'text/plain; charset=utf-8' } })
+  if (!room) return previewMissing()
   const { response, changed } = await previewRequest(room, req, Date.now(), { secure: new URL(previewOrigin(req)).protocol === 'https:' })
   if (changed) save()
   return response

@@ -181,7 +181,11 @@ try {
   await until('host first turn', () => host.lines.some(l => l.type === 'result'))
   check('host answers its own first prompt', /marmalade/i.test(host.text))
 
+  // A session with history asks before anything earlier leaves it.
   host.say('/share-session')
+  await until('share asks first', () => /earlier prompt/.test(host.text), 60_000).catch(() => null)
+  check('Share asks first in a session with history', /share-session all/.test(host.text) && !/\/s\/[A-Za-z0-9_-]{16,}/.test(host.text))
+  host.say('/share-session all')
   const linkPattern = new RegExp(`${SERVER.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/s/[A-Za-z0-9_-]{16,}`)
   const link = await until('share link', () => linkPattern.exec(host.text)?.[0])
   const id = link.split('/s/')[1]

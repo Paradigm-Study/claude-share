@@ -112,7 +112,7 @@ export function stackSvg(faces: readonly Face[], opts: { live: boolean; size?: n
  * hairline edge, the three muted dots and a mono label in its bar, the host's
  * dot, a serif title, and Clover perched on the frame. Dark: ink card.
  */
-export function bannerSvg(o: { title: string; host: string; live: boolean; detail: string; width?: number }): string {
+export function bannerSvg(o: { title: string; host: string; live: boolean; detail: string; status?: string; width?: number }): string {
   const w = o.width ?? 420
   const top = 30 // room above the frame for Clover
   const h = top + 108
@@ -140,7 +140,7 @@ ${DOTS.replace(/^<style>|<\/style>$/g, '')}
 ${
   o.live
     ? `<g><circle class="live" cx="${w - 52}" cy="${top + 17}" r="4" fill="${ROSE}"/><circle cx="${w - 52}" cy="${top + 17}" r="3.2" fill="${ROSE}"/><text x="${w - 43}" y="${top + 21}" font-family='${MONO}' font-size="10" font-weight="700" letter-spacing="1.2" fill="${ROSE}">LIVE</text></g>`
-    : `<text class="detail" x="${w - 60}" y="${top + 21}" font-family='${MONO}' font-size="10" font-weight="700" letter-spacing="1.2">ENDED</text>`
+    : `<text class="detail" x="${w - 16}" y="${top + 21}" text-anchor="end" font-family='${MONO}' font-size="10" font-weight="700" letter-spacing="1.2">${esc(o.status ?? 'ENDED')}</text>`
 }
 ${face({ name: o.host, online: true }, 36, top + 71, 15)}
 <text class="title" x="62" y="${top + 67}" font-family='${SERIF}' font-size="16.5">${esc(title)}</text>

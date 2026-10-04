@@ -80,6 +80,9 @@ const sidebarA = atom({ plugin: 'shared-session', key: 'sidebar' } as const, nul
 const shownA = atom({ plugin: 'shared-session', key: 'shown' } as const, [] as ShareShown[])
 const previewsA = atom({ plugin: 'shared-session', key: 'previews' } as const, {} as Record<string, string>)
 const autoOpenA = atom({ plugin: 'shared-session', key: 'autoOpen' } as const, true)
+const askingA = atom({ plugin: 'shared-session', key: 'asking' } as const, null as { prompts: number } | null)
+const connectionA = atom({ plugin: 'shared-session', key: 'connection' } as const, 'live' as 'live' | 'reconnecting')
+const confirmingA = atom({ plugin: 'shared-session', key: 'confirming' } as const, null as 'stop' | null)
 
 // Context a host app puts into the person's message (Claude Desktop adds a
 // <system-reminder> to a first prompt): not typed, and never shared.
@@ -364,6 +367,7 @@ async function runStream($: $, generation: number) {
             streamUp = true
             delivered = true
             failures = 0
+            await setConnection($, 'live')
             await streamPage($, generation, message as unknown as EventsPage)
           }
         }
@@ -387,7 +391,7 @@ async function runStream($: $, generation: number) {
       if (status === 404 && refusal === 'Not found') return void startPolls($, generation, 'the server has no stream')
       const mode = await read($, modeA)
       await reset($)
-      $.ui.log(mode === 'guest' ? `${room.host}'s session is no longer shared.` : 'Sharing ended.')
+      $.ui.log(mode === 'guest' ? `${room.host}'s session is no longer shared.` : 'Sharing ended: the room closed on the server. Press Share to start a new one.')
       return
     }
     // The server ends every stream after a few minutes: pick it up again at
@@ -395,8 +399,15 @@ async function runStream($: $, generation: number) {
     // proxy that cuts streams short is not hammered.
     if (delivered && (await $.clock.now()) - opened > 60_000) continue
     failures += 1
+    if (failures >= 2) await setConnection($, 'reconnecting')
     await new Promise<void>(resolve => $.clock.after(Math.min(30_000, 500 * 2 ** failures), resolve))
   }
+}
+
+// Shown in the row above the prompt and the Room: a room this session can't
+// reach says so, rather than looking live and quiet.
+async function setConnection($: $, state: 'live' | 'reconnecting') {
+  if ((await read($, connectionA)) !== state) await update($, connectionA, () => state)
 }
 
 function startPolls($: $, generation: number, why: string) {
@@ -471,6 +482,7 @@ async function pollOnce($: $, generation: number) {
     })
     if (generation !== pollGeneration) return
     pollFailures = 0
+    await setConnection($, 'live')
     const now = await $.clock.now()
     if (page.events.length > 0 || (await read($, workingA))) lastActivity = now
     await receive($, mode, room, page)
@@ -482,10 +494,11 @@ async function pollOnce($: $, generation: number) {
     if (generation !== pollGeneration) return
     if (isGone(error)) {
       await reset($)
-      $.ui.log(mode === 'guest' ? `${room.host}'s session is no longer shared.` : 'Sharing ended.')
+      $.ui.log(mode === 'guest' ? `${room.host}'s session is no longer shared.` : 'Sharing ended: the room closed on the server. Press Share to start a new one.')
       return
     }
     pollFailures += 1
+    if (pollFailures >= 2) await setConnection($, 'reconnecting')
     pollDelay = Math.min(15_000, 500 * 2 ** pollFailures)
     $.clock.after(pollDelay, () => void pollOnce($, generation))
   }
@@ -681,6 +694,9 @@ async function reset($: $) {
   await update($, ownersA, () => ({}))
   await update($, shownA, () => [])
   await update($, previewsA, () => ({}))
+  await update($, askingA, () => null)
+  await update($, connectionA, () => 'live')
+  await update($, confirmingA, () => null)
   savedNames.clear()
 }
 
@@ -789,9 +805,32 @@ function nudgeSidebar($: $) {
 // ---------------------------------------------------------------------------
 // Host
 
-async function share($: $, surface?: RenderSurface): Promise<ShareRoom> {
+// Share pressed. Sharing sends everything earlier to everyone with the link,
+// so a session with earlier prompts asks first, in the row above the prompt
+// (and the Room), whether to include them; a fresh one shares at once.
+async function requestShare($: $, surface?: RenderSurface) {
+  const prompts = (await read($, modeA)) === 'idle' ? await earlierPrompts($) : 0
+  if (prompts === 0) {
+    await share($, surface)
+    return
+  }
+  await update($, askingA, () => ({ prompts }))
+}
+
+// The prompts typed in this session so far.
+async function earlierPrompts($: $): Promise<number> {
+  const name = await whoami($)
+  const cwd = await $.session.cwd()
+  const history = await $.session.messages({ as: 'api' })
+  return (Array.isArray(history) ? history : []).flatMap(m => rowsFromMessage(m, name, cwd)).filter(row => row.kind === 'user').length
+}
+
+// `history: false` shares only what happens from now on: nothing earlier goes
+// out, not even the first prompt as the room's title.
+async function share($: $, surface?: RenderSurface, opts: { history?: boolean } = {}): Promise<ShareRoom> {
   const mode = await read($, modeA)
   if (mode === 'guest') throw new Error('Leave the session you joined before sharing this one.')
+  await update($, askingA, () => null)
   const existing = await read($, roomA)
   if (mode === 'host' && existing) {
     await copyLink($, existing.url, surface)
@@ -801,7 +840,7 @@ async function share($: $, surface?: RenderSurface): Promise<ShareRoom> {
   const server = await serverOf($)
   const name = await whoami($)
   const cwd = await $.session.cwd()
-  const history = await $.session.messages({ as: 'api' })
+  const history = opts.history === false ? [] : await $.session.messages({ as: 'api' })
   const messages = Array.isArray(history) ? history : []
   const firstPrompt = messages.flatMap(m => rowsFromMessage(m, name, cwd)).find(row => row.kind === 'user')?.text
   const folder = cwd.split('/').filter(Boolean).at(-1) ?? 'session'
@@ -833,15 +872,31 @@ async function share($: $, surface?: RenderSurface): Promise<ShareRoom> {
     for (const row of rowsFromMessage(message, name, cwd)) send($, 'row', row)
   }
   startFeed($)
-  await copyLink($, room.url, surface)
+  const copied = await $.ui.copy({ text: room.url, surface }).catch(() => ({ isCopied: false }))
+  $.ui.toast(copied.isCopied ? 'Sharing · link copied' : 'Sharing · the link is in the transcript')
+  $.ui.log(
+    `Sharing${opts.history === false ? ' from now on' : ''}. Anyone with this link can join and prompt this session: ${room.url}`,
+  )
   await markSidebar($, current => `👥 Live · ${current || room.title}`)
   return room
 }
 
 async function copyLink($: $, url: string, surface?: RenderSurface) {
   const copied = await $.ui.copy({ text: url, surface }).catch(() => ({ isCopied: false }))
-  $.ui.toast(copied.isCopied ? 'Share link copied' : 'Shared: the link is in the transcript')
-  $.ui.log(`Shared. Anyone with this link can join and talk to this session: ${url}`)
+  if (copied.isCopied) $.ui.toast('Link copied')
+  else $.ui.log(`The share link: ${url}`)
+}
+
+// Stop sharing ends the room for everyone: the first press asks, a second
+// within five seconds stops.
+async function confirmStop($: $) {
+  if ((await read($, confirmingA)) === 'stop') {
+    await update($, confirmingA, () => null)
+    await stopSharing($)
+    return
+  }
+  await update($, confirmingA, () => 'stop')
+  $.clock.after(5_000, () => void update($, confirmingA, c => (c === 'stop' ? null : c)))
 }
 
 async function stopSharing($: $) {
@@ -1507,6 +1562,9 @@ type View = {
   working: ShareWorking | null
   policy: SharePolicy
   unread: number
+  connection: 'live' | 'reconnecting'
+  confirming: 'stop' | null
+  asking: { prompts: number } | null
 }
 
 async function view($: $): Promise<View> {
@@ -1519,6 +1577,9 @@ async function view($: $): Promise<View> {
     working: await read($, workingA),
     policy: await read($, policyA),
     unread: await read($, unreadA),
+    connection: await read($, connectionA),
+    confirming: await read($, confirmingA),
+    asking: await read($, askingA),
   }
 }
 
@@ -1547,6 +1608,7 @@ function presence(v: View): string {
 function statusLine(v: View): string | null {
   const host = v.room?.host ?? 'the host'
   const w = v.working
+  if (v.connection === 'reconnecting') return `↻  Reconnecting to the room… what you send goes out once it's back`
   if (v.mode === 'host') {
     if (w?.byGuest && w.waitingFor) return `⚠  ${w.by} is waiting for your OK on ${w.waitingFor}`
     if (w?.byGuest) return `◐  Claude is working for ${w.by}`
@@ -1580,6 +1642,45 @@ function describe(a: ShareActivity): string {
   }
 }
 
+// Share pressed in a session with history: everything earlier would go to
+// everyone with the link, so the row (or the Room) asks first.
+function shareChoice($: $, el: UI, prompts: number, where: 'band' | 'room') {
+  const { Box, Text, Button } = el
+  const go = (history: boolean, surface?: RenderSurface) =>
+    void share($, surface, { history }).catch(error => {
+      $.ui.toast("Couldn't share")
+      $.ui.log(`Couldn't share: ${String(error?.message ?? error)}`)
+    })
+  return (
+    <Box flexDirection="column" gap={where === 'room' ? 1 : 0}>
+      <Box flexDirection="row" gap={1} flexWrap="wrap">
+        <Text bold>Share this session?</Text>
+        <Text dimColor>{`Everyone with the link will see its ${prompts} earlier prompt${prompts === 1 ? '' : 's'} and Claude's replies.`}</Text>
+      </Box>
+      <Box flexDirection="row" gap={1} justifyContent={where === 'band' ? 'flex-end' : 'flex-start'}>
+        <Button key="share-all" label="Share everything" variant="primary" onPress={press => go(true, press.surface)} />
+        <Button key="share-new" label="Only from now on" onPress={press => go(false, press.surface)} />
+        <Button key="share-cancel" label="Cancel" plain dimColor onPress={() => void update($, askingA, () => null)} />
+      </Box>
+    </Box>
+  )
+}
+
+// Why a link didn't join, in words a person can act on.
+function joinFailure(error: unknown, server: string): string {
+  if (isGone(error)) return "That shared session has ended: the host stopped sharing, or the room expired. Ask them for a new link."
+  if (error instanceof ApiError) return `Couldn't join that shared session: ${error.message}`
+  return `Couldn't reach the share server at ${server}. Check your connection, then paste the link again.`
+}
+
+// What a guest may do here, in a line.
+function rulesLine(policy: SharePolicy, host: string): string {
+  if (policy.prompts === 'watch') return `◎ Watch-only: you follow along and chat; ${host} prompts Claude`
+  const asks =
+    policy.approvals === 'none' ? 'nothing asks first' : policy.approvals === 'all' ? `every tool asks ${host} first` : `edits and commands ask ${host} first`
+  return `✎ Everyone can prompt · ${asks}`
+}
+
 const shownGlyph = (item: ShareShown) => (item.kind === 'preview' ? '◍' : item.kind === 'widget' ? '◆' : item.kind === 'link' ? '↗' : '◧')
 
 const svgOf = (el: UI) => ('Svg' in el ? el.Svg : undefined)
@@ -1595,7 +1696,7 @@ export const register: Register = (on, options) => {
   on('session.start', async ($, e, next) => {
     const started = await next(e)
     // Not /share: Claude has its own. Every name here is the plugin's alone.
-    await $.command.register({ name: 'share-session', description: 'Share this session: copies a link teammates join with' })
+    await $.command.register({ name: 'share-session', description: 'Share this session with a link: /share-session [all | new]' })
     await $.command.register({ name: 'stop-sharing', description: 'Stop sharing this session, or leave the one you joined' })
     await $.command.register({ name: 'room', description: 'Open the Room: who is here, activity, side chat' })
     await $.command.register({ name: 'share-file', description: 'Show a file to everyone in the shared session: /share-file <path>' })
@@ -1613,10 +1714,24 @@ export const register: Register = (on, options) => {
     return next(e)
   })
 
-  on('command.run', { command: 'share-session' }, async $ => {
+  on('command.run', { command: 'share-session' }, async ($, e) => {
+    const choice = e.args.trim().toLowerCase()
     try {
-      const room = await share($)
-      return { text: `Sharing this session. Anyone with the link can join: ${room.url}` }
+      if ((await read($, modeA)) === 'idle' && choice !== 'all' && choice !== 'new') {
+        const prompts = await earlierPrompts($)
+        if (prompts > 0) {
+          return {
+            text: [
+              `This session has ${prompts} earlier prompt${prompts === 1 ? '' : 's'}. Everyone with the link would see them, and Claude's replies.`,
+              '',
+              '- `/share-session all` shares the session as it is',
+              '- `/share-session new` shares only what happens from now on',
+            ].join('\n'),
+          }
+        }
+      }
+      const room = await share($, undefined, { history: choice !== 'new' })
+      return { text: `Sharing this session${choice === 'new' ? ' from now on' : ''}. Anyone with the link can join: ${room.url}` }
     } catch (error) {
       return { text: `Couldn't share: ${String((error as Error)?.message ?? error)}` }
     }
@@ -1658,7 +1773,7 @@ export const register: Register = (on, options) => {
     const mode = await read($, modeA)
     if (mode === 'host') await stopSharing($)
     else if (mode === 'guest') await leave($)
-    return { text: mode === 'idle' ? 'This session is not shared.' : 'Done.' }
+    return { text: mode === 'idle' ? 'This session is not shared.' : mode === 'host' ? 'Stopped sharing. The link no longer works.' : 'Left the shared session.' }
   })
 
   on('ui.close', async ($, e, next) => {
@@ -1689,17 +1804,17 @@ export const register: Register = (on, options) => {
         answerWith({
           kind: 'note',
           text: [
-            `You're in **${room.host}**'s session.`,
+            `You joined **${room.host}'s session**.`,
             policy.prompts === 'watch'
-              ? `It's watch-only for now: you'll see every turn live, and you can chat with everyone in the **Room** panel.`
-              : `What you type here goes to it and runs on ${room.host}'s machine; everyone sees the replies live.`,
-            `The **Room** panel (above the prompt, or \`/room\`) shows who's here and has a side chat Claude doesn't read. To leave, press **Leave**.`,
+              ? `It's watch-only for now: you see every turn live and can chat with everyone in the **Room**.`
+              : `What you type here runs there, on ${room.host}'s machine, and everyone sees the replies live.`,
+            `The **Room** (above the prompt, or \`/room\`) shows who's here and has a side chat Claude doesn't read. **Leave** is up there too.${history.length ? ' First, what happened so far:' : ''}`,
           ].join(' '),
           then: history,
           open,
         })
       } catch (error) {
-        answerWith({ kind: 'note', text: `Couldn't join that shared session: ${String((error as Error)?.message ?? error)}`, then: [] })
+        answerWith({ kind: 'note', text: joinFailure(error, link[1]), then: [] })
       }
       return next(e)
     }
@@ -1984,14 +2099,14 @@ export const register: Register = (on, options) => {
       descriptions: {
         'Allow once': `Run this one ${e.tool} call for ${working.by}.`,
         [always]: `Don't ask again for ${working.by}'s requests while this session is shared.`,
-        Deny: `Claude is told you declined and carries on without it.`,
+        Decline: `Claude is told you declined and carries on without it.`,
       },
     }
-    let answer = 'Deny'
+    let answer = 'Decline'
     try {
       answer = await $.ui.ask(`${working.by} wants Claude to run ${what.slice(0, 200)}. Allow it?`, {
         header: ASK_HEADER,
-        options: ['Allow once', always, 'Deny'],
+        options: ['Allow once', always, 'Decline'],
       })
     } catch {}
     pendingAsk = null
@@ -2098,7 +2213,8 @@ export const register: Register = (on, options) => {
     return next({ ...e, props: { ...e.props, hint } })
   })
 
-  // The Room: who's here, what happened, the side chat, and the host's controls.
+  // The Room: who's here, the side chat, what was shown, what happened, and
+  // the settings, in that order; the one button that ends it last.
   on('ui.render', { component: 'Pane', requestId: ROOM }, async ($, e) => {
     const el = $.ui.resolve(e)
     const { Box, Text, Button, Link } = el
@@ -2107,16 +2223,28 @@ export const register: Register = (on, options) => {
     const Select = selectOf(el)
     const v = await view($)
     const room = v.room
+    const section = (title: string, note?: string) => (
+      <Box flexDirection="row" gap={1}>
+        <Text bold dimColor>
+          {title}
+        </Text>
+        {note ? <Text dimColor>{note}</Text> : null}
+      </Box>
+    )
     if (v.mode === 'idle' || !room) {
+      if (v.asking) return shareChoice($, el, v.asking.prompts, 'room')
       return (
         <Box flexDirection="column" gap={1}>
-          <Text dimColor>This session is not shared.</Text>
-          <Button
-            key="room-share"
-            label="Share this session"
-            variant="primary"
-            onPress={press => void share($, press.surface).catch(error => $.ui.log(`Couldn't share: ${String(error?.message ?? error)}`))}
-          />
+          <Text bold>This session isn't shared</Text>
+          <Text dimColor>Share it and teammates join from their own Claude Code with a link. They see the conversation live and can prompt Claude here.</Text>
+          <Box flexDirection="row">
+            <Button
+              key="room-share"
+              label="Share this session"
+              variant="primary"
+              onPress={press => void requestShare($, press.surface).catch(error => $.ui.log(`Couldn't share: ${String(error?.message ?? error)}`))}
+            />
+          </Box>
         </Box>
       )
     }
@@ -2128,36 +2256,26 @@ export const register: Register = (on, options) => {
     const people = faces(v)
     const online = people.filter(p => p.online).length
     const isHost = v.mode === 'host'
-    const section = (title: string) => (
-      <Text bold dimColor>
-        {title}
-      </Text>
-    )
+    const live = v.connection === 'live'
     const joinedAt = (name: string) => activity.find(a => a.kind === 'join' && a.who === name)?.ts
     const prompts = (name: string) => activity.filter(a => a.kind === 'prompt' && a.who === name).length
+    const detail = live ? `${isHost ? "You're sharing this session" : `Hosted by ${room.host}`} · ${online} here` : 'Reconnecting to the room…'
 
     return (
       <Box flexDirection="column" gap={1}>
         {Svg ? (
           <Svg
-            source={bannerSvg({
-              title: room.title,
-              host: room.host,
-              live: true,
-              detail: `${isHost ? 'You are sharing this session' : `Hosted by ${room.host}`} · ${online} here`,
-            })}
-            alt={`${room.title}, hosted by ${room.host}, live`}
+            source={bannerSvg({ title: room.title, host: room.host, live, detail, status: 'RECONNECTING' })}
+            alt={`${room.title}, hosted by ${room.host}, ${live ? 'live' : 'reconnecting'}`}
           />
         ) : (
           <Box flexDirection="column">
-            <Text bold>{`● LIVE  ${room.title}`}</Text>
-            <Text dimColor>{`${isHost ? 'You are sharing' : `Hosted by ${room.host}`} · ${online} here · ${describePolicy(v.policy)}`}</Text>
+            <Text bold>{`${live ? '● LIVE' : '↻ RECONNECTING'}  ${room.title}`}</Text>
+            <Text dimColor>{detail}</Text>
           </Box>
         )}
 
-        <Text dimColor>{`${v.policy.prompts === 'watch' ? '◎ Watch-only' : '✎ Everyone can prompt'} · ${
-          v.policy.approvals === 'none' ? 'no approvals' : v.policy.approvals === 'all' ? 'every tool asks the host' : 'edits and commands ask the host'
-        }`}</Text>
+        {isHost ? null : <Text dimColor>{rulesLine(v.policy, room.host)}</Text>}
 
         <Box flexDirection="row" gap={1} alignItems="center">
           <Text dimColor wrap="truncate-middle">
@@ -2168,7 +2286,7 @@ export const register: Register = (on, options) => {
         </Box>
 
         <Box flexDirection="column">
-          {section(`PEOPLE · ${online}`)}
+          {section('PEOPLE', `${online} here`)}
           {people.map(p => {
             const joined = joinedAt(p.name)
             const asked = prompts(p.name)
@@ -2192,7 +2310,7 @@ export const register: Register = (on, options) => {
                     {[
                       p.note?.includes('host') ? 'hosting' : joined ? `joined ${ago(joined, now)}` : 'here',
                       asked ? `${asked} prompt${asked === 1 ? '' : 's'}` : 'no prompts yet',
-                      trusted.includes(p.name) ? 'trusted' : '',
+                      trusted.includes(p.name) ? 'always allowed' : '',
                     ]
                       .filter(Boolean)
                       .join(' · ')}
@@ -2201,11 +2319,53 @@ export const register: Register = (on, options) => {
               </Box>
             )
           })}
+          {isHost && people.length <= 1 ? <Text dimColor>No one has joined yet. Send the link to a teammate: it opens in their Claude Code.</Text> : null}
         </Box>
 
         <Box flexDirection="column">
+          {section('CHAT', 'people only · Claude never reads it')}
+          {chat.length === 0 ? <Text dimColor>Nothing yet. Say hi, or talk about the work without prompting Claude.</Text> : null}
+          {chat.slice(-12).map((c, i) => (
+            <Box key={`chat-${c.ts}-${i}`} flexDirection="column">
+              <Box flexDirection="row" gap={1}>
+                <Text bold>{c.seat === v.me ? 'You' : c.who}</Text>
+                <Text dimColor>{ago(c.ts, now)}</Text>
+              </Box>
+              <Text>{c.text}</Text>
+            </Box>
+          ))}
+          {Input ? (
+            <Input key={`chat-input-${chat.length}`} placeholder="Message everyone…" submitLabel="Send" onSubmit={(value: string) => void postChat($, value)} />
+          ) : (
+            <Text dimColor>Chat from Claude Code on desktop or in a terminal.</Text>
+          )}
+        </Box>
+
+        {shown.length ? (
+          <Box flexDirection="column">
+            {section('SHOWN', isHost ? 'what Claude showed everyone' : `what ${room.host}'s Claude showed`)}
+            {shown
+              .slice(-8)
+              .reverse()
+              .map(item => (
+                <Box key={`shown-${item.key}`} flexDirection="row" gap={1} alignItems="center">
+                  <Text dimColor={item.closed}>{shownGlyph(item)}</Text>
+                  <Text dimColor>{ago(item.ts, now).padEnd(8)}</Text>
+                  <Text wrap="truncate-end" dimColor={item.closed}>{`${item.name}${item.closed ? ' · ended' : ''}`}</Text>
+                  {!isHost && !item.closed && item.kind !== 'widget' && item.kind !== 'link' ? (
+                    <Button key={`open-${item.key}`} label="Open" plain onPress={press => void openShown($, item, press.surface)} />
+                  ) : null}
+                  {isHost && item.kind === 'preview' && item.pid && !item.closed ? (
+                    <Button key={`stop-${item.key}`} label="Stop" plain onPress={() => void stopPreview($, item.pid as string)} />
+                  ) : null}
+                </Box>
+              ))}
+          </Box>
+        ) : null}
+
+        <Box flexDirection="column">
           {section('ACTIVITY')}
-          {activity.length === 0 ? <Text dimColor>Nothing yet.</Text> : null}
+          {activity.length === 0 ? <Text dimColor>Joins, prompts and approvals show up here.</Text> : null}
           {activity
             .slice(-8)
             .reverse()
@@ -2222,91 +2382,38 @@ export const register: Register = (on, options) => {
             ))}
         </Box>
 
-        <Box flexDirection="column">
-          {section('SHOWN · files, widgets, pages, previews')}
-          {shown.length === 0 ? (
-            <Text dimColor>
-              {isHost
-                ? v.policy.files === 'off'
-                  ? 'What Claude shows stays with you (see Host controls).'
-                  : 'What Claude shows (files, widgets, pages, previews of localhost) goes to everyone here.'
-                : `What ${room.host}'s Claude shows opens here too, and is listed here.`}
-            </Text>
-          ) : null}
-          {shown
-            .slice(-8)
-            .reverse()
-            .map(item => (
-              <Box key={`shown-${item.key}`} flexDirection="row" gap={1} alignItems="center">
-                <Text dimColor={item.closed}>{shownGlyph(item)}</Text>
-                <Text dimColor>{ago(item.ts, now).padEnd(8)}</Text>
-                <Text wrap="truncate-end" dimColor={item.closed}>{`${item.name}${item.closed ? ' · ended' : ''}`}</Text>
-                {!isHost && !item.closed && item.kind !== 'widget' && item.kind !== 'link' ? (
-                  <Button key={`open-${item.key}`} label="Open" plain onPress={press => void openShown($, item, press.surface)} />
-                ) : null}
-                {isHost && item.kind === 'preview' && item.pid && !item.closed ? (
-                  <Button key={`stop-${item.key}`} label="Stop" plain onPress={() => void stopPreview($, item.pid as string)} />
-                ) : null}
-              </Box>
-            ))}
-        </Box>
-
-        <Box flexDirection="column" gap={0}>
-          {section('CHAT · Claude never sees this')}
-          {chat.length === 0 ? <Text dimColor>Say hi. Messages here go to people, not to Claude.</Text> : null}
-          {chat.slice(-12).map((c, i) => (
-            <Box key={`chat-${c.ts}-${i}`} flexDirection="column">
-              <Box flexDirection="row" gap={1}>
-                <Text bold>{c.seat === v.me ? 'You' : c.who}</Text>
-                <Text dimColor>{ago(c.ts, now)}</Text>
-              </Box>
-              <Text>{c.text}</Text>
-            </Box>
-          ))}
-          {Input ? (
-            <Input
-              key={`chat-input-${chat.length}`}
-              placeholder="Message everyone…"
-              submitLabel="Send"
-              onSubmit={(value: string) => void postChat($, value)}
-            />
-          ) : (
-            <Text dimColor>Chat from Claude Code on desktop or in a terminal.</Text>
-          )}
-        </Box>
-
         {isHost ? (
           <Box flexDirection="column" gap={1}>
-            {section('HOST CONTROLS')}
+            {section('SETTINGS', 'everyone here sees these')}
             {Select ? (
               <Select
-              key="policy-prompts"
-              label="Teammates can"
-              value={v.policy.prompts}
-              options={[
-                { value: 'everyone', label: 'Prompt Claude' },
-                { value: 'watch', label: 'Only watch and chat' },
-              ]}
-              onSelect={(value: string) => void setPolicy($, { prompts: value === 'watch' ? 'watch' : 'everyone' })}
-            />
+                key="policy-prompts"
+                label="Teammates can"
+                value={v.policy.prompts}
+                options={[
+                  { value: 'everyone', label: 'Prompt Claude' },
+                  { value: 'watch', label: 'Only watch and chat' },
+                ]}
+                onSelect={(value: string) => void setPolicy($, { prompts: value === 'watch' ? 'watch' : 'everyone' })}
+              />
             ) : null}
             {Select ? (
               <Select
-              key="policy-approvals"
-              label="Ask me before a teammate's request runs"
-              value={v.policy.approvals}
-              options={[
-                { value: 'edits', label: 'Edits, commands and web (recommended)' },
-                { value: 'all', label: 'Every tool, reads included' },
-                { value: 'none', label: 'Nothing: I trust everyone here' },
-              ]}
-              onSelect={(value: string) => void setPolicy($, { approvals: value === 'all' || value === 'none' ? value : 'edits' })}
-            />
+                key="policy-approvals"
+                label="Ask me before a teammate's request runs"
+                value={v.policy.approvals}
+                options={[
+                  { value: 'edits', label: 'Edits, commands and web (recommended)' },
+                  { value: 'all', label: 'Every tool, reads included' },
+                  { value: 'none', label: "Nothing: I trust everyone here" },
+                ]}
+                onSelect={(value: string) => void setPolicy($, { approvals: value === 'all' || value === 'none' ? value : 'edits' })}
+              />
             ) : null}
             {Select ? (
               <Select
                 key="policy-files"
-                label="What Claude shows: files, widgets, pages, previews"
+                label="What Claude shows (files, widgets, pages, previews)"
                 value={v.policy.files ?? 'on'}
                 options={[
                   { value: 'on', label: 'Goes to everyone here' },
@@ -2321,10 +2428,19 @@ export const register: Register = (on, options) => {
                 <Button key="untrust" label="Ask again" plain onPress={() => void update($, trustedA, () => [])} />
               </Box>
             ) : null}
-            <Button key="room-stop" label="Stop sharing" variant="primary" onPress={() => void stopSharing($)} />
+            <Box flexDirection="row" gap={1} alignItems="center">
+              <Button
+                key="room-stop"
+                label={v.confirming === 'stop' ? 'Stop for everyone?' : 'Stop sharing'}
+                variant="primary"
+                onPress={() => void confirmStop($)}
+              />
+              {v.confirming === 'stop' ? <Text dimColor>Press again to end the room. The link stops working.</Text> : null}
+            </Box>
           </Box>
         ) : (
           <Box flexDirection="column" gap={1}>
+            {section('SETTINGS', 'just for you')}
             {Select ? (
               <Select
                 key="auto-open"
@@ -2337,7 +2453,9 @@ export const register: Register = (on, options) => {
                 onSelect={(value: string) => void update($, autoOpenA, () => value !== 'ask')}
               />
             ) : null}
-            <Button key="room-leave" label={`Leave ${room.host}'s session`} variant="primary" onPress={() => void leave($)} />
+            <Box flexDirection="row">
+              <Button key="room-leave" label={`Leave ${room.host}'s session`} onPress={() => void leave($)} />
+            </Box>
           </Box>
         )}
       </Box>
@@ -2353,6 +2471,7 @@ export const register: Register = (on, options) => {
     const v = await view($)
 
     if (v.mode === 'idle') {
+      if (v.asking) return shareChoice($, el, v.asking.prompts, 'band')
       return (
         <Box flexDirection="row" justifyContent="flex-end">
           <Button
@@ -2361,7 +2480,7 @@ export const register: Register = (on, options) => {
             plain
             dimColor
             onPress={press => {
-              void share($, press.surface).catch(error => {
+              void requestShare($, press.surface).catch(error => {
                 $.ui.toast("Couldn't share")
                 $.ui.log(`Couldn't share: ${String(error?.message ?? error)}`)
               })
@@ -2372,26 +2491,37 @@ export const register: Register = (on, options) => {
     }
 
     const people = faces(v)
-    const stack = stackSvg(people, { live: true, size: 24, max: 6 })
+    const live = v.connection === 'live'
+    const stack = stackSvg(people, { live, size: 24, max: 6 })
     const status = statusLine(v)
     const here = presence(v)
     const roomLabel = v.unread ? `Room · ${v.unread} new` : `Room · ${people.filter(p => p.online).length}`
+    const stopping = v.confirming === 'stop'
 
     return (
       <Box flexDirection="column">
         <Box flexDirection="row" gap={1} alignItems="center" justifyContent="space-between">
           <Box flexDirection="row" gap={1} alignItems="center" flexShrink={1}>
             {Svg ? (
-              <Svg source={stack.source} alt={`Live with ${people.map(p => p.name).join(', ')}`} width={stack.width} height={24} />
+              <Svg
+                source={stack.source}
+                alt={`${live ? 'Live' : 'Reconnecting'} with ${people.map(p => p.name).join(', ')}`}
+                width={stack.width}
+                height={24}
+              />
             ) : (
               <Box flexDirection="row">
-                <Text color={ROSE}>● </Text>
+                <Text color={live ? ROSE : undefined} dimColor={!live}>
+                  {live ? '● ' : '↻ '}
+                </Text>
                 {people.map(p => (
-                  <Text dimColor={!p.online}>{p.online ? '●' : '○'}</Text>
+                  <Text key={`dot-${p.name}`} dimColor={!p.online}>
+                    {p.online ? '●' : '○'}
+                  </Text>
                 ))}
               </Box>
             )}
-            <Text bold>{v.mode === 'host' ? 'Shared' : `${v.room?.host}'s session`}</Text>
+            <Text bold>{v.mode === 'host' ? 'Sharing' : `${v.room?.host}'s session`}</Text>
             {here ? (
               <Text dimColor wrap="truncate-end">
                 {here}
@@ -2400,17 +2530,25 @@ export const register: Register = (on, options) => {
           </Box>
           <Box flexDirection="row" gap={1}>
             <Button key="room" label={roomLabel} plain dimColor={!v.unread} onPress={() => void openRoom($)} />
-            {v.mode === 'host' ? (
+            {v.mode === 'host' && !stopping ? (
               <Button key="copy" label="Copy link" plain dimColor onPress={press => void (v.room ? copyLink($, v.room.url, press.surface) : undefined)} />
             ) : null}
             {v.mode === 'host' ? (
-              <Button key="stop-sharing" label="Stop sharing" plain dimColor onPress={() => void stopSharing($)} />
+              stopping ? (
+                <Button key="stop-sharing" label="Stop for everyone?" variant="primary" onPress={() => void confirmStop($)} />
+              ) : (
+                <Button key="stop-sharing" label="Stop sharing" plain dimColor onPress={() => void confirmStop($)} />
+              )
             ) : (
               <Button key="leave" label="Leave" plain dimColor onPress={() => void leave($)} />
             )}
           </Box>
         </Box>
-        {status ? (
+        {stopping ? (
+          <Text dimColor wrap="truncate-end">
+            Press again to end the room for everyone. The link stops working.
+          </Text>
+        ) : status ? (
           <Text dimColor wrap="truncate-end">
             {status}
           </Text>

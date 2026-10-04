@@ -594,6 +594,39 @@ const previewPage = (status, title, text) =>
     { status, headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' } },
   )
 
+// A link to a room that isn't here (ended long ago and swept, or mistyped):
+// the landing page's look, and what to do.
+export function missingPage() {
+  const html = `<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>This shared session isn't here</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@500;600&family=Gowun+Batang:wght@400;700&display=swap" rel="stylesheet">
+<style>
+${PAGE_CSS}</style></head>
+<body>
+<header class="wrap nav">
+  <a class="brand" href="#"><svg viewBox="0 0 500 500" aria-hidden="true">${LOGO_PATHS}</svg><span class="word">Paradigm</span><span class="sub">Shared session</span></a>
+  <span class="live ended"><i></i><span>ENDED</span></span>
+</header>
+<main class="wrap">
+  <section class="hero" style="grid-template-columns:minmax(0,1fr)">
+    <div>
+      <span class="eyebrow">Link not found</span>
+      <h1>This shared session isn't here</h1>
+      <p class="sub-copy">It ended, or the link is incomplete. Ask whoever sent it for a new one.</p>
+    </div>
+  </section>
+</main>
+<footer class="wrap"><q>Everyone in one session, Claude in the middle.</q></footer>
+</body></html>`
+  return new Response(html, { status: 404, headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' } })
+}
+
+// A preview link whose room isn't here.
+export const previewMissing = () => previewPage(404, 'This preview has ended', 'The shared session it belonged to is no longer here.')
+
 // The room id a preview request is for: the enter link's, else the cookie's.
 export function previewRoomOf(req) {
   const url = new URL(req.url)
@@ -704,28 +737,7 @@ export { json }
 const escapeHtml = s =>
   String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c])
 
-export function landingPage(room, url, now) {
-  const deepLink = `claude://code/new?q=${encodeURIComponent(url)}`
-  const data = {
-    id: room.id,
-    url,
-    deepLink,
-    title: room.title,
-    host: room.host.name,
-    ended: Boolean(room.endedAt),
-    people: room.people(now),
-  }
-  const json = JSON.stringify(data).replace(/</g, '\\u003c')
-  const host = escapeHtml(room.host.name)
-  const html = `<!doctype html>
-<html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>${host} is sharing a Claude Code session</title>
-<meta name="description" content="${escapeHtml(room.title)}">
-<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@500;600&family=Gowun+Batang:wght@400;700&display=swap" rel="stylesheet">
-<style>
-/* Paradigm's landing design (paradigm-study-web, "A School of One"): paper and
+const PAGE_CSS = `/* Paradigm's landing design (paradigm-study-web, "A School of One"): paper and
    ink, a faint dot grid, the notebook window with three muted dots, mono
    eyebrows, a serif display face, warm shadows. Dark is ours: ink paper. */
 :root {
@@ -818,13 +830,43 @@ h1 { font-family:var(--display); font-weight:400; font-size:46px; line-height:1.
 .first[open] summary::before { content:"– "; }
 .first p { margin:8px 0; }
 .first .composer { margin-top:0; }
+.first code.inline { font:12.5px var(--mono); background:var(--accent-wash); color:var(--accent-ink); padding:1px 5px; border-radius:4px; }
+.status a { color:var(--accent-ink); text-decoration:underline; text-underline-offset:2px; }
 footer { padding:0 0 40px; color:var(--faint); font-size:13px; }
 footer q { font-family:var(--display); font-size:17px; color:var(--muted); quotes:"\\201C" "\\201D"; }
 [hidden] { display:none !important; }
 @media (max-width: 880px) { .hero { grid-template-columns:minmax(0,1fr); gap:64px; padding:40px 0 64px; } .window { margin:0 auto; } h1 { font-size:36px; } }
 @media (max-width: 480px) { .wrap { padding:0 18px; } h1 { font-size:30px; } .main { padding:22px 18px 18px; } .cta { gap:16px; flex-wrap:wrap; } .brand .sub { display:none; } }
 @media (prefers-reduced-motion: reduce) { * { animation:none !important; transition:none !important; } }
-</style></head>
+`
+
+export function landingPage(room, url, now) {
+  const deepLink = `claude://code/new?q=${encodeURIComponent(url)}`
+  const data = {
+    id: room.id,
+    url,
+    deepLink,
+    title: room.title,
+    host: room.host.name,
+    ended: Boolean(room.endedAt),
+    people: room.people(now),
+  }
+  const json = JSON.stringify(data).replace(/</g, '\\u003c')
+  const host = escapeHtml(room.host.name)
+  const html = `<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${host} is sharing a Claude Code session</title>
+<meta name="description" content="${escapeHtml(room.title)}">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Claude Code · Shared session">
+<meta property="og:title" content="${host} is sharing a Claude Code session">
+<meta property="og:description" content="${escapeHtml(room.title)} · Join from your own Claude Code and work in it together.">
+<meta name="twitter:card" content="summary">
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@500;600&family=Gowun+Batang:wght@400;700&display=swap" rel="stylesheet">
+<style>
+${PAGE_CSS}</style></head>
 <body>
 <header class="wrap nav">
   <a class="brand" href="#"><svg viewBox="0 0 500 500" aria-hidden="true">${LOGO_PATHS}</svg><span class="word">Paradigm</span><span class="sub">Shared session</span></a>
@@ -848,14 +890,15 @@ footer q { font-family:var(--display); font-size:17px; color:var(--muted); quote
       <div class="bar"><span class="d r"></span><span class="d y"></span><span class="d g"></span><span class="label">claude code · shared</span><span class="live" id="pill2"><i></i><span>LIVE</span></span></div>
       <div class="main" id="steps">
         <div class="step done"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg><span><b class="hn"></b> shared this session</span></div>
-        <div class="step"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 9h10M7 13h6"/></svg><span>Opens a <b>new Claude Code session</b> with this link in the prompt box</span></div>
-        <div class="step"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 10 4 15l5 5"/><path d="M20 4v7a4 4 0 0 1-4 4H4"/></svg><span><b>Press Enter</b> to join. The conversation so far plays back first</span></div>
-        <a class="step go" id="go" href="#"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg><span><b>Open in Claude Code</b> and talk to it together</span></a>
-        <div class="composer"><span class="slash">/</span><code id="link"></code><button id="copy2" title="Copy link" aria-label="Copy link"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2.5"/><path d="M5 15V6a2 2 0 0 1 2-2h9"/></svg></button></div>
-        <details class="first" id="first">
+        <div class="step done" id="ended-step" hidden><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="8.5"/><path d="M8.5 12h7"/></svg><span>Sharing has ended. Ask <b class="hn"></b> for a new link</span></div>
+        <a class="step go join" id="go" href="#"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg><span><b>Open in Claude Code.</b> A new session opens with this link in the prompt box</span></a>
+        <div class="step join"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 10 4 15l5 5"/><path d="M20 4v7a4 4 0 0 1-4 4H4"/></svg><span><b>Press Enter</b> to join. The conversation so far plays back, then you're in it live</span></div>
+        <div class="composer join"><span class="slash">/</span><code id="link"></code><button id="copy2" title="Copy link" aria-label="Copy link"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2.5"/><path d="M5 15V6a2 2 0 0 1 2-2h9"/></svg></button></div>
+        <details class="first join" id="first">
           <summary>First time? Install the plugin once</summary>
-          <p>Paste this in a terminal, then start a new Claude Code session (or restart Claude Desktop):</p>
+          <p>Paste this in a terminal, then start a new Claude Code session (or quit and reopen Claude Desktop):</p>
           <div class="composer"><span class="slash">$</span><code id="install"></code><button id="copy3" title="Copy command" aria-label="Copy install command"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2.5"/><path d="M5 15V6a2 2 0 0 1 2-2h9"/></svg></button></div>
+          <p>In a terminal instead? Start <code class="inline">claude</code> and paste the link as your first message.</p>
         </details>
       </div>
     </div>
@@ -894,7 +937,8 @@ footer q { font-family:var(--display); font-size:17px; color:var(--muted); quote
     var b = document.createElement('b'); b.textContent = here.length + ' here'; count.appendChild(b);
     if (here.length) count.appendChild(document.createTextNode(' · ' + here.map(function (p) { return p.name; }).join(', ')));
     ['pill', 'pill2'].forEach(function (id) { $(id).classList.toggle('ended', d.ended); $(id).lastElementChild.textContent = d.ended ? 'ENDED' : 'LIVE'; });
-    $('cta').hidden = d.ended; $('go').hidden = d.ended;
+    $('cta').hidden = d.ended; $('ended-step').hidden = !d.ended; document.querySelector('.people').hidden = d.ended;
+    Array.prototype.forEach.call(document.querySelectorAll('.join'), function (n) { n.hidden = d.ended; });
     if (d.ended) { $('eyebrow').textContent = 'Sharing ended'; $('subcopy').textContent = 'This session is no longer shared. Ask ' + data.host + ' for a new link.'; }
   }
   render(data);
@@ -909,7 +953,19 @@ footer q { font-family:var(--display); font-size:17px; color:var(--muted); quote
   document.addEventListener('visibilitychange', refresh);
   function copy() { navigator.clipboard.writeText(data.url).then(function () { $('copy').textContent = 'Copied'; setTimeout(function () { $('copy').textContent = 'Copy link'; }, 1600); }); }
   $('copy').addEventListener('click', copy); $('copy2').addEventListener('click', copy);
-  function opening() { $('status').textContent = 'Opening Claude… then press Enter in the new session.'; }
+  // The app opening takes this window's focus. Still here after a moment: say what else works.
+  var left = false;
+  window.addEventListener('blur', function () { left = true; });
+  document.addEventListener('visibilitychange', function () { if (document.visibilityState === 'hidden') left = true; });
+  function opening() {
+    left = false;
+    $('status').textContent = 'Opening Claude… then press Enter in the new session.';
+    setTimeout(function () {
+      if (left) return;
+      $('status').textContent = "Didn't open? You need the Claude desktop app, or start claude in a terminal and paste the link. First time? Install the plugin below.";
+      $('first').open = true;
+    }, 2500);
+  }
   $('open').addEventListener('click', opening); $('go').addEventListener('click', opening);
   if (!data.ended && location.hash !== '#stay') {
     var key = 'opened:' + data.id; var already = false; try { already = sessionStorage.getItem(key) === '1'; sessionStorage.setItem(key, '1'); } catch (e) {}

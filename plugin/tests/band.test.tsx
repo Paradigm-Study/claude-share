@@ -22,7 +22,7 @@ function band<S extends (typeof SURFACES)[number]>(surface: S) {
 // that answers from memory. Returns what the server was asked. `stream` is
 // what the room's stream sends a curl child; without it, curl can't start and
 // the plugin polls.
-function world(on: On, opts: { server?: boolean; stream?: unknown[] } = {}) {
+function world(on: On, opts: { server?: boolean; stream?: unknown[]; history?: unknown[]; down?: boolean } = {}) {
   const asked: string[] = []
   const spawned: { argv: readonly string[]; input?: string }[] = []
   on('process.spawn', async function* ($, e) {
@@ -49,7 +49,7 @@ function world(on: On, opts: { server?: boolean; stream?: unknown[] } = {}) {
   })
   on('ui.copy', () => ({ value: { isCopied: true } }))
   on('session.cwd', () => ({ value: '/tmp/demo' }))
-  on('session.messages', () => ({ value: [] }))
+  on('session.messages', () => ({ value: (opts.history ?? []) as never }))
   on('process.run', () => ({ value: { exitCode: 1, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }))
   on('prompt.submit', ($, e) => ({ text: e.text }))
   // The app's own drawing beneath the plugin: just the labels it was handed.
@@ -70,6 +70,7 @@ function world(on: On, opts: { server?: boolean; stream?: unknown[] } = {}) {
     const method = e.init?.method ?? 'GET'
     const path = e.url.replace(/^https?:\/\/[^/]+/, '').replace(/\?.*$/, '')
     asked.push(`${method} ${path}`)
+    if (opts.down && path.endsWith('/events') && method === 'GET') return { value: { status: 503, ok: false, headers: {}, text: '{"error":"unavailable"}' } }
     if (method === 'POST' && path.endsWith('/events') && e.init?.body) posted.push(...(JSON.parse(e.init.body).events ?? []))
     const people = [
       { id: 'host', name: 'Sam', role: 'host', online: true },
@@ -103,16 +104,19 @@ test('a session that is not shared shows one Share button', async ($, on) => {
   }
 })
 
-test('Share makes the host row; Stop sharing ends it', async ($, on) => {
+test('Share makes the host row; Stop sharing asks once, then ends it', async ($, on) => {
   const asked = world(on)
   for (const surface of SURFACES) {
     const ui = await $.ui.mount(band(surface))
     await ui.press({ key: 'share' })
-    expect((await ui.find({ type: 'Text', text: /^Shared$/ }))?.props.bold).toBe(true)
+    expect((await ui.find({ type: 'Text', text: /^Sharing$/ }))?.props.bold).toBe(true)
     expect(await ui.find({ type: 'Text', text: 'waiting for people to join' })).toBeDefined()
     // Desktop draws the live dot and faces as vector art; the terminal, letters.
     expect(Boolean(await ui.find({ type: 'Svg' }))).toBe(surface === 'desktop')
     expect(await ui.find({ key: 'copy' })).toBeDefined()
+    await ui.press({ key: 'stop-sharing' })
+    expect((await ui.find({ key: 'stop-sharing' }))?.props.label).toBe('Stop for everyone?')
+    expect(await ui.find({ type: 'Text', text: /ends the room for everyone|end the room for everyone/ })).toBeDefined()
     await ui.press({ key: 'stop-sharing' })
     expect(await ui.find({ key: 'share' })).toBeDefined()
     await ui.unmount()
@@ -227,8 +231,10 @@ test('the Room shows the banner, everyone, activity and the chat', async ($, on)
     const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text)
     expect(Boolean(await ui.find({ type: 'Svg' }))).toBe(surface === 'desktop')
     for (const name of ['Sam', 'scott', 'Alex']) expect(texts).toContain(name)
-    expect(texts).toContain('PEOPLE · 3')
-    expect(texts).toContain('CHAT · Claude never sees this')
+    expect(texts).toContain('PEOPLE')
+    expect(texts).toContain('3 here')
+    expect(texts).toContain('CHAT')
+    expect(texts).toContain('people only · Claude never reads it')
     expect(await ui.find({ key: 'room-leave' })).toBeDefined()
     expect(await ui.find({ key: 'policy-prompts' })).toBeUndefined() // the host's alone
     await ui.input({ key: 'chat-input-0', text: 'hello room' })
@@ -277,6 +283,7 @@ test("sharing marks the session's sidebar row, and stopping puts it back", async
   expect(calls).toContain('set_session_title {"session_id":"self","title":"👥 Live · Fix login flow"}')
   expect(calls).toContain('set_pinned {"session_id":"local_test","pinned":true}')
   await ui.press({ key: 'stop-sharing' })
+  await ui.press({ key: 'stop-sharing' })
   expect(calls.at(-3)).toBe('set_session_title {"session_id":"self","title":"Fix login flow"}')
   expect(calls.at(-2)).toBe('set_pinned {"session_id":"local_test","pinned":false}')
 })
@@ -294,6 +301,7 @@ test("a session that was pinned stays pinned after sharing", async ($, on) => {
   const calls = sidebar(on, { title: 'Pinned work', pinned: true })
   const ui = await $.ui.mount(band('desktop'))
   await ui.press({ key: 'share' })
+  await ui.press({ key: 'stop-sharing' })
   await ui.press({ key: 'stop-sharing' })
   expect(calls.some(c => c.startsWith('set_pinned'))).toBe(false)
   expect(calls.at(-1)).toBe('set_session_title {"session_id":"self","title":"Pinned work"}')
@@ -374,4 +382,52 @@ test('a guest can choose to be asked before what the host shows opens', async ($
   await pane.unmount()
   const again = await $.ui.mount({ plugin: 'shared-session', surface: 'desktop', component: 'Pane', requestId: 'shared-room', props: PANE })
   expect((await again.find({ key: 'auto-open' }))?.props.value).toBe('ask')
+})
+
+const HISTORY = [
+  { role: 'user', content: 'Fix the login redirect' },
+  { role: 'assistant', content: [{ type: 'text', text: 'Fixed: the callback now keeps the return path.' }] },
+  { role: 'user', content: 'Now add a test' },
+]
+
+test('Share in a session with history asks first; "Only from now on" sends none of it', async ($, on) => {
+  const asked = world(on, { history: HISTORY })
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount(band(surface))
+    await ui.press({ key: 'share' })
+    expect(asked).not.toContain('POST /api/rooms') // nothing leaves until they choose
+    expect(await ui.find({ type: 'Text', text: 'Share this session?' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /2 earlier prompts/ })).toBeDefined()
+    await ui.press({ key: 'share-cancel' })
+    expect(await ui.find({ key: 'share' })).toBeDefined()
+    await ui.unmount()
+  }
+  const ui = await $.ui.mount(band('desktop'))
+  await ui.press({ key: 'share' })
+  await ui.press({ key: 'share-new' })
+  expect(asked).toContain('POST /api/rooms')
+  await asked.clock.advance(100)
+  expect(asked.posted.filter(e => e.type === 'row')).toHaveLength(0)
+})
+
+test('"Share everything" sends the history', async ($, on) => {
+  const asked = world(on, { history: HISTORY })
+  const ui = await $.ui.mount(band('desktop'))
+  await ui.press({ key: 'share' })
+  await ui.press({ key: 'share-all' })
+  await asked.clock.advance(100)
+  expect(asked.posted.filter(e => e.type === 'row').length).toBeGreaterThan(0)
+  expect((await ui.find({ type: 'Text', text: /^Sharing$/ }))?.props.bold).toBe(true)
+})
+
+test("a room this session can't reach says it is reconnecting", async ($, on) => {
+  const asked = world(on, { down: true })
+  await $.prompt.submit({ text: LINK, origin: { kind: 'composer' }, wait: false })
+  await asked.clock.advance(5_000)
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount(band(surface))
+    expect(await ui.find({ type: 'Text', text: /Reconnecting to the room/ })).toBeDefined()
+    if (surface === 'desktop') expect((await ui.find({ type: 'Svg' }))?.props.alt).toMatch(/^Reconnecting/)
+    await ui.unmount()
+  }
 })

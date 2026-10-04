@@ -33,7 +33,7 @@ Facts that matter:
 - **Claude Code 2.1.286+ is required** (function-hook plugins). A `claude` on PATH can be older than Claude Desktop's bundled one; `setup.mjs` finds a new-enough binary (or set `CLAUDE_BIN`). An older CLI reports `hooks: Invalid input` on this plugin: that is the version, not the plugin.
 - **A session keeps the plugin copy it started with.** After installing or updating, *new* sessions get it; an open Claude Desktop session needs the app quit and reopened. `/reload-plugins` re-reads the same old copy, so it does not pick up a new version.
 - **The plugin's commands** are `/share-session`, `/room` and `/stop-sharing`. They are deliberately not `/share`, which is Claude's own.
-- **Sharing sends the session's whole history.** That's prompts, replies, tool calls and the first lines of tool results, sent to everyone with the link and through the server. Before sharing an existing session for someone, tell them that. A fresh session shares only what happens in it.
+- **Sharing sends the session's whole history.** That's prompts, replies, tool calls and the first lines of tool results, sent to everyone with the link and through the server. Before sharing an existing session for someone, tell them that. The plugin asks too: Share in a session with prompts offers **Share everything** or **Only from now on**, and `/share-session` there answers with `/share-session all` and `/share-session new` instead of sharing. A fresh session shares at once.
 
 ## Changing it
 

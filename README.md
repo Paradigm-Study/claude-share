@@ -49,13 +49,14 @@ It stops with a `NEEDS HUMAN` line at the one or two steps that need a person. S
 ## Use it
 
 - **Join:** open a share link. Its page opens Claude Desktop with the link in a new session's prompt box, so you press Enter. Pasting a link into any Claude Code session works too. Joining needs only the plugin: no server, account or sign-in.
-- **Share:** press **Share** above the prompt, or type `/share-session`. The link is copied. Sharing needs a server; see below.
+- **Share:** press **Share** above the prompt, or type `/share-session`. In a session that already has prompts, it asks first whether teammates may see them: **Share everything**, or **Only from now on** (`/share-session all` or `/share-session new`). The link is copied. Sharing needs a server; see below.
 - **Room:** press **Room** above the prompt, or type `/room`, for:
   - who's here and who Claude is working for;
-  - the timeline and the side chat;
-  - for the host, the controls.
+  - the side chat, what was shown, and the activity;
+  - settings: the host's rules for everyone, and each guest's own.
 - **Show:** what the host's Claude shows reaches everyone by itself. The host can also type `/share-file <path>` to show a file, or `/share-preview <port>` to let teammates open a local dev server. Both are listed in the Room, where guests reopen them and the host stops previews. Someone who joins later gets any preview still open.
-- **Stop:** press **Leave** or **Stop sharing**, or type `/stop-sharing`. Esc in a guest stops the shared turn.
+- **Stop:** press **Leave**, or **Stop sharing** twice (it ends the room for everyone), or type `/stop-sharing`. Esc in a guest stops the shared turn.
+- **Connection:** if the room can't be reached, the row above the prompt says it is reconnecting; anything sent meanwhile goes out once it's back.
 
 ## Host a server
 
