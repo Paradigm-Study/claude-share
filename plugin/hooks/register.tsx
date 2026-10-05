@@ -77,6 +77,7 @@ const unreadA = atom({ plugin: 'shared-session', key: 'unread' } as const, 0)
 const policyA = atom({ plugin: 'shared-session', key: 'policy' } as const, DEFAULT_POLICY)
 const trustedA = atom({ plugin: 'shared-session', key: 'trusted' } as const, [] as string[])
 const ownersA = atom({ plugin: 'shared-session', key: 'owners' } as const, {} as Record<string, string>)
+const liveUpdatesA = atom({ plugin: 'shared-session', key: 'liveUpdates' } as const, null as 'running' | 'next' | null)
 const sidebarA = atom({ plugin: 'shared-session', key: 'sidebar' } as const, null as { title: string; pinned: boolean; id?: string } | null)
 const shownA = atom({ plugin: 'shared-session', key: 'shown' } as const, [] as ShareShown[])
 const previewsA = atom({ plugin: 'shared-session', key: 'previews' } as const, {} as Record<string, string>)
@@ -182,11 +183,139 @@ async function noteLatest($: $, latest: unknown) {
   if (typeof latest !== 'string' || !mine || !newerThan(latest, mine) || (await read($, newerA)) === latest) return
   await update($, newerA, () => latest)
   const auto = await read($, updatesA)
+  const live = await read($, liveUpdatesA)
+  if (live === 'running') return void selfUpdate($, latest)
   $.ui.log(
     auto
-      ? `Shared Sessions ${latest} is out (this session runs ${mine}). Claude Code installs it by itself; new sessions get it.`
+      ? `Shared Sessions ${latest} is out (this session runs ${mine}). It installs by itself; new sessions get it${live === 'next' ? ', and from then on updates load without a restart' : ''}.`
       : `Shared Sessions ${latest} is out (this session runs ${mine}). Turn on Updates in the Room, or run: ${UPDATE_COMMAND}`,
   )
+}
+
+// Updates in place. Claude Code loads a plugin folder named in the
+// settings' CLAUDE_CODE_PLUGIN_DIRS in every session, ahead of the installed
+// copy, and with CLAUDE_CODE_PLUGIN_DIR_WATCH=1 every running session reloads
+// it when its files change. So with Updates on, the plugin keeps a copy of
+// itself there, and that copy replaces its own files with each release (from
+// the repository the marketplace installs from): open sessions take it up
+// at once, no restart. Off, the folder is no longer named and new sessions
+// run the installed copy again.
+const LIVE_SUBDIR = '.claude/shared-session/plugin'
+const RELEASE_URL = 'https://codeload.github.com/Paradigm-Study/claude-share/tar.gz/refs/heads/main'
+const INSTALLED_ID = 'shared-session@claude-share'
+let updatingTo: string | null = null
+
+async function liveDirOf($: $): Promise<string | null> {
+  const home = await $.env.get('HOME')
+  return home ? `${home}/${LIVE_SUBDIR}` : null
+}
+const runsLive = ($: $) => $.plugin.root.replace(/\/+$/, '').endsWith(`/${LIVE_SUBDIR}`)
+
+async function readSettings($: $): Promise<{ path: string; settings: Record<string, unknown> } | null> {
+  const path = await settingsFile($)
+  if (!path) return null
+  try {
+    return { path, settings: (await $.fs.exists(path)) ? JSON.parse(await $.fs.read(path)) : {} }
+  } catch {
+    return null
+  }
+}
+
+// Names (or stops naming) the live folder in the settings' env, the rest kept.
+async function nameLiveDir($: $, on: boolean): Promise<boolean> {
+  const dir = await liveDirOf($)
+  const read0 = await readSettings($)
+  if (!dir || !read0) return false
+  const env = { ...((read0.settings.env ?? {}) as Record<string, string>) }
+  const dirs = String(env.CLAUDE_CODE_PLUGIN_DIRS ?? '').split(':').filter(d => d && d !== dir)
+  if (on) {
+    env.CLAUDE_CODE_PLUGIN_DIRS = [...dirs, dir].join(':')
+    env.CLAUDE_CODE_PLUGIN_DIR_WATCH = '1'
+  } else if (dirs.length) env.CLAUDE_CODE_PLUGIN_DIRS = dirs.join(':')
+  else {
+    delete env.CLAUDE_CODE_PLUGIN_DIRS
+    delete env.CLAUDE_CODE_PLUGIN_DIR_WATCH
+  }
+  try {
+    await $.fs.write(read0.path, `${JSON.stringify({ ...read0.settings, env }, null, 2)}\n`)
+    return true
+  } catch {
+    return false
+  }
+}
+
+// Turns updates in place on: this copy into the live folder, then named.
+async function enableLive($: $): Promise<boolean> {
+  const dir = await liveDirOf($)
+  if (!dir) return false
+  if (!runsLive($)) {
+    const copied = await sh(
+      $,
+      [
+        `src=${sq($.plugin.root)}; live=${sq(dir)}`,
+        'mkdir -p "$live" || exit 1',
+        'if command -v rsync >/dev/null 2>&1; then rsync -a --delete --exclude .claude --exclude tests "$src/" "$live/"; else cp -R "$src/." "$live/"; fi && echo copied',
+        '',
+      ].join('\n'),
+    )
+    if (!copied.out.includes('copied')) return false
+  }
+  if (!(await nameLiveDir($, true))) return false
+  await update($, liveUpdatesA, () => (runsLive($) ? 'running' : 'next'))
+  return true
+}
+
+// The live copy: fetch the release, and when it's newer than this one, put
+// its files in place of this folder's (one session at a time, by a lock);
+// every session running the folder reloads with it.
+async function selfUpdate($: $, latest: string) {
+  if (!runsLive($) || updatingTo === latest || !(await read($, updatesA))) return
+  const mine = await ownVersion($)
+  if (!mine || !newerThan(latest, mine)) return
+  updatingTo = latest
+  const live = $.plugin.root.replace(/\/+$/, '')
+  const url = (await $.env.get('SHARED_SESSION_RELEASE_URL')) || RELEASE_URL
+  const fetched = await sh(
+    $,
+    [
+      `live=${sq(live)}; next="$live.next"; lock="$live.lock"`,
+      'if ! mkdir "$lock" 2>/dev/null; then',
+      '  [ -n "$(find "$lock" -maxdepth 0 -mmin +10 2>/dev/null)" ] && rmdir "$lock" 2>/dev/null && mkdir "$lock" 2>/dev/null || { echo busy; exit 0; }',
+      'fi',
+      'tmp=$(mktemp -d) || { rmdir "$lock"; exit 1; }',
+      `curl -fsSL --max-time 90 ${sq(url)} -o "$tmp/r.tgz" && tar -xzf "$tmp/r.tgz" -C "$tmp" || { rm -rf "$tmp"; rmdir "$lock"; echo failed; exit 0; }`,
+      'pj=$(find "$tmp" -path "*/plugin/.claude-plugin/plugin.json" | head -1); src="${pj%/.claude-plugin/plugin.json}"',
+      '[ -n "$pj" ] && [ -f "$src/hooks/register.tsx" ] || { rm -rf "$tmp"; rmdir "$lock"; echo failed; exit 0; }',
+      'rm -rf "$next" && mkdir -p "$next" && cp -R "$src/." "$next/" && rm -rf "$next/tests" "$next/.claude" "$tmp"',
+      `echo "version=$(sed -n 's/.*"version": *"\\([^"]*\\)".*/\\1/p' "$next/.claude-plugin/plugin.json" | head -1)"`,
+      '',
+    ].join('\n'),
+  )
+  const got = /version=(\S+)/.exec(fetched.out)?.[1]
+  const apply = Boolean(got && newerThan(got, mine))
+  if (apply) $.ui.log(`Updating Shared Sessions to ${got}. It reloads in place; nothing to restart.`)
+  if (got) {
+    await sh(
+      $,
+      [
+        `live=${sq(live)}; next="$live.next"; lock="$live.lock"`,
+        apply ? 'if command -v rsync >/dev/null 2>&1; then rsync -a --delete --exclude .claude "$next/" "$live/"; else cp -R "$next/." "$live/"; fi' : ':',
+        'rm -rf "$next"; rmdir "$lock" 2>/dev/null; echo done',
+        '',
+      ].join('\n'),
+    )
+  }
+  if (!apply) updatingTo = null // try again at the next check
+}
+
+// What the server says is newest, asked now and then: a long-open session
+// learns of a release without sharing or joining anything.
+async function checkForUpdate($: $) {
+  try {
+    const info = await api<{ latest?: string }>($, await serverOf($), '/api/version')
+    await noteLatest($, info.latest)
+    if (typeof info.latest === 'string' && (await read($, liveUpdatesA)) === 'running') await selfUpdate($, info.latest)
+  } catch {}
 }
 
 async function settingsFile($: $): Promise<string | null> {
@@ -198,12 +327,21 @@ async function settingsFile($: $): Promise<string | null> {
 async function readUpdates($: $) {
   const path = await settingsFile($)
   let on: boolean | null = null
+  let settings: Record<string, unknown> = {}
   try {
-    if (path) on = JSON.parse(await $.fs.read(path))?.extraKnownMarketplaces?.[MARKETPLACE]?.autoUpdate === true
+    if (path) settings = JSON.parse(await $.fs.read(path)) ?? {}
+    on = (settings.extraKnownMarketplaces as Record<string, { autoUpdate?: unknown }> | undefined)?.[MARKETPLACE]?.autoUpdate === true
   } catch {
     on = path && !(await $.fs.exists(path).catch(() => true)) ? false : null
   }
   await update($, updatesA, () => on)
+  const dir = await liveDirOf($)
+  const named = Boolean(dir && String((settings.env as Record<string, unknown> | undefined)?.CLAUDE_CODE_PLUGIN_DIRS ?? '').split(':').includes(dir))
+  await update($, liveUpdatesA, () => (runsLive($) ? 'running' : named ? 'next' : null))
+  // Automatic updates chosen before they could load in place: in place now.
+  if (on && !named && !runsLive($) && (await enableLive($))) {
+    $.ui.log('Shared Sessions now updates in place: from your next new session on, a release loads without a restart.')
+  }
 }
 
 // The Room's Updates setting: the marketplace's `autoUpdate` in the person's
@@ -228,14 +366,28 @@ async function writeUpdates($: $, on: boolean) {
     return
   }
   await update($, updatesA, () => on)
-  $.ui.toast(on ? 'Updates: automatic' : 'Updates: manual')
+  if (on) {
+    const live = await enableLive($)
+    $.ui.toast(live ? (runsLive($) ? 'Updates: automatic, in place' : 'Updates: automatic. New sessions update in place') : 'Updates: automatic')
+  } else {
+    await nameLiveDir($, false)
+    await update($, liveUpdatesA, () => (runsLive($) ? 'running' : null))
+    $.ui.toast(runsLive($) ? 'Updates: manual, from your next new session on' : 'Updates: manual')
+  }
 }
 
 // Where Share creates rooms: the plugin's option, the environment, or the
 // build's default, in that order.
 async function serverOf($: $): Promise<string> {
   const fromEnv = (await $.env.get('SHARED_SESSION_SERVER')) ?? ''
-  const url = (configuredServer || fromEnv || SERVER_URL).trim().replace(/\/+$/, '')
+  // The live copy is a plugin folder, configured under another id: the
+  // server saved for the installed copy (setup.mjs, /plugin configure) counts.
+  let saved = configuredServer
+  if (!saved && runsLive($)) {
+    const options = ((await readSettings($))?.settings.pluginConfigs as Record<string, { options?: { server?: unknown } }> | undefined)?.[INSTALLED_ID]?.options
+    saved = typeof options?.server === 'string' ? options.server : ''
+  }
+  const url = (saved || fromEnv || SERVER_URL).trim().replace(/\/+$/, '')
   if (!/^https?:\/\/[^\s/]+/.test(url)) throw new Error(NO_SERVER)
   return url
 }
@@ -1020,7 +1172,7 @@ async function share($: $, surface?: RenderSurface, opts: { history?: boolean } 
   }
   await update($, roomA, () => room)
   await update($, modeA, () => 'host')
-  void noteLatest($, created.latest)
+  void readUpdates($).then(() => noteLatest($, created.latest))
   await update($, peopleA, () => [{ id: 'host', name, role: 'host', online: true }])
 
   // What happened before Share, so people who join see the whole session,
@@ -1235,7 +1387,7 @@ async function join($: $, server: string, id: string) {
     fromNow?: boolean
     hostVersion?: string
   }>($, server, `/api/rooms/${id}/join`, { method: 'POST', body: { name } })
-  void noteLatest($, joined.latest)
+  void readUpdates($).then(() => noteLatest($, joined.latest))
   const room: ShareRoom = {
     server,
     id,
@@ -2126,6 +2278,8 @@ export const register: Register = (on, options) => {
     await $.command.register({ name: 'share-file', description: 'Show a file to everyone in the shared session: /share-file <path>' })
     await $.command.register({ name: 'share-preview', description: "Let teammates open this machine's localhost: /share-preview <port> [title]" })
     void readUpdates($)
+    $.clock.after(15_000, () => void checkForUpdate($))
+    $.clock.every(30 * 60_000, () => void checkForUpdate($))
     // A reload keeps $.state: pick the room back up. A restart doesn't: a
     // host session saved its room when it closed, and takes it up again.
     const room = await read($, roomA)
@@ -2808,6 +2962,13 @@ export const register: Register = (on, options) => {
           />,
         )
       : null
+    const liveUpdates = await read($, liveUpdatesA)
+    const updatesNote =
+      updates && liveUpdates === 'running'
+        ? 'This session updates itself: a release loads in place.'
+        : updates && liveUpdates === 'next'
+          ? 'From your next new session on, a release loads in place, no restart.'
+          : null
     const joinedAt = (name: string) => activity.find(a => a.kind === 'join' && a.who === name)?.ts
     const prompts = (name: string) => activity.filter(a => a.kind === 'prompt' && a.who === name).length
     const detail = live ? `${isHost ? "You're sharing" : `Hosted by ${room.host}`} · ${online} here` : 'Reconnecting to the room…'
@@ -3014,6 +3175,7 @@ export const register: Register = (on, options) => {
                     )
                   : null}
                 {updatesSetting}
+                {updatesNote ? <Text dimColor>{updatesNote}</Text> : null}
                 {trusted.length ? (
                   <Box flexDirection="row" gap={1} alignItems="center" justifyContent="space-between">
                     <Text dimColor wrap="truncate-end">{`Always allowed: ${listNames(trusted)}`}</Text>
@@ -3042,6 +3204,7 @@ export const register: Register = (on, options) => {
                     )
                   : null}
                 {updatesSetting}
+                {updatesNote ? <Text dimColor>{updatesNote}</Text> : null}
               </Box>,
             )}
 

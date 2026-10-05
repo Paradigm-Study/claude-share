@@ -110,6 +110,8 @@ declare module 'claude-code' {
       newer: string | null
       /** Whether Claude Code updates this plugin by itself (the marketplace's `autoUpdate`); null when unknown. */
       updates: boolean | null
+      /** Updates in place: this session runs the copy that updates itself (`running`), or new sessions will (`next`). */
+      liveUpdates: 'running' | 'next' | null
     }
   }
 }

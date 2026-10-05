@@ -33,6 +33,7 @@ function world(on: On, opts: { server?: boolean; stream?: unknown[]; history?: u
       if (e.input?.includes('/files"') && e.input.includes('--data-binary')) {
         yield { stream: 'stdout' as const, text: JSON.stringify({ id: 'f'.repeat(64), name: 'chart.html', type: 'text/html', size: 42 }) }
       }
+      if (e.input?.includes('echo copied')) yield { stream: 'stdout' as const, text: 'copied\n' }
       // A dev server answers on 3340 only.
       if (e.input?.includes('echo "exit=$?"')) yield { stream: 'stdout' as const, text: e.input.includes('localhost:3340/') ? 'exit=28\n' : 'exit=7\n' }
       return { value: { code: 0, signal: null } }
@@ -527,6 +528,26 @@ test("the Room's Updates setting turns on auto-update in the person's settings, 
   const saved = JSON.parse(asked.written.at(-1)?.text ?? '{}')
   expect(saved.theme).toBe('dark')
   expect(saved.extraKnownMarketplaces['claude-share']).toEqual({ source: { source: 'github', repo: 'Paradigm-Study/claude-share' }, autoUpdate: true })
+  // …and in place: a copy of the plugin in a folder every session loads and watches.
+  expect(asked.spawned.some(s => s.input?.includes("live='/home/scott/.claude/shared-session/plugin'"))).toBe(true)
+  expect(saved.env).toEqual({ CLAUDE_CODE_PLUGIN_DIRS: '/home/scott/.claude/shared-session/plugin', CLAUDE_CODE_PLUGIN_DIR_WATCH: '1' })
+  expect(await pane.find({ type: 'Text', text: /next new session on, a release loads in place/ })).toBeDefined()
+  // Off again: the folder isn't named, the person's other settings stay.
+  await pane.select({ key: 'updates', value: 'manual' })
+  const after = JSON.parse(asked.written.at(-1)?.text ?? '{}')
+  expect(after.env).toEqual({})
+  expect(after.theme).toBe('dark')
+})
+
+test('automatic updates chosen earlier move to updates in place, keeping other plugin folders', async ($, on) => {
+  const asked = world(on, {
+    settings: JSON.stringify({ env: { CLAUDE_CODE_PLUGIN_DIRS: '/home/scott/mods/other' }, extraKnownMarketplaces: { 'claude-share': { source: { source: 'github', repo: 'Paradigm-Study/claude-share' }, autoUpdate: true } } }),
+  })
+  await $.prompt.submit({ text: LINK, origin: { kind: 'composer' }, wait: false })
+  await asked.clock.advance(10)
+  const saved = JSON.parse(asked.written.at(-1)?.text ?? '{}')
+  expect(saved.env.CLAUDE_CODE_PLUGIN_DIRS).toBe('/home/scott/mods/other:/home/scott/.claude/shared-session/plugin')
+  expect(asked.logged.some(l => l.includes('updates in place'))).toBe(true)
 })
 
 test("a guest's read runs without asking only inside the host's project", async () => {
