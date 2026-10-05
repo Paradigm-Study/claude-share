@@ -34,7 +34,7 @@ function world(on: On, opts: { server?: boolean; stream?: unknown[]; history?: u
         yield { stream: 'stdout' as const, text: JSON.stringify({ id: 'f'.repeat(64), name: 'chart.html', type: 'text/html', size: 42 }) }
       }
       // A dev server answers on 3340 only.
-      if (e.input?.includes("-w '%{http_code}'")) yield { stream: 'stdout' as const, text: e.input.includes('127.0.0.1:3340/') ? '200' : '000' }
+      if (e.input?.includes("-w '%{http_code}'")) yield { stream: 'stdout' as const, text: e.input.includes('localhost:3340/') ? '200' : '000' }
       return { value: { code: 0, signal: null } }
     }
     if (!opts.stream) throw new Error('spawn curl ENOENT')

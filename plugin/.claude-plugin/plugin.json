@@ -1,7 +1,7 @@
 {
   "name": "shared-session",
   "displayName": "Shared Sessions",
-  "version": "0.9.4",
+  "version": "0.9.5",
   "description": "Share a Claude Code session with a link. Teammates join from their own Claude Code and talk to it: one session does the work, everyone sees every turn live, and the host approves what runs on their machine. Sharing goes through this project's public server unless you set your own (README: Privacy and the public server).",
   "author": {
     "name": "scoootscooob",

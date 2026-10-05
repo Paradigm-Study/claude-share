@@ -385,13 +385,15 @@ try {
   // Someone who joins while the preview is open is handed it too, after the history.
   mkdirSync(join(WORK, 'lee'), { recursive: true })
   const lee = session('Lee', join(WORK, 'lee'))
+  const leeJoined = Date.now()
   lee.say(link)
+  await until('late joiner caught up', () => assistantText(lee).some(t => /kiwi/i.test(t)), 120_000).catch(() => null)
+  const leeCaughtUp = Date.now()
   const late = await until('late joiner got the preview', () => /https?:\/\/[^\s)`'"]+\/__share\/enter\?room=[\w-]+&ticket=[\w-]+/.exec(lee.text)?.[0], 60_000).catch(() => null)
   check('someone who joins later is handed the open preview', Boolean(late) && late !== enter, late ?? 'no link')
-  // Everything before arrives in the join reply itself, at once.
-  const firstTurn = lee.lines.slice(0, Math.max(0, lee.lines.findIndex(l => l.type === 'result')))
-  const firstText = firstTurn.filter(l => l.type === 'assistant').flatMap(l => l.message.content.filter(b => b.type === 'text').map(b => b.text)).join('\n').toLowerCase()
-  check('and sees everything before it at once, in the join reply', ['marmalade', 'pineapple', 'kiwi'].every(w => firstText.includes(w)), `${firstTurn.length} lines in the join turn`)
+  // Each earlier prompt arrives as a turn of its own, as it was for the host,
+  // and quickly: one step for its calls, one for its last words.
+  check('and sees each earlier prompt as its own turn, with its reply', ['marmalade', 'pineapple', 'kiwi'].every(w => assistantText(lee).some(t => t.toLowerCase().includes(w))) && lee.lines.filter(l => l.type === 'result').length >= 6, `${lee.lines.filter(l => l.type === 'result').length} turns in ${((leeCaughtUp - leeJoined) / 1000).toFixed(1)} s`)
 
   // A dev server the host's Claude gives the address of is shared too.
   const dev = createServer((req, res) => res.writeHead(200, { 'content-type': 'text/html' }).end('<h1>mentioned ok</h1>'))

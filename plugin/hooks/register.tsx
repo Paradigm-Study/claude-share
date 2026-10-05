@@ -829,7 +829,6 @@ async function reset($: $, opts: { keepSidebar?: boolean } = {}) {
   rideSubmitted = false
   hostCalls.clear()
   staticRuns.clear()
-  caughtUp.clear()
   mentionedPorts.clear()
   pendingGuestPrompts.length = 0
   await update($, modeA, () => 'idle')
@@ -1449,7 +1448,7 @@ async function shareLocal($: $, pages: { port: number; path: string }[]) {
   for (const { port, path } of pages.slice(0, 5)) {
     if (!port || mentionedPorts.has(port) || (await read($, previewsA))[String(port)]) continue
     mentionedPorts.add(port)
-    const probe = await sh($, `curl -s -o /dev/null -m 2 -w '%{http_code}' http://127.0.0.1:${port}/\n`)
+    const probe = await sh($, `curl -s -o /dev/null -m 2 -w '%{http_code}' http://localhost:${port}/\n`)
     if (!/^[1-5]\d\d$/.test(probe.out.trim())) {
       mentionedPorts.delete(port) // nothing there yet: a later mention tries again
       continue
@@ -1800,11 +1799,36 @@ const liveRuns = new Map<string, RideRun>()
 // draws for its own calls, and nothing runs on this machine. By card id.
 const REPLAY_TOOL = 'mcp__shared-session__replay'
 const hostCalls = new Map<string, { hostId: string; seq: number; turnId?: string; result?: string }>()
-// Guest: history replayed as cards too, a step per call: where each one is.
-const staticRuns = new Map<string, { rows: Row[]; pos: number; replayed: Set<string> }>()
-// Guest: join replies that showed the history's calls, owed their last line.
-const caughtUp = new Set<string>()
-const HISTORY_CARDS = 150 // calls drawn as cards in a join's history; earlier ones as text
+// Guest: an earlier exchange's turn whose calls were shown, owed its last words.
+const staticRuns = new Map<string, { tail: string }>()
+const EXCHANGE_CARDS = 200 // calls drawn as cards in one earlier exchange; the rest as text
+
+// An earlier exchange as one response: its text, and each call a card with
+// the result the room kept (preset, so the card answers at once), up to its
+// last call; the words after that are the tail, said in the next step.
+type HistoryBlock = { text: string } | { id: string; input: Record<string, unknown> }
+function historyBlocks(rows: Row[]): { blocks: HistoryBlock[]; tail: string } {
+  const results = new Map(rows.filter(r => r.kind === 'result' && r.id).map(r => [r.id as string, r]))
+  const blocks: HistoryBlock[] = []
+  const replayed = new Set<string>()
+  let text = ''
+  for (const row of rows) {
+    if (row.kind === 'tool' && replayReady && row.id && row.input && row.tool && !VIEWER_TOOL.test(row.tool) && replayed.size < EXCHANGE_CARDS) {
+      if (text.trim()) blocks.push({ text: text.trim() })
+      text = ''
+      const id = `toolu_${newId()}${newId()}`
+      const res = results.get(row.id)
+      hostCalls.set(id, { hostId: row.id, seq: 0, result: res ? `${res.isError ? 'Error: ' : ''}${stripLineNumbers(res.text)}` : '(no result)' })
+      if (hostCalls.size > 3000) hostCalls.delete(hostCalls.keys().next().value as string)
+      blocks.push({ id, input: { tool: row.tool, summary: row.text, input: row.input } })
+      replayed.add(row.id)
+      continue
+    }
+    if (row.kind === 'result' && row.id && replayed.has(row.id)) continue
+    text += `${rowsToMarkdown([row])}\n\n`
+  }
+  return { blocks, tail: text.trim() }
+}
 let replayReady = false
 // Calls that show something (a file, a widget, a page) are made again here
 // instead (replayOf), so their rows stay out of the card replay.
@@ -2190,7 +2214,7 @@ export const register: Register = (on, options) => {
             policy.prompts === 'watch'
               ? `It's watch-only for now: you see every turn live and can chat with everyone in the **Room**.`
               : `What you type here runs there, on ${room.host}'s machine, and everyone sees the replies live.`,
-            `The **Room** (above the prompt, or \`/room\`) shows who's here and has a side chat Claude doesn't read. **Leave** is up there too.${history.length ? '' : fromNow ? ` ${room.host} shared from that point on, so what came before isn't shown.` : ''}`,
+            `The **Room** (above the prompt, or \`/room\`) shows who's here and has a side chat Claude doesn't read. **Leave** is up there too.${history.length ? ` What happened before you joined follows, ${history.length === 1 ? 'one prompt' : `${history.length} prompts`} with their replies.` : fromNow ? ` ${room.host} shared from that point on, so what came before isn't shown.` : ''}`,
             hostVersion && newerThan(CARDS_FROM, hostVersion)
               ? `\n\n> ${room.host}'s Claude Code runs Shared Sessions ${hostVersion}, so their tool calls show here as text, not cards. Once they update (\`${UPDATE_COMMAND}\`) and restart Claude Code, they show as cards.`
               : '',
@@ -2268,12 +2292,12 @@ export const register: Register = (on, options) => {
       ridesInStep.delete(e.turnId)
       liveRuns.delete(e.turnId)
       staticRuns.delete(e.turnId)
-      caughtUp.delete(e.turnId)
       if (ride) {
         ridesByTurn.delete(e.turnId)
         localTurnActive = false
         if (ride.kind === 'note' && mode === 'guest') {
           const room = await read($, roomA)
+          for (const exchange of ride.then) laterRides.push({ text: exchange.prompt, ride: { kind: 'static', rows: exchange.rows } })
           for (const event of ride.open ?? []) {
             const shown = shownOf(event)
             if (shown) laterRides.push({ text: `${room?.host ?? 'The host'} has ${shown.name} open`, ride: { kind: 'artifact', event } })
@@ -2293,81 +2317,23 @@ export const register: Register = (on, options) => {
 
     const progress = ridesInStep.get(e.turnId)
     const staticRun = staticRuns.get(e.turnId)
-    if (ride && (e.index === 0 || progress || staticRun || caughtUp.has(e.turnId))) {
+    if (ride && (e.index === 0 || progress || staticRun)) {
       const room = await read($, roomA)
       let answer = ''
-      if (ride.kind === 'static') {
-        // What happened before joining: text as it was, and each tool call
-        // as a card with the result the room kept (no waiting).
-        const run = staticRun ?? { rows: ride.rows, pos: 0, replayed: new Set<string>() }
+      if (ride.kind === 'static' && staticRun) {
         staticRuns.delete(e.turnId)
-        const results = new Map(run.rows.filter(r => r.kind === 'result' && r.id).map(r => [r.id as string, r]))
-        let card: { row: Row; result: string } | null = null
-        const parts: Row[] = []
-        while (run.pos < run.rows.length) {
-          const row = run.rows[run.pos++]!
-          if (row.kind === 'tool' && replayReady && row.id && row.input && row.tool && !VIEWER_TOOL.test(row.tool)) {
-            const res = results.get(row.id)
-            run.replayed.add(row.id)
-            card = { row, result: res ? `${res.isError ? 'Error: ' : ''}${stripLineNumbers(res.text)}` : '(no result)' }
-            break
-          }
-          if (row.kind === 'result' && row.id && run.replayed.has(row.id)) continue
-          parts.push(row)
-        }
-        answer = rowsToMarkdown(parts)
-        if (!answer && e.index === 0 && !card) answer = '(no reply)'
-        if (answer) yield { kind: 'text', index: 0, text: answer } satisfies TurnStepChunk
-        if (card && !next.signal.aborted) {
-          staticRuns.set(e.turnId, run)
-          const id = `toolu_${newId()}${newId()}`
-          const input = { tool: card.row.tool, summary: card.row.text, input: card.row.input }
-          rideCalls.set(id, { name: REPLAY_TOOL, input: JSON.stringify(input), approve: true })
-          hostCalls.set(id, { hostId: card.row.id ?? '', seq: 0, result: card.result })
-          if (hostCalls.size > 1000) hostCalls.delete(hostCalls.keys().next().value as string)
-          yield { kind: 'tool', index: 1, id, name: REPLAY_TOOL } satisfies TurnStepChunk
-          yield { kind: 'input', index: 1, json: JSON.stringify(input) } satisfies TurnStepChunk
-          yield { kind: 'stop', stopReason: 'tool_use', usage: null } satisfies TurnStepChunk
-          return { turnId: e.turnId, index: e.index, answer, toolUses: [{ name: REPLAY_TOOL, input }], stopReason: 'tool_use', usage: null }
-        }
-      } else if (ride.kind === 'note' && caughtUp.has(e.turnId)) {
-        caughtUp.delete(e.turnId)
-        answer = "_You're caught up. What happens next shows here as it happens._"
+        answer = staticRun.tail || '_(it stopped here)_'
         yield { kind: 'text', index: 0, text: answer } satisfies TurnStepChunk
-      } else if (ride.kind === 'note') {
-        // Joining: the note, then everything before it at once, each earlier
-        // prompt quoted and each call a card with the result the room kept:
-        // one step, so the reply lands whole and the view is at its end.
-        const blocks: ({ text: string } | { id: string; input: Record<string, unknown> })[] = []
-        let text = ride.text
-        if (ride.then.length) text += '\n\n---\n\n**Before you joined**\n\n'
-        const endText = () => {
-          if (text) blocks.push({ text })
-          text = ''
-        }
-        let cards = 0
-        for (const exchange of ride.then) {
-          const spoken = splitSpeaker(exchange.prompt)
-          text += `> **${spoken?.who ?? 'Someone'}:** ${(spoken?.text ?? exchange.prompt).replace(/\n/g, '\n> ')}\n\n`
-          const results = new Map(exchange.rows.filter(r => r.kind === 'result' && r.id).map(r => [r.id as string, r]))
-          const replayed = new Set<string>()
-          for (const row of exchange.rows) {
-            if (row.kind === 'tool' && replayReady && row.id && row.input && row.tool && !VIEWER_TOOL.test(row.tool) && cards < HISTORY_CARDS) {
-              endText()
-              const id = `toolu_${newId()}${newId()}`
-              const res = results.get(row.id)
-              hostCalls.set(id, { hostId: row.id, seq: 0, result: res ? `${res.isError ? 'Error: ' : ''}${stripLineNumbers(res.text)}` : '(no result)' })
-              blocks.push({ id, input: { tool: row.tool, summary: row.text, input: row.input } })
-              replayed.add(row.id)
-              cards += 1
-              continue
-            }
-            if (row.kind === 'result' && row.id && replayed.has(row.id)) continue
-            text += `${rowsToMarkdown([row])}\n\n`
-          }
-        }
-        endText()
+      } else if (ride.kind === 'static') {
+        // An earlier exchange, its own turn as it was for the host: its prompt
+        // above, then everything up to its last call in this one step and the
+        // last words in the next. No step per call, nothing to wait for.
+        const { blocks, tail } = historyBlocks(ride.rows)
         const toolUses: { name: string; input: Record<string, unknown> }[] = []
+        if (!blocks.length) {
+          answer = tail || '(no reply)'
+          yield { kind: 'text', index: 0, text: answer } satisfies TurnStepChunk
+        }
         for (const [index, block] of blocks.entries()) {
           if ('text' in block) {
             answer += block.text
@@ -2379,10 +2345,17 @@ export const register: Register = (on, options) => {
           }
         }
         if (toolUses.length && !next.signal.aborted) {
-          caughtUp.add(e.turnId)
+          staticRuns.set(e.turnId, { tail })
           yield { kind: 'stop', stopReason: 'tool_use', usage: null } satisfies TurnStepChunk
           return { turnId: e.turnId, index: e.index, answer, toolUses, stopReason: 'tool_use', usage: null }
         }
+        if (blocks.length && tail) {
+          answer += tail
+          yield { kind: 'text', index: blocks.length, text: tail } satisfies TurnStepChunk
+        }
+      } else if (ride.kind === 'note') {
+        answer = ride.text
+        yield { kind: 'text', index: 0, text: answer } satisfies TurnStepChunk
       } else if (room) {
         // A ride can take several steps: each thing the host's Claude showed
         // is a call made here, and the next step picks up where this one left.
