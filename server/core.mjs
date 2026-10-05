@@ -644,8 +644,11 @@ async function previewRoutes(room, req, rest, auth, now, ctx) {
       return { changed: true, response: json({ ok: true }) }
     }
     if (!ctx.previewOrigin) return { response: json({ error: 'This server does not serve previews.' }, 501) }
+    // Where the link lands: a page of the app (one path on it), else its root.
+    const asked = await readJson(req).catch(() => ({}))
+    const path = typeof asked.path === 'string' && /^\/(?!\/)[^\s\\]{0,2000}$/.test(asked.path) ? asked.path : '/'
     const ticket = token(18)
-    room.tickets.set(ticket, { pid: preview.pid, exp: now + TICKET_MS })
+    room.tickets.set(ticket, { pid: preview.pid, exp: now + TICKET_MS, path })
     for (const [t, v] of room.tickets) if (v.exp < now) room.tickets.delete(t)
     return { response: json({ url: `${ctx.previewOrigin}/__share/enter?room=${room.id}&ticket=${ticket}` }) }
   }
@@ -818,7 +821,7 @@ export async function previewRequest(room, req, now, { secure = true } = {}) {
       // second click, a pane reopened later): it goes straight back.
       const own = previewSession(room, req, now)
       if (own && (!ticket || own.pid === ticket.pid) && room.previews.has(own.pid) && !room.endedAt) {
-        return { response: new Response(null, { status: 302, headers: { location: '/', 'cache-control': 'no-store' } }) }
+        return { response: new Response(null, { status: 302, headers: { location: ticket?.path ?? '/', 'cache-control': 'no-store' } }) }
       }
       return { response: previewPage(403, 'This preview link has been used', 'Each link opens the preview in one browser, within ten minutes. For a new one, press <b>Open</b> in the Room panel in Claude Code.') }
     }
@@ -830,7 +833,7 @@ export async function previewRequest(room, req, now, { secure = true } = {}) {
       changed: true,
       response: new Response(null, {
         status: 302,
-        headers: { location: '/', 'cache-control': 'no-store', 'set-cookie': `${COOKIE}=${room.id}.${sid}; Path=/; HttpOnly; SameSite=Lax${secure ? '; Secure' : ''}` },
+        headers: { location: ticket.path ?? '/', 'cache-control': 'no-store', 'set-cookie': `${COOKIE}=${room.id}.${sid}; Path=/; HttpOnly; SameSite=Lax${secure ? '; Secure' : ''}` },
       }),
     }
   }

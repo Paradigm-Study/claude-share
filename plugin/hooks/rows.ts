@@ -33,12 +33,17 @@ type Block = {
 
 // A message another session, a teammate or a channel delivered: its markup
 // off, its sender's name kept (`from-name`, `source`, `teammate`).
-const DELIVERED = /^\s*<(cross-session-message|teammate-message|channel)\b([^>]*)>([\s\S]*?)<\/\1>\s*$/
+const DELIVERED = /^\s*(?:Another Claude session sent a message:\s*)?<(cross-session-message|teammate-message|channel|agent-message)\b([^>]*)>([\s\S]*?)(?:<\/\1>\s*)?$/
 
 export function delivered(text: string): { from: string; text: string } | null {
   const m = DELIVERED.exec(text)
   if (!m) return null
   const attr = (name: string) => new RegExp(`\\b${name}="([^"]*)"`).exec(m[2] ?? '')?.[1]
+  if (m[1] === 'agent-message') {
+    // A subagent's hand-back: long, and the session's own work, not a prompt anyone typed.
+    const body = (m[3] ?? '').replace(/^\s*\[Subagent hand-back\][^\n]*\n?/, '').trim()
+    return { from: 'Subagent', text: body.length > 600 ? `${body.slice(0, 600)}…` : body }
+  }
   return { from: attr('from-name') ?? attr('source') ?? attr('teammate') ?? attr('from') ?? 'another session', text: (m[3] ?? '').trim() }
 }
 
@@ -48,7 +53,7 @@ const INPUT_MAX = 16_000 // chars of JSON a tool row carries to replay
 // (a skill's instructions, a compacted conversation's summary, a background
 // task's notice): none of it is something a person typed.
 const ENGINE_TEXT =
-  /^\s*(<(command-name|command-message|command-args|local-command-stdout|local-command-stderr|local-command-caveat|system-reminder|bash-input|bash-stdout|bash-stderr|task-notification|user-prompt-submit-hook)\b|Base directory for this skill:|This session is being continued from a previous conversation|\[SYSTEM NOTIFICATION)/
+  /^\s*(<(command-name|command-message|command-args|local-command-stdout|local-command-stderr|local-command-caveat|system-reminder|bash-input|bash-stdout|bash-stderr|task-notification|user-prompt-submit-hook)\b|Base directory for this skill:|This session is being continued from a previous conversation|\[SYSTEM NOTIFICATION|Tool loaded\.\s*$|\[Request interrupted by user)/
 
 // Context a host app or the engine puts into a user message; never shown to others.
 const SYSTEM_BLOCKS = /<(system-reminder|task-notification)>[\s\S]*?<\/\1>/g
@@ -148,8 +153,9 @@ export function rowsFromMessage(
         if (who === null || ENGINE_TEXT.test(text) || !text) continue
         rows.push({ kind: 'user', who, text })
       } else if (block.type === 'tool_result') {
-        // A file read's lines come numbered ("   12\tcode"); the numbers are noise here.
-        const text = textOf(block.content).replace(/^ *\d+\t/gm, '')
+        // A file read's lines come numbered ("   12\tcode"); the numbers are noise
+        // here, and so is what the engine adds for the model (reminders).
+        const text = textOf(block.content).replace(SYSTEM_BLOCKS, '').replace(/^ *\d+\t/gm, '').trim()
         rows.push({
           kind: 'result',
           text: text ? clip(text, RESULT_LINES, RESULT_CHARS) : '(no output)',

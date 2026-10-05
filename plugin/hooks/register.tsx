@@ -728,6 +728,7 @@ function shownOf(event: ServerEvent): ShareShown | null {
     files,
     pid: typeof body.pid === 'string' ? body.pid : undefined,
     port: typeof body.port === 'number' ? body.port : undefined,
+    path: kind === 'preview' && typeof body.path === 'string' && body.path.startsWith('/') ? body.path : undefined,
     url: typeof body.url === 'string' ? body.url : undefined,
   }
 }
@@ -821,6 +822,9 @@ async function reset($: $) {
   laterRides.length = 0
   rideSubmitted = false
   hostCalls.clear()
+  staticRuns.clear()
+  caughtUp.clear()
+  mentionedPorts.clear()
   pendingGuestPrompts.length = 0
   await update($, modeA, () => 'idle')
   await update($, roomA, () => null)
@@ -1292,6 +1296,32 @@ async function stopPreview($: $, pid: string) {
   await api($, room.server, `/api/rooms/${room.id}/previews/${pid}/end`, { method: 'POST', token: room.token }).catch(() => {})
 }
 
+// Host: a localhost address Claude gave out (a dev server it started, say)
+// is shared like one it opened in the browser pane, when what Claude shows
+// goes to everyone, and only once something answers there. On its own turn
+// for guests, not the one that mentioned it (that may have ended).
+const mentionedPorts = new Set<number>()
+async function shareMentioned($: $, text: string) {
+  if ((await read($, modeA)) !== 'host' || (await read($, policyA)).files === 'off') return
+  const room = await read($, roomA)
+  if (!room) return
+  for (const m of text.matchAll(new RegExp(LOCAL_URL.source, 'gi'))) {
+    const port = Number(m[1])
+    if (!port || mentionedPorts.has(port) || (await read($, previewsA))[String(port)]) continue
+    mentionedPorts.add(port)
+    const probe = await sh($, `curl -s -o /dev/null -m 2 -w '%{http_code}' http://127.0.0.1:${port}/\n`)
+    if (!/^[1-5]\d\d$/.test(probe.out.trim())) {
+      mentionedPorts.delete(port) // nothing there yet: a later mention tries again
+      continue
+    }
+    const title = `localhost:${port}`
+    const pid = await ensurePreview($, room, port, title)
+    if (!pid) continue
+    send($, 'artifact', { kind: 'preview', pid, port, title, path: m[2] ?? '/' })
+    $.ui.toast(`Sharing localhost:${port} with the room (stop it in the Room)`)
+  }
+}
+
 // Host: a tool call that showed something, sent to the room for guests.
 async function captureShown($: $, e: Record<string, unknown>, result: unknown) {
   if ((await read($, modeA)) !== 'host' || (await read($, policyA)).files === 'off') return
@@ -1393,7 +1423,7 @@ async function replayOf($: $, room: ShareRoom, event: ServerEvent): Promise<Repl
       return { label, call: { name: 'mcp__Claude_Browser__preview_start', input: { url: `file://${paths[0]}` } } }
     case 'preview': {
       if (!shown.pid) return null
-      const url = await previewTicket($, room, shown.pid)
+      const url = await previewTicket($, room, shown.pid, shown.path)
       if (!url) return { label, note: 'the preview could not be opened' }
       if (!(await hasTool($, 'mcp__Claude_Browser__preview_start'))) return { label, note: `open it in a browser within 10 minutes (the link opens in one browser): ${url}` }
       return { label, call: { name: 'mcp__Claude_Browser__preview_start', input: { url } } }
@@ -1411,16 +1441,16 @@ async function refusedNote($: $, room: ShareRoom, event: ServerEvent, reason: st
   const shown = shownOf(event)
   const why = /auto mode/i.test(reason) ? 'auto mode only opens what you asked for' : 'it was not allowed'
   if (shown?.kind === 'preview' && shown.pid) {
-    const url = await previewTicket($, room, shown.pid)
+    const url = await previewTicket($, room, shown.pid, shown.path)
     if (url) return `\n\n> This session didn't open it in the browser pane (${why}). [Open the preview](${url}) in your browser within 10 minutes (the link opens in one browser), or press **Open** in the Room panel.\n\n`
   }
   return `\n\n> This session didn't open it (${why}). Press **Open** in the Room panel${shown?.files?.length ? `, or find it in \`.shared-session/\`` : ''}.\n\n`
 }
 
 // A link (ten minutes, one browser) that opens a preview on the preview host name.
-async function previewTicket($: $, room: ShareRoom, pid: string): Promise<string | null> {
+async function previewTicket($: $, room: ShareRoom, pid: string, path?: string): Promise<string | null> {
   try {
-    return (await api<{ url: string }>($, room.server, `/api/rooms/${room.id}/previews/${pid}/ticket`, { method: 'POST', token: room.token })).url
+    return (await api<{ url: string }>($, room.server, `/api/rooms/${room.id}/previews/${pid}/ticket`, { method: 'POST', token: room.token, body: { path: path ?? '/' } })).url
   } catch {
     return null
   }
@@ -1433,7 +1463,7 @@ async function openShown($: $, shown: ShareShown, surface?: RenderSurface) {
   const room = await read($, roomA)
   if (!room) return
   if (shown.kind === 'preview' && shown.pid) {
-    const url = await previewTicket($, room, shown.pid)
+    const url = await previewTicket($, room, shown.pid, shown.path)
     if (!url) return void $.ui.toast('That preview has ended')
     if (inDesktop === undefined) inDesktop = (await $.env.get('CLAUDE_CODE_ENTRYPOINT')) === 'claude-desktop'
     const opened = inDesktop ? await $.mcp.call('Claude_Browser', 'preview_start', { url }).catch(() => null) : null
@@ -1618,7 +1648,12 @@ const liveRuns = new Map<string, RideRun>()
 // plugin's own tool, answered with the host's result: the card a session
 // draws for its own calls, and nothing runs on this machine. By card id.
 const REPLAY_TOOL = 'mcp__shared-session__replay'
-const hostCalls = new Map<string, { hostId: string; seq: number; turnId?: string }>()
+const hostCalls = new Map<string, { hostId: string; seq: number; turnId?: string; result?: string }>()
+// Guest: history replayed as cards too, a step per call: where each one is.
+const staticRuns = new Map<string, { rows: Row[]; pos: number; replayed: Set<string> }>()
+// Guest: join replies that showed the history's calls, owed their last line.
+const caughtUp = new Set<string>()
+const HISTORY_CARDS = 150 // calls drawn as cards in a join's history; earlier ones as text
 let replayReady = false
 // Calls that show something (a file, a widget, a page) are made again here
 // instead (replayOf), so their rows stay out of the card replay.
@@ -1997,7 +2032,7 @@ export const register: Register = (on, options) => {
             policy.prompts === 'watch'
               ? `It's watch-only for now: you see every turn live and can chat with everyone in the **Room**.`
               : `What you type here runs there, on ${room.host}'s machine, and everyone sees the replies live.`,
-            `The **Room** (above the prompt, or \`/room\`) shows who's here and has a side chat Claude doesn't read. **Leave** is up there too.${history.length ? ' First, what happened so far:' : fromNow ? ` ${room.host} shared from that point on, so what came before isn't shown.` : ''}`,
+            `The **Room** (above the prompt, or \`/room\`) shows who's here and has a side chat Claude doesn't read. **Leave** is up there too.${history.length ? '' : fromNow ? ` ${room.host} shared from that point on, so what came before isn't shown.` : ''}`,
           ].join(' '),
           then: history,
           open,
@@ -2048,7 +2083,8 @@ export const register: Register = (on, options) => {
     await update($, workingA, () => ({ turnId: e.turnId, by, byGuest: Boolean(guest), startedAt, tail: '', waitingFor: null }))
     // A prompt another session delivered is shown as its text, not its markup.
     const said = typedText(e.text)
-    send($, 'turn', { state: 'start', turnId: e.turnId, by, prompt: guest?.text ?? delivered(said)?.text ?? said, pid: guest?.pid ?? '' })
+    const sent = guest ? null : delivered(said)
+    send($, 'turn', { state: 'start', turnId: e.turnId, by: sent?.from ?? by, prompt: guest?.text ?? sent?.text ?? said, pid: guest?.pid ?? '' })
     return next(e)
   })
 
@@ -2062,11 +2098,12 @@ export const register: Register = (on, options) => {
       const ride = ridesByTurn.get(e.turnId)
       ridesInStep.delete(e.turnId)
       liveRuns.delete(e.turnId)
+      staticRuns.delete(e.turnId)
+      caughtUp.delete(e.turnId)
       if (ride) {
         ridesByTurn.delete(e.turnId)
         localTurnActive = false
         if (ride.kind === 'note' && mode === 'guest') {
-          for (const exchange of ride.then) laterRides.push({ text: exchange.prompt, ride: { kind: 'static', rows: exchange.rows } })
           const room = await read($, roomA)
           for (const event of ride.open ?? []) {
             const shown = shownOf(event)
@@ -2086,12 +2123,97 @@ export const register: Register = (on, options) => {
     const mode = await read($, modeA)
 
     const progress = ridesInStep.get(e.turnId)
-    if (ride && (e.index === 0 || progress)) {
+    const staticRun = staticRuns.get(e.turnId)
+    if (ride && (e.index === 0 || progress || staticRun || caughtUp.has(e.turnId))) {
       const room = await read($, roomA)
       let answer = ''
-      if (ride.kind === 'static' || ride.kind === 'note') {
-        answer = ride.kind === 'note' ? ride.text : rowsToMarkdown(ride.rows) || '(no reply)'
+      if (ride.kind === 'static') {
+        // What happened before joining: text as it was, and each tool call
+        // as a card with the result the room kept (no waiting).
+        const run = staticRun ?? { rows: ride.rows, pos: 0, replayed: new Set<string>() }
+        staticRuns.delete(e.turnId)
+        const results = new Map(run.rows.filter(r => r.kind === 'result' && r.id).map(r => [r.id as string, r]))
+        let card: { row: Row; result: string } | null = null
+        const parts: Row[] = []
+        while (run.pos < run.rows.length) {
+          const row = run.rows[run.pos++]!
+          if (row.kind === 'tool' && replayReady && row.id && row.input && row.tool && !VIEWER_TOOL.test(row.tool)) {
+            const res = results.get(row.id)
+            run.replayed.add(row.id)
+            card = { row, result: res ? `${res.isError ? 'Error: ' : ''}${stripLineNumbers(res.text)}` : '(no result)' }
+            break
+          }
+          if (row.kind === 'result' && row.id && run.replayed.has(row.id)) continue
+          parts.push(row)
+        }
+        answer = rowsToMarkdown(parts)
+        if (!answer && e.index === 0 && !card) answer = '(no reply)'
+        if (answer) yield { kind: 'text', index: 0, text: answer } satisfies TurnStepChunk
+        if (card && !next.signal.aborted) {
+          staticRuns.set(e.turnId, run)
+          const id = `toolu_${newId()}${newId()}`
+          const input = { tool: card.row.tool, summary: card.row.text, input: card.row.input }
+          rideCalls.set(id, { name: REPLAY_TOOL, input: JSON.stringify(input), approve: true })
+          hostCalls.set(id, { hostId: card.row.id ?? '', seq: 0, result: card.result })
+          if (hostCalls.size > 1000) hostCalls.delete(hostCalls.keys().next().value as string)
+          yield { kind: 'tool', index: 1, id, name: REPLAY_TOOL } satisfies TurnStepChunk
+          yield { kind: 'input', index: 1, json: JSON.stringify(input) } satisfies TurnStepChunk
+          yield { kind: 'stop', stopReason: 'tool_use', usage: null } satisfies TurnStepChunk
+          return { turnId: e.turnId, index: e.index, answer, toolUses: [{ name: REPLAY_TOOL, input }], stopReason: 'tool_use', usage: null }
+        }
+      } else if (ride.kind === 'note' && caughtUp.has(e.turnId)) {
+        caughtUp.delete(e.turnId)
+        answer = "_You're caught up. What happens next shows here as it happens._"
         yield { kind: 'text', index: 0, text: answer } satisfies TurnStepChunk
+      } else if (ride.kind === 'note') {
+        // Joining: the note, then everything before it at once, each earlier
+        // prompt quoted and each call a card with the result the room kept:
+        // one step, so the reply lands whole and the view is at its end.
+        const blocks: ({ text: string } | { id: string; input: Record<string, unknown> })[] = []
+        let text = ride.text
+        if (ride.then.length) text += '\n\n---\n\n**Before you joined**\n\n'
+        const endText = () => {
+          if (text) blocks.push({ text })
+          text = ''
+        }
+        let cards = 0
+        for (const exchange of ride.then) {
+          const spoken = splitSpeaker(exchange.prompt)
+          text += `> **${spoken?.who ?? 'Someone'}:** ${(spoken?.text ?? exchange.prompt).replace(/\n/g, '\n> ')}\n\n`
+          const results = new Map(exchange.rows.filter(r => r.kind === 'result' && r.id).map(r => [r.id as string, r]))
+          const replayed = new Set<string>()
+          for (const row of exchange.rows) {
+            if (row.kind === 'tool' && replayReady && row.id && row.input && row.tool && !VIEWER_TOOL.test(row.tool) && cards < HISTORY_CARDS) {
+              endText()
+              const id = `toolu_${newId()}${newId()}`
+              const res = results.get(row.id)
+              hostCalls.set(id, { hostId: row.id, seq: 0, result: res ? `${res.isError ? 'Error: ' : ''}${stripLineNumbers(res.text)}` : '(no result)' })
+              blocks.push({ id, input: { tool: row.tool, summary: row.text, input: row.input } })
+              replayed.add(row.id)
+              cards += 1
+              continue
+            }
+            if (row.kind === 'result' && row.id && replayed.has(row.id)) continue
+            text += `${rowsToMarkdown([row])}\n\n`
+          }
+        }
+        endText()
+        const toolUses: { name: string; input: Record<string, unknown> }[] = []
+        for (const [index, block] of blocks.entries()) {
+          if ('text' in block) {
+            answer += block.text
+            yield { kind: 'text', index, text: block.text } satisfies TurnStepChunk
+          } else {
+            yield { kind: 'tool', index, id: block.id, name: REPLAY_TOOL } satisfies TurnStepChunk
+            yield { kind: 'input', index, json: JSON.stringify(block.input) } satisfies TurnStepChunk
+            toolUses.push({ name: REPLAY_TOOL, input: block.input })
+          }
+        }
+        if (toolUses.length && !next.signal.aborted) {
+          caughtUp.add(e.turnId)
+          yield { kind: 'stop', stopReason: 'tool_use', usage: null } satisfies TurnStepChunk
+          return { turnId: e.turnId, index: e.index, answer, toolUses, stopReason: 'tool_use', usage: null }
+        }
       } else if (room) {
         // A ride can take several steps: each thing the host's Claude showed
         // is a call made here, and the next step picks up where this one left.
@@ -2177,7 +2299,7 @@ export const register: Register = (on, options) => {
           if (call.name === REPLAY_TOOL && run.lastCall) {
             const hostId = (run.lastCall.event.body as unknown as Row).id ?? ''
             hostCalls.set(id, { hostId, seq: run.lastCall.event.seq, turnId: state.current?.turnId })
-            if (hostCalls.size > 200) hostCalls.delete(hostCalls.keys().next().value as string)
+            if (hostCalls.size > 1000) hostCalls.delete(hostCalls.keys().next().value as string)
           }
           if (rideCalls.size > 50) rideCalls.delete(rideCalls.keys().next().value as string)
           yield { kind: 'tool', index: 1, id, name: call.name } satisfies TurnStepChunk
@@ -2246,6 +2368,7 @@ export const register: Register = (on, options) => {
     const call = hostCalls.get(e.tool_use_id)
     const room = await read($, roomA)
     if (!call || !room) return { result: 'Nothing to show here: this tool replays a shared session.' } as never
+    if (call.result !== undefined) return { result: call.result } as never
     return { result: await hostResult($, room, call, next.signal) } as never
   }).catch(async () => ({ result: "The host's result didn't come through." }) as never)
 
@@ -2269,6 +2392,7 @@ export const register: Register = (on, options) => {
       // A guest's prompt reached the model as "Name: text"; show it as theirs.
       const spoken = fromGuest && row.kind === 'user' ? splitSpeaker(row.text) : null
       send($, 'row', spoken ? { ...row, who: spoken.who, text: spoken.text } : row)
+      if (row.kind === 'assistant' && LOCAL_URL.test(row.text)) void shareMentioned($, row.text)
     }
     return stored
   })

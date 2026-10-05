@@ -69,6 +69,8 @@ export type ShareShown = {
   files?: ShareFileMeta[]
   pid?: string
   port?: number
+  /** A preview's page: where its links land. */
+  path?: string
   url?: string
   /** A preview the host has stopped. */
   closed?: boolean

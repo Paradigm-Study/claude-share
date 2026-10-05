@@ -219,6 +219,8 @@ try {
   await until('Sam joined', async () => (await roomInfo(id)).people?.some(p => p.name === 'Sam'))
   await until('history shown to guest', () => /marmalade/i.test(guest.text), 30_000)
   check('guest sees what happened before Share', /marmalade/i.test(guest.text))
+  await until('history card', () => guest.lines.some(l => l.type === 'assistant' && l.message.content.some(b => b.type === 'tool_use' && b.name === 'mcp__shared-session__replay' && b.input?.tool === 'Read')), 30_000).catch(() => null)
+  check('what happened before shows its tool calls as cards too', guest.lines.some(l => l.type === 'assistant' && l.message.content.some(b => b.type === 'tool_use' && b.name === 'mcp__shared-session__replay' && b.input?.tool === 'Read')))
 
   // Alex talks to the shared session.
   const before = host.lines.length
@@ -361,7 +363,26 @@ try {
   lee.say(link)
   const late = await until('late joiner got the preview', () => /https?:\/\/[^\s)`'"]+\/__share\/enter\?room=[\w-]+&ticket=[\w-]+/.exec(lee.text)?.[0], 60_000).catch(() => null)
   check('someone who joins later is handed the open preview', Boolean(late) && late !== enter, late ?? 'no link')
-  check('and sees each exchange before it, one turn apiece', ['marmalade', 'pineapple', 'kiwi'].every(w => assistantText(lee).some(t => t.toLowerCase().includes(w))), String(lee.lines.filter(l => l.type === 'result').length) + ' turns')
+  // Everything before arrives in the join reply itself, at once.
+  const firstTurn = lee.lines.slice(0, Math.max(0, lee.lines.findIndex(l => l.type === 'result')))
+  const firstText = firstTurn.filter(l => l.type === 'assistant').flatMap(l => l.message.content.filter(b => b.type === 'text').map(b => b.text)).join('\n').toLowerCase()
+  check('and sees everything before it at once, in the join reply', ['marmalade', 'pineapple', 'kiwi'].every(w => firstText.includes(w)), `${firstTurn.length} lines in the join turn`)
+
+  // A dev server the host's Claude gives the address of is shared too.
+  const dev = createServer((req, res) => res.writeHead(200, { 'content-type': 'text/html' }).end('<h1>mentioned ok</h1>'))
+  await new Promise(r => dev.listen(0, '127.0.0.1', r))
+  children.push({ kill: () => dev.close() })
+  const enters = () => guest.text.match(/https?:\/\/[^\s)`'"]+\/__share\/enter\?room=[\w-]+&ticket=[\w-]+/g) ?? []
+  const known = new Set(enters())
+  host.say(`Reply with exactly this line and nothing else: The dev server is running at http://localhost:${dev.address().port}/dash`)
+  const mentioned = await until('guest got the mentioned dev server', () => enters().find(u => !known.has(u)), 90_000).catch(() => null)
+  let mentionedOk = false
+  if (mentioned) {
+    const opened = await fetch(mentioned, { redirect: 'manual' })
+    const jar = (opened.headers.get('set-cookie') ?? '').split(';')[0]
+    mentionedOk = opened.headers.get('location') === '/dash' && (await fetch(`${new URL(mentioned).origin}/`, { headers: { cookie: jar } }).then(r => r.text())).includes('mentioned ok')
+  }
+  check("a dev server the host's Claude mentions opens for guests, at the path it gave", mentionedOk, mentioned ?? 'no link')
 
   // How everyone heard the room: one open stream each, or polls when asked to.
   const polling = process.env.SHARED_SESSION_TRANSPORT === 'poll'

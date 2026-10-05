@@ -10,7 +10,7 @@ Share a Claude Code session with a link. Teammates open it, land in a Claude Cod
   - the footer and working line say who's here and whose turn it is;
   - a Room panel has people, activity, host controls and a side chat Claude never reads;
   - in Desktop, the session list marks and pins shared sessions.
-- **What Claude shows, everyone sees.** When the host's Claude opens a file in the side panel or the Files pane, draws a widget, or opens a page or a local dev server in the browser pane, each guest's own Claude Code opens the same thing. Files are saved in the guest's project under `.shared-session/` (kept out of git), and a dev server is reached through the room server.
+- **What Claude shows, everyone sees.** When the host's Claude opens a file in the side panel or the Files pane, draws a widget, or opens a page or a local dev server in the browser pane, each guest's own Claude Code opens the same thing. A dev server it only gives the address of (`http://localhost:3000/…`) is shared too, at that page, once something answers there. Files are saved in the guest's project under `.shared-session/` (kept out of git), and a dev server is reached through the room server.
 
 Built as a Claude Code plugin of function hooks (a "mod"), plus a small room server that runs on Cloudflare or as a single Node process. **It works right after install:** sharing goes through a public server this project runs ([what it sees and keeps](#privacy-and-the-public-server)), and teams can point it at their own.
 
@@ -60,7 +60,7 @@ It stops with a `NEEDS HUMAN` line at the one or two steps that need a person. S
   - who's here and who Claude is working for;
   - the side chat, what was shown, and the activity;
   - settings: the host's rules for everyone, and each guest's own.
-- **Show:** what the host's Claude shows reaches everyone by itself. The host can also type `/share-file <path>` to show a file, or `/share-preview <port>` to let teammates open a local dev server. Both are listed in the Room, where guests reopen them and the host stops previews. Someone who joins later gets any preview still open.
+- **Show:** what the host's Claude shows reaches everyone by itself. The host can also type `/share-file <path>` to show a file, or `/share-preview <port>` to let teammates open a local dev server. Both are listed in the Room, where guests reopen them and the host stops previews. Someone who joins later gets everything so far in the join reply at once, its tool calls as cards, then any preview still open.
 - **In a terminal:** the same, by keyboard. Type `/share-session`, `/room` and `/stop-sharing`; paste a link as a prompt to join. The row above the prompt says who's here and whose turn it is, and its buttons take focus like the rest of the prompt area. What the host's Claude shows reaches a terminal guest as a saved file or a link to open in a browser.
 - **Stop:** press **Leave**, or **Stop sharing** twice (it ends the room for everyone), or type `/stop-sharing`. Esc in a guest stops the shared turn.
 - **Connection:** if the room can't be reached, the row above the prompt says it is reconnecting; anything sent meanwhile goes out once it's back.
@@ -167,7 +167,7 @@ The end-to-end run starts a host (in bypass mode, on purpose) and two guests, th
 - ordering;
 - Esc from a guest;
 - that everyone hears the room over one open stream;
-- that a file the host shares lands in the guest's project, that a guest opens the host's localhost through a preview, and that someone who joins later is handed it with every exchange before;
+- that a file the host shares lands in the guest's project, that a guest opens the host's localhost through a preview, that someone who joins later is handed it with everything before in the join reply, and that a dev server the host's Claude gives the address of opens for guests at that page;
 - that a guest's write is refused without approval;
 - that sharing ends cleanly.
 
