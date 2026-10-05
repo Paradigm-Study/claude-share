@@ -15,7 +15,7 @@
 // dialog, one row above the prompt, and the Room panel (people, activity,
 // a side chat Claude never reads, and the host's controls).
 
-import { atom, read, update } from 'claude-code'
+import { atom, memberOf, read, update } from 'claude-code'
 import type { Elements, EngineInterface, HookStream, ProcessSpawnChunk, ProcessSpawnResult, Register, RenderChildren, RenderSurface, Timer, TurnStepChunk } from 'claude-code'
 
 import type { ShareActivity, ShareChat, ShareFileMeta, ShareMode, SharePerson, SharePolicy, ShareRoom, ShareShown, ShareWorking } from '../types'
@@ -78,6 +78,7 @@ const policyA = atom({ plugin: 'shared-session', key: 'policy' } as const, DEFAU
 const trustedA = atom({ plugin: 'shared-session', key: 'trusted' } as const, [] as string[])
 const ownersA = atom({ plugin: 'shared-session', key: 'owners' } as const, {} as Record<string, string>)
 const liveUpdatesA = atom({ plugin: 'shared-session', key: 'liveUpdates' } as const, null as 'running' | 'next' | null)
+const replayRunF = atom({ plugin: 'shared-session', key: 'replayRun' } as const, null as { tools?: string[]; hidden?: true } | null)
 const toolRowsA = atom({ plugin: 'shared-session', key: 'toolRows' } as const, 'grouped' as 'grouped' | 'each')
 const approvingA = atom({ plugin: 'shared-session', key: 'approving' } as const, null as { who: string; what: string; always: string } | null)
 const sidebarA = atom({ plugin: 'shared-session', key: 'sidebar' } as const, null as { title: string; pinned: boolean; id?: string } | null)
@@ -2261,20 +2262,27 @@ const EXCHANGE_CARDS = 200 // calls drawn as cards in one earlier exchange; the 
 // tool that ran (this one, never grouped, and a registered tool can't say
 // otherwise), so the plugin keeps the runs it made: the first call of a run
 // draws the line, the rest draw nothing. Other calls keep their own rows.
-type ReplayRun = { first: string; tools: string[] }
+type ReplayRun = { first: string; tools: string[]; ids: string[] }
 const replayRuns = new Map<string, ReplayRun>()
 const openRuns = new Map<string, ReplayRun | null>() // a live turn's run so far
 const COLLAPSIBLE = /^(Read|Grep|Glob|Bash|LS)$/
 function joinRun(run: ReplayRun | null, id: string, tool: string): ReplayRun | null {
   if (!COLLAPSIBLE.test(tool)) return null
-  const joined = run ?? { first: id, tools: [] }
+  const joined = run ?? { first: id, tools: [], ids: [] }
   joined.tools.push(tool)
+  joined.ids.push(id)
   replayRuns.set(id, joined)
   if (replayRuns.size > 5000) replayRuns.delete(replayRuns.keys().next().value as string)
   return joined
 }
+// Kept in the session's state, so a reload (an update in place) draws the
+// rows it redraws the same: each call's row reads its own member.
+async function saveRun($: $, run: ReplayRun) {
+  for (const id of run.ids) await $.state.set({ plugin: 'shared-session', key: 'replayRun', id }, id === run.first ? { tools: [...run.tools] } : { hidden: true })
+}
+
 // In the terminal's own words: "Searched for 2 patterns, read 3 files".
-function runLine(run: ReplayRun): string {
+function runLine(run: { tools: string[] }): string {
   const n = (re: RegExp) => run.tools.filter(t => re.test(t)).length
   const searched = n(/^(Grep|Glob)$/)
   const read = n(/^Read$/)
@@ -2294,12 +2302,13 @@ function runLine(run: ReplayRun): string {
 // the result the room kept (preset, so the card answers at once), up to its
 // last call; the words after that are the tail, said in the next step.
 type HistoryBlock = { text: string } | { id: string; input: Record<string, unknown> }
-function historyBlocks(rows: Row[]): { blocks: HistoryBlock[]; tail: string } {
+function historyBlocks(rows: Row[]): { blocks: HistoryBlock[]; tail: string; runs: ReplayRun[] } {
   const results = new Map(rows.filter(r => r.kind === 'result' && r.id).map(r => [r.id as string, r]))
   const blocks: HistoryBlock[] = []
   const replayed = new Set<string>()
   let text = ''
   let run: ReplayRun | null = null
+  const runs = new Set<ReplayRun>()
   for (const row of rows) {
     // Every call a card here, a page the host opened too: what's still open
     // is handed over after the history, not reopened at each step of it.
@@ -2311,6 +2320,7 @@ function historyBlocks(rows: Row[]): { blocks: HistoryBlock[]; tail: string } {
       text = ''
       const id = `toolu_${newId()}${newId()}`
       run = joinRun(run, id, row.tool)
+      if (run) runs.add(run)
       const res = results.get(row.id)
       hostCalls.set(id, { hostId: row.id, seq: 0, result: res ? `${res.isError ? 'Error: ' : ''}${stripLineNumbers(res.text)}` : '(no result)' })
       if (hostCalls.size > 3000) hostCalls.delete(hostCalls.keys().next().value as string)
@@ -2321,7 +2331,7 @@ function historyBlocks(rows: Row[]): { blocks: HistoryBlock[]; tail: string } {
     if (row.kind === 'result' && row.id && replayed.has(row.id)) continue
     text += `${rowsToMarkdown([row])}\n\n`
   }
-  return { blocks, tail: text.trim() }
+  return { blocks, tail: text.trim(), runs: [...runs] }
 }
 let replayReady = false
 // Calls that show something (a file, a widget, a page) are made again here
@@ -2612,6 +2622,9 @@ export const register: Register = (on, options) => {
     await $.command.register({ name: 'share-file', description: 'Show a file to everyone in the shared session: /share-file <path>' })
     await $.command.register({ name: 'share-preview', description: "Let teammates open this machine's localhost: /share-preview <port> [title]" })
     void readUpdates($)
+    // Loaded anew (an update in place, a reload): the rows this plugin drew
+    // draw again with this code, the room and the transcript as they were.
+    $.ui.invalidate('ui.render')
     $.clock.after(3_000, () => void catchUpFromInstalled($))
     $.clock.after(15_000, () => void checkForUpdate($))
     $.clock.every(30 * 60_000, () => void checkForUpdate($))
@@ -2841,7 +2854,8 @@ export const register: Register = (on, options) => {
         // An earlier exchange, its own turn as it was for the host: its prompt
         // above, then everything up to its last call in this one step and the
         // last words in the next. No step per call, nothing to wait for.
-        const { blocks, tail } = historyBlocks(ride.rows)
+        const { blocks, tail, runs } = historyBlocks(ride.rows)
+        for (const run of runs) await saveRun($, run)
         const toolUses: { name: string; input: Record<string, unknown> }[] = []
         if (!blocks.length) {
           answer = tail || '(no reply)'
@@ -2960,8 +2974,9 @@ export const register: Register = (on, options) => {
           // A run goes on while steps bring calls with no words between them.
           const replayed = call.name === REPLAY_TOOL ? String((call.input as { tool?: unknown }).tool ?? '') : ''
           const before = answer.trim() ? null : (openRuns.get(e.turnId) ?? null)
-          openRuns.set(e.turnId, replayed ? joinRun(before, id, replayed) : null)
-          if (before && COLLAPSIBLE.test(replayed)) $.ui.invalidate('ui.render') // its line counts one more
+          const grown = replayed ? joinRun(before, id, replayed) : null
+          openRuns.set(e.turnId, grown)
+          if (grown) await saveRun($, grown) // its first row's line counts one more
           yield { kind: 'tool', index: 1, id, name: call.name } satisfies TurnStepChunk
           yield { kind: 'input', index: 1, json: JSON.stringify(call.input) } satisfies TurnStepChunk
           yield { kind: 'stop', stopReason: 'tool_use', usage: null } satisfies TurnStepChunk
@@ -3042,8 +3057,9 @@ export const register: Register = (on, options) => {
     // `Name(summary)` and a folded line or two of what came back.
     if (e.surface !== 'terminal') return next({ ...e, props: { ...e.props, tool: input.tool, input: input.input ?? {} } })
     const { Box, Text } = $.ui.resolve(e)
-    const run = (await read($, toolRowsA)) === 'grouped' ? replayRuns.get(e.props.tool_use_id) : undefined
-    if (run) return run.first === e.props.tool_use_id ? <Text dimColor>{`  ${runLine(run)}`}</Text> : <Box />
+    const run = (await read($, toolRowsA)) === 'grouped' ? await read($, memberOf(replayRunF, e)) : null
+    if (run?.hidden) return <Box />
+    if (run?.tools) return <Text dimColor>{`  ${runLine({ tools: run.tools })}`}</Text>
     const summary = typeof input.summary === 'string' ? input.summary.split('\n')[0]!.slice(0, 160) : ''
     const lines = e.props.isRunning ? [] : replayLines(input.tool, (input.input ?? {}) as Record<string, unknown>, outputText(e.props.output), e.props.isErrored)
     return (
@@ -3213,20 +3229,37 @@ export const register: Register = (on, options) => {
     // A message another session sent them, passed on: its body, and whence it
     // came (its wrapper drawn as markdown would hide the first lines).
     const relayed = delivered(said.text)
-    const spoken = relayed ? { who: `${said.who} · from ${relayed.from}`, text: relayed.text } : said
     const el = $.ui.resolve(e)
     const { Box, Text, Markdown } = el
     const Svg = svgOf(el, e.surface)
+    const avatar = Svg ? <Svg source={avatarSvg({ name: said.who, online: true }, 24)} alt={said.who} width={24} height={24} /> : <Text>●</Text>
+    if (relayed) {
+      // A message another session sent them, which they passed on: who passed
+      // it and whence it came over its body as a quote, folded to its head
+      // until ctrl+o as the terminal folds its own messages.
+      const lines = relayed.text.split('\n')
+      const shown = e.props.isExpanded || lines.length <= 8 ? lines : lines.slice(0, 6)
+      const quoted = shown.map(line => (line ? `> ${line}` : '>')).join('\n')
+      const more = shown.length < lines.length ? `\n>\n> … +${lines.length - shown.length} lines (ctrl+o to expand)` : ''
+      return (
+        <Box flexDirection="row" gap={1}>
+          {avatar}
+          <Box flexDirection="column" flexShrink={1}>
+            <Box flexDirection="row" gap={1}>
+              <Text bold>{said.who}</Text>
+              <Text dimColor>{`relayed a message from ${relayed.from}`}</Text>
+            </Box>
+            <Markdown key="said" text={`${quoted}${more}`} />
+          </Box>
+        </Box>
+      )
+    }
     return (
       <Box flexDirection="row" gap={1}>
-        {Svg ? (
-          <Svg source={avatarSvg({ name: spoken.who, online: true }, 24)} alt={spoken.who} width={24} height={24} />
-        ) : (
-          <Text>●</Text>
-        )}
+        {avatar}
         <Box flexDirection="column" flexShrink={1}>
-          <Text bold>{spoken.who}</Text>
-          <Markdown key="said" text={spoken.text} />
+          <Text bold>{said.who}</Text>
+          <Markdown key="said" text={said.text} />
         </Box>
       </Box>
     )

@@ -194,8 +194,9 @@ test("a teammate's prompt that another session sent them shows its words and whe
   const text = 'Kyle: <cross-session-message from="uds:/tmp/x.sock" from-name="claude-share-0f" from-mode="bypass">\nBug report from this guest\n\nDetails below.\n</cross-session-message>'
   for (const surface of SURFACES) {
     const ui = await $.ui.mount({ ...ROW(text, { kind: 'plugin', name: 'shared-session', asUser: true }), surface })
-    expect((await ui.find({ type: 'Text', text: 'Kyle · from claude-share-0f' }))?.props.bold).toBe(true)
-    expect((await ui.find({ key: 'said' }))?.text).toBe('Bug report from this guest\n\nDetails below.')
+    expect((await ui.find({ type: 'Text', text: 'Kyle' }))?.props.bold).toBe(true)
+    expect(await ui.find({ type: 'Text', text: 'relayed a message from claude-share-0f' })).toBeDefined()
+    expect((await ui.find({ key: 'said' }))?.text).toBe('> Bug report from this guest\n>\n> Details below.')
     await ui.unmount()
   }
 })
