@@ -1980,6 +1980,57 @@ async function relaySocket($: $, room: ShareRoom, ask: Record<string, unknown>) 
   } catch {}
 }
 
+// How the terminal names a tool in its rows.
+function terminalName(tool: string): string {
+  const mcp = /^mcp__(.+?)__(.+)$/.exec(tool)
+  if (mcp) return `${mcp[1]} - ${mcp[2]} (MCP)`
+  return ({ Edit: 'Update', MultiEdit: 'Update', NotebookEdit: 'Update', Grep: 'Search', Glob: 'Search', WebFetch: 'Fetch', WebSearch: 'Web Search', TodoWrite: 'Update Todos', Task: 'Agent' } as Record<string, string>)[tool] ?? tool
+}
+
+// A replayed call's result as text, whatever shape the row kept it in.
+function outputText(output: unknown): string {
+  if (typeof output === 'string') return output
+  const blocks = Array.isArray(output) ? output : output && typeof output === 'object' && Array.isArray((output as { content?: unknown }).content) ? (output as { content: unknown[] }).content : null
+  if (blocks) return blocks.map(b => (b && typeof b === 'object' && typeof (b as { text?: unknown }).text === 'string' ? (b as { text: string }).text : '')).join('\n')
+  return output === undefined || output === null ? '' : JSON.stringify(output)
+}
+
+// The line or two the terminal shows under a call, folded as it folds its own.
+function replayLines(tool: string, input: Record<string, unknown>, out: string, errored: boolean): string[] {
+  const text = out.replace(/^Error: /, '').trimEnd()
+  const all = text ? text.split('\n') : []
+  const count = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`
+  if (errored) return [`Error: ${all[0] ?? 'failed'}`]
+  const first = (n: number) => (all.length <= n ? all : [...all.slice(0, n), `… +${count(all.length - n, 'line')}`])
+  switch (tool) {
+    case 'Read': {
+      // A file read's last line can be just its number (an empty last line).
+      const lines = all.length && /^\s*\d+\s*$/.test(all.at(-1) ?? '') ? all.length - 1 : all.length
+      return [`Read ${count(lines, 'line')}`]
+    }
+    case 'Write':
+      return [`Wrote ${count(String(input.content ?? '').split('\n').length, 'line')}`]
+    case 'Edit':
+    case 'MultiEdit':
+    case 'NotebookEdit': {
+      const edits = Array.isArray(input.edits) ? (input.edits as Record<string, unknown>[]) : [input]
+      const lines = (v: unknown) => (typeof v === 'string' && v ? v.split('\n').length : 0)
+      const added = edits.reduce((n, x) => n + lines(x.new_string ?? x.new_source), 0)
+      const removed = edits.reduce((n, x) => n + lines(x.old_string), 0)
+      const file = String(input.file_path ?? input.notebook_path ?? '').split('/').pop()
+      const parts = [added ? count(added, 'addition') : '', removed ? count(removed, 'removal') : ''].filter(Boolean)
+      return [`Updated${file ? ` ${file}` : ''}${parts.length ? ` with ${parts.join(' and ')}` : ''}`]
+    }
+    case 'Grep':
+    case 'Glob':
+      return [all.length && !/^No (files|matches) found/.test(all[0] ?? '') ? `Found ${count(all.length, tool === 'Glob' ? 'file' : 'line')}` : 'Found nothing']
+    case 'Bash':
+      return all.length ? first(3) : ['(No output)']
+    default:
+      return all.length ? first(2) : []
+  }
+}
+
 // Groups rows into prompt + reply exchanges.
 function exchanges(rows: Row[], host: string): Exchange[] {
   const out: Exchange[] = []
@@ -2079,7 +2130,10 @@ async function postChat($: $, text: string) {
 async function openRoom($: $) {
   roomOpen = true
   await update($, unreadA, () => 0)
-  await $.ui.open({ id: ROOM, title: 'Shared session' })
+  // A dialog in a terminal: it takes the keys (Tab and the arrows walk it,
+  // Esc closes it) and opens as tall as the Room is, not a third of the
+  // screen. Desktop's side panel just comes forward.
+  await $.ui.open({ id: ROOM, title: 'Shared session', focus: true, closeOnEscape: true, rows: 60 })
 }
 
 // What one riding poll adds to the reply being shown.
@@ -2400,6 +2454,8 @@ async function shareCommand($: $, e: { args: string }): Promise<{ text: string }
     if ((await read($, modeA)) === 'idle' && choice !== 'all' && choice !== 'new') {
       const prompts = await earlierPrompts($)
       if (prompts > 0) {
+        // The row above the prompt offers the same two, a press away (by keys in a terminal).
+        await update($, askingA, () => ({ prompts }))
         return {
           text: [
             `This session has ${prompts} earlier prompt${prompts === 1 ? '' : 's'}. Everyone with the link would see them, and Claude's replies.`,
@@ -2836,9 +2892,38 @@ export const register: Register = (on, options) => {
 
   // Guest: a replay card is drawn as the call it replays (Bash, Read, Edit).
   on('ui.render', { component: 'ToolUse', props: { tool: REPLAY_TOOL } }, async ($, e, next) => {
-    const input = (e.props.input ?? {}) as { tool?: unknown; input?: unknown }
+    const input = (e.props.input ?? {}) as { tool?: unknown; input?: unknown; summary?: unknown }
     if (typeof input.tool !== 'string') return next(e)
-    return next({ ...e, props: { ...e.props, tool: input.tool, input: input.input ?? {} } })
+    // Desktop draws a renamed call as that tool's own card. The terminal draws
+    // by the tool that ran (this one, generically: every argument, the whole
+    // result), so there the row is drawn as the terminal draws the real one:
+    // `Name(summary)` and a folded line or two of what came back.
+    if (e.surface !== 'terminal') return next({ ...e, props: { ...e.props, tool: input.tool, input: input.input ?? {} } })
+    const { Box, Text } = $.ui.resolve(e)
+    const summary = typeof input.summary === 'string' ? input.summary.split('\n')[0]!.slice(0, 160) : ''
+    const lines = e.props.isRunning ? [] : replayLines(input.tool, (input.input ?? {}) as Record<string, unknown>, outputText(e.props.output), e.props.isErrored)
+    return (
+      <Box flexDirection="column">
+        <Box flexDirection="row">
+          <Text color={e.props.isErrored ? BAD : e.props.isRunning ? undefined : GOOD} dimColor={e.props.isRunning}>
+            {'⏺ '}
+          </Text>
+          <Text bold>{terminalName(input.tool)}</Text>
+          <Text wrap="truncate-end">{summary ? `(${summary})` : ''}</Text>
+        </Box>
+        {lines.map((line, i) => (
+          <Text key={`l${i}`} dimColor={!e.props.isErrored} color={e.props.isErrored ? BAD : undefined} wrap="truncate-end">
+            {`${i === 0 ? '  ⎿  ' : '     '}${line}`}
+          </Text>
+        ))}
+      </Box>
+    )
+  })
+  // …and its result is in that row already, folded: not again in full below it.
+  on('ui.render', { component: 'ToolResult', props: { tool: REPLAY_TOOL } }, async ($, e, next) => {
+    if (e.surface !== 'terminal') return next(e)
+    const { Box } = $.ui.resolve(e)
+    return <Box />
   })
 
   // Host: every row the conversation keeps goes to the room.
@@ -2977,7 +3062,8 @@ export const register: Register = (on, options) => {
   // face and name over their words.
   on('ui.render', { component: 'UserMessage', props: { origin: { kind: 'plugin' } } }, async ($, e, next) => {
     const origin = e.props.origin
-    if (!('name' in origin) || origin.name !== PLUGIN) return next(e)
+    // Installed (`shared-session`, `…@claude-share`) or a folder copy (`…@inline`).
+    if (!('name' in origin) || (origin.name !== PLUGIN && !String(origin.name).startsWith(`${PLUGIN}@`))) return next(e)
     const spoken = splitSpeaker(typedText(e.props.text))
     if (!spoken) return next(e)
     const el = $.ui.resolve(e)
