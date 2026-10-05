@@ -21,7 +21,7 @@ import type { Elements, EngineInterface, HookStream, ProcessSpawnChunk, ProcessS
 import type { ShareActivity, ShareChat, ShareFileMeta, ShareMode, SharePerson, SharePolicy, ShareRoom, ShareShown, ShareWorking } from '../types'
 import { ACCENT, BAD, GOOD, ROSE, ago, avatarSvg, bannerSvg, labelsFor, stackSvg, toolGlyph } from './look'
 import type { Face } from './look'
-import { rowsFromMessage, rowsToMarkdown, splitSpeaker, summarizeTool } from './rows'
+import { delivered, rowsFromMessage, rowsToMarkdown, splitSpeaker, summarizeTool } from './rows'
 import type { Row } from './rows'
 import { SERVER_URL } from './server'
 import { readsInside } from './paths'
@@ -341,7 +341,15 @@ async function flush($: $) {
     outbox = []
     return
   }
-  const batch = outbox.splice(0, 200)
+  // Up to 200 events and ~400 KB a post (the server takes 512 KB).
+  let take = 0
+  let bytes = 0
+  while (take < Math.min(200, outbox.length)) {
+    bytes += JSON.stringify(outbox[take]).length
+    if (take > 0 && bytes > 400_000) break
+    take += 1
+  }
+  const batch = outbox.splice(0, take)
   if (batch.length === 0) return
   flushing = true
   let retry = false
@@ -531,6 +539,43 @@ async function pause($: $, ms: number) {
   } catch {
     await new Promise<void>(resolve => $.clock.after(ms, resolve))
   }
+}
+
+// Guest: the result of a call the host's Claude made, for its card here: read
+// from the room (the stream, or a short poll) until the host has it, the
+// host's turn ends, or the person stops this turn. Waits are budget-free.
+async function hostResult($: $, room: ShareRoom, call: { hostId: string; seq: number; turnId?: string }, signal: AbortSignal): Promise<string> {
+  const deadline = (await $.clock.now()) + 30 * 60_000
+  let cursor = call.seq
+  while (!signal.aborted && (await $.clock.now()) < deadline) {
+    const page = await ridePage($, room, cursor).catch(() => null)
+    for (const event of page?.events ?? []) {
+      cursor = Math.max(cursor, event.seq)
+      const row = event.body as unknown as Row
+      if (event.type === 'row' && row.kind === 'result' && row.id === call.hostId) return `${row.isError ? 'Error: ' : ''}${stripLineNumbers(row.text)}`
+      if (event.type === 'turn' && event.body.state === 'end' && (!call.turnId || event.body.turnId === call.turnId)) return "(the host's turn ended before this finished)"
+      if (event.type === 'ended') return '(sharing ended)'
+    }
+    if (page?.ended) return '(sharing ended)'
+    if (!page) await pause($, 500)
+  }
+  return signal.aborted ? '(stopped)' : '(still running on the host)'
+}
+
+// Guest: the tool host calls are drawn as. Only a joined session has it.
+async function readyReplay($: $) {
+  if (replayReady) return
+  replayReady = await $.tool
+    .register({
+      name: 'replay',
+      description:
+        "Shows a tool call made in the shared session this session joined, with the host's result. Used only by the Shared Sessions plugin; it runs nothing.",
+      inputSchema: { type: 'object', properties: { tool: { type: 'string' }, summary: { type: 'string' }, input: { type: 'object' } }, required: ['tool'] },
+    })
+    .then(
+      () => true,
+      () => false,
+    )
 }
 
 // What a riding turn reads next: from the stream when it is up and reaches
@@ -775,6 +820,7 @@ async function reset($: $) {
   ridesByText.clear()
   laterRides.length = 0
   rideSubmitted = false
+  hostCalls.clear()
   pendingGuestPrompts.length = 0
   await update($, modeA, () => 'idle')
   await update($, roomA, () => null)
@@ -950,7 +996,7 @@ async function share($: $, surface?: RenderSurface, opts: { history?: boolean } 
     $,
     server,
     '/api/rooms',
-    { method: 'POST', body: { name, title } },
+    { method: 'POST', body: { name, title, fromNow: opts.history === false || undefined } },
   )
   const room: ShareRoom = {
     server,
@@ -1078,6 +1124,7 @@ async function join($: $, server: string, id: string) {
     history: ServerEvent[]
     people: SharePerson[]
     latest?: string
+    fromNow?: boolean
   }>($, server, `/api/rooms/${id}/join`, { method: 'POST', body: { name } })
   void noteLatest($, joined.latest)
   const room: ShareRoom = {
@@ -1093,6 +1140,7 @@ async function join($: $, server: string, id: string) {
   }
   await update($, roomA, () => room)
   await update($, modeA, () => 'guest')
+  await readyReplay($)
   await update($, peopleA, () => joined.people)
   await update($, workingA, () => null)
   // The room as it stands: its timeline, its chat, the host's policy.
@@ -1116,7 +1164,7 @@ async function join($: $, server: string, id: string) {
   }
   startFeed($)
   await markSidebar($, () => `👥 ${room.host} · ${room.title}`)
-  return { room, history: exchanges(past.map(e => e.body as unknown as Row), joined.host), open: [...open.values()] }
+  return { room, history: exchanges(past.map(e => e.body as unknown as Row), joined.host), open: [...open.values()], fromNow: joined.fromNow === true }
 }
 
 // ---------------------------------------------------------------------------
@@ -1566,6 +1614,15 @@ function sameArgs(given: string, actual: unknown): boolean {
 const rideCalls = new Map<string, { name: string; input: string; approve: boolean }>()
 // Guest: the ride each running turn is showing, while it shows it.
 const liveRuns = new Map<string, RideRun>()
+// Guest: each tool call the host's Claude made is drawn as a call of this
+// plugin's own tool, answered with the host's result: the card a session
+// draws for its own calls, and nothing runs on this machine. By card id.
+const REPLAY_TOOL = 'mcp__shared-session__replay'
+const hostCalls = new Map<string, { hostId: string; seq: number; turnId?: string }>()
+let replayReady = false
+// Calls that show something (a file, a widget, a page) are made again here
+// instead (replayOf), so their rows stay out of the card replay.
+const VIEWER_TOOL = /^(SendUserFile|Artifact)$|show_widget$|^mcp__Claude_Browser__(preview_start|navigate)$|^mcp__ccd_view__show_pane$/
 const ridesInStep = new Map<string, RideRun>()
 
 type RideState = {
@@ -1575,6 +1632,8 @@ type RideState = {
   // What the host's Claude showed during the turn, still to show here: each
   // one becomes a step of this turn that makes the same call locally.
   actions: ServerEvent[]
+  // Host calls drawn as cards: their results are the cards', not text.
+  native?: Set<string>
 }
 
 // A file read's lines come numbered ("   12\tcode"); older hosts send them so.
@@ -1632,6 +1691,11 @@ function rideStep(ride: Ride, state: RideState, event: ServerEvent, host: string
     }
     state.streamed = false
     if (row.kind === 'tool') {
+      if (replayReady && row.id && row.input && row.tool && !VIEWER_TOOL.test(row.tool)) {
+        ;(state.native ??= new Set()).add(row.id)
+        state.actions.push(event)
+        return ''
+      }
       const head = `\n\n${toolGlyph(row.tool ?? '')} **${row.tool}** ${row.text ? `\`${row.text.replaceAll('`', "'")}\`` : ''}\n`
       if (row.detail && (row.tool === 'Edit' || row.tool === 'Write')) {
         return `${head}\n\`\`\`${row.tool === 'Edit' ? 'diff' : ''}\n${row.detail}\n\`\`\`\n`
@@ -1639,6 +1703,7 @@ function rideStep(ride: Ride, state: RideState, event: ServerEvent, host: string
       return head
     }
     if (row.kind === 'result') {
+      if (row.id && state.native?.has(row.id)) return ''
       return `  ⎿ ${row.isError ? '**Error:** ' : ''}${(stripLineNumbers(row.text).split('\n')[0] ?? '').slice(0, 200)}\n\n`
     }
   }
@@ -1844,6 +1909,7 @@ export const register: Register = (on, options) => {
     // A reload keeps $.state: pick the room back up.
     const room = await read($, roomA)
     if (room && (await read($, modeA)) !== 'idle') startFeed($)
+    if (room && (await read($, modeA)) === 'guest') await readyReplay($)
     return started
   })
 
@@ -1922,7 +1988,7 @@ export const register: Register = (on, options) => {
       // did, then what happened before plays back, all without a model call.
       try {
         if (mode === 'guest') await leave($)
-        const { room, history, open } = await join($, link[1], link[2])
+        const { room, history, open, fromNow } = await join($, link[1], link[2])
         const policy = await read($, policyA)
         answerWith({
           kind: 'note',
@@ -1931,7 +1997,7 @@ export const register: Register = (on, options) => {
             policy.prompts === 'watch'
               ? `It's watch-only for now: you see every turn live and can chat with everyone in the **Room**.`
               : `What you type here runs there, on ${room.host}'s machine, and everyone sees the replies live.`,
-            `The **Room** (above the prompt, or \`/room\`) shows who's here and has a side chat Claude doesn't read. **Leave** is up there too.${history.length ? ' First, what happened so far:' : ''}`,
+            `The **Room** (above the prompt, or \`/room\`) shows who's here and has a side chat Claude doesn't read. **Leave** is up there too.${history.length ? ' First, what happened so far:' : fromNow ? ` ${room.host} shared from that point on, so what came before isn't shown.` : ''}`,
           ].join(' '),
           then: history,
           open,
@@ -1980,7 +2046,9 @@ export const register: Register = (on, options) => {
     const by = guest?.who ?? room?.host ?? 'host'
     const startedAt = await $.clock.now()
     await update($, workingA, () => ({ turnId: e.turnId, by, byGuest: Boolean(guest), startedAt, tail: '', waitingFor: null }))
-    send($, 'turn', { state: 'start', turnId: e.turnId, by, prompt: guest?.text ?? typedText(e.text), pid: guest?.pid ?? '' })
+    // A prompt another session delivered is shown as its text, not its markup.
+    const said = typedText(e.text)
+    send($, 'turn', { state: 'start', turnId: e.turnId, by, prompt: guest?.text ?? delivered(said)?.text ?? said, pid: guest?.pid ?? '' })
     return next(e)
   })
 
@@ -2028,7 +2096,7 @@ export const register: Register = (on, options) => {
         // A ride can take several steps: each thing the host's Claude showed
         // is a call made here, and the next step picks up where this one left.
         const run: RideRun = progress ?? {
-          state: { current: null, streamed: false, done: ride.kind === 'artifact', actions: ride.kind === 'artifact' ? [ride.event] : [] },
+          state: { current: null, streamed: false, done: ride.kind === 'artifact', actions: ride.kind === 'artifact' ? [ride.event] : [], native: new Set() },
           cursor:
             ride.kind === 'turn'
               ? (hostTurns.find(t => t.turnId === ride.turnId)?.startSeq ?? room.seq)
@@ -2056,6 +2124,12 @@ export const register: Register = (on, options) => {
         let call: Replay['call'] | undefined
         while (!next.signal.aborted) {
           const action = state.actions.shift()
+          if (action && action.type === 'row' && (action.body as unknown as Row).kind === 'tool') {
+            const row = action.body as unknown as Row
+            call = { name: REPLAY_TOOL, input: { tool: row.tool, summary: row.text, input: row.input } }
+            run.lastCall = { id: '', event: action }
+            break
+          }
           if (action) {
             const replay = await replayOf($, room, action).catch(() => null)
             if (!replay) continue
@@ -2089,7 +2163,8 @@ export const register: Register = (on, options) => {
               answer += piece
               yield { kind: 'text', index: 0, text: piece } satisfies TurnStepChunk
             }
-            if (state.done) break
+            // A call to make: everything after it waits, so it lands in order.
+            if (state.done || state.actions.length) break
           }
           if (page.ended) state.done = true
         }
@@ -2099,6 +2174,11 @@ export const register: Register = (on, options) => {
           const id = `toolu_${newId()}${newId()}`
           if (run.lastCall) run.lastCall.id = id
           rideCalls.set(id, { name: call.name, input: JSON.stringify(call.input), approve: shownOf(run.lastCall?.event ?? ({ body: {} } as ServerEvent))?.kind !== 'link' })
+          if (call.name === REPLAY_TOOL && run.lastCall) {
+            const hostId = (run.lastCall.event.body as unknown as Row).id ?? ''
+            hostCalls.set(id, { hostId, seq: run.lastCall.event.seq, turnId: state.current?.turnId })
+            if (hostCalls.size > 200) hostCalls.delete(hostCalls.keys().next().value as string)
+          }
           if (rideCalls.size > 50) rideCalls.delete(rideCalls.keys().next().value as string)
           yield { kind: 'tool', index: 1, id, name: call.name } satisfies TurnStepChunk
           yield { kind: 'input', index: 1, json: JSON.stringify(call.input) } satisfies TurnStepChunk
@@ -2160,6 +2240,22 @@ export const register: Register = (on, options) => {
     return { turnId: e.turnId, index: e.index, answer: note, toolUses: [], stopReason: 'end_turn', usage: null }
   })
 
+  // Guest: a replay card's result is the host's. Answered here, never by
+  // anything beneath: if this fails, the backstop answers instead.
+  on('tool.call', { tool: REPLAY_TOOL }, async ($, e, next) => {
+    const call = hostCalls.get(e.tool_use_id)
+    const room = await read($, roomA)
+    if (!call || !room) return { result: 'Nothing to show here: this tool replays a shared session.' } as never
+    return { result: await hostResult($, room, call, next.signal) } as never
+  }).catch(async () => ({ result: "The host's result didn't come through." }) as never)
+
+  // Guest: a replay card is drawn as the call it replays (Bash, Read, Edit).
+  on('ui.render', { component: 'ToolUse', props: { tool: REPLAY_TOOL } }, async ($, e, next) => {
+    const input = (e.props.input ?? {}) as { tool?: unknown; input?: unknown }
+    if (typeof input.tool !== 'string') return next(e)
+    return next({ ...e, props: { ...e.props, tool: input.tool, input: input.input ?? {} } })
+  })
+
   // Host: every row the conversation keeps goes to the room.
   on('session.append', async ($, e, next) => {
     const stored = await next(e)
@@ -2203,6 +2299,8 @@ export const register: Register = (on, options) => {
   // names asks first (edits, commands and the web by default), whatever the
   // permission mode; "Always allow" trusts that person for the session.
   on('tool.check', async ($, e, next) => {
+    // The replay tool only returns what the host's Claude got: nothing to ask.
+    if (e.tool === REPLAY_TOOL) return { decision: 'allow', reason: "Shows a call the host's Claude made; nothing runs here" }
     // Guest: a riding turn's own call to a viewer (what the host's Claude
     // showed, made again here) is this plugin's to approve, so it opens like
     // it did for the host. Only that exact call, never a public link, never

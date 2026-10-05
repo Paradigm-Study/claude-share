@@ -126,7 +126,7 @@ Previews are served on a second port (`PREVIEW_PORT`, default `PORT` + 1); set `
 
 ## Limits
 
-- **Guests see tool calls as text.** The host's tool calls appear in guests' transcripts as compact lines (`❯ Bash`, `✎ Edit` with a diff), not native tool cards.
+- **Guests' tool cards are replays.** The host's tool calls show in a guest's transcript as tool cards (Bash, Read, Edit…) with the host's results, drawn by the plugin's own `replay` tool, which runs nothing. Each result is cut to its first 40 lines. A guest's session lists that tool while joined.
 - **Not mirrored:** subagents' inner steps and pasted images.
 - **No "Alex is typing…".** The engine doesn't see keystrokes in Claude Desktop's composer.
 - **Needs `curl` for live updates.** Each shared session keeps one `curl` process reading the room's stream, so a quiet room makes no requests. Without `curl`, or against a server too old to stream, the plugin polls instead, from every 0.4 s while busy down to every 15 s when quiet.

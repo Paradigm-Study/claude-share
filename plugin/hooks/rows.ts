@@ -14,16 +14,35 @@ export type Row = {
   /** A few lines under a tool row: an edit's diff, a write's head. */
   detail?: string
   isError?: boolean
+  /** A tool row's call id, and a result row's: pairs the two. */
+  id?: string
+  /** A tool row's input as the host's Claude sent it, when small enough to replay. */
+  input?: Record<string, unknown>
 }
 
 type Block = {
   type: string
+  id?: string
+  tool_use_id?: string
   text?: string
   name?: string
   input?: unknown
   content?: unknown
   is_error?: boolean
 }
+
+// A message another session, a teammate or a channel delivered: its markup
+// off, its sender's name kept (`from-name`, `source`, `teammate`).
+const DELIVERED = /^\s*<(cross-session-message|teammate-message|channel)\b([^>]*)>([\s\S]*?)<\/\1>\s*$/
+
+export function delivered(text: string): { from: string; text: string } | null {
+  const m = DELIVERED.exec(text)
+  if (!m) return null
+  const attr = (name: string) => new RegExp(`\\b${name}="([^"]*)"`).exec(m[2] ?? '')?.[1]
+  return { from: attr('from-name') ?? attr('source') ?? attr('teammate') ?? attr('from') ?? 'another session', text: (m[3] ?? '').trim() }
+}
+
+const INPUT_MAX = 16_000 // chars of JSON a tool row carries to replay
 
 // User-side text the engine records around a command or injects as context
 // (a skill's instructions, a compacted conversation's summary, a background
@@ -34,8 +53,8 @@ const ENGINE_TEXT =
 // Context a host app or the engine puts into a user message; never shown to others.
 const SYSTEM_BLOCKS = /<(system-reminder|task-notification)>[\s\S]*?<\/\1>/g
 
-const RESULT_LINES = 8
-const RESULT_CHARS = 1200
+const RESULT_LINES = 40
+const RESULT_CHARS = 4000
 const DETAIL_LINES = 12
 
 function blocksOf(content: unknown): Block[] {
@@ -120,6 +139,12 @@ export function rowsFromMessage(
     if (role === 'user') {
       if (block.type === 'text' && typeof block.text === 'string') {
         const text = block.text.replace(SYSTEM_BLOCKS, '').trim()
+        // A prompt another session delivered is the session's prompt too, under the sender's name.
+        const sent = delivered(text)
+        if (sent) {
+          if (sent.text) rows.push({ kind: 'user', who: sent.from, text: sent.text })
+          continue
+        }
         if (who === null || ENGINE_TEXT.test(text) || !text) continue
         rows.push({ kind: 'user', who, text })
       } else if (block.type === 'tool_result') {
@@ -129,6 +154,7 @@ export function rowsFromMessage(
           kind: 'result',
           text: text ? clip(text, RESULT_LINES, RESULT_CHARS) : '(no output)',
           isError: block.is_error === true || undefined,
+          id: block.tool_use_id,
         })
       }
     } else if (role === 'assistant') {
@@ -136,7 +162,8 @@ export function rowsFromMessage(
         rows.push({ kind: 'assistant', text: block.text.trim() })
       } else if (block.type === 'tool_use' && block.name) {
         const { text, detail } = summarizeTool(block.name, block.input, cwd)
-        rows.push({ kind: 'tool', tool: block.name, text, detail })
+        const input = block.input && typeof block.input === 'object' && JSON.stringify(block.input).length <= INPUT_MAX ? (block.input as Record<string, unknown>) : undefined
+        rows.push({ kind: 'tool', tool: block.name, text, detail, id: block.id, input })
       }
     }
   }

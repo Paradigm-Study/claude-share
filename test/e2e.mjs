@@ -234,9 +234,18 @@ try {
   // A host turn that goes quiet for longer than a step's 10 s budget (a slow
   // tool, a long think): the guest still shows it, never answering it itself.
   const quiet = host.lines.length
-  host.say('Use the Bash tool to run `sleep 15`, then reply with just the word lantern.')
+  host.say('Use the Bash tool to run `sleep 15 && touch replay-marker.txt`, then reply with just the word lantern.')
   await until('host ran the quiet turn', () => host.lines.slice(quiet).some(l => l.type === 'result' && /lantern/i.test(l.result ?? '')), 120_000).catch(() => null)
   await until('guest shows the quiet turn', () => assistantText(guest).some(t => /lantern/i.test(t)), 30_000).catch(() => null)
+  // The host's Bash call is drawn in the guest as a card of the plugin's own
+  // replay tool, answered with the host's result: nothing runs on the guest.
+  const replayed = guest.lines.flatMap(l => (l.type === 'assistant' ? l.message.content : [])).find(b => b.type === 'tool_use' && b.name === 'mcp__shared-session__replay' && JSON.stringify(b.input).includes('replay-marker'))
+  const answered = replayed && guest.lines.flatMap(l => (l.type === 'user' && Array.isArray(l.message?.content) ? l.message.content : [])).some(b => b.type === 'tool_result' && b.tool_use_id === replayed.id)
+  check('a host tool call shows in the guest as a tool card with the host\'s result', Boolean(replayed && replayed.input?.tool === 'Bash' && answered), replayed ? JSON.stringify(replayed.input).slice(0, 80) : 'no card')
+  // The host's Claude may run it in the background and answer first: wait for the host's file.
+  await until('host made the marker', () => existsSync(join(hostDir, 'replay-marker.txt')), 60_000).catch(() => null)
+  await new Promise(r => setTimeout(r, 2000))
+  check('a replayed call never runs on the guest', existsSync(join(hostDir, 'replay-marker.txt')) && !existsSync(join(guestDir, 'replay-marker.txt')))
   check(
     'a host turn quiet for over 10 s plays in the guest, not its own model',
     assistantText(guest).some(t => /lantern/i.test(t)) && guest.lines.filter(l => l.type === 'result').every(l => !(l.total_cost_usd > 0)),

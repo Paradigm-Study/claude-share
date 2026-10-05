@@ -70,6 +70,7 @@ export class Room {
     this.host = data.host // { name, token, lastSeen }
     this.createdAt = data.createdAt
     this.endedAt = data.endedAt ?? null
+    this.fromNow = data.fromNow === true // shared without what came before
     this.seq = data.seq ?? 0
     this.events = data.events ?? []
     this.seats = new Map(Object.entries(data.seats ?? {}))
@@ -100,12 +101,13 @@ export class Room {
     return room
   }
 
-  static create({ id, name, title, now }) {
+  static create({ id, name, title, now, fromNow }) {
     return new Room({
       id,
       title: String(title ?? '').trim().slice(0, 120) || 'Claude Code session',
       host: { name: clampName(name), token: token(24), lastSeen: now },
       createdAt: now,
+      fromNow: fromNow === true,
     })
   }
 
@@ -116,6 +118,7 @@ export class Room {
       host: this.host,
       createdAt: this.createdAt,
       endedAt: this.endedAt,
+      fromNow: this.fromNow || undefined,
       seq: this.seq,
       events: this.events,
       seats: Object.fromEntries(this.seats),
@@ -356,7 +359,7 @@ export class Windows {
 // POST /api/rooms: the host's Share. Returns the room and the host's token.
 export async function createRoom(req, id, now, origin) {
   const body = await readJson(req)
-  const room = Room.create({ id, name: body.name, title: body.title, now })
+  const room = Room.create({ id, name: body.name, title: body.title, now, fromNow: body.fromNow })
   return {
     room,
     response: json({
@@ -420,6 +423,7 @@ async function handleRoom(room, req, rest, now, origin, ctx) {
         seq: room.seq,
         history: room.events,
         people: room.people(now),
+        fromNow: room.fromNow || undefined,
         latest: PLUGIN_LATEST,
       }),
     }
