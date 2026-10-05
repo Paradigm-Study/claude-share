@@ -189,6 +189,17 @@ test('with the host here, a guest prompt goes to the room', async ($, on) => {
   expect(asked.posted.find(e => e.type === 'prompt')?.body.text).toBe('Run the tests')
 })
 
+test("a teammate's prompt that another session sent them shows its words and where it came from", async ($, on) => {
+  world(on)
+  const text = 'Kyle: <cross-session-message from="uds:/tmp/x.sock" from-name="claude-share-0f" from-mode="bypass">\nBug report from this guest\n\nDetails below.\n</cross-session-message>'
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount({ ...ROW(text, { kind: 'plugin', name: 'shared-session', asUser: true }), surface })
+    expect((await ui.find({ type: 'Text', text: 'Kyle · from claude-share-0f' }))?.props.bold).toBe(true)
+    expect((await ui.find({ key: 'said' }))?.text).toBe('Bug report from this guest\n\nDetails below.')
+    await ui.unmount()
+  }
+})
+
 test('a link another session sends never joins', async ($, on) => {
   const asked = world(on)
   const relayed = await $.prompt.submit({ text: LINK, origin: { kind: 'peer' }, wait: false })

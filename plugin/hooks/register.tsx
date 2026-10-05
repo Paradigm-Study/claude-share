@@ -2781,7 +2781,9 @@ export const register: Register = (on, options) => {
     // A prompt another session delivered is shown as its text, not its markup.
     const said = typedText(e.text)
     const sent = guest ? null : delivered(said)
-    send($, 'turn', { state: 'start', turnId: e.turnId, by: sent?.from ?? by, prompt: guest?.text ?? sent?.text ?? (said || startedBy(e.text)), pid: guest?.pid ?? '' })
+    const relayed = guest ? delivered(guest.text) : null
+    const guestPrompt = guest ? (relayed ? `(from ${relayed.from}) ${relayed.text}` : guest.text) : undefined
+    send($, 'turn', { state: 'start', turnId: e.turnId, by: sent?.from ?? by, prompt: guestPrompt ?? sent?.text ?? (said || startedBy(e.text)), pid: guest?.pid ?? '' })
     return next(e)
   })
 
@@ -3206,8 +3208,12 @@ export const register: Register = (on, options) => {
     const origin = e.props.origin
     // Installed (`shared-session`, `…@claude-share`) or a folder copy (`…@inline`).
     if (!('name' in origin) || (origin.name !== PLUGIN && !String(origin.name).startsWith(`${PLUGIN}@`))) return next(e)
-    const spoken = splitSpeaker(typedText(e.props.text))
-    if (!spoken) return next(e)
+    const said = splitSpeaker(typedText(e.props.text))
+    if (!said) return next(e)
+    // A message another session sent them, passed on: its body, and whence it
+    // came (its wrapper drawn as markdown would hide the first lines).
+    const relayed = delivered(said.text)
+    const spoken = relayed ? { who: `${said.who} · from ${relayed.from}`, text: relayed.text } : said
     const el = $.ui.resolve(e)
     const { Box, Text, Markdown } = el
     const Svg = svgOf(el, e.surface)
