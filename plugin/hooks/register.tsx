@@ -255,7 +255,7 @@ async function enableLive($: $): Promise<boolean> {
       [
         `src=${sq($.plugin.root)}; live=${sq(dir)}`,
         'mkdir -p "$live" || exit 1',
-        'if command -v rsync >/dev/null 2>&1; then rsync -a --delete --exclude .claude --exclude tests "$src/" "$live/"; else cp -R "$src/." "$live/"; fi && echo copied',
+        'if command -v rsync >/dev/null 2>&1; then rsync -a --delete --checksum --exclude .claude --exclude tests "$src/" "$live/"; else cp -R "$src/." "$live/"; fi && echo copied',
         '',
       ].join('\n'),
     )
@@ -300,13 +300,51 @@ async function selfUpdate($: $, latest: string) {
       $,
       [
         `live=${sq(live)}; next="$live.next"; lock="$live.lock"`,
-        apply ? 'if command -v rsync >/dev/null 2>&1; then rsync -a --delete --exclude .claude "$next/" "$live/"; else cp -R "$next/." "$live/"; fi' : ':',
+        apply ? 'if command -v rsync >/dev/null 2>&1; then rsync -a --delete --checksum --exclude .claude "$next/" "$live/"; else cp -R "$next/." "$live/"; fi' : ':',
         'rm -rf "$next"; rmdir "$lock" 2>/dev/null; echo done',
         '',
       ].join('\n'),
     )
   }
-  if (!apply) updatingTo = null // try again at the next check
+  if (!apply) {
+    updatingTo = null // try again at the next check
+    // Said once a version: the download failing here (a proxy, no curl) would
+    // otherwise keep this session on its version unseen.
+    if (!got && !/busy/.test(fetched.out) && failedFor !== latest) {
+      failedFor = latest
+      $.ui.log(`Shared Sessions ${latest} is out, but this machine couldn't download it. Run: ${UPDATE_COMMAND} — the next session picks it up.`)
+    }
+  }
+}
+let failedFor: string | null = null
+
+// The live copy behind the installed one (someone ran the update command, or
+// a download failed here): take the installed copy's files, no network; every
+// session running the folder reloads with them.
+async function catchUpFromInstalled($: $) {
+  if (!runsLive($)) return
+  const mine = await ownVersion($)
+  const home = await $.env.get('HOME')
+  if (!mine || !home) return
+  let installed: { installPath?: unknown; version?: unknown } | undefined
+  try {
+    const list = JSON.parse(await $.fs.read(`${home}/.claude/plugins/installed_plugins.json`))
+    installed = ((list.plugins ?? list)[INSTALLED_ID] as { installPath?: unknown; version?: unknown }[] | undefined)?.find(e => typeof e.installPath === 'string')
+  } catch {
+    return
+  }
+  const version = typeof installed?.version === 'string' ? installed.version : ''
+  if (!version || !newerThan(version, mine) || typeof installed?.installPath !== 'string') return
+  $.ui.log(`Updating Shared Sessions to ${version} from the installed copy. It reloads in place; nothing to restart.`)
+  await sh(
+    $,
+    [
+      `src=${sq(installed.installPath)}; live=${sq($.plugin.root.replace(/\/+$/, ''))}`,
+      '[ -f "$src/hooks/register.tsx" ] || exit 0',
+      'if command -v rsync >/dev/null 2>&1; then rsync -a --delete --checksum --exclude .claude --exclude tests "$src/" "$live/"; else cp -R "$src/." "$live/"; fi',
+      '',
+    ].join('\n'),
+  )
 }
 
 // What the server says is newest, asked now and then: a long-open session
@@ -339,8 +377,10 @@ async function readUpdates($: $) {
   const dir = await liveDirOf($)
   const named = Boolean(dir && String((settings.env as Record<string, unknown> | undefined)?.CLAUDE_CODE_PLUGIN_DIRS ?? '').split(':').includes(dir))
   await update($, liveUpdatesA, () => (runsLive($) ? 'running' : named ? 'next' : null))
-  // Automatic updates chosen before they could load in place: in place now.
-  if (on && !named && !runsLive($) && (await enableLive($))) {
+  // Automatic updates chosen before they could load in place (or the folder
+  // named for them gone): in place now.
+  const missing = named && dir ? !(await $.fs.exists(`${dir}/.claude-plugin/plugin.json`).catch(() => true)) : false
+  if (on && (!named || missing) && !runsLive($) && (await enableLive($))) {
     $.ui.log('Shared Sessions now updates in place: from your next new session on, a release loads without a restart.')
   }
 }
@@ -1095,12 +1135,17 @@ async function markSidebar($: $, title: (current: string) => string) {
   const info = await sessionInfo($, 'self')
   if (info === null) return
   if (typeof info.sessionId === 'string') selfId = info.sessionId
-  const current = typeof info.title === 'string' ? info.title : ''
+  // The row as it was before any share: a mark an earlier share left (an app
+  // that quit mid-share, a room taken back up) is not part of it.
+  const current = unmarked(typeof info.title === 'string' ? info.title : '')
   const pinned = info.pinned === true
   if (!(await read($, sidebarA))) await update($, sidebarA, () => ({ title: current, pinned, id: selfId || undefined }))
   await desk($, 'ccd_session_mgmt', 'set_session_title', { session_id: 'self', title: title(current).slice(0, 120) })
   if (!pinned) await setPinned($, true)
 }
+
+// A title without the marks sharing and joining put in front of it.
+const unmarked = (title: string) => title.replace(/^(?:👥 [^·]{1,80} · )+/u, '').replace(/^(?:[^·]{1,80}'s session · )+/u, '')
 
 // Puts the row back: the title it had (or `title`), unpinned unless it was pinned.
 async function unmarkSidebar($: $, title?: string) {
@@ -2525,6 +2570,7 @@ export const register: Register = (on, options) => {
     await $.command.register({ name: 'share-file', description: 'Show a file to everyone in the shared session: /share-file <path>' })
     await $.command.register({ name: 'share-preview', description: "Let teammates open this machine's localhost: /share-preview <port> [title]" })
     void readUpdates($)
+    $.clock.after(3_000, () => void catchUpFromInstalled($))
     $.clock.after(15_000, () => void checkForUpdate($))
     $.clock.every(30 * 60_000, () => void checkForUpdate($))
     // A reload keeps $.state: pick the room back up. A restart doesn't: a
