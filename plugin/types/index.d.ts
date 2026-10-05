@@ -104,6 +104,8 @@ declare module 'claude-code' {
       asking: { prompts: number } | null
       /** Whether this session hears the room: `live`, or `reconnecting` after failed tries. */
       connection: 'live' | 'reconnecting'
+      /** Host: a teammate's tool call waiting for an answer in the row above the prompt (the question dialog didn't show). */
+      approving: { who: string; what: string; always: string } | null
       /** A button pressed once that ends something for everyone, waiting for its second press. */
       confirming: 'stop' | null
       /** A newer plugin than this one, as the share server last said. */

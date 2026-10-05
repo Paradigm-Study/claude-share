@@ -78,6 +78,7 @@ const policyA = atom({ plugin: 'shared-session', key: 'policy' } as const, DEFAU
 const trustedA = atom({ plugin: 'shared-session', key: 'trusted' } as const, [] as string[])
 const ownersA = atom({ plugin: 'shared-session', key: 'owners' } as const, {} as Record<string, string>)
 const liveUpdatesA = atom({ plugin: 'shared-session', key: 'liveUpdates' } as const, null as 'running' | 'next' | null)
+const approvingA = atom({ plugin: 'shared-session', key: 'approving' } as const, null as { who: string; what: string; always: string } | null)
 const sidebarA = atom({ plugin: 'shared-session', key: 'sidebar' } as const, null as { title: string; pinned: boolean; id?: string } | null)
 const shownA = atom({ plugin: 'shared-session', key: 'shown' } as const, [] as ShareShown[])
 const previewsA = atom({ plugin: 'shared-session', key: 'previews' } as const, {} as Record<string, string>)
@@ -414,6 +415,8 @@ let roomOpen = false
 const pendingGuestPrompts: { who: string; framed: string; text: string; pid: string }[] = []
 // Host: the approval question on screen, so its dialog can show a preview.
 let pendingAsk: { who: string; preview: string; descriptions: Record<string, string> } | null = null
+// The row-above-the-prompt answer to a teammate's call, when the dialog didn't show.
+let bandAnswer: ((label: string) => void) | null = null
 
 // Guest: the host's turns as announced, and how this session shows them.
 type HostTurn = { turnId: string; by: string; prompt: string; pid?: string; startSeq: number; shown: boolean; claimed: boolean }
@@ -1001,6 +1004,8 @@ async function reset($: $, opts: { keepSidebar?: boolean } = {}) {
   await update($, askingA, () => null)
   await update($, connectionA, () => 'live')
   await update($, confirmingA, () => null)
+  bandAnswer?.('Decline')
+  await update($, approvingA, () => null)
   savedNames.clear()
 }
 
@@ -2928,13 +2933,31 @@ export const register: Register = (on, options) => {
         Decline: `Claude is told you declined and carries on without it.`,
       },
     }
+    const options = ['Allow once', always, 'Decline']
     let answer = 'Decline'
+    const askedAt = await $.clock.now()
+    let shown = true
     try {
-      answer = await $.ui.ask(`${working.by} wants Claude to run ${what.slice(0, 200)}. Allow it?`, {
-        header: ASK_HEADER,
-        options: ['Allow once', always, 'Decline'],
+      answer = await $.ui.ask(`${working.by} wants Claude to run ${what.slice(0, 200)}. Allow it?`, { header: ASK_HEADER, options })
+      if (!options.includes(answer)) shown = false // something else answered for it (a settings hook)
+    } catch {
+      // Dismissed after a look is a no; refused at once, it never showed (a
+      // settings hook on AskUserQuestion, a host with no dialog).
+      shown = (await $.clock.now()) - askedAt > 1500
+    }
+    // Asked in the row above the prompt instead, the person's own buttons,
+    // when anything draws it (a plain -p run draws nothing: a no, as before).
+    if (!shown && (await $.session.surfaces()).length > 0) {
+      await update($, approvingA, () => ({ who: working.by, what, always }))
+      $.ui.toast(`${working.by} wants Claude to run ${what.slice(0, 80)}: answer above the prompt`)
+      nudgeSidebar($)
+      answer = await new Promise<string>(resolve => {
+        bandAnswer = resolve
+        $.clock.after(10 * 60_000, () => resolve('Decline'))
       })
-    } catch {}
+      bandAnswer = null
+      await update($, approvingA, () => null)
+    }
     pendingAsk = null
     const allowed = answer === 'Allow once' || answer === always
     if (answer === always) await update($, trustedA, list => [...new Set([...list, working.by])])
@@ -3413,6 +3436,7 @@ export const register: Register = (on, options) => {
     const here = presence(v)
     const roomLabel = v.unread ? `Room · ${v.unread} new` : `Room · ${people.filter(p => p.online).length}`
     const stopping = v.confirming === 'stop'
+    const approving = await read($, approvingA)
 
     return (
       <Box flexDirection="column" paddingRight={e.surface === 'terminal' ? 4 : 0}>
@@ -3454,7 +3478,16 @@ export const register: Register = (on, options) => {
             )}
           </Box>
         </Box>
-        {stopping ? (
+        {v.mode === 'host' && approving ? (
+          <Box flexDirection="column">
+            <Text wrap="truncate-end">{`⚠  ${approving.who} wants Claude to run ${approving.what}`}</Text>
+            <Box flexDirection="row" gap={1}>
+              <Button key="approve-once" label="Allow once" variant="primary" onPress={() => bandAnswer?.('Allow once')} />
+              <Button key="approve-always" label={approving.always} plain onPress={() => bandAnswer?.(approving.always)} />
+              <Button key="approve-no" label="Decline" plain onPress={() => bandAnswer?.('Decline')} />
+            </Box>
+          </Box>
+        ) : stopping ? (
           <Text dimColor wrap="truncate-end">
             Press again to end the room for everyone. The link stops working.
           </Text>
