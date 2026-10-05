@@ -278,11 +278,12 @@ export function shareUrl(origin, id) {
 }
 
 // Plugin versions. The newest is the plugin this server was deployed with;
-// clients say theirs in a header. Older than PLUGIN_MIN can't share or join:
-// up to 0.7.0, a guest step that waited more than 10 s on a slow host fell
-// through to the guest's own model, which then acted on the guest's machine.
+// clients say theirs in a header. Older than PLUGIN_MIN can't share or join
+// (rooms already open carry on): before 0.10.1, a host's approval question
+// could be declined for them unseen, its Next.js 16 dev servers showed blank,
+// and nothing below 0.9.8 updates itself, so everyone moves up once, here.
 export const PLUGIN_LATEST = manifest.version
-export const PLUGIN_MIN = '0.7.1'
+export const PLUGIN_MIN = '0.10.1'
 export const UPDATE_COMMAND = 'claude plugin marketplace update claude-share && claude plugin update shared-session@claude-share'
 
 const versionParts = v => String(v).split('.').map(n => Number.parseInt(n, 10) || 0)
@@ -299,7 +300,7 @@ export function outdatedClient(req) {
   if (version && compareVersions(version, PLUGIN_MIN) >= 0) return null
   return json(
     {
-      error: `This Shared Sessions plugin is out of date${version ? ` (${version})` : ''}. Update it in a terminal: ${UPDATE_COMMAND} — then start a new Claude Code session (or quit and reopen Claude Desktop).`,
+      error: `This Shared Sessions plugin is out of date${version ? ` (${version})` : ''}. Update it in a terminal: ${UPDATE_COMMAND} — then quit and reopen Claude Desktop (Cmd+Q), or start a new terminal session. In the Room, set Settings → Updates to "Install by themselves" and later versions load without a restart.`,
       latest: PLUGIN_LATEST,
       min: PLUGIN_MIN,
       update: UPDATE_COMMAND,

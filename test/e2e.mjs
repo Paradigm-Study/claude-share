@@ -240,6 +240,7 @@ function transcriptOf(s) {
   return ''
 }
 
+const UPDATE_LINE = 'claude plugin marketplace update claude-share && claude plugin update shared-session@claude-share'
 const roomInfo = async id => (await fetch(`${SERVER}/api/rooms/${id}`)).json()
 
 try {
@@ -253,9 +254,12 @@ try {
   const home = await fetch(`${SERVER}/`).then(r => r.text()).catch(() => '')
   check("the server's page says how to install and what it keeps", home.includes('claude plugin install shared-session@claude-share') && home.includes('What this server sees and keeps'))
   // The room knows which plugin its host runs, so a guest's can say what an older one can't show.
-  const older = await fetch(`${SERVER}/api/rooms`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-shared-session-version': '0.8.2' }, body: JSON.stringify({ name: 'old host', title: 'old' }) }).then(r => r.json())
-  check("the room says which plugin its host runs", (await roomInfo(older.id)).hostVersion === '0.8.2')
-  await fetch(`${SERVER}/api/rooms/${older.id}/end`, { method: 'POST', headers: { authorization: `Bearer ${older.token}`, 'x-shared-session-version': '0.8.2' } })
+  const older = await fetch(`${SERVER}/api/rooms`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-shared-session-version': '0.10.1' }, body: JSON.stringify({ name: 'host', title: 'versions' }) }).then(r => r.json())
+  await fetch(`${SERVER}/api/rooms/${older.id}/events?after=0&wait=0`, { headers: { authorization: `Bearer ${older.token}`, 'x-shared-session-version': '0.10.7' } })
+  check('the room says which plugin its host runs now', (await roomInfo(older.id)).hostVersion === '0.10.7')
+  await fetch(`${SERVER}/api/rooms/${older.id}/end`, { method: 'POST', headers: { authorization: `Bearer ${older.token}`, 'x-shared-session-version': '0.10.7' } })
+  const tooOld = await fetch(`${SERVER}/api/rooms`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-shared-session-version': '0.9.7' }, body: JSON.stringify({ name: 'old', title: 'old' }) })
+  check('a plugin older than the minimum is turned away with the update command', tooOld.status === 426 && String((await tooOld.json()).error).includes(UPDATE_LINE))
   check('an out-of-date plugin is told how to update', outdated.status === 426 && String(outdatedBody.error).includes('claude plugin update shared-session@claude-share'), `HTTP ${outdated.status}`)
 
   // Kim's session gave out a dev server's address before sharing: Share
