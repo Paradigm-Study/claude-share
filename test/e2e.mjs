@@ -187,6 +187,26 @@ try {
   await fetch(`${SERVER}/api/rooms/${older.id}/end`, { method: 'POST', headers: { authorization: `Bearer ${older.token}`, 'x-shared-session-version': '0.8.2' } })
   check('an out-of-date plugin is told how to update', outdated.status === 426 && String(outdatedBody.error).includes('claude plugin update shared-session@claude-share'), `HTTP ${outdated.status}`)
 
+  // Kim's session gave out a dev server's address before sharing: Share
+  // everything opens it for whoever joins, at that page.
+  const kimDev = createServer((req, res) => res.writeHead(200, { 'content-type': 'text/html' }).end('<h1>kim ok</h1>'))
+  await new Promise(r => kimDev.listen(0, '127.0.0.1', r))
+  children.push({ kill: () => kimDev.close() })
+  mkdirSync(join(WORK, 'kim'), { recursive: true })
+  const kim = session('Kim', join(WORK, 'kim'))
+  kim.say(`Reply with exactly this line and nothing else: Running at http://localhost:${kimDev.address().port}/dev/sheet`)
+  await until('Kim answered', () => kim.lines.some(l => l.type === 'result'), 120_000)
+  kim.say('/share-session all')
+  const kimLink = await until("Kim's link", () => /\/s\/([A-Za-z0-9_-]{16,})/.exec(kim.text)?.[1], 60_000)
+  const kimRoom = await until("Kim's dev server shared", async () => {
+    const seat = await fetch(`${SERVER}/api/rooms/${kimLink}/join`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-shared-session-version': '9.9.9' }, body: JSON.stringify({ name: 'probe' }) }).then(r => r.json())
+    await fetch(`${SERVER}/api/rooms/${kimLink}/leave`, { method: 'POST', headers: { authorization: `Bearer ${seat.token}` } }).catch(() => {})
+    return seat.history?.some(e => e.type === 'artifact' && e.body.kind === 'preview' && e.body.port === kimDev.address().port) && seat
+  }, 30_000).catch(() => null)
+  const kimShown = kimRoom?.history.find(e => e.type === 'artifact' && e.body.kind === 'preview')
+  check('a dev server Claude gave out before Share opens for whoever joins, at that page', kimShown?.body.path === '/dev/sheet', kimShown ? `${kimShown.body.port}${kimShown.body.path}` : 'nothing shared')
+  kim.say('/stop-sharing')
+
   // Scott's session: a normal session with some history, then Share.
   const hostFlags = ['--permission-mode', 'bypassPermissions', '--allow-dangerously-skip-permissions']
   let host = session('Scott', hostDir, hostFlags)

@@ -1024,10 +1024,12 @@ async function share($: $, surface?: RenderSurface, opts: { history?: boolean } 
   void noteLatest($, created.latest)
   await update($, peopleA, () => [{ id: 'host', name, role: 'host', online: true }])
 
-  // What happened before Share, so people who join see the whole session.
+  // What happened before Share, so people who join see the whole session,
+  // and the dev servers Claude opened then, still running, open for them too.
   for (const message of messages) {
     for (const row of rowsFromMessage(message, name, cwd)) send($, 'row', row)
   }
+  void shareLocal($, localOpens(messages)).catch(() => {})
   startFeed($)
   const copied = await $.ui.copy({ text: room.url, surface }).catch(() => ({ isCopied: false }))
   $.ui.toast(copied.isCopied ? 'Sharing · link copied' : 'Sharing · the link is in the transcript')
@@ -1402,17 +1404,49 @@ async function stopPreview($: $, pid: string) {
   await api($, room.server, `/api/rooms/${room.id}/previews/${pid}/end`, { method: 'POST', token: room.token }).catch(() => {})
 }
 
-// Host: a localhost address Claude gave out (a dev server it started, say)
-// is shared like one it opened in the browser pane, when what Claude shows
-// goes to everyone, and only once something answers there. On its own turn
-// for guests, not the one that mentioned it (that may have ended).
+// Host: a localhost address Claude gave out (a dev server it started, say),
+// or one it opened before Share, is shared like one it opens in the browser
+// pane while sharing: when what Claude shows goes to everyone, and only once
+// something answers there. On its own turn for guests, not the one that
+// mentioned it (that may have ended).
 const mentionedPorts = new Set<number>()
-async function shareMentioned($: $, text: string) {
+const localPages = (text: string) => [...text.matchAll(new RegExp(LOCAL_URL.source, 'gi'))].map(m => ({ port: Number(m[1]), path: m[2] ?? '/' }))
+
+// The pages a browser_batch call opened, in order.
+function batchOpens(input: Record<string, unknown>): string[] {
+  const actions = Array.isArray(input.actions) ? (input.actions as { name?: unknown; input?: { url?: unknown } }[]) : []
+  return actions.filter(a => (a?.name === 'navigate' || a?.name === 'preview_start') && typeof a.input?.url === 'string').map(a => a.input?.url as string)
+}
+
+// The localhost pages a session's Claude opened in the browser pane or gave
+// the address of, each port at the page it was at last.
+function localOpens(messages: unknown[]): { port: number; path: string }[] {
+  const last = new Map<number, string>()
+  for (const message of messages) {
+    const m = message as { role?: unknown; content?: unknown }
+    if (m?.role !== 'assistant' || !Array.isArray(m.content)) continue
+    for (const block of m.content as { type?: unknown; text?: unknown; name?: unknown; input?: Record<string, unknown> }[]) {
+      const urls =
+        block?.type === 'text' && typeof block.text === 'string'
+          ? [block.text]
+          : block?.type === 'tool_use' && block.input
+            ? block.name === 'mcp__Claude_Browser__browser_batch'
+              ? batchOpens(block.input)
+              : /^mcp__Claude_Browser__(preview_start|navigate)$/.test(String(block.name)) && typeof block.input.url === 'string'
+                ? [block.input.url]
+                : []
+            : []
+      for (const url of urls) for (const page of localPages(url)) last.set(page.port, page.path)
+    }
+  }
+  return [...last].map(([port, path]) => ({ port, path }))
+}
+
+async function shareLocal($: $, pages: { port: number; path: string }[]) {
   if ((await read($, modeA)) !== 'host' || (await read($, policyA)).files === 'off') return
   const room = await read($, roomA)
   if (!room) return
-  for (const m of text.matchAll(new RegExp(LOCAL_URL.source, 'gi'))) {
-    const port = Number(m[1])
+  for (const { port, path } of pages.slice(0, 5)) {
     if (!port || mentionedPorts.has(port) || (await read($, previewsA))[String(port)]) continue
     mentionedPorts.add(port)
     const probe = await sh($, `curl -s -o /dev/null -m 2 -w '%{http_code}' http://127.0.0.1:${port}/\n`)
@@ -1423,7 +1457,7 @@ async function shareMentioned($: $, text: string) {
     const title = `localhost:${port}`
     const pid = await ensurePreview($, room, port, title)
     if (!pid) continue
-    send($, 'artifact', { kind: 'preview', pid, port, title, path: m[2] ?? '/' })
+    send($, 'artifact', { kind: 'preview', pid, port, title, path })
     $.ui.toast(`Sharing localhost:${port} with the room (stop it in the Room)`)
   }
 }
@@ -1458,6 +1492,17 @@ async function captureShown($: $, e: Record<string, unknown>, result: unknown) {
   } else if (tool === 'mcp__ccd_view__show_pane' && input.pane === 'file' && str(input.path)) {
     const files = await uploads([str(input.path)])
     if (files.length) send($, 'artifact', { kind: 'file', turnId, files, line: typeof input.line === 'number' ? input.line : undefined })
+  } else if (tool === 'mcp__Claude_Browser__browser_batch') {
+    // Steps in one call: the last localhost page it opened, as a navigate's.
+    const local = batchOpens(input)
+      .map(url => LOCAL_URL.exec(url))
+      .filter(Boolean)
+      .at(-1)
+    if (local) {
+      const port = Number(local[1])
+      const pid = await ensurePreview($, room, port, `localhost:${port}`)
+      if (pid) send($, 'artifact', { kind: 'preview', turnId, pid, port, title: `localhost:${port}`, path: local[2] ?? '/' })
+    }
   } else if (/^mcp__Claude_Browser__(preview_start|navigate)$/.test(tool)) {
     let url = str(input.url)
     if (!url) url = LOCAL_URL.exec(JSON.stringify(result ?? ''))?.[0] ?? ''
@@ -2516,7 +2561,7 @@ export const register: Register = (on, options) => {
       // A guest's prompt reached the model as "Name: text"; show it as theirs.
       const spoken = fromGuest && row.kind === 'user' ? splitSpeaker(row.text) : null
       send($, 'row', spoken ? { ...row, who: spoken.who, text: spoken.text } : row)
-      if (row.kind === 'assistant' && LOCAL_URL.test(row.text)) void shareMentioned($, row.text)
+      if (row.kind === 'assistant' && LOCAL_URL.test(row.text)) void shareLocal($, localPages(row.text))
     }
     return stored
   })

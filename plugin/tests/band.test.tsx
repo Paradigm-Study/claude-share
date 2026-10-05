@@ -33,6 +33,8 @@ function world(on: On, opts: { server?: boolean; stream?: unknown[]; history?: u
       if (e.input?.includes('/files"') && e.input.includes('--data-binary')) {
         yield { stream: 'stdout' as const, text: JSON.stringify({ id: 'f'.repeat(64), name: 'chart.html', type: 'text/html', size: 42 }) }
       }
+      // A dev server answers on 3340 only.
+      if (e.input?.includes("-w '%{http_code}'")) yield { stream: 'stdout' as const, text: e.input.includes('127.0.0.1:3340/') ? '200' : '000' }
       return { value: { code: 0, signal: null } }
     }
     if (!opts.stream) throw new Error('spawn curl ENOENT')
@@ -457,6 +459,38 @@ test('"Share everything" sends the history', async ($, on) => {
   await asked.clock.advance(100)
   expect(asked.posted.filter(e => e.type === 'row').length).toBeGreaterThan(0)
   expect((await ui.find({ type: 'Text', text: /^Sharing$/ }))?.props.bold).toBe(true)
+})
+
+test('"Share everything" opens the dev servers Claude opened before, still running, at the page it was on', async ($, on) => {
+  const asked = world(on, {
+    history: [
+      { role: 'user', content: 'Build the course sheet' },
+      {
+        role: 'assistant',
+        content: [
+          { type: 'tool_use', id: 'toolu_a', name: 'mcp__Claude_Browser__browser_batch', input: { actions: [{ name: 'navigate', input: { url: 'http://localhost:3340/dev/start' } }] } },
+          { type: 'text', text: 'Built: http://localhost:3340/dev/course-sheet (the old app is at http://localhost:3320/home)' },
+        ],
+      },
+    ],
+  })
+  const ui = await $.ui.mount(band('desktop'))
+  await ui.press({ key: 'share' })
+  await ui.press({ key: 'share-all' })
+  await asked.clock.advance(200)
+  const previews = asked.posted.filter(e => e.type === 'artifact' && e.body.kind === 'preview')
+  expect(previews.map(e => [e.body.port, e.body.path])).toEqual([[3340, '/dev/course-sheet']]) // 3320 isn't answering
+})
+
+test('a page the host\'s Claude opens with browser_batch goes to the room', async ($, on) => {
+  const asked = world(on)
+  on('tool.call', { tool: 'mcp__Claude_Browser__browser_batch' }, () => ({ result: [], text: 'navigated' }) as never)
+  const ui = await $.ui.mount(band('desktop'))
+  await ui.press({ key: 'share' })
+  await $.tool.call({ tool: 'mcp__Claude_Browser__browser_batch', actions: [{ name: 'navigate', input: { url: 'http://localhost:5173/settings' } }, { name: 'computer', input: { action: 'screenshot' } }] } as never)
+  await asked.clock.advance(200)
+  const shown = asked.posted.find(e => e.type === 'artifact')
+  expect([shown?.body.kind, shown?.body.port, shown?.body.path]).toEqual(['preview', 5173, '/settings'])
 })
 
 test("a room this session can't reach says it is reconnecting", async ($, on) => {
