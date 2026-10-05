@@ -104,6 +104,8 @@ declare module 'claude-code' {
       asking: { prompts: number } | null
       /** Whether this session hears the room: `live`, or `reconnecting` after failed tries. */
       connection: 'live' | 'reconnecting'
+      /** Guest, in a terminal: replayed reads, searches and commands folded into count lines, or each drawn. */
+      toolRows: 'grouped' | 'each'
       /** Host: a teammate's tool call waiting for an answer in the row above the prompt (the question dialog didn't show). */
       approving: { who: string; what: string; always: string } | null
       /** A button pressed once that ends something for everyone, waiting for its second press. */

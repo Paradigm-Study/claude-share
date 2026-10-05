@@ -78,6 +78,7 @@ const policyA = atom({ plugin: 'shared-session', key: 'policy' } as const, DEFAU
 const trustedA = atom({ plugin: 'shared-session', key: 'trusted' } as const, [] as string[])
 const ownersA = atom({ plugin: 'shared-session', key: 'owners' } as const, {} as Record<string, string>)
 const liveUpdatesA = atom({ plugin: 'shared-session', key: 'liveUpdates' } as const, null as 'running' | 'next' | null)
+const toolRowsA = atom({ plugin: 'shared-session', key: 'toolRows' } as const, 'grouped' as 'grouped' | 'each')
 const approvingA = atom({ plugin: 'shared-session', key: 'approving' } as const, null as { who: string; what: string; always: string } | null)
 const sidebarA = atom({ plugin: 'shared-session', key: 'sidebar' } as const, null as { title: string; pinned: boolean; id?: string } | null)
 const shownA = atom({ plugin: 'shared-session', key: 'shown' } as const, [] as ShareShown[])
@@ -1027,6 +1028,8 @@ async function reset($: $, opts: { keepSidebar?: boolean } = {}) {
   rideSubmitted = false
   hostCalls.clear()
   staticRuns.clear()
+  replayRuns.clear()
+  openRuns.clear()
   mentionedPorts.clear()
   pendingGuestPrompts.length = 0
   await update($, modeA, () => 'idle')
@@ -2253,6 +2256,40 @@ const hostCalls = new Map<string, { hostId: string; seq: number; turnId?: string
 const staticRuns = new Map<string, { tail: string }>()
 const EXCHANGE_CARDS = 200 // calls drawn as cards in one earlier exchange; the rest as text
 
+// Terminal: consecutive replayed reads, searches and shell commands fold into
+// one count line, as the terminal folds its own. The engine groups by the
+// tool that ran (this one, never grouped, and a registered tool can't say
+// otherwise), so the plugin keeps the runs it made: the first call of a run
+// draws the line, the rest draw nothing. Other calls keep their own rows.
+type ReplayRun = { first: string; tools: string[] }
+const replayRuns = new Map<string, ReplayRun>()
+const openRuns = new Map<string, ReplayRun | null>() // a live turn's run so far
+const COLLAPSIBLE = /^(Read|Grep|Glob|Bash|LS)$/
+function joinRun(run: ReplayRun | null, id: string, tool: string): ReplayRun | null {
+  if (!COLLAPSIBLE.test(tool)) return null
+  const joined = run ?? { first: id, tools: [] }
+  joined.tools.push(tool)
+  replayRuns.set(id, joined)
+  if (replayRuns.size > 5000) replayRuns.delete(replayRuns.keys().next().value as string)
+  return joined
+}
+// In the terminal's own words: "Searched for 2 patterns, read 3 files".
+function runLine(run: ReplayRun): string {
+  const n = (re: RegExp) => run.tools.filter(t => re.test(t)).length
+  const searched = n(/^(Grep|Glob)$/)
+  const read = n(/^Read$/)
+  const listed = n(/^LS$/)
+  const ran = n(/^Bash$/)
+  const parts = [
+    searched ? `searched for ${searched} ${searched === 1 ? 'pattern' : 'patterns'}` : '',
+    read ? `read ${read} ${read === 1 ? 'file' : 'files'}` : '',
+    listed ? `listed ${listed} ${listed === 1 ? 'directory' : 'directories'}` : '',
+    ran ? `ran ${ran} shell ${ran === 1 ? 'command' : 'commands'}` : '',
+  ].filter(Boolean)
+  const line = parts.join(', ')
+  return line.charAt(0).toUpperCase() + line.slice(1)
+}
+
 // An earlier exchange as one response: its text, and each call a card with
 // the result the room kept (preset, so the card answers at once), up to its
 // last call; the words after that are the tail, said in the next step.
@@ -2262,13 +2299,18 @@ function historyBlocks(rows: Row[]): { blocks: HistoryBlock[]; tail: string } {
   const blocks: HistoryBlock[] = []
   const replayed = new Set<string>()
   let text = ''
+  let run: ReplayRun | null = null
   for (const row of rows) {
     // Every call a card here, a page the host opened too: what's still open
     // is handed over after the history, not reopened at each step of it.
     if (row.kind === 'tool' && replayReady && row.id && row.input && row.tool && replayed.size < EXCHANGE_CARDS) {
-      if (text.trim()) blocks.push({ text: text.trim() })
+      if (text.trim()) {
+        blocks.push({ text: text.trim() })
+        run = null // words between calls end a run
+      }
       text = ''
       const id = `toolu_${newId()}${newId()}`
+      run = joinRun(run, id, row.tool)
       const res = results.get(row.id)
       hostCalls.set(id, { hostId: row.id, seq: 0, result: res ? `${res.isError ? 'Error: ' : ''}${stripLineNumbers(res.text)}` : '(no result)' })
       if (hostCalls.size > 3000) hostCalls.delete(hostCalls.keys().next().value as string)
@@ -2760,6 +2802,7 @@ export const register: Register = (on, options) => {
       ridesInStep.delete(e.turnId)
       liveRuns.delete(e.turnId)
       staticRuns.delete(e.turnId)
+      openRuns.delete(e.turnId)
       if (ride) {
         ridesByTurn.delete(e.turnId)
         localTurnActive = false
@@ -2912,6 +2955,11 @@ export const register: Register = (on, options) => {
             if (hostCalls.size > 1000) hostCalls.delete(hostCalls.keys().next().value as string)
           }
           if (rideCalls.size > 50) rideCalls.delete(rideCalls.keys().next().value as string)
+          // A run goes on while steps bring calls with no words between them.
+          const replayed = call.name === REPLAY_TOOL ? String((call.input as { tool?: unknown }).tool ?? '') : ''
+          const before = answer.trim() ? null : (openRuns.get(e.turnId) ?? null)
+          openRuns.set(e.turnId, replayed ? joinRun(before, id, replayed) : null)
+          if (before && COLLAPSIBLE.test(replayed)) $.ui.invalidate('ui.render') // its line counts one more
           yield { kind: 'tool', index: 1, id, name: call.name } satisfies TurnStepChunk
           yield { kind: 'input', index: 1, json: JSON.stringify(call.input) } satisfies TurnStepChunk
           yield { kind: 'stop', stopReason: 'tool_use', usage: null } satisfies TurnStepChunk
@@ -2992,6 +3040,8 @@ export const register: Register = (on, options) => {
     // `Name(summary)` and a folded line or two of what came back.
     if (e.surface !== 'terminal') return next({ ...e, props: { ...e.props, tool: input.tool, input: input.input ?? {} } })
     const { Box, Text } = $.ui.resolve(e)
+    const run = (await read($, toolRowsA)) === 'grouped' ? replayRuns.get(e.props.tool_use_id) : undefined
+    if (run) return run.first === e.props.tool_use_id ? <Text dimColor>{`  ${runLine(run)}`}</Text> : <Box />
     const summary = typeof input.summary === 'string' ? input.summary.split('\n')[0]!.slice(0, 160) : ''
     const lines = e.props.isRunning ? [] : replayLines(input.tool, (input.input ?? {}) as Record<string, unknown>, outputText(e.props.output), e.props.isErrored)
     return (
@@ -3552,6 +3602,20 @@ export const register: Register = (on, options) => {
                           { value: 'ask', label: 'Ask me first' },
                         ]}
                         onSelect={(value: string) => void update($, autoOpenA, () => value !== 'ask')}
+                      />,
+                    )
+                  : null}
+                {Select && e.surface === 'terminal'
+                  ? setting(
+                      'Tool calls',
+                      <Select
+                        key="tool-rows"
+                        value={await read($, toolRowsA)}
+                        options={[
+                          { value: 'grouped', label: 'Grouped, as the terminal folds its own' },
+                          { value: 'each', label: 'Each shown, with its result' },
+                        ]}
+                        onSelect={(value: string) => void update($, toolRowsA, () => (value === 'each' ? 'each' : 'grouped'))}
                       />,
                     )
                   : null}
