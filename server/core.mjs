@@ -886,6 +886,42 @@ export async function previewRequest(room, req, now, { secure = true } = {}) {
   return { response: await answer }
 }
 
+// WebSockets through a preview: a dev server's live reload, and the debug
+// data Next.js 16 sends its dev pages over one (they don't start without it).
+// The guest's browser opens a socket on the preview host name; the room tells
+// the host's stream; the host's plugin starts a relay that opens one to its
+// localhost and one back to the room (ws/<id>, host only), and the room passes
+// messages between the two as they are. The process holding the sockets pairs
+// them (worker.mjs, node.mjs); what's decided here is the same for both.
+export const SOCKET_ID = /^[A-Za-z0-9_-]{8,40}$/
+
+// Whom a browser's socket is for: its preview session, the port, the path.
+export function previewSocketTarget(room, req, now) {
+  const session = previewSession(room, req, now)
+  const preview = session ? room.previews.get(session.pid) : null
+  if (!preview || room.endedAt) return { ok: false, status: 404 }
+  const url = new URL(req.url)
+  const protocols = (req.headers.get('sec-websocket-protocol') ?? '')
+    .split(',')
+    .map(p => p.trim())
+    .filter(p => /^[\w.-]{1,64}$/.test(p))
+    .slice(0, 4)
+  return { ok: true, pid: preview.pid, port: preview.port, path: `${url.pathname}${url.search}`, protocols }
+}
+
+// Asks the host for a relay; false when the host's Claude Code isn't connected.
+export function announceSocket(room, id, target) {
+  return room.toHost({ ws: { id, pid: target.pid, port: target.port, path: target.path, protocols: target.protocols } })
+}
+
+export function hostSocketAllowed(room, req) {
+  const auth = room.auth(bearerOf(req))
+  return Boolean(auth && auth.role === 'host' && !room.endedAt)
+}
+
+// A close code a socket may send on (the reserved ones become a plain close).
+export const sendableClose = code => (Number.isInteger(code) && code >= 1000 && code < 5000 && ![1004, 1005, 1006, 1015].includes(code) ? code : 1000)
+
 function toBase64(bytes) {
   let out = ''
   for (let i = 0; i < bytes.length; i += 0x8000) out += String.fromCharCode(...bytes.subarray(i, i + 0x8000))

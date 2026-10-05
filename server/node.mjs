@@ -9,9 +9,10 @@
 // app's root-relative paths work; PREVIEW_URL says how people reach it.
 
 import { createServer } from 'node:http'
+import { createHash } from 'node:crypto'
 import { readFileSync, writeFileSync, renameSync } from 'node:fs'
 
-import { Room, ROOM_ID, SEAT_TIMEOUT_MS, createRoom, roomRequest, previewRequest, previewRoomOf, notFound, json, publicOrigin, token, missingPage, previewMissing, homePage, outdatedClient, versionInfo, limitOf, limitedResponse, closedResponse, Windows } from './core.mjs'
+import { Room, ROOM_ID, SEAT_TIMEOUT_MS, createRoom, roomRequest, previewRequest, previewRoomOf, notFound, json, publicOrigin, token, missingPage, previewMissing, homePage, outdatedClient, versionInfo, limitOf, limitedResponse, closedResponse, Windows, SOCKET_ID, previewSocketTarget, announceSocket, hostSocketAllowed, sendableClose } from './core.mjs'
 
 const PORT = Number(process.env.PORT ?? 8787)
 const PUBLIC_URL = process.env.PUBLIC_URL
@@ -139,16 +140,21 @@ async function previewRoute(req) {
   return response
 }
 
+function headersOf(nodeReq) {
+  const headers = new Headers()
+  for (const [k, v] of Object.entries(nodeReq.headers)) {
+    if (typeof v === 'string') headers.set(k, v)
+    else if (Array.isArray(v)) headers.set(k, v.join(', '))
+  }
+  return headers
+}
+
 const serve = route => async (nodeReq, nodeRes) => {
   try {
     const chunks = []
     for await (const chunk of nodeReq) chunks.push(chunk)
     const body = Buffer.concat(chunks)
-    const headers = new Headers()
-    for (const [k, v] of Object.entries(nodeReq.headers)) {
-      if (typeof v === 'string') headers.set(k, v)
-      else if (Array.isArray(v)) headers.set(k, v.join(', '))
-    }
+    const headers = headersOf(nodeReq)
     // Who asked, for the limits: the socket's address (behind a proxy, set
     // TRUST_PROXY=1 to use its X-Forwarded-For).
     const forwarded = process.env.TRUST_PROXY === '1' ? String(nodeReq.headers['x-forwarded-for'] ?? '').split(',')[0].trim() : ''
@@ -187,3 +193,148 @@ server.listen(PORT, () => console.log(`shared sessions on http://localhost:${POR
 const previews = createServer(serve(previewRoute))
 previews.requestTimeout = 60_000
 previews.listen(PREVIEW_PORT, () => console.log(`previews on http://localhost:${PREVIEW_PORT}`))
+
+// WebSockets through a preview (see core.mjs): a guest's browser socket on
+// the preview port, the host's relay for it on the main one, paired by id.
+const pairs = new Map() // socket id → { browser, relay, pending }
+
+const refuse = (socket, status) => {
+  socket.end(`HTTP/1.1 ${status} ${status === 401 ? 'Unauthorized' : status === 503 ? 'Service Unavailable' : 'Not Found'}\r\nconnection: close\r\ncontent-length: 0\r\n\r\n`)
+}
+
+previews.on('upgrade', (nodeReq, socket, head) => {
+  const req = new Request(`http://${nodeReq.headers.host ?? 'localhost'}${nodeReq.url}`, { headers: headersOf(nodeReq) })
+  const id = previewRoomOf(req)
+  const room = id && ROOM_ID.test(id) ? rooms.get(id) : undefined
+  const target = room ? previewSocketTarget(room, req, Date.now()) : { ok: false, status: 404 }
+  if (!target.ok) return refuse(socket, target.status)
+  const wsId = token(12)
+  if (!announceSocket(room, wsId, target)) return refuse(socket, 503)
+  const pair = { browser: null, relay: null, pending: [] }
+  pairs.set(wsId, pair)
+  pair.browser = acceptSocket(nodeReq, socket, head, target.protocols[0], {
+    message: data => (pair.relay ? pair.relay.send(data) : pair.pending.length < 500 && pair.pending.push(data)),
+    close: code => {
+      pairs.delete(wsId)
+      pair.relay?.close(code)
+    },
+  })
+})
+
+server.on('upgrade', (nodeReq, socket, head) => {
+  const m = /^\/api\/rooms\/([^/]+)\/ws\/([^/?]+)$/.exec(String(nodeReq.url).split('?')[0])
+  const room = m && ROOM_ID.test(m[1]) ? rooms.get(m[1]) : undefined
+  const pair = m && SOCKET_ID.test(m[2]) ? pairs.get(m[2]) : undefined
+  if (!room || !hostSocketAllowed(room, new Request('http://localhost/', { headers: headersOf(nodeReq) }))) return refuse(socket, 401)
+  if (!pair) return refuse(socket, 404)
+  pair.relay = acceptSocket(nodeReq, socket, head, '', {
+    message: data => pair.browser?.send(data),
+    close: code => {
+      pairs.delete(m[2])
+      pair.browser?.close(code)
+    },
+  })
+  for (const data of pair.pending.splice(0)) pair.relay.send(data)
+})
+
+// The server side of a WebSocket, enough to pass messages on: the handshake,
+// frames in (masked, maybe in pieces; pings answered) and out, and a close.
+function acceptSocket(nodeReq, socket, head, protocol, on) {
+  const key = nodeReq.headers['sec-websocket-key']
+  if (!key) return void refuse(socket, 404)
+  const accept = createHash('sha1').update(`${key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`).digest('base64')
+  socket.write(['HTTP/1.1 101 Switching Protocols', 'upgrade: websocket', 'connection: Upgrade', `sec-websocket-accept: ${accept}`, ...(protocol ? [`sec-websocket-protocol: ${protocol}`] : []), '', ''].join('\r\n'))
+  const frame = (op, payload) => {
+    const len = payload.length
+    let headBytes
+    if (len < 126) headBytes = Buffer.from([0x80 | op, len])
+    else if (len < 65536) {
+      headBytes = Buffer.alloc(4)
+      headBytes[0] = 0x80 | op
+      headBytes[1] = 126
+      headBytes.writeUInt16BE(len, 2)
+    } else {
+      headBytes = Buffer.alloc(10)
+      headBytes[0] = 0x80 | op
+      headBytes[1] = 127
+      headBytes.writeBigUInt64BE(BigInt(len), 2)
+    }
+    return Buffer.concat([headBytes, payload])
+  }
+  let closed = false
+  const close = code => {
+    if (closed) return
+    closed = true
+    const p = Buffer.alloc(2)
+    p.writeUInt16BE(sendableClose(code))
+    try {
+      socket.write(frame(8, p))
+    } catch {}
+    socket.end()
+    on.close(code)
+  }
+  let buf = head?.length ? Buffer.from(head) : Buffer.alloc(0)
+  let parts = []
+  let partOp = 1
+  const read = () => {
+    while (buf.length >= 2) {
+      const fin = buf[0] & 0x80
+      const op = buf[0] & 0x0f
+      const masked = buf[1] & 0x80
+      let len = buf[1] & 0x7f
+      let at = 2
+      if (len === 126) {
+        if (buf.length < 4) return
+        len = buf.readUInt16BE(2)
+        at = 4
+      } else if (len === 127) {
+        if (buf.length < 10) return
+        len = Number(buf.readBigUInt64BE(2))
+        at = 10
+      }
+      const maskAt = at
+      if (masked) at += 4
+      if (buf.length < at + len) return
+      let payload = buf.subarray(at, at + len)
+      if (masked) {
+        const mask = buf.subarray(maskAt, maskAt + 4)
+        payload = Buffer.from(payload)
+        for (let i = 0; i < payload.length; i++) payload[i] ^= mask[i & 3]
+      }
+      buf = buf.subarray(at + len)
+      if (op === 8) return close(payload.length >= 2 ? payload.readUInt16BE(0) : 1000)
+      if (op === 9) {
+        socket.write(frame(10, payload))
+        continue
+      }
+      if (op === 10) continue
+      if (op === 1 || op === 2) {
+        partOp = op
+        parts = [payload]
+      } else if (op === 0) parts.push(payload)
+      if (fin) {
+        const data = Buffer.concat(parts)
+        parts = []
+        on.message(partOp === 1 ? data.toString('utf8') : data)
+      }
+    }
+  }
+  socket.on('data', d => {
+    buf = Buffer.concat([buf, d])
+    read()
+  })
+  socket.on('close', () => {
+    if (!closed) {
+      closed = true
+      on.close(1006)
+    }
+  })
+  socket.on('error', () => socket.destroy())
+  if (buf.length) read()
+  return {
+    send: data => {
+      if (!closed) socket.write(frame(typeof data === 'string' ? 1 : 2, typeof data === 'string' ? Buffer.from(data, 'utf8') : Buffer.from(data)))
+    },
+    close,
+  }
+}

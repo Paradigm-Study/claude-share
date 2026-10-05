@@ -9,7 +9,9 @@
 // The engine needs model access the usual way (a login, or ANTHROPIC_* env).
 
 import { spawn } from 'node:child_process'
-import { createServer } from 'node:http'
+import { createServer, request as httpRequest } from 'node:http'
+import { request as httpsRequest } from 'node:https'
+import { createHash, randomBytes } from 'node:crypto'
 import { mkdirSync, existsSync, rmSync, writeFileSync, createWriteStream, readdirSync, readFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -119,6 +121,75 @@ function session(name, cwd, extraArgs = [], logName = name) {
   s.type = content =>
     child.stdin.write(`${JSON.stringify({ type: 'user', origin: { kind: 'human' }, message: { role: 'user', content } })}\n`)
   return s
+}
+
+// The least WebSocket for the checks: an echo on the stand-in dev app, and a
+// client that sends one text message and reads one back.
+function wsFrame(op, payload, masked) {
+  const len = payload.length
+  const head = len < 126 ? Buffer.from([0x80 | op, (masked ? 0x80 : 0) | len]) : Buffer.from([0x80 | op, (masked ? 0x80 : 0) | 126, len >> 8, len & 255])
+  if (!masked) return Buffer.concat([head, payload])
+  const mask = randomBytes(4)
+  const body = Buffer.from(payload).map((b, i) => b ^ mask[i & 3])
+  return Buffer.concat([head, mask, body])
+}
+function wsReadText(buf) {
+  if (buf.length < 2) return null
+  let len = buf[1] & 0x7f
+  let at = 2
+  if (len === 126) {
+    if (buf.length < 4) return null
+    len = buf.readUInt16BE(2)
+    at = 4
+  }
+  const masked = buf[1] & 0x80
+  const mask = masked ? buf.subarray(at, at + 4) : null
+  if (masked) at += 4
+  if (buf.length < at + len) return null
+  const body = Buffer.from(buf.subarray(at, at + len)).map((b, i) => (mask ? b ^ mask[i & 3] : b))
+  return { op: buf[0] & 0x0f, text: body.toString('utf8') }
+}
+function wsEchoServer(req, socket) {
+  const accept = createHash('sha1').update(`${req.headers['sec-websocket-key']}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`).digest('base64')
+  socket.write(`HTTP/1.1 101 Switching Protocols\r\nupgrade: websocket\r\nconnection: Upgrade\r\nsec-websocket-accept: ${accept}\r\n\r\n`)
+  let buf = Buffer.alloc(0)
+  socket.on('data', d => {
+    buf = Buffer.concat([buf, d])
+    const msg = wsReadText(buf)
+    if (msg && msg.op === 1) {
+      buf = Buffer.alloc(0)
+      socket.write(wsFrame(1, Buffer.from(`echo:${msg.text}`), false))
+    }
+  })
+  socket.on('error', () => {})
+}
+function wsEcho(url, cookie, text) {
+  return new Promise((resolve, reject) => {
+    const u = new URL(url)
+    const req = (u.protocol === 'wss:' ? httpsRequest : httpRequest)({
+      host: u.hostname,
+      port: u.port || (u.protocol === 'wss:' ? 443 : 80),
+      path: u.pathname,
+      headers: { connection: 'Upgrade', upgrade: 'websocket', 'sec-websocket-key': randomBytes(16).toString('base64'), 'sec-websocket-version': '13', cookie },
+    })
+    const timer = setTimeout(() => reject(new Error('no echo in 30 s')), 30_000)
+    req.on('upgrade', (res, socket) => {
+      socket.write(wsFrame(1, Buffer.from(text), true))
+      let buf = Buffer.alloc(0)
+      socket.on('data', d => {
+        buf = Buffer.concat([buf, d])
+        const msg = wsReadText(buf)
+        if (msg) {
+          clearTimeout(timer)
+          socket.destroy()
+          resolve(msg.text)
+        }
+      })
+    })
+    req.on('response', res => reject(new Error(`HTTP ${res.statusCode}`)))
+    req.on('error', reject)
+    req.end()
+  })
 }
 
 async function until(what, fn, ms = 90_000) {
@@ -350,6 +421,7 @@ try {
     }
     res.writeHead(200, { 'content-type': 'text/html' }).end('<!doctype html><script src="/assets/app.js"></script><h1>dev server ok</h1>')
   })
+  app.on('upgrade', (req, socket) => wsEchoServer(req, socket))
   await new Promise(r => app.listen(0, '127.0.0.1', r))
   children.push({ kill: () => app.close() })
   host.say(`/share-preview ${app.address().port} Dev app`)
@@ -382,6 +454,11 @@ try {
       back.headers.get('location') === '/'
   }
   check("a teammate opens the host's localhost through a preview (its link lets in one browser, which can come back)", previewed, enter ?? 'no link')
+
+  // A WebSocket through the preview (a dev server's live reload; Next.js 16's
+  // dev pages don't start without theirs): the app's echo answers.
+  const echoed = origin ? await wsEcho(`${origin.replace(/^http/, 'ws')}/__echo`, cookie, 'ping-through-preview').catch(e => `error: ${e.message}`) : 'no preview'
+  check("a WebSocket opened on a preview reaches the host's dev server and back", echoed === 'echo:ping-through-preview', echoed)
 
   // Someone who joins while the preview is open is handed it too, after the history.
   mkdirSync(join(WORK, 'lee'), { recursive: true })

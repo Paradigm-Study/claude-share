@@ -611,6 +611,9 @@ async function runStream($: $, generation: number) {
           else if (message.proxy && typeof message.proxy === 'object') {
             // Host: a guest's browser, through a preview, asking this machine.
             void answerProxy($, room, message.proxy as Record<string, unknown>)
+          } else if (message.ws && typeof message.ws === 'object') {
+            // …or opening a WebSocket on it (live reload, a dev page's debug data).
+            void relaySocket($, room, message.ws as Record<string, unknown>)
           }
           else if (Array.isArray(message.events)) {
             if (!streamUp && !delivered) $.ui.log('Shared session: listening on a stream', { to: 'debug' })
@@ -1530,7 +1533,9 @@ async function join($: $, server: string, id: string) {
   return {
     room,
     history: exchanges(past.map(e => e.body as unknown as Row), joined.host),
-    open: [...open.values()],
+    // One preview opens: they share one host name, so a browser holds one at a
+    // time (the newest); the rest are in the Room, a press of Open away.
+    open: [...open.values()].slice(-1),
     fromNow: joined.fromNow === true,
     hostVersion: typeof joined.hostVersion === 'string' ? joined.hostVersion : null,
   }
@@ -1693,7 +1698,12 @@ function localOpens(messages: unknown[]): { port: number; path: string }[] {
                 ? [block.input.url]
                 : []
             : []
-      for (const url of urls) for (const page of localPages(url)) last.set(page.port, page.path)
+      for (const url of urls) {
+        for (const page of localPages(url)) {
+          last.delete(page.port) // most recently used last
+          last.set(page.port, page.path)
+        }
+      }
     }
   }
   return [...last].map(([port, path]) => ({ port, path }))
@@ -1703,7 +1713,7 @@ async function shareLocal($: $, pages: { port: number; path: string }[]) {
   if ((await read($, modeA)) !== 'host' || (await read($, policyA)).files === 'off') return
   const room = await read($, roomA)
   if (!room) return
-  for (const { port, path } of pages.slice(0, 5)) {
+  for (const { port, path } of pages.slice(-5)) {
     if (!port || mentionedPorts.has(port) || (await read($, previewsA))[String(port)]) continue
     mentionedPorts.add(port)
     // Something listening is enough: a dev server compiling its first page
@@ -1932,6 +1942,37 @@ async function answerProxy($: $, room: ShareRoom, ask: Record<string, unknown>) 
       '',
     ].join('\n'),
   )
+}
+
+// Host: a guest's browser opened a WebSocket on a preview. A relay (Node, as
+// the dev server runs on) opens it on this machine's localhost, only on ports
+// this session shares, and one back to the room for it; its settings, token
+// included, go on stdin. Without Node, the browser's socket just closes.
+const FIND_NODE = [
+  'for n in "$(command -v node 2>/dev/null)" /opt/homebrew/bin/node /usr/local/bin/node "$HOME/.volta/bin/node" $(ls -d "$HOME"/.nvm/versions/node/*/bin/node "$HOME"/.local/share/fnm/node-versions/*/installation/bin/node "$HOME"/.asdf/installs/nodejs/*/bin/node 2>/dev/null | sort -r); do',
+  '  [ -n "$n" ] && [ -x "$n" ] && exec "$n" "$1"',
+  'done',
+  'echo "Shared session: no node to relay a preview WebSocket" >&2; exit 127',
+].join('\n')
+
+async function relaySocket($: $, room: ShareRoom, ask: Record<string, unknown>) {
+  const id = typeof ask.id === 'string' && /^[A-Za-z0-9_-]{8,40}$/.test(ask.id) ? ask.id : ''
+  const port = Number(ask.port)
+  const path = typeof ask.path === 'string' && ask.path.startsWith('/') ? ask.path : '/'
+  const protocols = (Array.isArray(ask.protocols) ? ask.protocols : []).filter((p): p is string => typeof p === 'string' && /^[\w.-]{1,64}$/.test(p)).slice(0, 4)
+  if (!id || !Number.isInteger(port) || !Object.values(await read($, previewsA)).includes(String(ask.pid ?? ''))) return
+  const config = {
+    local: `ws://localhost:${port}${path}`,
+    origin: `http://localhost:${port}`,
+    protocols,
+    room: `${room.server.replace(/^http/, 'ws')}/api/rooms/${room.id}/ws/${id}`,
+    token: room.token,
+    version: await ownVersion($),
+  }
+  try {
+    const child = $.process.spawn({ argv: ['/bin/sh', '-c', FIND_NODE, 'sh', `${$.plugin.root}/relay/ws-relay.cjs`], input: JSON.stringify(config) })
+    for await (const chunk of child) if (chunk.stream === 'stderr') $.ui.log(chunk.text.trim(), { to: 'debug' })
+  } catch {}
 }
 
 // Groups rows into prompt + reply exchanges.

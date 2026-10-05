@@ -39,6 +39,11 @@ import {
   Windows,
   ROOMS_PER_ADDRESS_DAY,
   ROOMS_PER_DAY,
+  SOCKET_ID,
+  previewSocketTarget,
+  announceSocket,
+  hostSocketAllowed,
+  sendableClose,
 } from './core.mjs'
 
 const ROOM_TTL_MS = 24 * 60 * 60 * 1000
@@ -170,6 +175,8 @@ export class RoomObject {
     this.savedSeq = 0
     // A socket stays in getWebSockets() while its close is being handled.
     this.closed = new WeakSet()
+    // A preview socket's messages from the browser before the host's relay is there.
+    this.pending = new Map()
     state.blockConcurrencyWhile(async () => {
       const meta = await state.storage.get('meta')
       if (!meta) return
@@ -246,6 +253,10 @@ export class RoomObject {
 
     if (rest === 'socket') return this.accept(req, url, now)
 
+    const upgrade = req.headers.get('upgrade')?.toLowerCase() === 'websocket'
+    if (upgrade && (rest === '__preview' || rest.startsWith('__preview/'))) return this.previewSocket(req, url, id, now)
+    if (upgrade && rest.startsWith('ws/')) return this.relaySocket(req, rest.slice(3))
+
     if (rest === '__preview' || rest.startsWith('__preview/')) {
       const path = url.pathname.slice(`/${id}/__preview`.length) || '/'
       const inner = new Request(new URL(`${path}${url.search}`, 'https://preview.local'), req)
@@ -275,10 +286,41 @@ export class RoomObject {
     return new Response(null, { status: 101, webSocket: client })
   }
 
+  // A guest's browser opens a socket on a preview: the host is asked for a
+  // relay, and the two are paired by the socket's id (tags pb:/ph:), so the
+  // pairing outlives the object sleeping between messages.
+  previewSocket(req, url, id, now) {
+    const path = url.pathname.slice(`/${id}/__preview`.length) || '/'
+    const target = previewSocketTarget(this.room, new Request(new URL(`${path}${url.search}`, 'https://preview.local'), { headers: req.headers }), now)
+    if (!target.ok) return new Response('This preview has ended', { status: target.status })
+    const wsId = token(12)
+    if (!announceSocket(this.room, wsId, target)) return new Response(`${this.room.host.name}'s Claude Code isn't connected right now.`, { status: 503 })
+    const [client, server] = Object.values(new WebSocketPair())
+    this.state.acceptWebSocket(server, [`pb:${wsId}`])
+    server.serializeAttachment({ pb: wsId })
+    return new Response(null, { status: 101, webSocket: client, headers: target.protocols[0] ? { 'sec-websocket-protocol': target.protocols[0] } : undefined })
+  }
+
+  // The host's relay for one browser socket.
+  relaySocket(req, wsId) {
+    if (!SOCKET_ID.test(wsId) || !hostSocketAllowed(this.room, req)) return json({ error: 'Only the host relays a preview.' }, 401)
+    if (!this.state.getWebSockets(`pb:${wsId}`).some(ws => !this.closed.has(ws))) return json({ error: 'That socket has closed.' }, 410)
+    const [client, server] = Object.values(new WebSocketPair())
+    this.state.acceptWebSocket(server, [`ph:${wsId}`])
+    server.serializeAttachment({ ph: wsId })
+    for (const message of this.pending.get(wsId) ?? []) {
+      try {
+        server.send(message)
+      } catch {}
+    }
+    this.pending.delete(wsId)
+    return new Response(null, { status: 101, webSocket: client })
+  }
+
   // One socket's line: everything after its cursor, and the room now.
   send(ws, now = Date.now()) {
     const att = ws.deserializeAttachment()
-    if (!att || !this.room) return
+    if (!att?.seat || !this.room) return
     const page = this.room.page(att.after, now)
     try {
       ws.send(JSON.stringify(page))
@@ -292,14 +334,52 @@ export class RoomObject {
     for (const ws of this.state.getWebSockets()) if (!this.closed.has(ws)) this.send(ws, now)
   }
 
-  webSocketMessage() {}
+  // Streams send nothing; a preview socket's message goes to its other half.
+  webSocketMessage(ws, message) {
+    const att = ws.deserializeAttachment()
+    const id = att?.pb ?? att?.ph
+    if (!id) return
+    const peers = this.state.getWebSockets(att.pb ? `ph:${id}` : `pb:${id}`).filter(p => !this.closed.has(p))
+    if (!peers.length && att.pb) {
+      const queue = this.pending.get(id) ?? []
+      if (queue.length < 500) queue.push(message)
+      this.pending.set(id, queue)
+      return
+    }
+    for (const peer of peers) {
+      try {
+        peer.send(message)
+      } catch {}
+    }
+  }
 
-  async webSocketClose(ws) {
+  async webSocketClose(ws, code, reason) {
+    const att = ws.deserializeAttachment()
+    if (att?.pb || att?.ph) return this.unpair(ws, att, code, reason)
     await this.disconnected(ws)
   }
 
   async webSocketError(ws) {
+    const att = ws.deserializeAttachment()
+    if (att?.pb || att?.ph) return this.unpair(ws, att, 1011, '')
     await this.disconnected(ws)
+  }
+
+  // Either half of a preview socket closing closes the other.
+  unpair(ws, att, code, reason) {
+    const id = att.pb ?? att.ph
+    const close = sendableClose(code)
+    this.closed.add(ws)
+    for (const peer of this.state.getWebSockets(att.pb ? `ph:${id}` : `pb:${id}`)) {
+      this.closed.add(peer)
+      try {
+        peer.close(close, String(reason ?? '').slice(0, 120))
+      } catch {}
+    }
+    try {
+      ws.close(close, 'closed')
+    } catch {}
+    this.pending.delete(id)
   }
 
   // A seat counts as last seen when its socket closed; look again once its

@@ -123,6 +123,7 @@ Previews are served on a second port (`PREVIEW_PORT`, default `PORT` + 1); set `
 - **Guests can't act on the host's machine without the host.** By default, only reads inside the host's project run without asking; a guest's request to read anywhere else, edit, run commands or use the web asks the host first. "Always allow" trusts one person for the session. The host can require approval for every tool, or none.
 - **What Claude shows travels too, unless the host keeps it.** Files Claude shows go through the server (10 MB each, deleted with the room). The host can keep them in Room → Host controls.
 - **Previews are for the room only.** Each guest opens a preview with a link that lasts ten minutes and lets in only the first browser that uses it. The host's plugin only fetches ports the host shared, and previews end with the room.
+- **Previews carry WebSockets.** A dev server's live reload works through a preview, and so do Next.js 16 dev pages, which don't start without their socket. The host's plugin relays each socket with a small Node script (`plugin/relay/ws-relay.cjs`); without Node on the host's machine, pages still load but their sockets don't connect. A browser holds one preview at a time (they share one host name), so joining opens the newest and the Room's **Open** switches.
 - **Only what a person types travels.** Desktop's hidden context notes are stripped from prompts before they leave a machine. A link relayed by another session, a channel or a task never joins anything.
 
 ## Limits
