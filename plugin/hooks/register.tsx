@@ -1452,8 +1452,12 @@ async function shareLocal($: $, pages: { port: number; path: string }[]) {
   for (const { port, path } of pages.slice(0, 5)) {
     if (!port || mentionedPorts.has(port) || (await read($, previewsA))[String(port)]) continue
     mentionedPorts.add(port)
-    const probe = await sh($, `curl -s -o /dev/null -m 2 -w '%{http_code}' http://localhost:${port}/\n`)
-    if (!/^[1-5]\d\d$/.test(probe.out.trim())) {
+    // Something listening is enough: a dev server compiling its first page
+    // can take far longer than this to answer, and a refused connection
+    // (curl's 7) is the only sign nothing is there.
+    const probe = await sh($, `curl -s -o /dev/null --connect-timeout 2 -m 3 http://localhost:${port}/; echo "exit=$?"\n`)
+    const exit = /exit=(\d+)/.exec(probe.out)?.[1]
+    if (exit === undefined || exit === '6' || exit === '7') {
       mentionedPorts.delete(port) // nothing there yet: a later mention tries again
       continue
     }
@@ -1817,7 +1821,9 @@ function historyBlocks(rows: Row[]): { blocks: HistoryBlock[]; tail: string } {
   const replayed = new Set<string>()
   let text = ''
   for (const row of rows) {
-    if (row.kind === 'tool' && replayReady && row.id && row.input && row.tool && !VIEWER_TOOL.test(row.tool) && replayed.size < EXCHANGE_CARDS) {
+    // Every call a card here, a page the host opened too: what's still open
+    // is handed over after the history, not reopened at each step of it.
+    if (row.kind === 'tool' && replayReady && row.id && row.input && row.tool && replayed.size < EXCHANGE_CARDS) {
       if (text.trim()) blocks.push({ text: text.trim() })
       text = ''
       const id = `toolu_${newId()}${newId()}`

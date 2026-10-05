@@ -189,7 +189,8 @@ try {
 
   // Kim's session gave out a dev server's address before sharing: Share
   // everything opens it for whoever joins, at that page.
-  const kimDev = createServer((req, res) => res.writeHead(200, { 'content-type': 'text/html' }).end('<h1>kim ok</h1>'))
+  // Slow to answer, like a dev server compiling its first page.
+  const kimDev = createServer((req, res) => setTimeout(() => res.writeHead(200, { 'content-type': 'text/html' }).end('<h1>kim ok</h1>'), 6000))
   await new Promise(r => kimDev.listen(0, '127.0.0.1', r))
   children.push({ kill: () => kimDev.close() })
   mkdirSync(join(WORK, 'kim'), { recursive: true })
