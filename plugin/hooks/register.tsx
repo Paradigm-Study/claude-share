@@ -77,7 +77,7 @@ const unreadA = atom({ plugin: 'shared-session', key: 'unread' } as const, 0)
 const policyA = atom({ plugin: 'shared-session', key: 'policy' } as const, DEFAULT_POLICY)
 const trustedA = atom({ plugin: 'shared-session', key: 'trusted' } as const, [] as string[])
 const ownersA = atom({ plugin: 'shared-session', key: 'owners' } as const, {} as Record<string, string>)
-const liveUpdatesA = atom({ plugin: 'shared-session', key: 'liveUpdates' } as const, null as 'running' | 'next' | null)
+const liveUpdatesA = atom({ plugin: 'shared-session', key: 'liveUpdates' } as const, null as 'running' | 'next' | 'pinned' | null)
 const replayRunF = atom({ plugin: 'shared-session', key: 'replayRun' } as const, null as { tools?: string[]; hidden?: true } | null)
 const toolRowsA = atom({ plugin: 'shared-session', key: 'toolRows' } as const, 'grouped' as 'grouped' | 'each')
 const approvingA = atom({ plugin: 'shared-session', key: 'approving' } as const, null as { who: string; what: string; always: string } | null)
@@ -188,6 +188,11 @@ async function noteLatest($: $, latest: unknown) {
   const auto = await read($, updatesA)
   const live = await read($, liveUpdatesA)
   if (live === 'running') return void selfUpdate($, latest)
+  if (live === 'pinned') {
+    return void $.ui.log(
+      `Shared Sessions ${latest} is out (this session runs ${mine}). Claude Desktop runs the copy installed from your local marketplace folder, so a release loads only when you quit and reopen it. To have releases load in place, add the marketplace from GitHub: ${await switchCommand($)}`,
+    )
+  }
   $.ui.log(
     auto
       ? `Shared Sessions ${latest} is out (this session runs ${mine}). It installs by itself; new sessions get it${live === 'next' ? ', and from then on updates load without a restart' : ''}.`
@@ -264,7 +269,8 @@ async function enableLive($: $): Promise<boolean> {
     if (!copied.out.includes('copied')) return false
   }
   if (!(await nameLiveDir($, true))) return false
-  await update($, liveUpdatesA, () => (runsLive($) ? 'running' : 'next'))
+  const pinned = !runsLive($) && (await pinnedByDesktop($))
+  await update($, liveUpdatesA, () => (runsLive($) ? 'running' : pinned ? 'pinned' : 'next'))
   return true
 }
 
@@ -364,6 +370,32 @@ async function settingsFile($: $): Promise<string | null> {
   return home ? `${home}/.claude/settings.json` : null
 }
 
+// Claude Desktop hands each session the installed copy's own folder when
+// its marketplace is a local one (a folder or a file, as a clone added by
+// path is). That folder comes ahead of the one that updates itself, so in
+// Desktop a release loads only at a restart; a GitHub marketplace's plugin is
+// left to Claude Code's loader, where the updating folder wins.
+async function pinnedByDesktop($: $): Promise<boolean> {
+  if ((await $.env.get('CLAUDE_CODE_ENTRYPOINT')) !== 'claude-desktop') return false
+  const home = await $.env.get('HOME')
+  if (!home) return false
+  try {
+    const known = JSON.parse(await $.fs.read(`${home}/.claude/plugins/known_marketplaces.json`)) as Record<string, { source?: { source?: unknown } }>
+    const kind = known[MARKETPLACE]?.source?.source
+    return kind === 'directory' || kind === 'file'
+  } catch {
+    return false
+  }
+}
+
+// From a local marketplace to the GitHub one, the plugin's server kept (the
+// marketplace's removal takes the plugin and its options with it).
+async function switchCommand($: $): Promise<string> {
+  const options = ((await readSettings($))?.settings.pluginConfigs as Record<string, { options?: { server?: unknown } }> | undefined)?.[INSTALLED_ID]?.options
+  const server = typeof options?.server === 'string' && options.server.replace(/\/+$/, '') !== SERVER_URL ? options.server : ''
+  return `claude plugin marketplace remove ${MARKETPLACE} && claude plugin marketplace add ${MARKETPLACE_SOURCE.repo} && claude plugin install ${INSTALLED_ID}${server ? ` --config server=${server}` : ''}`
+}
+
 // Whether the marketplace auto-updates, from the person's settings.
 async function readUpdates($: $) {
   const path = await settingsFile($)
@@ -375,10 +407,21 @@ async function readUpdates($: $) {
   } catch {
     on = path && !(await $.fs.exists(path).catch(() => true)) ? false : null
   }
-  await update($, updatesA, () => on)
   const dir = await liveDirOf($)
   const named = Boolean(dir && String((settings.env as Record<string, unknown> | undefined)?.CLAUDE_CODE_PLUGIN_DIRS ?? '').split(':').includes(dir))
-  await update($, liveUpdatesA, () => (runsLive($) ? 'running' : named ? 'next' : null))
+  // The marketplace added again (moved to GitHub, say) comes back without
+  // autoUpdate, and the plugin's options with it. The folder still named says
+  // the person chose updates (turning them off un-names it): on again.
+  const known = (settings.extraKnownMarketplaces ?? {}) as Record<string, Record<string, unknown>>
+  if (path && named && known[MARKETPLACE] && known[MARKETPLACE].autoUpdate === undefined) {
+    try {
+      await $.fs.write(path, `${JSON.stringify({ ...settings, extraKnownMarketplaces: { ...known, [MARKETPLACE]: { ...known[MARKETPLACE], autoUpdate: true } } }, null, 2)}\n`)
+      on = true
+    } catch {}
+  }
+  await update($, updatesA, () => on)
+  const pinned = named && !runsLive($) && (await pinnedByDesktop($))
+  await update($, liveUpdatesA, () => (runsLive($) ? 'running' : pinned ? 'pinned' : named ? 'next' : null))
   // Automatic updates chosen before they could load in place (or the folder
   // named for them gone): in place now.
   const missing = named && dir ? !(await $.fs.exists(`${dir}/.claude-plugin/plugin.json`).catch(() => true)) : false
@@ -1305,9 +1348,10 @@ async function confirmStop($: $) {
 }
 
 // Host: a session that closes keeps its room. What it needs is saved by
-// session id, and the same session (reopened after a restart, or resumed)
-// takes it up again; guests see the host away meanwhile. Stop sharing, a
-// /clear or the room's expiry ends it.
+// session id, and the same session (reopened after a restart, or resumed;
+// in Claude Desktop, also reopened under a new id) takes it up again; guests
+// see the host away meanwhile. Stop sharing, a /clear or the room's expiry
+// ends it.
 const HOSTING_KEY = 'hosting:'
 const HOSTING_KEEP_MS = 24 * 60 * 60 * 1000
 type Hosting = {
@@ -1320,6 +1364,34 @@ type Hosting = {
   activity: ShareActivity[]
   chat: ShareChat[]
   sidebar: { title: string; pinned: boolean; id?: string } | null
+  place?: string
+}
+
+// Claude Desktop's own id for a session (`local_<uuid>`, the shape Claude Code
+// itself accepts). It stays when Desktop reopens the session under a new
+// Claude Code id (a rewind, or going on from an earlier message), so a place
+// saved under the old id is still found.
+async function placeOf($: $): Promise<string> {
+  const id = ((await $.env.get('CLAUDE_CODE_HOST_SESSION_ID')) ?? '').trim()
+  return /^local_[0-9a-f-]{8,}$/.test(id) ? id : ''
+}
+
+// What this session saved when it closed: under its own id, else under the
+// Desktop session's (the newest; older ones are places it never took back).
+async function savedKey($: $, prefix: string): Promise<{ key: string | null; older: string[] }> {
+  const own = `${prefix}${await $.session.id()}`
+  if ((await $.store.get(own)) !== undefined) return { key: own, older: [] }
+  const place = await placeOf($)
+  if (!place) return { key: null, older: [] }
+  const mine: { key: string; at: number }[] = []
+  for (const key of await $.store.keys()) {
+    if (!key.startsWith(prefix)) continue
+    const saved = (await $.store.get(key)) as { at?: unknown; place?: unknown; sidebar?: { id?: unknown } | null } | undefined
+    // Places saved before `place` was: the sidebar row's id is the same one.
+    if (typeof saved?.at === 'number' && (saved.place ?? saved.sidebar?.id) === place) mine.push({ key, at: saved.at })
+  }
+  mine.sort((a, b) => b.at - a.at)
+  return { key: mine[0]?.key ?? null, older: mine.slice(1).map(m => m.key) }
 }
 
 async function keepHosting($: $, sessionId: string) {
@@ -1335,6 +1407,7 @@ async function keepHosting($: $, sessionId: string) {
     activity: (await read($, activityA)).slice(-40),
     chat: (await read($, chatA)).slice(-40),
     sidebar: await read($, sidebarA),
+    place: (await placeOf($)) || undefined,
   }
   await $.store.set(`${HOSTING_KEY}${sessionId}`, saved)
   stopStream()
@@ -1358,6 +1431,7 @@ type Joined = {
   activity: ShareActivity[]
   chat: ShareChat[]
   sidebar: { title: string; pinned: boolean; id?: string } | null
+  place?: string
 }
 
 async function keepJoined($: $, sessionId: string) {
@@ -1372,6 +1446,7 @@ async function keepJoined($: $, sessionId: string) {
     activity: (await read($, activityA)).slice(-40),
     chat: (await read($, chatA)).slice(-40),
     sidebar: await read($, sidebarA),
+    place: (await placeOf($)) || undefined,
   }
   await $.store.set(`${JOINED_KEY}${sessionId}`, saved)
   stopStream()
@@ -1380,7 +1455,9 @@ async function keepJoined($: $, sessionId: string) {
 }
 
 async function resumeJoined($: $) {
-  const key = `${JOINED_KEY}${await $.session.id()}`
+  const { key, older } = await savedKey($, JOINED_KEY)
+  for (const stale of older) await $.store.delete(stale)
+  if (!key) return
   const saved = (await $.store.get(key)) as Joined | undefined
   if (!saved?.room?.token || saved.room.seat === 'host') return
   await $.store.delete(key)
@@ -1452,7 +1529,6 @@ async function forgetHosting($: $) {
 
 async function resumeHosting($: $) {
   const id = await $.session.id()
-  const key = `${HOSTING_KEY}${id}`
   const now = await $.clock.now()
   // Places saved by sessions that never came back, past any room's life.
   for (const other of await $.store.keys()) {
@@ -1460,9 +1536,17 @@ async function resumeHosting($: $) {
     const at = ((await $.store.get(other)) as Partial<Hosting> | undefined)?.at
     if (typeof at !== 'number' || now - at > HOSTING_KEEP_MS) await $.store.delete(other)
   }
-  const saved = (await $.store.get(key)) as Hosting | undefined
+  const found = await savedKey($, HOSTING_KEY)
+  // Rooms this Desktop session left before and never took back: over.
+  for (const stale of found.older) {
+    const left = (await $.store.get(stale)) as Hosting | undefined
+    await $.store.delete(stale)
+    if (left?.room?.token && left.room.seat === 'host') void api($, left.room.server, `/api/rooms/${left.room.id}/end`, { method: 'POST', token: left.room.token }).catch(() => {})
+  }
+  if (!found.key) return
+  const saved = (await $.store.get(found.key)) as Hosting | undefined
   if (!saved?.room?.token || saved.room.seat !== 'host') return
-  await $.store.delete(key)
+  await $.store.delete(found.key)
   if (now - saved.at > HOSTING_KEEP_MS) return
   let page: EventsPage | null = null
   try {
@@ -3410,6 +3494,19 @@ export const register: Register = (on, options) => {
         : updates && liveUpdates === 'next'
           ? 'From your next new session on, a release loads in place, no restart.'
           : null
+    const switchTo = liveUpdates === 'pinned' ? await switchCommand($) : ''
+    const updatesRow = switchTo ? (
+      <Box flexDirection="row" gap={1} alignItems="center" justifyContent="space-between">
+        <Box flexShrink={1}>
+          <Text dimColor>
+            Claude Desktop runs the copy installed from your local marketplace folder, ahead of the one that updates itself, so a release loads only when you quit and reopen it. Add the marketplace from GitHub to update in place.
+          </Text>
+        </Box>
+        <Button key="copy-switch" label="Copy command" plain onPress={press => void copyText($, switchTo, 'Command copied: run it in a terminal, then quit and reopen Claude', press.surface)} />
+      </Box>
+    ) : updatesNote ? (
+      <Text dimColor>{updatesNote}</Text>
+    ) : null
     const joinedAt = (name: string) => activity.find(a => a.kind === 'join' && a.who === name)?.ts
     const prompts = (name: string) => activity.filter(a => a.kind === 'prompt' && a.who === name).length
     const detail = live ? `${isHost ? "You're sharing" : `Hosted by ${room.host}`} · ${online} here` : 'Reconnecting to the room…'
@@ -3616,7 +3713,7 @@ export const register: Register = (on, options) => {
                     )
                   : null}
                 {updatesSetting}
-                {updatesNote ? <Text dimColor>{updatesNote}</Text> : null}
+                {updatesRow}
                 {trusted.length ? (
                   <Box flexDirection="row" gap={1} alignItems="center" justifyContent="space-between">
                     <Text dimColor wrap="truncate-end">{`Always allowed: ${listNames(trusted)}`}</Text>
@@ -3659,7 +3756,7 @@ export const register: Register = (on, options) => {
                     )
                   : null}
                 {updatesSetting}
-                {updatesNote ? <Text dimColor>{updatesNote}</Text> : null}
+                {updatesRow}
               </Box>,
             )}
 

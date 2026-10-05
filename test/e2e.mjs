@@ -58,7 +58,7 @@ function startServer() {
   children.push(child)
 }
 
-function session(name, cwd, extraArgs = [], logName = name) {
+function session(name, cwd, extraArgs = [], logName = name, extraEnv = {}) {
   // A home of its own: no installed plugins, settings hooks or transcripts of
   // the machine's user leak into the run (model access comes from the env).
   const home = join(WORK, `${name}-home`)
@@ -73,6 +73,7 @@ function session(name, cwd, extraArgs = [], logName = name) {
     GIT_CONFIG_GLOBAL: join(WORK, `${name}.gitconfig`),
   }
   if (process.env.SHARED_SESSION_TRANSPORT) env.SHARED_SESSION_TRANSPORT = process.env.SHARED_SESSION_TRANSPORT
+  Object.assign(env, extraEnv)
   for (const key of ['ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY']) {
     const value = MODEL_ENV[key] ?? process.env[key]
     if (value) env[key] = value
@@ -285,7 +286,9 @@ try {
 
   // Scott's session: a normal session with some history, then Share.
   const hostFlags = ['--permission-mode', 'bypassPermissions', '--allow-dangerously-skip-permissions']
-  let host = session('Scott', hostDir, hostFlags)
+  // Claude Desktop's own id for the host's session, which outlives its Claude Code ids.
+  const hostPlace = { CLAUDE_CODE_HOST_SESSION_ID: 'local_0e2e0000-0000-4000-8000-000000000001' }
+  let host = session('Scott', hostDir, hostFlags, 'Scott', hostPlace)
   host.say('Read README.md and tell me the secret word in one word.')
   await until('host first turn', () => host.lines.some(l => l.type === 'result'))
   check('host answers its own first prompt', /marmalade/i.test(host.text))
@@ -503,7 +506,8 @@ try {
 
   // The host's Claude Code closes (a restart to update, say): the room stays
   // open with the host away, and a guest's prompt meanwhile is answered here,
-  // not sent. The same session reopened shares again, on the same link.
+  // not sent. The same session reopened shares again, on the same link, even
+  // under a new Claude Code id, as Claude Desktop reopens one after a rewind.
   const hostSession = host.lines.find(l => l.type === 'system' && l.subtype === 'init')?.session_id
   host.child.stdin.end()
   await until('host closed', () => host.child.exitCode !== null || host.child.signalCode !== null, 60_000).catch(() => null)
@@ -514,12 +518,15 @@ try {
   guest.type(desktopPrompt('Say the word ember and nothing else.'))
   await until('guest told the host is closed', () => /Claude Code is closed right now/.test(guest.text), 30_000).catch(() => null)
   check("a guest's prompt while the host is closed is answered there, not sent", /Claude Code is closed right now/.test(guest.text))
-  host = session('Scott', hostDir, [...hostFlags, '--resume', hostSession], 'Scott-reopened')
+  host = session('Scott', hostDir, [...hostFlags, '--resume', hostSession, '--fork-session'], 'Scott-reopened', hostPlace)
   await until('host back', async () => (await roomInfo(id)).people?.some(p => p.role === 'host' && p.online), 60_000).catch(() => null)
   check('the reopened session shares the same room again', (await roomInfo(id)).people?.some(p => p.role === 'host' && p.online) === true)
   guest.type(desktopPrompt('What is 9 times 4? Reply with just the number.'))
   await until('reopened host ran a guest prompt', () => host.lines.some(l => l.type === 'result' && /\b36\b/.test(l.result ?? '')), 120_000).catch(() => null)
   check("and runs a guest's prompt there", host.lines.some(l => l.type === 'result' && /\b36\b/.test(l.result ?? '')))
+  // A stream-json session names its id once its first prompt comes in.
+  const reopenedAs = host.lines.find(l => l.type === 'system' && l.subtype === 'init')?.session_id
+  check('…though it was reopened under a new Claude Code id', Boolean(reopenedAs) && reopenedAs !== hostSession, `ids ${hostSession?.slice(0, 8)} → ${reopenedAs?.slice(0, 8)}`)
   check('a prompt sent while it was closed never ran', !/\bember\b/i.test(transcriptOf(host)))
 
   // A guest's Claude Code closes too, long enough for the room to let its

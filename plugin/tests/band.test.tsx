@@ -23,7 +23,21 @@ function band<S extends (typeof SURFACES)[number]>(surface: S) {
 // that answers from memory. Returns what the server was asked. `stream` is
 // what the room's stream sends a curl child; without it, curl can't start and
 // the plugin polls.
-function world(on: On, opts: { server?: boolean; stream?: unknown[]; history?: unknown[]; down?: boolean; latest?: string; settings?: string; hostAway?: boolean } = {}) {
+function world(
+  on: On,
+  opts: {
+    server?: boolean
+    stream?: unknown[]
+    history?: unknown[]
+    down?: boolean
+    latest?: string
+    settings?: string
+    hostAway?: boolean
+    env?: Record<string, string>
+    store?: Record<string, unknown>
+    files?: Record<string, string>
+  } = {},
+) {
   const asked: string[] = []
   const spawned: { argv: readonly string[]; input?: string }[] = []
   on('process.spawn', async function* ($, e) {
@@ -45,11 +59,13 @@ function world(on: On, opts: { server?: boolean; stream?: unknown[]; history?: u
   })
   const clock = mock.clock(on, { now: 1_000 })
   // A Claude Desktop session, unless a test says otherwise.
-  const desktop = { CLAUDE_CODE_ENTRYPOINT: 'claude-desktop' }
+  const desktop = { CLAUDE_CODE_ENTRYPOINT: 'claude-desktop', ...opts.env }
   mock.env(on, opts.server === false ? { USER: 'scott', HOME: '/home/scott', ...desktop } : { USER: 'scott', HOME: '/home/scott', SHARED_SESSION_SERVER: 'http://localhost:8787', ...desktop })
+  if (opts.store) mock.store(on, opts.store)
   // The files the plugin reads: its own manifest, and the person's settings.
   const files = new Map<string, string>()
   if (opts.settings !== undefined) files.set('/home/scott/.claude/settings.json', opts.settings)
+  for (const [path, text] of Object.entries(opts.files ?? {})) files.set(path, text)
   const written: { path: string; text: string }[] = []
   on('fs.read', ($, e) => {
     if (e.path.endsWith('/.claude-plugin/plugin.json')) return { value: '{"name":"shared-session","version":"0.7.1"}' }
@@ -70,6 +86,7 @@ function world(on: On, opts: { server?: boolean; stream?: unknown[]; history?: u
     return { value: undefined }
   })
   on('ui.copy', () => ({ value: { isCopied: true } }))
+  on('command.register', ($, e) => ({ value: { command: e.name } }))
   on('session.cwd', () => ({ value: '/tmp/demo' }))
   on('session.messages', () => ({ value: (opts.history ?? []) as never }))
   on('process.run', () => ({ value: { exitCode: 1, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }))
@@ -560,6 +577,95 @@ test('automatic updates chosen earlier move to updates in place, keeping other p
   const saved = JSON.parse(asked.written.at(-1)?.text ?? '{}')
   expect(saved.env.CLAUDE_CODE_PLUGIN_DIRS).toBe('/home/scott/mods/other:/home/scott/.claude/shared-session/plugin')
   expect(asked.logged.some(l => l.includes('updates in place'))).toBe(true)
+})
+
+// A room a host session saved when it closed, as keepHosting saves it.
+function savedRoom(id: string, at: number, where: { sidebar?: string; place?: string } = {}) {
+  return {
+    at,
+    room: { server: 'http://localhost:8787', id, url: `http://localhost:8787/s/${id}`, title: 'demo', host: 'scott', token: `t-${id}`, seat: 'host', seq: 3, since: 1 },
+    policy: { prompts: 'everyone', approvals: 'edits', files: 'on' },
+    trusted: [],
+    previews: {},
+    shown: [],
+    activity: [],
+    chat: [],
+    sidebar: where.sidebar ? { title: 'Fix login', pinned: false, id: where.sidebar } : null,
+    ...(where.place ? { place: where.place } : {}),
+  }
+}
+const START = { cwd: '/tmp/demo', surface: 'desktop', isInteractive: true } as const
+
+test('a host session reopened takes its room back, on the same link', async ($, on) => {
+  const asked = world(on, { store: { 'hosting:cli-1': savedRoom('room0000000000000009', 900) } })
+  on('session.id', () => ({ value: 'cli-1' }))
+  on('session.start', ($, e) => ({ cwd: e.cwd }))
+  await $.session.start(START)
+  await asked.clock.advance(10)
+  expect(asked.logged).toContain('Still sharing this session: http://localhost:8787/s/room0000000000000009')
+})
+
+test('a Desktop session reopened under a new id (a rewind) takes its room back; rooms it left before end', async ($, on) => {
+  const asked = world(on, {
+    env: { CLAUDE_CODE_HOST_SESSION_ID: 'local_0000d351-0000-4000-8000-000000000001' },
+    store: {
+      'hosting:cli-old': savedRoom('room0000000000000009', 900, { place: 'local_0000d351-0000-4000-8000-000000000001' }),
+      // Saved before places were: the sidebar row's id is Desktop's.
+      'hosting:cli-older': savedRoom('room0000000000000008', 500, { sidebar: 'local_0000d351-0000-4000-8000-000000000001' }),
+      'hosting:cli-other': savedRoom('room0000000000000007', 950, { place: 'local_0000d352-0000-4000-8000-000000000002' }),
+    },
+  })
+  on('session.id', () => ({ value: 'cli-new' }))
+  on('session.start', ($, e) => ({ cwd: e.cwd }))
+  await $.session.start(START)
+  await asked.clock.advance(10)
+  expect(asked.logged).toContain('Still sharing this session: http://localhost:8787/s/room0000000000000009')
+  expect(asked).toContain('POST /api/rooms/room0000000000000008/end')
+  // Another Desktop session's room is its own.
+  expect(asked.some(a => a.includes('room0000000000000007'))).toBe(false)
+})
+
+const NAMED = { CLAUDE_CODE_PLUGIN_DIRS: '/home/scott/.claude/shared-session/plugin', CLAUDE_CODE_PLUGIN_DIR_WATCH: '1' }
+const KNOWN = '/home/scott/.claude/plugins/known_marketplaces.json'
+const LIVE = '/home/scott/.claude/shared-session/plugin/.claude-plugin/plugin.json'
+
+test('in Claude Desktop, a copy installed from a local marketplace folder says how to update in place', async ($, on) => {
+  const asked = world(on, {
+    latest: '9.9.9',
+    settings: JSON.stringify({ env: NAMED, extraKnownMarketplaces: { 'claude-share': { source: { source: 'directory', path: '/home/scott/claude-share' }, autoUpdate: true } } }),
+    files: { [LIVE]: '{}', [KNOWN]: JSON.stringify({ 'claude-share': { source: { source: 'directory', path: '/home/scott/claude-share' }, autoUpdate: true } }) },
+  })
+  await $.prompt.submit({ text: LINK, origin: { kind: 'composer' }, wait: false })
+  await asked.clock.advance(10)
+  const command = 'claude plugin marketplace remove claude-share && claude plugin marketplace add Paradigm-Study/claude-share && claude plugin install shared-session@claude-share'
+  expect(asked.logged.some(l => l.includes('9.9.9 is out') && l.includes('local marketplace folder') && l.includes(command))).toBe(true)
+  const pane = await $.ui.mount({ plugin: 'shared-session', surface: 'desktop', component: 'Pane', requestId: 'shared-room', props: PANE })
+  expect(await pane.find({ type: 'Text', text: /runs the copy installed from your local marketplace folder/ })).toBeDefined()
+  expect(await pane.find({ key: 'copy-switch' })).toBeDefined()
+})
+
+test('a GitHub marketplace in Claude Desktop shows no such note', async ($, on) => {
+  const asked = world(on, {
+    settings: JSON.stringify({ env: NAMED, extraKnownMarketplaces: { 'claude-share': { source: { source: 'github', repo: 'Paradigm-Study/claude-share' }, autoUpdate: true } } }),
+    files: { [LIVE]: '{}', [KNOWN]: JSON.stringify({ 'claude-share': { source: { source: 'github', repo: 'Paradigm-Study/claude-share' }, autoUpdate: true } }) },
+  })
+  await $.prompt.submit({ text: LINK, origin: { kind: 'composer' }, wait: false })
+  await asked.clock.advance(10)
+  const pane = await $.ui.mount({ plugin: 'shared-session', surface: 'desktop', component: 'Pane', requestId: 'shared-room', props: PANE })
+  expect(await pane.find({ key: 'copy-switch' })).toBeUndefined()
+  expect(await pane.find({ type: 'Text', text: /next new session on, a release loads in place/ })).toBeDefined()
+})
+
+test('a marketplace added again keeps automatic updates when updates in place were chosen', async ($, on) => {
+  const asked = world(on, {
+    settings: JSON.stringify({ theme: 'dark', env: NAMED, extraKnownMarketplaces: { 'claude-share': { source: { source: 'github', repo: 'Paradigm-Study/claude-share' } } } }),
+  })
+  await $.prompt.submit({ text: LINK, origin: { kind: 'composer' }, wait: false })
+  await asked.clock.advance(10)
+  const saved = JSON.parse(asked.written.at(-1)?.text ?? '{}')
+  expect(saved.extraKnownMarketplaces['claude-share']).toEqual({ source: { source: 'github', repo: 'Paradigm-Study/claude-share' }, autoUpdate: true })
+  expect(saved.env).toEqual(NAMED)
+  expect(saved.theme).toBe('dark')
 })
 
 test("a guest's read runs without asking only inside the host's project", async () => {
