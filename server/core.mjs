@@ -387,8 +387,11 @@ export async function createRoom(req, id, now, origin) {
 // so an app's root-relative paths work); absent, previews are off.
 export async function roomRequest(room, req, rest, now, origin, ctx = {}) {
   const swept = room.sweep(now)
+  const version = room.host.version
   const result = await handleRoom(room, req, rest, now, origin, ctx)
-  return swept ? { ...result, changed: true } : result
+  // A host on a new plugin version (an update, a restart) is kept, so a room
+  // loaded back from storage says the version that runs now.
+  return swept || room.host.version !== version ? { ...result, changed: true } : result
 }
 
 async function handleRoom(room, req, rest, now, origin, ctx) {
