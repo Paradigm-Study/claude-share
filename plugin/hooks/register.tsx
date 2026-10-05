@@ -1153,6 +1153,10 @@ async function resumeHosting($: $) {
   }
   startFeed($)
   $.ui.log(`Still sharing this session: ${room.url}`)
+  // Dev servers this session's Claude opened, running again (or never shared
+  // by the version that was running before), open for everyone too.
+  const messages = await $.session.messages({ as: 'api' }).catch(() => [])
+  void shareLocal($, localOpens(Array.isArray(messages) ? messages : [])).catch(() => {})
 }
 
 async function stopSharing($: $) {
