@@ -56,7 +56,7 @@ function startServer() {
   children.push(child)
 }
 
-function session(name, cwd, extraArgs = []) {
+function session(name, cwd, extraArgs = [], logName = name) {
   // A home of its own: no installed plugins, settings hooks or transcripts of
   // the machine's user leak into the run (model access comes from the env).
   const home = join(WORK, `${name}-home`)
@@ -90,13 +90,13 @@ function session(name, cwd, extraArgs = []) {
       '--plugin-dir',
       join(ROOT, 'plugin'),
       '--debug-file',
-      join(WORK, `${name}.debug.log`),
+      join(WORK, `${logName}.debug.log`),
       ...extraArgs,
     ],
     { cwd, env, stdio: ['pipe', 'pipe', 'pipe'] },
   )
   children.push(child)
-  const out = createWriteStream(join(WORK, `${name}.stream.jsonl`))
+  const out = createWriteStream(join(WORK, `${logName}.stream.jsonl`))
   const s = { name, child, home, lines: [], text: '' }
   let buffer = ''
   child.stdout.on('data', chunk => {
@@ -181,10 +181,15 @@ try {
   const outdatedBody = await outdated.json().catch(() => ({}))
   const home = await fetch(`${SERVER}/`).then(r => r.text()).catch(() => '')
   check("the server's page says how to install and what it keeps", home.includes('claude plugin install shared-session@claude-share') && home.includes('What this server sees and keeps'))
+  // The room knows which plugin its host runs, so a guest's can say what an older one can't show.
+  const older = await fetch(`${SERVER}/api/rooms`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-shared-session-version': '0.8.2' }, body: JSON.stringify({ name: 'old host', title: 'old' }) }).then(r => r.json())
+  check("the room says which plugin its host runs", (await roomInfo(older.id)).hostVersion === '0.8.2')
+  await fetch(`${SERVER}/api/rooms/${older.id}/end`, { method: 'POST', headers: { authorization: `Bearer ${older.token}`, 'x-shared-session-version': '0.8.2' } })
   check('an out-of-date plugin is told how to update', outdated.status === 426 && String(outdatedBody.error).includes('claude plugin update shared-session@claude-share'), `HTTP ${outdated.status}`)
 
   // Scott's session: a normal session with some history, then Share.
-  const host = session('Scott', hostDir, ['--permission-mode', 'bypassPermissions', '--allow-dangerously-skip-permissions'])
+  const hostFlags = ['--permission-mode', 'bypassPermissions', '--allow-dangerously-skip-permissions']
+  let host = session('Scott', hostDir, hostFlags)
   host.say('Read README.md and tell me the secret word in one word.')
   await until('host first turn', () => host.lines.some(l => l.type === 'result'))
   check('host answers its own first prompt', /marmalade/i.test(host.text))
@@ -391,6 +396,27 @@ try {
     polling ? 'everyone polls when told to' : 'everyone hears the room over one open stream',
     heard.every(log => log.includes(polling ? 'Shared session: polling' : 'Shared session: listening on a stream')),
   )
+
+  // The host's Claude Code closes (a restart to update, say): the room stays
+  // open with the host away, and a guest's prompt meanwhile is answered here,
+  // not sent. The same session reopened shares again, on the same link.
+  const hostSession = host.lines.find(l => l.type === 'system' && l.subtype === 'init')?.session_id
+  host.child.stdin.end()
+  await until('host closed', () => host.child.exitCode !== null || host.child.signalCode !== null, 60_000).catch(() => null)
+  await until('host shown away', async () => (await roomInfo(id)).people?.some(p => p.role === 'host' && !p.online), 90_000).catch(() => null)
+  const away = await roomInfo(id)
+  check('a host that closes leaves the room open, shown away', away.ended === false && away.people?.some(p => p.role === 'host' && !p.online))
+  await new Promise(r => setTimeout(r, 2500)) // the room tells guests a moment after it counts the host gone
+  guest.type(desktopPrompt('Say the word ember and nothing else.'))
+  await until('guest told the host is closed', () => /Claude Code is closed right now/.test(guest.text), 30_000).catch(() => null)
+  check("a guest's prompt while the host is closed is answered there, not sent", /Claude Code is closed right now/.test(guest.text))
+  host = session('Scott', hostDir, [...hostFlags, '--resume', hostSession], 'Scott-reopened')
+  await until('host back', async () => (await roomInfo(id)).people?.some(p => p.role === 'host' && p.online), 60_000).catch(() => null)
+  check('the reopened session shares the same room again', (await roomInfo(id)).people?.some(p => p.role === 'host' && p.online) === true)
+  guest.type(desktopPrompt('What is 9 times 4? Reply with just the number.'))
+  await until('reopened host ran a guest prompt', () => host.lines.some(l => l.type === 'result' && /\b36\b/.test(l.result ?? '')), 120_000).catch(() => null)
+  check("and runs a guest's prompt there", host.lines.some(l => l.type === 'result' && /\b36\b/.test(l.result ?? '')))
+  check('a prompt sent while it was closed never ran', !/\bember\b/i.test(transcriptOf(host)))
 
   // Stop sharing: the guest is told, the link stops working.
   host.say('/stop-sharing')

@@ -101,11 +101,11 @@ export class Room {
     return room
   }
 
-  static create({ id, name, title, now, fromNow }) {
+  static create({ id, name, title, now, fromNow, version }) {
     return new Room({
       id,
       title: String(title ?? '').trim().slice(0, 120) || 'Claude Code session',
-      host: { name: clampName(name), token: token(24), lastSeen: now },
+      host: { name: clampName(name), token: token(24), lastSeen: now, version: version ?? undefined },
       createdAt: now,
       fromNow: fromNow === true,
     })
@@ -308,6 +308,12 @@ export function outdatedClient(req) {
   )
 }
 
+// The plugin version a request says it comes from, when it says one plainly.
+export function clientVersion(req) {
+  const v = req.headers.get('x-shared-session-version') ?? ''
+  return /^\d{1,4}\.\d{1,4}\.\d{1,6}$/.test(v) ? v : null
+}
+
 export const versionInfo = () => json({ latest: PLUGIN_LATEST, min: PLUGIN_MIN, update: UPDATE_COMMAND })
 
 // What a public server limits, so a busy day stays affordable and one person
@@ -359,7 +365,7 @@ export class Windows {
 // POST /api/rooms: the host's Share. Returns the room and the host's token.
 export async function createRoom(req, id, now, origin) {
   const body = await readJson(req)
-  const room = Room.create({ id, name: body.name, title: body.title, now, fromNow: body.fromNow })
+  const room = Room.create({ id, name: body.name, title: body.title, now, fromNow: body.fromNow, version: clientVersion(req) })
   return {
     room,
     response: json({
@@ -401,6 +407,7 @@ async function handleRoom(room, req, rest, now, origin, ctx) {
         host: room.host.name,
         people: room.people(now),
         ended: Boolean(room.endedAt),
+        hostVersion: room.host.version,
       }),
     }
   }
@@ -425,6 +432,7 @@ async function handleRoom(room, req, rest, now, origin, ctx) {
         people: room.people(now),
         fromNow: room.fromNow || undefined,
         latest: PLUGIN_LATEST,
+        hostVersion: room.host.version,
       }),
     }
   }
@@ -438,6 +446,10 @@ async function handleRoom(room, req, rest, now, origin, ctx) {
 
   const auth = room.auth(bearerOf(req))
   if (!auth) return { response: json({ error: 'Not a member of this session.' }, 401) }
+  // Which plugin the host runs now (an update and a restart change it), so a
+  // guest's plugin can say what an older one can't show.
+  const version = auth.role === 'host' ? clientVersion(req) : null
+  if (version) room.host.version = version
 
   const files = await fileRoutes(room, req, rest, auth, now)
   if (files) return files

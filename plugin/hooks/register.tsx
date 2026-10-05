@@ -155,6 +155,7 @@ const NO_SERVER =
 const MARKETPLACE = 'claude-share'
 const MARKETPLACE_SOURCE = { source: 'github', repo: 'Paradigm-Study/claude-share' }
 const UPDATE_COMMAND = 'claude plugin marketplace update claude-share && claude plugin update shared-session@claude-share'
+const CARDS_FROM = '0.9.0' // the first version whose tool calls guests draw as cards
 let pluginVersion: string | undefined
 
 async function ownVersion($: $): Promise<string> {
@@ -734,7 +735,12 @@ function shownOf(event: ServerEvent): ShareShown | null {
 }
 
 async function receive($: $, mode: ShareMode, room: ShareRoom, page: EventsPage) {
+  const hostWas = (await read($, peopleA)).find(p => p.role === 'host')?.online
   await update($, peopleA, () => page.people)
+  const hostIs = page.people.find(p => p.role === 'host')?.online
+  if (mode === 'guest' && hostWas !== undefined && hostIs !== undefined && hostWas !== hostIs) {
+    $.ui.toast(hostIs ? `${room.host} is back` : `${room.host}'s Claude Code closed; the room waits for them`)
+  }
   let seq = room.seq
   for (const event of page.events) {
     seq = Math.max(seq, event.seq)
@@ -807,12 +813,12 @@ async function receive($: $, mode: ShareMode, room: ShareRoom, page: EventsPage)
   if (mode === 'guest') scheduleRides($)
 }
 
-async function reset($: $) {
+async function reset($: $, opts: { keepSidebar?: boolean } = {}) {
   // The sidebar row first, while the room is still known: the host's title
   // comes back; a guest's says whose session it was.
   const was = await read($, roomA)
   const wasMode = await read($, modeA)
-  await unmarkSidebar($, wasMode === 'guest' && was ? `${was.host}'s session · ${was.title}`.slice(0, 120) : undefined)
+  if (!opts.keepSidebar) await unmarkSidebar($, wasMode === 'guest' && was ? `${was.host}'s session · ${was.title}`.slice(0, 120) : undefined)
   pollGeneration += 1
   stopStream()
   outbox = []
@@ -1056,8 +1062,101 @@ async function confirmStop($: $) {
   $.clock.after(5_000, () => void update($, confirmingA, c => (c === 'stop' ? null : c)))
 }
 
+// Host: a session that closes keeps its room. What it needs is saved by
+// session id, and the same session (reopened after a restart, or resumed)
+// takes it up again; guests see the host away meanwhile. Stop sharing, a
+// /clear or the room's expiry ends it.
+const HOSTING_KEY = 'hosting:'
+const HOSTING_KEEP_MS = 24 * 60 * 60 * 1000
+type Hosting = {
+  at: number
+  room: ShareRoom
+  policy: SharePolicy
+  trusted: string[]
+  previews: Record<string, string>
+  shown: ShareShown[]
+  activity: ShareActivity[]
+  chat: ShareChat[]
+  sidebar: { title: string; pinned: boolean; id?: string } | null
+}
+
+async function keepHosting($: $, sessionId: string) {
+  const room = await read($, roomA)
+  if (!room) return
+  const saved: Hosting = {
+    at: await $.clock.now(),
+    room,
+    policy: await read($, policyA),
+    trusted: await read($, trustedA),
+    previews: await read($, previewsA),
+    shown: (await read($, shownA)).slice(-20),
+    activity: (await read($, activityA)).slice(-40),
+    chat: (await read($, chatA)).slice(-40),
+    sidebar: await read($, sidebarA),
+  }
+  await $.store.set(`${HOSTING_KEY}${sessionId}`, saved)
+  stopStream()
+  await flush($) // what Claude said last, if the exit gives it time
+  // This process may go on as another session (a /resume): that one isn't sharing.
+  await reset($, { keepSidebar: true })
+}
+
+async function forgetHosting($: $) {
+  try {
+    await $.store.delete(`${HOSTING_KEY}${await $.session.id()}`)
+  } catch {}
+}
+
+async function resumeHosting($: $) {
+  const key = `${HOSTING_KEY}${await $.session.id()}`
+  const now = await $.clock.now()
+  // Rooms saved by sessions that never came back, past any room's life.
+  for (const other of await $.store.keys()) {
+    if (!other.startsWith(HOSTING_KEY) || other === key) continue
+    const at = ((await $.store.get(other)) as Partial<Hosting> | undefined)?.at
+    if (typeof at !== 'number' || now - at > HOSTING_KEEP_MS) await $.store.delete(other)
+  }
+  const saved = (await $.store.get(key)) as Hosting | undefined
+  if (!saved?.room?.token || saved.room.seat !== 'host') return
+  await $.store.delete(key)
+  if (now - saved.at > HOSTING_KEEP_MS) return
+  let page: EventsPage | null = null
+  try {
+    page = await api<EventsPage>($, saved.room.server, `/api/rooms/${saved.room.id}/events?after=${saved.room.seq}&wait=0`, { token: saved.room.token })
+  } catch (error) {
+    if (isGone(error)) return void $.ui.log('The session you shared ended while this one was closed.')
+    // Unreachable for now: share on, and the feed keeps trying.
+  }
+  if (page?.ended) return void $.ui.log('The session you shared ended while this one was closed.')
+  const room: ShareRoom = { ...saved.room, seq: page?.seq ?? saved.room.seq }
+  await update($, roomA, () => room)
+  await update($, policyA, () => ({ ...DEFAULT_POLICY, ...saved.policy }))
+  await update($, trustedA, () => saved.trusted ?? [])
+  await update($, previewsA, () => saved.previews ?? {})
+  await update($, shownA, () => saved.shown ?? [])
+  await update($, activityA, () => saved.activity ?? [])
+  await update($, chatA, () => saved.chat ?? [])
+  await update($, sidebarA, () => saved.sidebar ?? null)
+  await update($, modeA, () => 'host')
+  if (page) {
+    await update($, peopleA, () => page.people)
+    // What happened while it was closed: the chat and comings and goings are
+    // kept; a prompt sent then is answered, not run late.
+    for (const event of page.events) {
+      if (event.type === 'prompt' && event.from.role === 'guest') {
+        send($, 'declined', { pid: typeof event.body.pid === 'string' ? event.body.pid : '', who: event.from.name, reason: `${room.host}'s Claude Code was closed when you sent this, so it didn't run. Send it again.` })
+        continue
+      }
+      await absorb($, room, 'host', event, false)
+    }
+  }
+  startFeed($)
+  $.ui.log(`Still sharing this session: ${room.url}`)
+}
+
 async function stopSharing($: $) {
   const room = await read($, roomA)
+  await forgetHosting($)
   await reset($)
   if (room) {
     await api($, room.server, `/api/rooms/${room.id}/end`, { method: 'POST', token: room.token }).catch(() => {})
@@ -1129,6 +1228,7 @@ async function join($: $, server: string, id: string) {
     people: SharePerson[]
     latest?: string
     fromNow?: boolean
+    hostVersion?: string
   }>($, server, `/api/rooms/${id}/join`, { method: 'POST', body: { name } })
   void noteLatest($, joined.latest)
   const room: ShareRoom = {
@@ -1168,7 +1268,13 @@ async function join($: $, server: string, id: string) {
   }
   startFeed($)
   await markSidebar($, () => `👥 ${room.host} · ${room.title}`)
-  return { room, history: exchanges(past.map(e => e.body as unknown as Row), joined.host), open: [...open.values()], fromNow: joined.fromNow === true }
+  return {
+    room,
+    history: exchanges(past.map(e => e.body as unknown as Row), joined.host),
+    open: [...open.values()],
+    fromNow: joined.fromNow === true,
+    hostVersion: typeof joined.hostVersion === 'string' ? joined.hostVersion : null,
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1941,16 +2047,23 @@ export const register: Register = (on, options) => {
     await $.command.register({ name: 'share-file', description: 'Show a file to everyone in the shared session: /share-file <path>' })
     await $.command.register({ name: 'share-preview', description: "Let teammates open this machine's localhost: /share-preview <port> [title]" })
     void readUpdates($)
-    // A reload keeps $.state: pick the room back up.
+    // A reload keeps $.state: pick the room back up. A restart doesn't: a
+    // host session saved its room when it closed, and takes it up again.
     const room = await read($, roomA)
     if (room && (await read($, modeA)) !== 'idle') startFeed($)
     if (room && (await read($, modeA)) === 'guest') await readyReplay($)
+    if (!room) await resumeHosting($).catch(error => $.ui.log(`Couldn't pick the shared session back up: ${String(error?.message ?? error)}`))
     return started
   })
 
   on('session.end', async ($, e, next) => {
     const mode = await read($, modeA)
-    if (mode === 'host') await stopSharing($).catch(() => {})
+    // A host session that closes (the app quits, a restart to update) keeps
+    // its room for when it comes back; /clear and a logout end it.
+    if (mode === 'host') {
+      if (e.reason === 'clear' || e.reason === 'logout') await stopSharing($).catch(() => {})
+      else await keepHosting($, e.sessionId).catch(() => {})
+    }
     if (mode === 'guest') await leave($).catch(() => {})
     return next(e)
   })
@@ -2023,7 +2136,7 @@ export const register: Register = (on, options) => {
       // did, then what happened before plays back, all without a model call.
       try {
         if (mode === 'guest') await leave($)
-        const { room, history, open, fromNow } = await join($, link[1], link[2])
+        const { room, history, open, fromNow, hostVersion } = await join($, link[1], link[2])
         const policy = await read($, policyA)
         answerWith({
           kind: 'note',
@@ -2033,6 +2146,9 @@ export const register: Register = (on, options) => {
               ? `It's watch-only for now: you see every turn live and can chat with everyone in the **Room**.`
               : `What you type here runs there, on ${room.host}'s machine, and everyone sees the replies live.`,
             `The **Room** (above the prompt, or \`/room\`) shows who's here and has a side chat Claude doesn't read. **Leave** is up there too.${history.length ? '' : fromNow ? ` ${room.host} shared from that point on, so what came before isn't shown.` : ''}`,
+            hostVersion && newerThan(CARDS_FROM, hostVersion)
+              ? `\n\n> ${room.host}'s Claude Code runs Shared Sessions ${hostVersion}, so their tool calls show here as text, not cards. Once they update (\`${UPDATE_COMMAND}\`) and restart Claude Code, they show as cards.`
+              : '',
           ].join(' '),
           then: history,
           open,
@@ -2048,6 +2164,14 @@ export const register: Register = (on, options) => {
         answerWith({
           kind: 'note',
           text: `**${room?.host}** has this session on watch-only, so this didn't go to Claude. You can still follow every turn and talk to everyone in the **Room** panel.`,
+          then: [],
+        })
+        return next(e)
+      }
+      if ((await read($, peopleA)).some(p => p.role === 'host' && !p.online)) {
+        answerWith({
+          kind: 'note',
+          text: `**${room?.host}**'s Claude Code is closed right now, so this didn't go to Claude. The room stays open and carries on when they're back (the **Room** shows them here again); send it then.`,
           then: [],
         })
         return next(e)

@@ -23,7 +23,7 @@ function band<S extends (typeof SURFACES)[number]>(surface: S) {
 // that answers from memory. Returns what the server was asked. `stream` is
 // what the room's stream sends a curl child; without it, curl can't start and
 // the plugin polls.
-function world(on: On, opts: { server?: boolean; stream?: unknown[]; history?: unknown[]; down?: boolean; latest?: string; settings?: string } = {}) {
+function world(on: On, opts: { server?: boolean; stream?: unknown[]; history?: unknown[]; down?: boolean; latest?: string; settings?: string; hostAway?: boolean } = {}) {
   const asked: string[] = []
   const spawned: { argv: readonly string[]; input?: string }[] = []
   on('process.spawn', async function* ($, e) {
@@ -96,7 +96,7 @@ function world(on: On, opts: { server?: boolean; stream?: unknown[]; history?: u
     if (opts.down && path.endsWith('/events') && method === 'GET') return { value: { status: 503, ok: false, headers: {}, text: '{"error":"unavailable"}' } }
     if (method === 'POST' && path.endsWith('/events') && e.init?.body) posted.push(...(JSON.parse(e.init.body).events ?? []))
     const people = [
-      { id: 'host', name: 'Sam', role: 'host', online: true },
+      { id: 'host', name: 'Sam', role: 'host', online: !opts.hostAway },
       { id: 'seat1', name: 'scott', role: 'guest', online: true },
       { id: 'seat2', name: 'Alex', role: 'guest', online: true },
     ]
@@ -168,6 +168,22 @@ test('a link typed in Desktop joins, and the row names the host', async ($, on) 
   const ui = await $.ui.mount(band('desktop'))
   await ui.press({ key: 'leave' })
   expect(await ui.find({ key: 'share' })).toBeDefined()
+})
+
+test("a prompt typed while the host's Claude Code is closed stays here", async ($, on) => {
+  const asked = world(on, { hostAway: true })
+  await $.prompt.submit({ text: LINK, origin: { kind: 'composer' }, wait: false })
+  await $.prompt.submit({ text: 'Run the tests', origin: { kind: 'composer' }, wait: false })
+  await asked.clock.advance(100)
+  expect(asked.posted.some(e => e.type === 'prompt')).toBe(false)
+})
+
+test('with the host here, a guest prompt goes to the room', async ($, on) => {
+  const asked = world(on)
+  await $.prompt.submit({ text: LINK, origin: { kind: 'composer' }, wait: false })
+  await $.prompt.submit({ text: 'Run the tests', origin: { kind: 'composer' }, wait: false })
+  await asked.clock.advance(100)
+  expect(asked.posted.find(e => e.type === 'prompt')?.body.text).toBe('Run the tests')
 })
 
 test('a link another session sends never joins', async ($, on) => {

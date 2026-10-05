@@ -17,6 +17,7 @@
 // Nothing here prints a token or credential.
 
 import { spawnSync } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync, mkdirSync } from 'node:fs'
 import { homedir, tmpdir, userInfo } from 'node:os'
 import { basename } from 'node:path'
@@ -353,14 +354,20 @@ async function check(claude) {
   // this machine's other sessions; their transcripts are removed after.
   const dir = mkdtempSync(join(tmpdir(), 'shared-session-check-'))
   try {
-    const env = flag('server') && !saved ? { ...process.env, SHARED_SESSION_SERVER: server } : process.env
-    const shared = run(claude, ['-p', '/share-session'], { cwd: dir, env, timeout: 120_000 })
+    const env = flag('server') ? { ...process.env, SHARED_SESSION_SERVER: server } : process.env
+    // A session that closes keeps its room for when it's opened again; this
+    // one is opened again to stop sharing, which ends it.
+    const session = randomUUID()
+    const shared = run(claude, ['-p', '--session-id', session, '/share-session'], { cwd: dir, env, timeout: 120_000 })
     const link = new RegExp(`${server.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/s/([A-Za-z0-9_-]{16,})`).exec(shared.out)
     if (!link) fail(`a real session could not share: ${shared.out.trim().split('\n').pop()}`)
     else {
+      const kept = (await call(`${server}/api/rooms/${link[1]}`)).body
+      run(claude, ['-p', '--resume', session, '/stop-sharing'], { cwd: dir, env, timeout: 120_000 })
       const room = (await call(`${server}/api/rooms/${link[1]}`)).body
-      if (room.ended) ok(`a real session shared${saved ? ' with the saved setting' : ''}, and its room ended when the session did`)
-      else fail('a real session shared, but its room was still open after the session ended')
+      if (!kept.ended && room.ended) ok(`a real session shared${saved ? ' with the saved setting' : ''}; its room stayed open when the session closed, and ended when it stopped sharing`)
+      else if (kept.ended) fail('a real session shared, but its room ended when the session closed (an older plugin?)')
+      else fail('a real session shared, but /stop-sharing in it, reopened, left the room open')
     }
 
     const made = await call(`${server}/api/rooms`, { method: 'POST', body: JSON.stringify({ name: 'setup-check', title: 'setup check' }) })
