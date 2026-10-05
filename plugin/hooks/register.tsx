@@ -1136,8 +1136,42 @@ async function requestShare($: $, surface?: RenderSurface) {
 async function earlierPrompts($: $): Promise<number> {
   const name = await whoami($)
   const cwd = await $.session.cwd()
-  const history = await $.session.messages({ as: 'api' })
-  return (Array.isArray(history) ? history : []).flatMap(m => rowsFromMessage(m, name, cwd)).filter(row => row.kind === 'user').length
+  return (await sessionHistory($)).flatMap(m => rowsFromMessage(m, name, cwd)).filter(row => row.kind === 'user').length
+}
+
+// The whole conversation as the session stored it. What Claude still holds
+// (`session.messages`) starts, after a compaction, at its summary, so a long
+// session would share only its last stretch; the transcript file keeps every
+// message (the summaries and subagents' messages left out). The newest
+// HISTORY_MESSAGES of it; without the file, what Claude holds.
+const HISTORY_MESSAGES = 6000
+type HistoryMessage = { role?: string; content: unknown }
+async function sessionHistory($: $): Promise<HistoryMessage[]> {
+  try {
+    const id = await $.session.id()
+    if (/^[\w-]{8,80}$/.test(id)) {
+      const found = await sh($, `ls -1 "\${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/projects/*/${id}.jsonl 2>/dev/null | head -1\n`)
+      const path = found.out.trim()
+      if (path) {
+        const out: { role: string; content: unknown[] }[] = []
+        for (const line of (await $.fs.read(path)).split('\n')) {
+          if (!line) continue
+          let d: { type?: unknown; isSidechain?: unknown; isCompactSummary?: unknown; message?: { role?: unknown; content?: unknown } }
+          try {
+            d = JSON.parse(line)
+          } catch {
+            continue
+          }
+          if ((d.type !== 'user' && d.type !== 'assistant') || d.isSidechain || d.isCompactSummary || !d.message) continue
+          const content = typeof d.message.content === 'string' ? [{ type: 'text', text: d.message.content }] : d.message.content
+          if (Array.isArray(content)) out.push({ role: String(d.message.role ?? d.type), content })
+        }
+        if (out.length) return out.slice(-HISTORY_MESSAGES)
+      }
+    }
+  } catch {}
+  const held = await $.session.messages({ as: 'api' }).catch(() => [])
+  return Array.isArray(held) ? (held as HistoryMessage[]) : []
 }
 
 // `history: false` shares only what happens from now on: nothing earlier goes
@@ -1155,8 +1189,7 @@ async function share($: $, surface?: RenderSurface, opts: { history?: boolean } 
   const server = await serverOf($)
   const name = await whoami($)
   const cwd = await $.session.cwd()
-  const history = opts.history === false ? [] : await $.session.messages({ as: 'api' })
-  const messages = Array.isArray(history) ? history : []
+  const messages = opts.history === false ? [] : await sessionHistory($)
   const firstPrompt = messages.flatMap(m => rowsFromMessage(m, name, cwd)).find(row => row.kind === 'user')?.text
   const folder = cwd.split('/').filter(Boolean).at(-1) ?? 'session'
   const title = firstPrompt ? `${folder}: ${(firstPrompt.split('\n')[0] ?? '').slice(0, 80)}` : folder
@@ -1185,9 +1218,8 @@ async function share($: $, surface?: RenderSurface, opts: { history?: boolean } 
 
   // What happened before Share, so people who join see the whole session,
   // and the dev servers Claude opened then, still running, open for them too.
-  for (const message of messages) {
-    for (const row of rowsFromMessage(message, name, cwd)) send($, 'row', row)
-  }
+  // The newest rows a room keeps (it holds 5000 events), oldest first.
+  for (const row of messages.flatMap(message => rowsFromMessage(message, name, cwd)).slice(-4000)) send($, 'row', row)
   void shareLocal($, localOpens(messages)).catch(() => {})
   startFeed($)
   const copied = await $.ui.copy({ text: room.url, surface }).catch(() => ({ isCopied: false }))
@@ -1417,8 +1449,7 @@ async function resumeHosting($: $) {
   $.ui.log(`Still sharing this session: ${room.url}`)
   // Dev servers this session's Claude opened, running again (or never shared
   // by the version that was running before), open for everyone too.
-  const messages = await $.session.messages({ as: 'api' }).catch(() => [])
-  void shareLocal($, localOpens(Array.isArray(messages) ? messages : [])).catch(() => {})
+  void shareLocal($, localOpens(await sessionHistory($))).catch(() => {})
 }
 
 async function stopSharing($: $) {
@@ -1980,6 +2011,15 @@ async function relaySocket($: $, room: ShareRoom, ask: Record<string, unknown>) 
   } catch {}
 }
 
+// Host: what started a turn nobody typed (a background task finishing), as
+// the line guests see in the prompt's place.
+function startedBy(text: string): string {
+  const note = /<task-notification>([\s\S]*?)<\/task-notification>/.exec(text)?.[1]
+  if (!note) return ''
+  const summary = /<summary>([\s\S]*?)<\/summary>/.exec(note)?.[1]?.trim()
+  return `(${(summary || 'a background task finished').slice(0, 200)})`
+}
+
 // How the terminal names a tool in its rows.
 function terminalName(tool: string): string {
   const mcp = /^mcp__(.+?)__(.+)$/.exec(tool)
@@ -2103,7 +2143,7 @@ function scheduleRides($: $) {
   if (!next) return
   next.claimed = true
   rideSubmitted = true
-  queueRide($, `${next.by}: ${next.prompt || '(continued)'}`, { kind: 'turn', turnId: next.turnId }, () => {
+  queueRide($, `${next.by}: ${next.prompt || '(carried on by itself)'}`, { kind: 'turn', turnId: next.turnId }, () => {
     next.claimed = false
     retry()
   })
@@ -2653,9 +2693,15 @@ export const register: Register = (on, options) => {
     // A prompt another session delivered is shown as its text, not its markup.
     const said = typedText(e.text)
     const sent = guest ? null : delivered(said)
-    send($, 'turn', { state: 'start', turnId: e.turnId, by: sent?.from ?? by, prompt: guest?.text ?? sent?.text ?? said, pid: guest?.pid ?? '' })
+    send($, 'turn', { state: 'start', turnId: e.turnId, by: sent?.from ?? by, prompt: guest?.text ?? sent?.text ?? (said || startedBy(e.text)), pid: guest?.pid ?? '' })
     return next(e)
   })
+
+  // Guest: every turn here plays the shared session back (no model runs), so
+  // the person's own Stop hooks (a notifier, a channel bridge) stay out of
+  // it: each cost a second or more per replayed turn, told a channel about
+  // turns nobody here took, and one could keep a finished ride going.
+  on('classic.Stop', async ($, e, next) => ((await read($, modeA)) === 'guest' ? {} : next(e)))
 
   on('turn.complete', async ($, e, next) => {
     if (e.agentId !== undefined) return next(e)

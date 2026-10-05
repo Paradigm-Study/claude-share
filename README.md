@@ -70,7 +70,7 @@ It stops with a `NEEDS HUMAN` line at the one or two steps that need a person. S
 
 Out of the box, Share uses `https://claude-share.proud-limit-da0a.workers.dev`, run by this project ([its page](https://claude-share.proud-limit-da0a.workers.dev/)). Joining a link always uses the server in that link.
 
-- **What it sees:** while a session is shared, its prompts, Claude's replies, the tools it runs with the first lines of their results, the side chat, and files or local previews the host's Claude shows. Sharing a session that already has history asks first whether to include it.
+- **What it sees:** while a session is shared, its prompts, Claude's replies, the tools it runs with the first lines of their results, the side chat, and files or local previews the host's Claude shows. Sharing a session that already has history asks first whether to include it; everything means everything the session stored, from before any compaction too (its newest 4,000 rows).
 - **How long:** a room and everything in it is deleted 24 hours after the host stops sharing or was last seen. No accounts, no analytics, no request logs.
 - **Who can see it:** anyone with the room's link. It's encrypted in transit, not end to end: the server can read what passes through it.
 - **Limits:** per network, 6 new rooms and 30 joins a minute; per room, 20 people, 50 MB of files and 900 posts a minute. Abused rooms get ended.
