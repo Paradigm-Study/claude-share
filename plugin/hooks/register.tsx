@@ -1254,6 +1254,107 @@ async function keepHosting($: $, sessionId: string) {
   await reset($, { keepSidebar: true })
 }
 
+// Guest: a session that closes keeps its place the same way. It stays
+// pinned and named; reopened, it takes its seat back (a new one if the room
+// let the old one go after its grace) and plays what it missed, prompt by
+// prompt, a turn still running on the host live. Leave, a /clear or a
+// logout leaves for good.
+const JOINED_KEY = 'joined:'
+type Joined = {
+  at: number
+  room: ShareRoom
+  autoOpen: boolean
+  policy: SharePolicy
+  shown: ShareShown[]
+  activity: ShareActivity[]
+  chat: ShareChat[]
+  sidebar: { title: string; pinned: boolean; id?: string } | null
+}
+
+async function keepJoined($: $, sessionId: string) {
+  const room = await read($, roomA)
+  if (!room) return
+  const saved: Joined = {
+    at: await $.clock.now(),
+    room,
+    autoOpen: await read($, autoOpenA),
+    policy: await read($, policyA),
+    shown: (await read($, shownA)).slice(-20),
+    activity: (await read($, activityA)).slice(-40),
+    chat: (await read($, chatA)).slice(-40),
+    sidebar: await read($, sidebarA),
+  }
+  await $.store.set(`${JOINED_KEY}${sessionId}`, saved)
+  stopStream()
+  // This process may go on as another session (a /resume): that one isn't in the room.
+  await reset($, { keepSidebar: true })
+}
+
+async function resumeJoined($: $) {
+  const key = `${JOINED_KEY}${await $.session.id()}`
+  const saved = (await $.store.get(key)) as Joined | undefined
+  if (!saved?.room?.token || saved.room.seat === 'host') return
+  await $.store.delete(key)
+  if ((await $.clock.now()) - saved.at > HOSTING_KEEP_MS) return
+  // Over while this was closed: only now does the sidebar row go back.
+  const over = async () => {
+    await update($, sidebarA, () => saved.sidebar ?? null)
+    await unmarkSidebar($, `${saved.room.host}'s session · ${saved.room.title}`.slice(0, 120))
+    $.ui.log(`${saved.room.host}'s session ended while this one was closed.`)
+  }
+  let room = saved.room
+  let missed: ServerEvent[] = []
+  let people: SharePerson[] | null = null
+  try {
+    const page = await api<EventsPage>($, room.server, `/api/rooms/${room.id}/events?after=${room.seq}&wait=0`, { token: room.token })
+    if (page.ended) return void (await over())
+    missed = page.events
+    people = page.people
+    room = { ...room, seq: page.seq }
+  } catch (error) {
+    if (error instanceof ApiError && (error.status === 404 || error.status === 410)) return void (await over())
+    if (error instanceof ApiError && error.status === 401) {
+      // The seat was let go: a new one, and what happened since the old one's last.
+      try {
+        const joined = await api<{ token: string; seat: string; seq: number; title: string; history: ServerEvent[]; people: SharePerson[] }>(
+          $,
+          room.server,
+          `/api/rooms/${room.id}/join`,
+          { method: 'POST', body: { name: await whoami($) } },
+        )
+        missed = joined.history.filter(e => e.seq > saved.room.seq)
+        people = joined.people
+        room = { ...room, token: joined.token, seat: joined.seat, seq: joined.seq, title: joined.title }
+      } catch (again) {
+        if (again instanceof ApiError && (again.status === 404 || again.status === 410)) return void (await over())
+        throw again
+      }
+    }
+    // Unreachable for now: back in anyway, and the feed keeps trying.
+  }
+  await update($, roomA, () => room)
+  await update($, policyA, () => ({ ...DEFAULT_POLICY, ...saved.policy }))
+  await update($, autoOpenA, () => saved.autoOpen !== false)
+  await update($, shownA, () => saved.shown ?? [])
+  await update($, activityA, () => saved.activity ?? [])
+  await update($, chatA, () => saved.chat ?? [])
+  await update($, sidebarA, () => saved.sidebar ?? null)
+  await update($, modeA, () => 'guest')
+  if (people) await update($, peopleA, () => people)
+  await readyReplay($)
+  for (const event of missed) await absorb($, room, 'guest', event, false)
+  const starts = missed.filter(e => e.type === 'turn' && e.body.state === 'start')
+  const ends = new Set(missed.filter(e => e.type === 'turn' && e.body.state === 'end').map(e => e.body.turnId))
+  const running = starts.filter(e => !ends.has(e.body.turnId)).at(-1)
+  const past = missed.filter(e => e.type === 'row' && (!running || e.seq < running.seq))
+  if (running) noteHostTurn(running)
+  const caught = exchanges(past.map(e => e.body as unknown as Row), room.host)
+  for (const exchange of caught) laterRides.push({ text: exchange.prompt, ride: { kind: 'static', rows: exchange.rows } })
+  startFeed($)
+  $.ui.log(caught.length ? `Back in ${room.host}'s session. What you missed follows.` : `Back in ${room.host}'s session.`)
+  if (caught.length || running) scheduleRides($)
+}
+
 async function forgetHosting($: $) {
   try {
     await $.store.delete(`${HOSTING_KEY}${await $.session.id()}`)
@@ -1261,11 +1362,12 @@ async function forgetHosting($: $) {
 }
 
 async function resumeHosting($: $) {
-  const key = `${HOSTING_KEY}${await $.session.id()}`
+  const id = await $.session.id()
+  const key = `${HOSTING_KEY}${id}`
   const now = await $.clock.now()
-  // Rooms saved by sessions that never came back, past any room's life.
+  // Places saved by sessions that never came back, past any room's life.
   for (const other of await $.store.keys()) {
-    if (!other.startsWith(HOSTING_KEY) || other === key) continue
+    if (!(other.startsWith(HOSTING_KEY) || other.startsWith(JOINED_KEY)) || other.endsWith(`:${id}`)) continue
     const at = ((await $.store.get(other)) as Partial<Hosting> | undefined)?.at
     if (typeof at !== 'number' || now - at > HOSTING_KEEP_MS) await $.store.delete(other)
   }
@@ -1912,6 +2014,9 @@ function scheduleRides($: $) {
 
 async function leave($: $) {
   const room = await read($, roomA)
+  try {
+    await $.store.delete(`${JOINED_KEY}${await $.session.id()}`)
+  } catch {}
   await reset($)
   if (room) {
     await api($, room.server, `/api/rooms/${room.id}/leave`, { method: 'POST', token: room.token }).catch(() => {})
@@ -2286,6 +2391,7 @@ export const register: Register = (on, options) => {
     if (room && (await read($, modeA)) !== 'idle') startFeed($)
     if (room && (await read($, modeA)) === 'guest') await readyReplay($)
     if (!room) await resumeHosting($).catch(error => $.ui.log(`Couldn't pick the shared session back up: ${String(error?.message ?? error)}`))
+    if (!(await read($, roomA))) await resumeJoined($).catch(error => $.ui.log(`Couldn't get back into the shared session: ${String(error?.message ?? error)}`))
     return started
   })
 
@@ -2297,7 +2403,11 @@ export const register: Register = (on, options) => {
       if (e.reason === 'clear' || e.reason === 'logout') await stopSharing($).catch(() => {})
       else await keepHosting($, e.sessionId).catch(() => {})
     }
-    if (mode === 'guest') await leave($).catch(() => {})
+    // A guest's too: still pinned and named, back in the room when reopened.
+    if (mode === 'guest') {
+      if (e.reason === 'clear' || e.reason === 'logout') await leave($).catch(() => {})
+      else await keepJoined($, e.sessionId).catch(() => {})
+    }
     return next(e)
   })
 

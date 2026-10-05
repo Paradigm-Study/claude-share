@@ -240,7 +240,7 @@ try {
   check('pasting the link joins', Boolean(joined), joined.people.map(p => `${p.name}:${p.role}`).join(', '))
   // Sam joins too, from a third session.
   mkdirSync(join(WORK, 'sam'), { recursive: true })
-  const sam = session('Sam', join(WORK, 'sam'))
+  let sam = session('Sam', join(WORK, 'sam'))
   sam.say(link)
   await until('Sam joined', async () => (await roomInfo(id)).people?.some(p => p.name === 'Sam'))
   await until('history shown to guest', () => /marmalade/i.test(guest.text), 30_000)
@@ -440,6 +440,25 @@ try {
   await until('reopened host ran a guest prompt', () => host.lines.some(l => l.type === 'result' && /\b36\b/.test(l.result ?? '')), 120_000).catch(() => null)
   check("and runs a guest's prompt there", host.lines.some(l => l.type === 'result' && /\b36\b/.test(l.result ?? '')))
   check('a prompt sent while it was closed never ran', !/\bember\b/i.test(transcriptOf(host)))
+
+  // A guest's Claude Code closes too, long enough for the room to let its
+  // seat go; reopened, the session is back in the room by itself and plays
+  // what it missed.
+  const samSession = sam.lines.find(l => l.type === 'system' && l.subtype === 'init')?.session_id
+  sam.child.stdin.end()
+  await until('Sam closed', () => sam.child.exitCode !== null || sam.child.signalCode !== null, 60_000).catch(() => null)
+  const missedAt = host.lines.length
+  host.say('Say the word "walnut" and nothing else.')
+  await until('host said walnut', () => host.lines.slice(missedAt).some(l => l.type === 'result' && /walnut/i.test(l.result ?? '')), 120_000).catch(() => null)
+  await until("Sam's seat let go", async () => !(await roomInfo(id)).people?.some(p => p.name === 'Sam'), 90_000).catch(() => null)
+  sam = session('Sam', join(WORK, 'sam'), ['--resume', samSession], 'Sam-reopened')
+  await until('Sam back in the room', async () => (await roomInfo(id)).people?.some(p => p.name === 'Sam' && p.online), 60_000).catch(() => null)
+  await until('Sam caught up', () => assistantText(sam).some(t => /walnut/i.test(t)), 60_000).catch(() => null)
+  check(
+    'a guest that closes and reopens is back in the room by itself, and sees what it missed',
+    (await roomInfo(id)).people?.some(p => p.name === 'Sam' && p.online) === true && assistantText(sam).some(t => /walnut/i.test(t)),
+    /Back in Scott's session/.test(sam.text) ? 'said it was back' : 'no back line',
+  )
 
   // Stop sharing: the guest is told, the link stops working.
   host.say('/stop-sharing')
