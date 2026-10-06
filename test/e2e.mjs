@@ -386,6 +386,19 @@ try {
   await until("guest's card has the picture", pictured, 60_000).catch(() => null)
   check("a picture the host's Claude reads shows in the guest's card as an image", pictured())
 
+  // The update command a guest types (the "is out" line names it) runs on the
+  // guest's computer; it never reaches the host's Claude to run there.
+  guest.type(desktopPrompt('claude plugin marketplace update claude-share && claude plugin update shared-session@claude-share'))
+  await until('guest answered the update itself', () => /Updating Shared Sessions on this computer/.test(guest.text), 30_000).catch(() => null)
+  await new Promise(r => setTimeout(r, 3000))
+  check(
+    "the update command a guest types runs on the guest's computer, never at the host",
+    /Updating Shared Sessions on this computer/.test(guest.text) && !transcriptOf(host).includes('claude plugin marketplace update'),
+  )
+  // Everyone's plugin version reaches the room, so the Room says who's behind.
+  const versions = (await roomInfo(id)).people ?? []
+  check("the room knows each person's plugin version", versions.length >= 2 && versions.every(p => /^\d+\.\d+\.\d+$/.test(p.version ?? '')), JSON.stringify(versions.map(p => [p.name, p.version])))
+
   await until('Sam sees Alex\'s exchange', () => transcriptOf(sam).includes('Alex: What is 17 times 3') && assistantText(sam).some(t => /\b51\b/.test(t)), 30_000).catch(() => null)
   check('a third person sees Alex\'s prompt and the answer', transcriptOf(sam).includes('Alex: What is 17 times 3') && assistantText(sam).some(t => /\b51\b/.test(t)))
 

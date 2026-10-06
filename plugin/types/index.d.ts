@@ -18,7 +18,7 @@ export type ShareRoom = {
   since: number
 }
 
-export type SharePerson = { id: string; name: string; role: 'host' | 'guest'; online: boolean }
+export type SharePerson = { id: string; name: string; role: 'host' | 'guest'; online: boolean; /** Their plugin's version, as the room heard it. */ version?: string }
 
 export type ShareWorking = {
   turnId: string
@@ -118,6 +118,8 @@ declare module 'claude-code' {
       updates: boolean | null
       /** Updates in place: this session runs the copy that updates itself (`running`), or new sessions will (`next`). */
       liveUpdates: 'running' | 'next' | 'pinned' | null
+      /** Pages the host's Claude published, by artifact id: what goes to the room again when one is opened again. */
+      pages: Record<string, Record<string, unknown>>
     }
   }
 }

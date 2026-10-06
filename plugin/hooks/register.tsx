@@ -89,6 +89,7 @@ const askingA = atom({ plugin: 'shared-session', key: 'asking' } as const, null 
 const connectionA = atom({ plugin: 'shared-session', key: 'connection' } as const, 'live' as 'live' | 'reconnecting')
 const confirmingA = atom({ plugin: 'shared-session', key: 'confirming' } as const, null as 'stop' | null)
 const newerA = atom({ plugin: 'shared-session', key: 'newer' } as const, null as string | null)
+const pagesA = atom({ plugin: 'shared-session', key: 'pages' } as const, {} as Record<string, Record<string, unknown>>)
 const updatesA = atom({ plugin: 'shared-session', key: 'updates' } as const, null as boolean | null)
 
 // Context a host app puts into the person's message (Claude Desktop adds a
@@ -702,6 +703,8 @@ async function runStream($: $, generation: number) {
       `url = "${room.server}/api/rooms/${room.id}/stream?after=${room.seq}"`,
       `header = "Authorization: Bearer ${room.token}"`,
       'header = "Accept: application/x-ndjson"',
+      // Which plugin this is, so the room knows who needs to update.
+      `header = "x-shared-session-version: ${await ownVersion($)}"`,
       'no-buffer',
       'silent',
       'connect-timeout = 10',
@@ -1031,9 +1034,71 @@ function shownOf(event: ServerEvent): ShareShown | null {
   }
 }
 
+// The update command (or either half of it), as the "is out" line gives it.
+const UPDATE_TYPED = /^\s*claude\s+plugin\s+(?:marketplace\s+update\s+claude-share|update\s+shared-session(?:@claude-share)?)(?:\s*(?:&&|;)\s*claude\s+plugin\s+(?:marketplace\s+update\s+claude-share|update\s+shared-session(?:@claude-share)?))*\s*$/
+
+// Guest (or anyone who typed it here): the update, run on this computer with
+// its own Claude Code (\`claude\` on the PATH, else Claude Desktop's newest),
+// then said: in place when this session runs the folder that updates itself,
+// else from a new session.
+async function updateHere($: $) {
+  const home = (await $.env.get('HOME')) ?? ''
+  const path = (await $.env.get('PATH')) ?? '/usr/bin:/bin'
+  const { out, code } = await sh(
+    $,
+    [
+      `export HOME=${sq(home)} PATH=${sq(path)}`,
+      'C=$(command -v claude 2>/dev/null)',
+      '[ -n "$C" ] || for d in "$HOME/Library/Application Support/Claude/claude-code"/*/*/claude.app/Contents/MacOS/claude; do [ -x "$d" ] && C="$d"; done',
+      '[ -n "$C" ] || { echo "no claude"; exit 3; }',
+      '"$C" plugin marketplace update claude-share 2>&1 | tail -1 && "$C" plugin update shared-session@claude-share 2>&1 | tail -1',
+      '',
+    ].join('\n'),
+  )
+  if (code !== 0) {
+    $.ui.log(`Couldn't update Shared Sessions here (${out.trim().split('\n').pop() || 'no output'}). In a terminal on this computer, run: ${UPDATE_COMMAND}`)
+    return
+  }
+  let installed = ''
+  try {
+    const list = JSON.parse(await $.fs.read(`${home}/.claude/plugins/installed_plugins.json`))
+    installed = String(((list.plugins ?? list)[INSTALLED_ID] as { version?: unknown }[] | undefined)?.find(x => typeof x.version === 'string')?.version ?? '')
+  } catch {}
+  const mine = await ownVersion($)
+  if (runsLive($) && installed && newerThan(installed, mine)) {
+    await catchUpFromInstalled($)
+    return void $.ui.log(`Shared Sessions ${installed} is installed here and loads into this session in place.`)
+  }
+  if (installed && newerThan(installed, mine)) return void $.ui.log(`Shared Sessions ${installed} is installed here. Start a new session to use it (in Claude Desktop, quit and reopen the app); with Updates on in the Room, later releases load in place.`)
+  $.ui.log(`Shared Sessions is up to date here (${installed || mine}).`)
+}
+
+// The newest plugin version this session knows of: its own, or the server's.
+async function latestKnown($: $): Promise<string> {
+  const mine = await ownVersion($)
+  const newer = await read($, newerA)
+  return newer && (!mine || newerThan(newer, mine)) ? newer : mine
+}
+
+// Host: a guest whose plugin is older than the newest, said once each, with
+// the command that updates them (in a terminal on their computer, or typed
+// in their Claude Code, where their plugin runs it there).
+const notedBehind = new Set<string>()
+async function noteBehind($: $, people: SharePerson[]) {
+  const behind = people.filter(p => p.role === 'guest' && p.version && !notedBehind.has(`${p.name}@${p.version}`))
+  if (!behind.length) return
+  const latest = await latestKnown($)
+  for (const p of behind) {
+    notedBehind.add(`${p.name}@${p.version}`)
+    if (!latest || !newerThan(latest, p.version!)) continue
+    $.ui.log(`${p.name} runs Shared Sessions ${p.version}, older than ${latest}: some of what you show (pictures, pages) may not reach them as it does here. They update with: ${UPDATE_COMMAND}`)
+  }
+}
+
 async function receive($: $, mode: ShareMode, room: ShareRoom, page: EventsPage) {
   const hostWas = (await read($, peopleA)).find(p => p.role === 'host')?.online
   await update($, peopleA, () => page.people)
+  if (mode === 'host') await noteBehind($, page.people)
   const hostIs = page.people.find(p => p.role === 'host')?.online
   if (mode === 'guest' && hostWas !== undefined && hostIs !== undefined && hostWas !== hostIs) {
     $.ui.toast(hostIs ? `${room.host} is back` : `${room.host}'s Claude Code closed; the room waits for them`)
@@ -2100,23 +2165,65 @@ async function captureShown($: $, e: Record<string, unknown>, result: unknown) {
       send($, 'artifact', { kind: 'link', turnId, url })
     }
   } else if (tool === 'Artifact' && str(input.file_path) && (!input.action || input.action === 'publish')) {
-    const page = await uploads([str(input.file_path)])
-    // Its pictures, scripts and styles: each at its published path beside the
-    // page, so it opens there whole, as it does here.
-    const root = str(input.root) ? abs(str(input.root)) : cwd
-    const listed = Array.isArray(input.files)
-      ? (input.files as unknown[]).map(f => (f && typeof f === 'object' ? str((f as { path?: unknown }).path) : '')).map(p => [p, p] as const)
-      : Object.entries((input.files ?? {}) as Record<string, unknown>).map(([to, from]) => [to, typeof from === 'string' ? from : from && typeof from === 'object' ? str((from as { from?: unknown }).from) : ''] as const)
-    const beside: ShareFileMeta[] = []
-    for (const [to, from] of listed.slice(0, PAGE_FILES)) {
-      const path = pagePath(to)
-      if (!path || !from) continue
-      const meta = await uploadFile($, room, from.startsWith('/') ? from : `${root}/${from}`)
-      if (meta) beside.push({ ...meta, path })
-    }
-    if (page.length && beside.length) send($, 'artifact', { kind: 'page', turnId, files: [{ ...page[0]!, path: baseName(str(input.file_path)) }, ...beside] })
-    else if (page.length) send($, 'artifact', { kind: 'send', turnId, files: page, display: 'render', caption: 'A page Claude published' })
+    const body = await pageEvent($, room, input, cwd)
+    if (!body) return
+    send($, 'artifact', { ...body, turnId })
+    const id = artifactId(JSON.stringify(result ?? ''))
+    if (id) await update($, pagesA, pages => ({ ...Object.fromEntries(Object.entries(pages).slice(-30)), [id]: body }))
+  } else if (tool === 'Artifact' && input.action === 'open' && str(input.url)) {
+    // A page published before, opened again: everyone sees it again, its
+    // files beside it (one published before this plugin kept them is found
+    // in the transcript).
+    const id = artifactId(str(input.url))
+    const body = id ? ((await read($, pagesA))[id] ?? (await earlierPage($, room, id, cwd))) : null
+    if (body) send($, 'artifact', { ...body, turnId })
   }
+}
+
+// Host: a published page as the room gets it: the page, and its pictures,
+// scripts and styles, each at its published path beside it, so it opens on
+// a guest's side whole, as it does here.
+async function pageEvent($: $, room: ShareRoom, input: Record<string, unknown>, cwd: string): Promise<Record<string, unknown> | null> {
+  const str = (v: unknown) => (typeof v === 'string' ? v : '')
+  const abs = (p: string) => (p.startsWith('/') ? p : `${cwd}/${p}`)
+  const page = await uploadFile($, room, abs(str(input.file_path)))
+  if (!page) return null
+  const root = str(input.root) ? abs(str(input.root)) : cwd
+  const listed = Array.isArray(input.files)
+    ? (input.files as unknown[]).map(f => (f && typeof f === 'object' ? str((f as { path?: unknown }).path) : '')).map(p => [p, p] as const)
+    : Object.entries((input.files ?? {}) as Record<string, unknown>).map(([to, from]) => [to, typeof from === 'string' ? from : from && typeof from === 'object' ? str((from as { from?: unknown }).from) : ''] as const)
+  const beside: ShareFileMeta[] = []
+  for (const [to, from] of listed.slice(0, PAGE_FILES)) {
+    const path = pagePath(to)
+    if (!path || !from) continue
+    const meta = await uploadFile($, room, from.startsWith('/') ? from : `${root}/${from}`)
+    if (meta) beside.push({ ...meta, path })
+  }
+  return beside.length
+    ? { kind: 'page', files: [{ ...page, path: baseName(str(input.file_path)) }, ...beside] }
+    : { kind: 'send', files: [page], display: 'render', caption: 'A page Claude published' }
+}
+
+// An Artifact's id, from its link (claude.ai/artifact/<id>, claude.ai/code/artifact/<id>).
+function artifactId(text: string): string | null {
+  return /claude\.ai\/(?:code\/)?artifact\/([A-Za-z0-9_-]{6,})/.exec(text)?.[1] ?? null
+}
+
+// Host: the newest publish of an Artifact this session's transcript holds,
+// as the room gets it.
+async function earlierPage($: $, room: ShareRoom, id: string, cwd: string): Promise<Record<string, unknown> | null> {
+  const calls = new Map<string, Record<string, unknown>>()
+  let found: Record<string, unknown> | null = null
+  for (const message of await sessionHistory($)) {
+    if (!Array.isArray(message.content)) continue
+    for (const block of message.content as { type?: string; id?: string; name?: string; input?: Record<string, unknown>; tool_use_id?: string; content?: unknown }[]) {
+      if (block.type === 'tool_use' && block.name === 'Artifact' && block.id && typeof block.input?.file_path === 'string') calls.set(block.id, block.input)
+      if (block.type === 'tool_result' && block.tool_use_id && calls.has(block.tool_use_id) && JSON.stringify(block.content ?? '').includes(id)) found = calls.get(block.tool_use_id)!
+    }
+  }
+  const body = found ? await pageEvent($, room, found, cwd) : null
+  if (body) await update($, pagesA, pages => ({ ...pages, [id]: body }))
+  return body
 }
 
 const PAGE_FILES = 60
@@ -2733,7 +2840,7 @@ function faces(v: View): Face[] {
   for (const p of v.everyone) {
     const known = seen.get(p.name)
     const note = [p.role === 'host' ? 'host' : '', p.id === v.me ? 'you' : '', p.online ? '' : 'away'].filter(Boolean).join(' · ')
-    const face: Face = { name: p.name, online: p.online || Boolean(known?.online), note, active: v.working?.by === p.name }
+    const face: Face = { name: p.name, online: p.online || Boolean(known?.online), note, active: v.working?.by === p.name, version: p.version ?? known?.version }
     if (!known || (!known.online && p.online)) seen.set(p.name, face)
   }
   // The host first, then whoever is here; labels tell same-initial people apart.
@@ -2838,6 +2945,18 @@ const selectOf = (el: UI) => ('Select' in el ? el.Select : undefined)
 // ---------------------------------------------------------------------------
 
 // /share-session: shares, or in a session with earlier prompts asks first.
+// What Claude is told when it asks for the share command itself.
+async function shareAnswer($: $): Promise<string> {
+  const mode = await read($, modeA)
+  const room = await read($, roomA)
+  if (mode === 'host' && room) {
+    const here = [...new Set((await read($, peopleA)).filter(p => p.role === 'guest' && p.online).map(p => p.name))]
+    return `This session is already shared (${room.url})${here.length ? `, with ${listNames(here)} here` : ''}. Everything that happens in it reaches them live, so there's nothing to share again. To show someone something again, show it again: publish or open the page, send the file, or open the page or preview; each of those goes to everyone in the room by itself.`
+  }
+  if (mode === 'guest' && room) return `This session joined ${room.host}'s shared session; only ${room.host} shares it. What's typed here runs there.`
+  return 'Sharing starts only when the person chooses it: they type /share-session or press Share above the prompt. It sends this session\'s prompts, replies and tool calls to everyone with the link, so tell them that and let them start it; don\'t start it yourself.'
+}
+
 async function shareCommand($: $, e: { args: string }): Promise<{ text: string }> {
   const choice = e.args.trim().toLowerCase()
   try {
@@ -2995,6 +3114,13 @@ export const register: Register = (on, options) => {
       } catch (error) {
         answerWith({ kind: 'note', text: joinFailure(error, link[1]), then: [] })
       }
+      return next(e)
+    }
+    // The update command, typed here by a guest (the "is out" line names it):
+    // run on this computer, never sent to the host's Claude to run there.
+    if (mode === 'guest' && UPDATE_TYPED.test(typed)) {
+      answerWith({ kind: 'note', text: `Updating Shared Sessions on this computer (this didn't go to ${(await read($, roomA))?.host ?? 'the host'}). A line below says when it's done.`, then: [] })
+      void updateHere($)
       return next(e)
     }
     if (mode === 'guest' && typed && !typed.startsWith('/')) {
@@ -3375,8 +3501,28 @@ export const register: Register = (on, options) => {
     }
     // Host: what Claude showed goes to the room for guests (not awaited:
     // uploads shouldn't hold the turn).
-    if (e.agentId === undefined && (await read($, modeA)) === 'host') void captureShown($, e as unknown as Record<string, unknown>, result).catch(() => {})
+    if (e.agentId === undefined && (await read($, modeA)) === 'host') {
+      void captureShown($, e as unknown as Record<string, unknown>, result).catch(() => {})
+      // A page it publishes or opens reaches everyone here as a copy of its
+      // own: said to Claude, so it doesn't send people after the link.
+      const action = String((e as { action?: unknown }).action ?? 'publish')
+      if (e.tool === 'Artifact' && (action === 'publish' || action === 'open') && result && typeof result === 'object' && !('deny' in result && result.deny) && (await read($, policyA)).files !== 'off') {
+        const room = await read($, roomA)
+        const note = `Shared Sessions: this page also went to everyone in ${room?.host ?? 'this'}'s shared session, with its pictures and files; it opens in their own Claude Code (the browser pane, or Open in their Room). They don't need the claude.ai link, which stays private unless it's shared on claude.ai.`
+        return { ...result, context: [...((result as { context?: readonly string[] }).context ?? []), note] } as typeof result
+      }
+    }
     return result
+  })
+
+  // The share command, asked for by Claude (the Skill tool) instead of typed:
+  // answered from here, with where things stand, never with the fallback
+  // page's "the plugin isn't running". Sharing itself starts only when the
+  // person chooses it, since it sends the session's history.
+  on('tool.call', { tool: 'Skill' }, async ($, e, next) => {
+    const skill = String((e as { skill?: unknown }).skill ?? '').replace(/^\//, '')
+    if (skill !== `${PLUGIN}:share-session` && skill !== 'share-session') return next(e)
+    return { result: { success: true, commandName: skill, status: 'forked', agentId: PLUGIN, result: await shareAnswer($) } } as never
   })
 
   // Host: a guest's prompt runs tools on this machine. What the host's policy
@@ -3639,6 +3785,9 @@ export const register: Register = (on, options) => {
     const newer = await read($, newerA)
     const updates = await read($, updatesA)
     const people = faces(v)
+    // Who runs an older plugin than the newest known: said beside their name.
+    const latest = await latestKnown($)
+    const behind = (p: Face) => Boolean(p.version && latest && newerThan(latest, p.version))
     const online = people.filter(p => p.online).length
     const isHost = v.mode === 'host'
     const live = v.connection === 'live'
@@ -3733,6 +3882,7 @@ export const register: Register = (on, options) => {
                       {p.name}
                     </Text>
                     {roles(p) ? <Text dimColor>{roles(p)}</Text> : null}
+                    {behind(p) ? <Text dimColor>{`on ${p.version}, needs an update`}</Text> : null}
                   </Box>
                   <Text dimColor wrap="truncate-end">
                     {p.active

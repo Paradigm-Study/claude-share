@@ -154,9 +154,11 @@ export class Room {
 
   people(now) {
     const online = !this.endedAt && (this.connected('host') || now - this.host.lastSeen < SEAT_TIMEOUT_MS)
+    // Each one's plugin version, as their requests say it: who needs to update.
+    const v = version => (version ? { version } : {})
     return [
-      { id: 'host', name: this.host.name, role: 'host', online },
-      ...[...this.seats.values()].map(s => ({ id: s.id, name: s.name, role: 'guest', online: true })),
+      { id: 'host', name: this.host.name, role: 'host', online, ...v(this.host.version) },
+      ...[...this.seats.values()].map(s => ({ id: s.id, name: s.name, role: 'guest', online: true, ...v(s.version) })),
     ]
   }
 
@@ -211,9 +213,9 @@ export class Room {
     })
   }
 
-  join(name, now) {
+  join(name, now, version = null) {
     const seatToken = token(24)
-    const seat = { id: token(6), name: clampName(name), joinedAt: now, lastSeen: now }
+    const seat = { id: token(6), name: clampName(name), joinedAt: now, lastSeen: now, ...(version ? { version } : {}) }
     this.seats.set(seatToken, seat)
     this.append({ seat: seat.id, name: seat.name, role: 'guest' }, 'join', {}, now)
     this.wake()
@@ -388,12 +390,15 @@ export async function createRoom(req, id, now, origin) {
 // so an app's root-relative paths work); absent, previews are off.
 export async function roomRequest(room, req, rest, now, origin, ctx = {}) {
   const swept = room.sweep(now)
-  const version = room.host.version
+  const versions = versionsOf(room)
   const result = await handleRoom(room, req, rest, now, origin, ctx)
-  // A host on a new plugin version (an update, a restart) is kept, so a room
-  // loaded back from storage says the version that runs now.
-  return swept || room.host.version !== version ? { ...result, changed: true } : result
+  // Someone on a new plugin version (an update, a restart) is kept, so a room
+  // loaded back from storage says the versions that run now, and everyone's
+  // Room hears it.
+  return swept || versionsOf(room) !== versions ? { ...result, changed: true } : result
 }
+
+const versionsOf = room => [room.host.version, ...[...room.seats.values()].map(s => s.version)].join(' ')
 
 async function handleRoom(room, req, rest, now, origin, ctx) {
   const method = req.method
@@ -422,7 +427,7 @@ async function handleRoom(room, req, rest, now, origin, ctx) {
     if (outdated) return { response: outdated }
     if (room.seats.size >= ROOM_SEATS_MAX) return { response: json({ error: `This session is full: ${ROOM_SEATS_MAX} people have joined.` }, 403) }
     const body = await readJson(req)
-    const { token: seatToken, seat } = room.join(body.name, now)
+    const { token: seatToken, seat } = room.join(body.name, now, clientVersion(req))
     return {
       changed: true,
       response: json({
@@ -450,10 +455,15 @@ async function handleRoom(room, req, rest, now, origin, ctx) {
 
   const auth = room.auth(bearerOf(req))
   if (!auth) return { response: json({ error: 'Not a member of this session.' }, 401) }
-  // Which plugin the host runs now (an update and a restart change it), so a
-  // guest's plugin can say what an older one can't show.
-  const version = auth.role === 'host' ? clientVersion(req) : null
-  if (version) room.host.version = version
+  // Which plugin each one runs now (an update and a restart change it): a
+  // guest's plugin says what an older host's can't show, and the Room who
+  // needs to update.
+  const version = clientVersion(req)
+  const seat = auth.role === 'guest' ? room.seats.get(bearerOf(req)) : null
+  const before = auth.role === 'host' ? room.host.version : seat?.version
+  if (version && auth.role === 'host') room.host.version = version
+  else if (version && seat) seat.version = version
+  if (version && before && version !== before) room.wake()
 
   const files = await fileRoutes(room, req, rest, auth, now)
   if (files) return files

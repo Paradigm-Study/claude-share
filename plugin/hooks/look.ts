@@ -54,7 +54,7 @@ export function labelsFor(names: readonly string[]): Map<string, string> {
   return out
 }
 
-export type Face = { name: string; online: boolean; note?: string; active?: boolean; label?: string }
+export type Face = { name: string; online: boolean; note?: string; active?: boolean; label?: string; version?: string }
 
 const DOTS = `<style>
 .dot{fill:${INK}}.ini{fill:#fff}.away .dot{fill:none;stroke:${INK}}.away .ini{fill:${INK}}.more{fill:#8a8f96}

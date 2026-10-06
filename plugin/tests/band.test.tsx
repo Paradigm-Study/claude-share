@@ -36,6 +36,7 @@ function world(
     env?: Record<string, string>
     store?: Record<string, unknown>
     files?: Record<string, string>
+    people?: { id: string; name: string; role: string; online: boolean; version?: string }[]
   } = {},
 ) {
   const asked: string[] = []
@@ -116,7 +117,7 @@ function world(
     versions.push(String((e.init?.headers as Record<string, string> | undefined)?.['x-shared-session-version'] ?? ''))
     if (opts.down && path.endsWith('/events') && method === 'GET') return { value: { status: 503, ok: false, headers: {}, text: '{"error":"unavailable"}' } }
     if (method === 'POST' && path.endsWith('/events') && e.init?.body) posted.push(...(JSON.parse(e.init.body).events ?? []))
-    const people = [
+    const people = opts.people ?? [
       { id: 'host', name: 'Sam', role: 'host', online: !opts.hostAway },
       { id: 'seat1', name: 'scott', role: 'guest', online: true },
       { id: 'seat2', name: 'Alex', role: 'guest', online: true },
@@ -518,6 +519,68 @@ test("a guest saves a page and the files beside it in a folder of its own, and o
   expect(saved).toEqual([`${dir}/index.html`, `${dir}/img/01-start.jpg`])
   expect(asked.spawned.some(s => s.input?.includes(`mkdir -p '${dir}/img'`))).toBe(true)
   expect(opened).toContain(`Claude_Browser.preview_start {"url":"file://${dir}/index.html"}`)
+})
+
+test("Claude asking for the share command itself hears where things stand, never that the plugin isn't running", async ($, on) => {
+  const asked = world(on)
+  const idle = await $.tool.call({ tool: 'Skill', skill: 'shared-session:share-session' } as never)
+  expect(JSON.stringify(idle)).toContain('Sharing starts only when the person chooses it')
+  expect(asked).not.toContain('POST /api/rooms') // Claude never starts it
+  const ui = await $.ui.mount(band('desktop'))
+  await ui.press({ key: 'share' })
+  const shared = await $.tool.call({ tool: 'Skill', skill: 'shared-session:share-session' } as never)
+  expect(JSON.stringify(shared)).toContain('already shared (http://localhost:8787/s/room0000000000000002)')
+})
+
+test('a page opened again goes to the room again with its files, even one published before, and Claude hears it went', async ($, on) => {
+  const ART = 'https://claude.ai/artifact/8nAyoRXM6doAg4ZND1fZ26'
+  const history = [
+    { role: 'user', content: 'Make the asset pack' },
+    { role: 'assistant', content: [{ type: 'tool_use', id: 'toolu_pub', name: 'Artifact', input: { file_path: '/tmp/demo/mkt/index.html', root: 'mkt', files: { 'img/01.jpg': 'img/01.jpg' } } }] },
+    { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_pub', content: `Published /tmp/demo/mkt/index.html at ${ART} (Version 1)` }] },
+  ]
+  const asked = world(on, { history })
+  on('tool.call', { tool: 'Artifact' }, () => ({ result: `Opened the Artifact at ${ART} for the user.` }) as never)
+  const ui = await $.ui.mount(band('desktop'))
+  await ui.press({ key: 'share' })
+  await ui.press({ key: 'share-new' })
+  const opened = await $.tool.call({ tool: 'Artifact', action: 'open', url: ART } as never)
+  await asked.clock.advance(200)
+  const page = asked.posted.filter(e => e.type === 'artifact').at(-1)
+  expect(page?.body.kind).toBe('page')
+  expect((page?.body.files as { path?: string }[]).map(f => f.path)).toEqual(['index.html', 'img/01.jpg'])
+  expect(JSON.stringify(opened)).toContain("They don't need the claude.ai link")
+})
+
+test('the update command a guest types runs on their computer, never at the host', async ($, on) => {
+  const asked = world(on)
+  await $.prompt.submit({ text: LINK, origin: { kind: 'composer' }, wait: false })
+  await asked.clock.advance(10)
+  await $.prompt.submit({ text: 'claude plugin marketplace update claude-share && claude plugin update shared-session@claude-share', origin: { kind: 'composer' }, wait: false })
+  await asked.clock.advance(100)
+  expect(asked.posted.some(e => e.type === 'prompt')).toBe(false)
+  const run = asked.spawned.find(s => s.input?.includes('plugin update shared-session@claude-share'))
+  expect(run?.input).toContain("export HOME='/home/scott'")
+  expect(asked.logged.some(l => /up to date here|is installed here/.test(l))).toBe(true)
+})
+
+test('the Room says who runs an older plugin, and the host hears it once with the command', async ($, on) => {
+  const asked = world(on, {
+    people: [
+      { id: 'host', name: 'scott', role: 'host', online: true, version: '0.7.1' },
+      { id: 'seat2', name: 'Alex', role: 'guest', online: true, version: '0.6.0' },
+      { id: 'seat3', name: 'Kim', role: 'guest', online: true, version: '0.7.1' },
+    ],
+  })
+  const ui = await $.ui.mount(band('desktop'))
+  await ui.press({ key: 'share' })
+  await asked.clock.advance(20_000)
+  const pane = await $.ui.mount({ plugin: 'shared-session', surface: 'desktop', component: 'Pane', requestId: 'shared-room', props: PANE })
+  expect(await pane.find({ type: 'Text', text: 'on 0.6.0, needs an update' })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: 'on 0.7.1, needs an update' })).toBeUndefined()
+  const said = asked.logged.filter(l => l.startsWith('Alex runs Shared Sessions 0.6.0'))
+  expect(said.length).toBe(1)
+  expect(said[0]).toContain('claude plugin marketplace update claude-share')
 })
 
 test('a guest can choose to be asked before what the host shows opens', async ($, on) => {
