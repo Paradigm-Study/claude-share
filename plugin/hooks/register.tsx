@@ -21,7 +21,7 @@ import type { Elements, EngineInterface, HookStream, ProcessSpawnChunk, ProcessS
 import type { ShareActivity, ShareChat, ShareFileMeta, ShareMode, SharePerson, SharePolicy, ShareRoom, ShareShown, ShareWorking } from '../types'
 import { ACCENT, BAD, GOOD, ROSE, ago, avatarSvg, bannerSvg, labelsFor, stackSvg, toolGlyph } from './look'
 import type { Face } from './look'
-import { delivered, rowsFromMessage, rowsToMarkdown, splitSpeaker, summarizeTool } from './rows'
+import { attachmentsOf, delivered, rowsFromMessage, rowsToMarkdown, splitSpeaker, summarizeTool } from './rows'
 import type { Media, RoomImage, Row } from './rows'
 import { SERVER_URL } from './server'
 import { readsInside } from './paths'
@@ -499,7 +499,10 @@ const feedWaiters = new Set<() => void>()
 let roomOpen = false
 
 // Host: guest prompts submitted and not yet started, oldest first.
-const pendingGuestPrompts: { who: string; framed: string; text: string; pid: string }[] = []
+const pendingGuestPrompts: { who: string; framed: string; text: string; pid: string; attached?: string[] }[] = []
+// Guest: a prompt with attachments, held until its stored message hands over
+// their bytes (a prompt's hook sees only their kinds), then sent with them.
+let heldPrompt: { text: string; pid: string; names: string[]; timer: Timer } | null = null
 // Host: the approval question on screen, so its dialog can show a preview.
 let pendingAsk: { who: string; preview: string; descriptions: Record<string, string> } | null = null
 // The row-above-the-prompt answer to a teammate's call, when the dialog didn't show.
@@ -1111,7 +1114,7 @@ async function receive($: $, mode: ShareMode, room: ShareRoom, page: EventsPage)
     switch (event.type) {
       case 'prompt':
         if (mode === 'host' && typeof body.text === 'string') {
-          await acceptPrompt($, event.from.name, body.text, typeof body.pid === 'string' ? body.pid : '')
+          await acceptPrompt($, event.from.name, body.text, typeof body.pid === 'string' ? body.pid : '', Array.isArray(body.attachments) ? (body.attachments as ShareFileMeta[]) : [])
         }
         break
       case 'stop':
@@ -1724,15 +1727,58 @@ async function setPolicy($: $, change: Partial<SharePolicy>) {
   send($, 'policy', policy)
 }
 
-async function acceptPrompt($: $, who: string, text: string, pid: string) {
+async function acceptPrompt($: $, who: string, text: string, pid: string, attachments: ShareFileMeta[] = []) {
   if ((await read($, policyA)).prompts === 'watch') {
     send($, 'declined', { pid, who, reason: 'This session is watch-only right now. Chat in the Room panel.' })
     return
   }
-  const framed = `${who}: ${text}`
-  pendingGuestPrompts.push({ who, framed, text, pid })
+  // What they attached, saved in the project, each named in the prompt with
+  // how to see it: a plugin's prompt carries words alone (no pictures, and its
+  // own hooks can't add context to it), and Read shows images and PDFs.
+  const attached = await saveAttachments($, who, attachments)
+  const cwd = await $.session.cwd()
+  const marks = attached.map(p => `📎 ${p.startsWith(`${cwd}/`) ? p.slice(cwd.length + 1) : p} (attached by ${who}; open it with the Read tool to see it)`).join('\n')
+  const framed = `${who}: ${text}${marks ? `${text ? '\n\n' : ''}${marks}` : ''}`
+  pendingGuestPrompts.push({ who, framed, text: framed.slice(who.length + 2), pid, attached })
   // Runs once the session is idle, after any turn already running.
   submitLater($, framed)
+}
+
+// Host: a guest's attachments into .shared-session/<guest>/ in this session's
+// folder, each under its own name.
+async function saveAttachments($: $, who: string, files: ShareFileMeta[]): Promise<string[]> {
+  const room = await read($, roomA)
+  if (!room || !files.length) return []
+  const cwd = await $.session.cwd()
+  const dir = `${cwd}/.shared-session/${who.replace(/[^\w.-]+/g, '-').slice(0, 40) || 'guest'}`
+  await sh($, `mkdir -p ${sq(dir)}\n`)
+  const out: string[] = []
+  for (const meta of files.slice(0, 10)) {
+    const name = `${meta.id.slice(0, 6)}-${(meta.name || 'attachment').replace(/[^\w.\- ()]+/g, '-').replace(/^\.+/, '') || 'attachment'}`
+    const path = await downloadFile($, room, meta, `${dir}/${name}`)
+    if (path) out.push(path)
+  }
+  return out
+}
+
+// Guest: a held prompt goes out, with what came through of its attachments.
+async function releaseHeld($: $, media: Media[]) {
+  const held = heldPrompt
+  if (!held) return
+  heldPrompt = null
+  held.timer.cancel()
+  const room = await read($, roomA)
+  const attachments: ShareFileMeta[] = []
+  for (const [i, m] of media.slice(0, 10).entries()) {
+    if (!room || m.data.length * 0.75 > IMAGE_MAX) continue
+    const ext = m.type.split('/')[1]?.replace('jpeg', 'jpg').replace(/[^\w]/g, '') || 'bin'
+    const name = held.names[i] || `attachment-${i + 1}.${ext}`
+    const meta = await uploadImage($, room, m, name)
+    if (meta) attachments.push(meta)
+  }
+  const missing = Math.max(held.names.length, media.length) - attachments.length
+  if (missing > 0) $.ui.log(`${missing === 1 ? 'An attachment' : `${missing} attachments`} didn't go with this message (over 8 MB, unreadable, or the room is full); the words did.`)
+  send($, 'prompt', { text: held.text, pid: held.pid, ...(attachments.length ? { attachments } : {}) })
 }
 
 async function stopTurn($: $, who: string) {
@@ -3123,7 +3169,7 @@ export const register: Register = (on, options) => {
       void updateHere($)
       return next(e)
     }
-    if (mode === 'guest' && typed && !typed.startsWith('/')) {
+    if (mode === 'guest' && (typed || e.attachments?.length) && !typed.startsWith('/')) {
       const room = await read($, roomA)
       if ((await read($, policyA)).prompts === 'watch') {
         answerWith({
@@ -3146,8 +3192,12 @@ export const register: Register = (on, options) => {
       const list = ridesByText.get(typed) ?? []
       list.push({ kind: 'own', pid, fromSeq: room?.seq ?? 0 })
       ridesByText.set(typed, list)
-      // Only what the person typed leaves this machine, never the host app's context.
-      send($, 'prompt', { text: typed, pid })
+      // Only what the person typed (and attached) leaves this machine, never
+      // the host app's context. Attachments' bytes come with the stored message.
+      if (e.attachments?.length) {
+        if (heldPrompt) await releaseHeld($, [])
+        heldPrompt = { text: typed, pid, names: e.attachments.map(a => a.filename ?? ''), timer: $.clock.after(8_000, () => void releaseHeld($, [])) }
+      } else send($, 'prompt', { text: typed, pid })
     }
     lastActivity = await $.clock.now()
     return next(e)
@@ -3468,6 +3518,10 @@ export const register: Register = (on, options) => {
   // Host: every row the conversation keeps goes to the room.
   on('session.append', async ($, e, next) => {
     const stored = await next(e)
+    if (e.agentId === undefined && heldPrompt && e.door === 'prompt' && PERSON.has(e.origin.kind) && (await read($, modeA)) === 'guest') {
+      void releaseHeld($, attachmentsOf((stored.message ?? e.message).content))
+      return stored
+    }
     if (e.agentId !== undefined || (await read($, modeA)) !== 'host') return stored
     const room = await read($, roomA)
     const host = room?.host ?? 'host'

@@ -92,7 +92,11 @@ function world(
   on('session.cwd', () => ({ value: '/tmp/demo' }))
   on('session.messages', () => ({ value: (opts.history ?? []) as never }))
   on('process.run', () => ({ value: { exitCode: 1, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }))
-  on('prompt.submit', ($, e) => ({ text: e.text }))
+  const submitted: { text: string; context?: readonly string[] }[] = []
+  on('prompt.submit', ($, e) => {
+    submitted.push({ text: e.text, context: e.context })
+    return { text: e.text }
+  })
   // The app's own drawing beneath the plugin: just the labels it was handed.
   on('ui.render', { component: 'SessionMode' }, ($, e) => {
     const { Text } = $.ui.resolve(e)
@@ -134,7 +138,7 @@ function world(
     }
     return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify(body) } }
   })
-  return Object.assign(asked, { clock, logged, spawned, posted, versions, written, urls })
+  return Object.assign(asked, { clock, logged, spawned, posted, versions, written, urls, submitted })
 }
 
 test('a session that is not shared shows one Share button', async ($, on) => {
@@ -581,6 +585,41 @@ test('the Room says who runs an older plugin, and the host hears it once with th
   const said = asked.logged.filter(l => l.startsWith('Alex runs Shared Sessions 0.6.0'))
   expect(said.length).toBe(1)
   expect(said[0]).toContain('claude plugin marketplace update claude-share')
+})
+
+test("a guest's attachment reaches the host's Claude: saved in the project and named in the prompt with how to see it", async ($, on) => {
+  const people = [
+    { id: 'host', name: 'scott', role: 'host', online: true },
+    { id: 'seat2', name: 'Alex', role: 'guest', online: true },
+  ]
+  const prompt = {
+    seq: 2,
+    type: 'prompt',
+    ts: 900,
+    from: { seat: 'seat2', name: 'Alex', role: 'guest' },
+    body: { text: 'What is this?', pid: 'p1', attachments: [{ id: 'd'.repeat(64), name: 'shot.png', type: 'image/png', size: 68 }] },
+  }
+  const asked = world(on, { stream: [{ seq: 2, events: [prompt], people, ended: false, title: 'demo' }] })
+  const ui = await $.ui.mount(band('desktop'))
+  await ui.press({ key: 'share' })
+  await asked.clock.advance(2_000)
+  const saved = `/tmp/demo/.shared-session/Alex/${'d'.repeat(6)}-shot.png`
+  expect(asked.spawned.some(s => s.input?.includes(`-o '${saved}'`))).toBe(true)
+  const sent = asked.submitted.find(p => p.text.startsWith('Alex: What is this?'))
+  expect(sent?.text).toBe(`Alex: What is this?\n\n📎 .shared-session/Alex/${'d'.repeat(6)}-shot.png (attached by Alex; open it with the Read tool to see it)`)
+})
+
+test('a guest message whose attachments never come through still goes, and says so', async ($, on) => {
+  const asked = world(on)
+  await $.prompt.submit({ text: LINK, origin: { kind: 'composer' }, wait: false })
+  await asked.clock.advance(10)
+  await $.prompt.submit({ text: 'What is this?', attachments: [{ type: 'image', mediaType: 'image/png' }], origin: { kind: 'composer' }, wait: false } as never)
+  await asked.clock.advance(100)
+  expect(asked.posted.some(e => e.type === 'prompt')).toBe(false) // held for its attachment
+  await asked.clock.advance(9_000)
+  const sent = asked.posted.find(e => e.type === 'prompt')
+  expect(sent?.body.text).toBe('What is this?')
+  expect(asked.logged.some(l => l.startsWith("An attachment didn't go with this message"))).toBe(true)
 })
 
 test('a guest can choose to be asked before what the host shows opens', async ($, on) => {

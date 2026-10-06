@@ -29,6 +29,17 @@ export type RoomImage = { id: string; type: string; size: number }
 /** A picture's bytes, base64, and its type. */
 export type Media = { data: string; type: string }
 
+/** What a prompt carries besides its words: base64 images and documents (a PDF). */
+export function attachmentsOf(content: unknown): Media[] {
+  const out: Media[] = []
+  for (const b of blocksOf(content) as (Block & { source?: { type?: unknown; media_type?: unknown; data?: unknown } })[]) {
+    if ((b.type === 'image' || b.type === 'document') && b.source?.type === 'base64' && typeof b.source.data === 'string' && typeof b.source.media_type === 'string') {
+      out.push({ data: b.source.data, type: b.source.media_type })
+    }
+  }
+  return out
+}
+
 /** The pictures in a tool result: the Messages API's base64 image blocks (and MCP's). */
 export function imagesOf(content: unknown): Media[] {
   const out: Media[] = []

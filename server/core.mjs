@@ -588,7 +588,8 @@ function streamResponse(room, auth, after) {
 }
 
 // ---------------------------------------------------------------------------
-// Files: POST files (host; the bytes, x-file-name) → { id, name, type, size };
+// Files: POST files (the host's shown files and pictures, a guest's prompt
+// attachments; the bytes, x-file-name) → { id, name, type, size };
 // GET files/<id> (any member) → the bytes. The id is the bytes' SHA-256.
 
 async function sha256(bytes) {
@@ -606,7 +607,6 @@ const fileName = raw => {
 
 async function fileRoutes(room, req, rest, auth, now) {
   if (rest === 'files' && req.method === 'POST') {
-    if (auth.role !== 'host') return { response: json({ error: 'Only the host shares files.' }, 403) }
     if (room.endedAt) return { response: json({ error: 'This session is no longer shared.' }, 410) }
     const bytes = new Uint8Array(await req.arrayBuffer())
     if (bytes.length > FILE_MAX) return { response: json({ error: `Files are limited to ${FILE_MAX / 1024 / 1024} MB.` }, 413) }
@@ -766,7 +766,7 @@ section.more { padding:0 0 72px; }
   <section class="more prose" id="privacy">
     <h2>What this server sees and keeps</h2>
     <ul>
-      <li><b>What passes through:</b> while a session is shared, its prompts, Claude's replies, the tools it runs with the first lines of their results and the pictures in them (screenshots, images it opens), the side chat, and any files or local previews the host's Claude shows. Sharing a session that already has history asks first whether to include it.</li>
+      <li><b>What passes through:</b> while a session is shared, its prompts and the files people attach to them, Claude's replies, the tools it runs with the first lines of their results and the pictures in them (screenshots, images it opens), the side chat, and any files or local previews the host's Claude shows. Sharing a session that already has history asks first whether to include it.</li>
       <li><b>How long:</b> a room and everything in it is deleted 24 hours after the host stops sharing or was last seen. There are no accounts, no analytics, and no request logs kept.</li>
       <li><b>Who can see it:</b> anyone with the room's link. Links are long and random; forward one only to people you'd hand the session to. Content is encrypted in transit, not end to end: the server can read what passes through it.</li>
       <li><b>What runs where:</b> a teammate's prompt runs on the host's machine. Reads inside the host's project run without asking; everything else asks the host first, by default.</li>

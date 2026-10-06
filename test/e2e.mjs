@@ -395,6 +395,19 @@ try {
     "the update command a guest types runs on the guest's computer, never at the host",
     /Updating Shared Sessions on this computer/.test(guest.text) && !transcriptOf(host).includes('claude plugin marketplace update'),
   )
+  // A picture a guest attaches to a prompt reaches the host's Claude: saved in
+  // the host's project and opened there, and the answer comes back.
+  const attachAt = host.lines.length
+  guest.type([...desktopPrompt('What color is the picture I attached? Reply with just the color, one word.'), { type: 'image', source: { type: 'base64', media_type: 'image/png', data: SWATCH_PNG } }])
+  const sawIt = () => host.lines.slice(attachAt).some(l => l.type === 'result' && /red/i.test(l.result ?? ''))
+  await until("host's Claude answered about the guest's picture", sawIt, 120_000).catch(() => null)
+  const keptAt = join(hostDir, '.shared-session', 'Alex')
+  check(
+    "a picture a guest attaches reaches the host's Claude, saved in the host's project",
+    sawIt() && existsSync(keptAt) && readdirSync(keptAt).some(f => f.endsWith('.png')),
+    existsSync(keptAt) ? readdirSync(keptAt).join(',') : 'nothing saved',
+  )
+
   // Everyone's plugin version reaches the room, so the Room says who's behind.
   const versions = (await roomInfo(id)).people ?? []
   check("the room knows each person's plugin version", versions.length >= 2 && versions.every(p => /^\d+\.\d+\.\d+$/.test(p.version ?? '')), JSON.stringify(versions.map(p => [p.name, p.version])))
