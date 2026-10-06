@@ -37,6 +37,8 @@ function world(
     store?: Record<string, unknown>
     files?: Record<string, string>
     people?: { id: string; name: string; role: string; online: boolean; version?: string }[]
+    /** Transcript files by path: the shell's ls, cat/head | tac | grep, and grep -l over them. */
+    transcripts?: Record<string, string>
   } = {},
 ) {
   const asked: string[] = []
@@ -44,6 +46,32 @@ function world(
   on('process.spawn', async function* ($, e) {
     spawned.push({ argv: e.argv, input: e.input })
     // Shell work: an upload answers with the file's id; anything else succeeds.
+    if (e.argv[0] === '/bin/sh' && opts.transcripts) {
+      const files = opts.transcripts
+      const input = e.input ?? ''
+      const ls = /projects\/\*\/([\w-]+)\.jsonl/.exec(input)
+      const read = /^(?:cat '([^']+)'|head -n (\d+) '([^']+)') \|/.exec(input)
+      const link = /grep -l -F '"uuid":"([^"]+)"' '[^']+'\/\*\.jsonl 2>\/dev\/null \| grep -v -F '([^']+)'/.exec(input)
+      if (input.startsWith('ls -1') && ls) {
+        const path = Object.keys(files).find(f => f.endsWith(`/${ls[1]}.jsonl`))
+        if (path) yield { stream: 'stdout' as const, text: `${path}\n` }
+        return { value: { code: 0, signal: null } }
+      }
+      if (read) {
+        const path = read[1] ?? read[3]!
+        const lines = (files[path] ?? '').split('\n').filter(Boolean)
+        const upTo = read[2] ? Number(read[2]) : lines.length
+        const out = lines.slice(0, upTo).reverse().filter(l => /"type":"(user|assistant)"/.test(l))
+        if (out.length) yield { stream: 'stdout' as const, text: `${out.join('\n')}\n` }
+        return { value: { code: 0, signal: null } }
+      }
+      if (link) {
+        const [, uuid, not] = link
+        const other = Object.keys(files).find(f => f !== not && files[f]!.includes(`"uuid":"${uuid}"`))
+        if (other) yield { stream: 'stdout' as const, text: `${files[other]!.split('\n').findIndex(l => l.includes(`"uuid":"${uuid}"`)) + 1}\n${other}` }
+        return { value: { code: 0, signal: null } }
+      }
+    }
     if (e.argv[0] === '/bin/sh') {
       if (e.input?.includes('/files"') && e.input.includes('--data-binary')) {
         const picture = e.input.includes('content-type: image/png')
@@ -479,6 +507,36 @@ test('a guest sees what the host showed in the Room, with Open', async ($, on) =
   const pane = await $.ui.mount({ plugin: 'shared-session', surface: 'desktop', component: 'Pane', requestId: 'shared-room', props: PANE })
   expect(await pane.find({ type: 'Text', text: /chart\.html/ })).toBeDefined()
   expect(await pane.find({ key: 'open-seq:2' })).toBeDefined()
+})
+
+test('a session reopened after a compaction shares its whole history, from the file before too, and asks first', async ($, on) => {
+  const row = (o: Record<string, unknown>) => JSON.stringify(o)
+  const old = '/home/scott/.claude/projects/-tmp-demo/session-a-0001.jsonl'
+  const now = '/home/scott/.claude/projects/-tmp-demo/session-b-0002.jsonl'
+  const asked = world(on, {
+    transcripts: {
+      [old]: [
+        row({ type: 'user', uuid: 'a1', parentUuid: null, message: { role: 'user', content: 'First prompt, in the old file' } }),
+        row({ type: 'assistant', uuid: 'a2', parentUuid: 'a1', message: { role: 'assistant', content: [{ type: 'text', text: 'An answer from before the compaction' }] } }),
+        row({ type: 'attachment', uuid: 'x1', parentUuid: 'a2' }),
+        row({ type: 'assistant', uuid: 'a3', parentUuid: 'x1', message: { role: 'assistant', content: [{ type: 'text', text: 'Copied into the new file too' }] } }),
+      ].join('\n'),
+      [now]: [
+        row({ type: 'attachment', uuid: 'x1', parentUuid: 'a2' }),
+        row({ type: 'user', uuid: 'b1', parentUuid: 'x1', isCompactSummary: true, message: { role: 'user', content: 'This session is being continued…' } }),
+        row({ type: 'assistant', uuid: 'b2', parentUuid: 'b1', message: { role: 'assistant', content: [{ type: 'text', text: 'Copied into the new file too' }] } }),
+        row({ type: 'user', uuid: 'b3', parentUuid: 'b2', message: { role: 'user', content: 'A prompt after reopening' } }),
+      ].join('\n'),
+    },
+  })
+  on('session.id', () => ({ value: 'session-b-0002' }))
+  const ui = await $.ui.mount(band('desktop'))
+  await ui.press({ key: 'share' })
+  expect(await ui.find({ type: 'Text', text: 'Share this session?' })).toBeDefined() // it has prompts: asks first
+  await ui.press({ key: 'share-all' })
+  await asked.clock.advance(100)
+  const texts = asked.posted.filter(e => e.type === 'row').map(e => e.body.text)
+  expect(texts).toEqual(['First prompt, in the old file', 'An answer from before the compaction', 'Copied into the new file too', 'A prompt after reopening'])
 })
 
 test("a page the host's Claude publishes goes to the room with the pictures beside it, each at its place", async ($, on) => {

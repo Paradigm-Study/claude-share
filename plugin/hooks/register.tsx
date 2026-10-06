@@ -1358,6 +1358,12 @@ async function earlierPrompts($: $): Promise<number> {
 // session would share only its last stretch; the transcript file keeps every
 // message (the summaries and subagents' messages left out). The newest
 // HISTORY_MESSAGES of it; without the file, what Claude holds.
+//
+// Read newest line first through a child (a plugin's own file read refuses
+// anything over 4 MiB, and a long session's transcript is many times that),
+// stopping once there's enough. A session reopened after a compaction goes
+// on in a new file that starts at the summary: its oldest message's parent
+// is a row of the file before, read on from there back.
 const HISTORY_MESSAGES = 6000
 type HistoryMessage = { role?: string; content: unknown }
 async function sessionHistory($: $): Promise<HistoryMessage[]> {
@@ -1365,27 +1371,80 @@ async function sessionHistory($: $): Promise<HistoryMessage[]> {
     const id = await $.session.id()
     if (/^[\w-]{8,80}$/.test(id)) {
       const found = await sh($, `ls -1 "\${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/projects/*/${id}.jsonl 2>/dev/null | head -1\n`)
-      const path = found.out.trim()
-      if (path) {
-        const out: { role: string; content: unknown[] }[] = []
-        for (const line of (await $.fs.read(path)).split('\n')) {
-          if (!line) continue
-          let d: { type?: unknown; isSidechain?: unknown; isCompactSummary?: unknown; message?: { role?: unknown; content?: unknown } }
-          try {
-            d = JSON.parse(line)
-          } catch {
-            continue
-          }
-          if ((d.type !== 'user' && d.type !== 'assistant') || d.isSidechain || d.isCompactSummary || !d.message) continue
-          const content = typeof d.message.content === 'string' ? [{ type: 'text', text: d.message.content }] : d.message.content
-          if (Array.isArray(content)) out.push({ role: String(d.message.role ?? d.type), content })
-        }
-        if (out.length) return out.slice(-HISTORY_MESSAGES)
+      let path = found.out.trim()
+      const newest: HistoryMessage[] = []
+      const keep = { pictures: 0 }
+      let upTo = 0 // read the file's lines before this one only (0: all of it)
+      const read = new Set<string>()
+      while (path && !read.has(path) && newest.length < HISTORY_MESSAGES) {
+        read.add(path)
+        const parent = await readBackward($, path, upTo, newest, keep)
+        if (!parent || newest.length >= HISTORY_MESSAGES) break
+        // The row it goes on from, in another file of the same project.
+        const dir = path.slice(0, path.lastIndexOf('/'))
+        const at = await sh(
+          $,
+          `f=$(grep -l -F ${sq(`"uuid":"${parent}"`)} ${sq(dir)}/*.jsonl 2>/dev/null | grep -v -F ${sq(path)} | head -1)\n[ -n "$f" ] && printf '%s\\n%s' "$(grep -n -F ${sq(`"uuid":"${parent}"`)} "$f" | head -1 | cut -d: -f1)" "$f"\n`,
+        )
+        const [line, next] = at.out.trim().split('\n')
+        upTo = Number(line) || 0
+        path = upTo && next ? next : ''
       }
+      if (newest.length) return newest.reverse()
     }
   } catch {}
   const held = await $.session.messages({ as: 'api' }).catch(() => [])
   return Array.isArray(held) ? (held as HistoryMessage[]) : []
+}
+
+// One transcript, newest line first (its lines up to `upTo` only, when given),
+// each conversation message into `out` until it holds HISTORY_MESSAGES; the
+// pictures of all but the newest HISTORY_IMAGES results are left out as it
+// goes. Returns the parent of the oldest message it reached, when it read
+// back to the file's start without filling up.
+async function readBackward($: $, path: string, upTo: number, out: HistoryMessage[], keep: { pictures: number }): Promise<string | null> {
+  const source = upTo > 0 ? `head -n ${upTo} ${sq(path)}` : `cat ${sq(path)}`
+  const child = $.process.spawn({
+    argv: ['/bin/sh', '-s'],
+    input: `${source} | { if command -v tac >/dev/null 2>&1; then tac; else tail -r; fi; } | grep -E '"type":"(user|assistant)"'\n`,
+  })
+  let parent: string | null = null
+  // false: enough read, stop.
+  const take = (line: string): boolean => {
+    let d: { type?: unknown; isSidechain?: unknown; isCompactSummary?: unknown; parentUuid?: unknown; message?: { role?: unknown; content?: unknown } }
+    try {
+      d = JSON.parse(line)
+    } catch {
+      return true
+    }
+    if (d.type !== 'user' && d.type !== 'assistant') return true
+    parent = typeof d.parentUuid === 'string' ? d.parentUuid : null
+    if (d.isSidechain || d.isCompactSummary || !d.message) return true
+    let content = typeof d.message.content === 'string' ? [{ type: 'text', text: d.message.content }] : d.message.content
+    if (!Array.isArray(content)) return true
+    // Pictures in results past the newest few: left out (a history carries those only).
+    content = (content as { type?: unknown; content?: unknown }[]).map(b => {
+      if (b?.type !== 'tool_result' || !Array.isArray(b.content) || !b.content.some((x: { type?: unknown }) => x?.type === 'image')) return b
+      return keep.pictures++ < HISTORY_IMAGES ? b : { ...b, content: (b.content as { type?: unknown }[]).filter(x => x?.type !== 'image') }
+    })
+    out.push({ role: String(d.message.role ?? d.type), content })
+    return out.length < HISTORY_MESSAGES
+  }
+  let buf = ''
+  try {
+    for await (const chunk of child) {
+      if (chunk.stream !== 'stdout') continue
+      buf += chunk.text
+      let i: number
+      while ((i = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, i)
+        buf = buf.slice(i + 1)
+        if (line && !take(line)) return null // full: leaving the loop ends the child
+      }
+    }
+    if (buf && !take(buf)) return null
+  } catch {}
+  return parent
 }
 
 // `history: false` shares only what happens from now on: nothing earlier goes
