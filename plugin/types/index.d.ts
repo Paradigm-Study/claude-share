@@ -55,7 +55,7 @@ export type SharePolicy = {
 }
 
 /** A file as the room keeps it: its bytes are at files/<id>. */
-export type ShareFileMeta = { id: string; name: string; type: string; size: number }
+export type ShareFileMeta = { id: string; name: string; type: string; size: number; /** Where a page's file sits beside it (`img/01.jpg`). */ path?: string }
 
 /**
  * Something the host's Claude showed: a file in the side panel or the Files

@@ -476,6 +476,50 @@ test('a guest sees what the host showed in the Room, with Open', async ($, on) =
   expect(await pane.find({ key: 'open-seq:2' })).toBeDefined()
 })
 
+test("a page the host's Claude publishes goes to the room with the pictures beside it, each at its place", async ($, on) => {
+  const asked = world(on)
+  on('tool.call', { tool: 'Artifact' }, () => ({ result: 'Published https://claude.ai/artifact/x' }) as never)
+  const ui = await $.ui.mount(band('desktop'))
+  await ui.press({ key: 'share' })
+  await $.tool.call({ tool: 'Artifact', file_path: '/tmp/demo/mkt/index.html', root: 'mkt', files: { 'img/01-start.jpg': 'img/01-start.jpg', '../escape.txt': 'x.txt' } } as never)
+  await asked.clock.advance(200)
+  const uploaded = asked.spawned.filter(s => s.argv[0] === '/bin/sh' && s.input?.includes('/files"')).map(s => /--data-binary @'([^']+)'/.exec(s.input ?? '')?.[1])
+  expect(uploaded).toEqual(['/tmp/demo/mkt/index.html', '/tmp/demo/mkt/img/01-start.jpg', '/tmp/demo/mkt/x.txt'])
+  const page = asked.posted.find(e => e.type === 'artifact')
+  expect(page?.body.kind).toBe('page')
+  // Each file's place beside the page; never outside it.
+  expect((page?.body.files as { path?: string }[]).map(f => f.path)).toEqual(['index.html', 'img/01-start.jpg', 'escape.txt'])
+})
+
+test("a guest saves a page and the files beside it in a folder of its own, and opens it from the Room", async ($, on) => {
+  const people = [
+    { id: 'host', name: 'Sam', role: 'host', online: true },
+    { id: 'seat1', name: 'scott', role: 'guest', online: true },
+  ]
+  const files = [
+    { id: 'b'.repeat(64), name: 'index.html', type: 'text/html', size: 42, path: 'index.html' },
+    { id: 'c'.repeat(64), name: '01-start.jpg', type: 'image/jpeg', size: 99, path: 'img/01-start.jpg' },
+  ]
+  const shown = { seq: 2, type: 'artifact', ts: 900, from: { seat: 'host', name: 'Sam', role: 'host' }, body: { kind: 'page', files } }
+  const asked = world(on, { stream: [{ seq: 2, events: [shown], people, ended: false, title: 'demo' }] })
+  const opened: string[] = []
+  on('mcp.call', ($, e) => {
+    opened.push(`${e.server}.${e.tool} ${JSON.stringify(e.args)}`)
+    return { value: { content: [{ type: 'text', text: 'ok' }], isError: false } } as never
+  })
+  await $.prompt.submit({ text: LINK, origin: { kind: 'composer' }, wait: false })
+  await asked.clock.advance(10)
+  const pane = await $.ui.mount({ plugin: 'shared-session', surface: 'desktop', component: 'Pane', requestId: 'shared-room', props: PANE })
+  expect(await pane.find({ type: 'Text', text: /index\.html \(a page and 1 file\)/ })).toBeDefined()
+  await pane.press({ key: 'open-seq:2' })
+  await asked.clock.advance(200)
+  const dir = `/tmp/demo/.shared-session/Sam/page-${'b'.repeat(8)}`
+  const saved = asked.spawned.map(s => /-o '([^']+)'/.exec(s.input ?? '')?.[1]).filter(Boolean)
+  expect(saved).toEqual([`${dir}/index.html`, `${dir}/img/01-start.jpg`])
+  expect(asked.spawned.some(s => s.input?.includes(`mkdir -p '${dir}/img'`))).toBe(true)
+  expect(opened).toContain(`Claude_Browser.preview_start {"url":"file://${dir}/index.html"}`)
+})
+
 test('a guest can choose to be asked before what the host shows opens', async ($, on) => {
   const asked = world(on, { stream: [{ seq: 1, events: [], people: [{ id: 'host', name: 'Sam', role: 'host', online: true }], ended: false, title: 'demo' }] })
   await $.prompt.submit({ text: LINK, origin: { kind: 'composer' }, wait: false })

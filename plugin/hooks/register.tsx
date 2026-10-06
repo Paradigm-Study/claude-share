@@ -1015,7 +1015,9 @@ function shownOf(event: ServerEvent): ShareShown | null {
         ? `a widget${typeof body.title === 'string' ? `: ${body.title.replaceAll('_', ' ')}` : ''}`
         : kind === 'link'
           ? String(body.url ?? 'a page')
-          : (files ?? []).map(f => f.name).join(', ') || 'a file'
+          : files?.some(f => f.path) && files.length > 1
+            ? `${files[0]!.name} (a page and ${files.length - 1} ${files.length === 2 ? 'file' : 'files'})`
+            : (files ?? []).map(f => f.name).join(', ') || 'a file'
   return {
     key: kind === 'preview' && typeof body.pid === 'string' ? `preview:${body.pid}` : `seq:${event.seq}`,
     kind,
@@ -1897,14 +1899,14 @@ async function uploadText($: $, room: ShareRoom, text: string, name: string): Pr
 
 // Guest: a room file into .shared-session/<host>/ in this session's folder
 // (inside the project, so the browser pane runs its pages live), kept out of git.
-async function downloadFile($: $, room: ShareRoom, meta: ShareFileMeta): Promise<string | null> {
+async function downloadFile($: $, room: ShareRoom, meta: ShareFileMeta, into?: string): Promise<string | null> {
   const cwd = await $.session.cwd()
-  const dir = `${cwd}/.shared-session/${room.host.replace(/[^\w.-]+/g, '-').slice(0, 40) || 'host'}`
+  const dir = into ? into.slice(0, into.lastIndexOf('/')) : `${cwd}/.shared-session/${room.host.replace(/[^\w.-]+/g, '-').slice(0, 40) || 'host'}`
   const clean = meta.name.replace(/[^\w.\- ()]+/g, '-').replace(/^\.+/, '') || 'file'
   const owner = savedNames.get(`${dir}/${clean}`)
   const dot = clean.lastIndexOf('.')
   const name = !owner || owner === meta.id ? clean : dot > 0 ? `${clean.slice(0, dot)}-${meta.id.slice(0, 6)}${clean.slice(dot)}` : `${clean}-${meta.id.slice(0, 6)}`
-  const path = `${dir}/${name}`
+  const path = into ?? `${dir}/${name}`
   const config = roomConfig(room, `files/${meta.id}`)
   const tag = fence(config)
   const exclude = excluded
@@ -1915,6 +1917,30 @@ async function downloadFile($: $, room: ShareRoom, meta: ShareFileMeta): Promise
   excluded = true
   savedNames.set(path, meta.id)
   return path
+}
+
+// Guest: what was shown, saved here. A page with files beside it (an Artifact's
+// pictures) goes in a folder of its own, each file at its place, the page
+// first, so it opens whole.
+async function downloadShown($: $, room: ShareRoom, files: ShareFileMeta[]): Promise<string[]> {
+  const paths: string[] = []
+  if (!files.some(f => f.path)) {
+    for (const meta of files) {
+      const path = await downloadFile($, room, meta)
+      if (path) paths.push(path)
+    }
+    return paths
+  }
+  const cwd = await $.session.cwd()
+  const dir = `${cwd}/.shared-session/${room.host.replace(/[^\w.-]+/g, '-').slice(0, 40) || 'host'}/page-${files[0]!.id.slice(0, 8)}`
+  for (const meta of files) {
+    const at = pagePath(meta.path ?? meta.name)
+    if (!at) continue
+    if (at.includes('/')) await sh($, `mkdir -p ${sq(`${dir}/${at.slice(0, at.lastIndexOf('/'))}`)}\n`)
+    const path = await downloadFile($, room, meta, `${dir}/${at}`)
+    if (path) paths.push(path)
+  }
+  return paths
 }
 
 async function hasTool($: $, name: string): Promise<boolean> {
@@ -2074,9 +2100,30 @@ async function captureShown($: $, e: Record<string, unknown>, result: unknown) {
       send($, 'artifact', { kind: 'link', turnId, url })
     }
   } else if (tool === 'Artifact' && str(input.file_path) && (!input.action || input.action === 'publish')) {
-    const files = await uploads([str(input.file_path)])
-    if (files.length) send($, 'artifact', { kind: 'send', turnId, files, display: 'render', caption: 'A page Claude published' })
+    const page = await uploads([str(input.file_path)])
+    // Its pictures, scripts and styles: each at its published path beside the
+    // page, so it opens there whole, as it does here.
+    const root = str(input.root) ? abs(str(input.root)) : cwd
+    const listed = Array.isArray(input.files)
+      ? (input.files as unknown[]).map(f => (f && typeof f === 'object' ? str((f as { path?: unknown }).path) : '')).map(p => [p, p] as const)
+      : Object.entries((input.files ?? {}) as Record<string, unknown>).map(([to, from]) => [to, typeof from === 'string' ? from : from && typeof from === 'object' ? str((from as { from?: unknown }).from) : ''] as const)
+    const beside: ShareFileMeta[] = []
+    for (const [to, from] of listed.slice(0, PAGE_FILES)) {
+      const path = pagePath(to)
+      if (!path || !from) continue
+      const meta = await uploadFile($, room, from.startsWith('/') ? from : `${root}/${from}`)
+      if (meta) beside.push({ ...meta, path })
+    }
+    if (page.length && beside.length) send($, 'artifact', { kind: 'page', turnId, files: [{ ...page[0]!, path: baseName(str(input.file_path)) }, ...beside] })
+    else if (page.length) send($, 'artifact', { kind: 'send', turnId, files: page, display: 'render', caption: 'A page Claude published' })
   }
+}
+
+const PAGE_FILES = 60
+// A page's file's place beside it, relative and inside: no `..`, no root.
+function pagePath(raw: string): string {
+  const parts = raw.split(/[\\/]+/).filter(p => p && p !== '.' && p !== '..').map(p => p.replace(/[^\w.\- ()]+/g, '-').replace(/^\.+/, '') || 'file')
+  return parts.join('/')
 }
 
 type Replay = { label: string; call?: { name: string; input: Record<string, unknown> }; note?: string }
@@ -2089,14 +2136,10 @@ async function replayOf($: $, room: ShareRoom, event: ServerEvent): Promise<Repl
   const shown = shownOf(event)
   if (!shown) return null
   const host = room.host
-  const paths: string[] = []
-  for (const meta of shown.files ?? []) {
-    const path = await downloadFile($, room, meta)
-    if (path) paths.push(path)
-  }
+  const paths = await downloadShown($, room, shown.files ?? [])
   const cwd = await $.session.cwd()
   const rel = (p: string) => (p.startsWith(`${cwd}/`) ? p.slice(cwd.length + 1) : p)
-  const savedNote = paths.length ? `saved to ${paths.map(p => `\`${rel(p)}\``).join(', ')}` : ''
+  const savedNote = paths.length ? `saved to ${(shown.files ?? []).some(f => f.path) ? `\`${rel(paths[0]!)}\`, with its files` : paths.map(p => `\`${rel(p)}\``).join(', ')}` : ''
   const label = `◧ **${host}'s Claude showed** ${shown.name}`
   switch (shown.kind) {
     case 'send':
@@ -2177,9 +2220,14 @@ async function openShown($: $, shown: ShareShown, surface?: RenderSurface) {
     }
     return
   }
-  const meta = shown.files?.[0]
-  const path = meta ? await downloadFile($, room, meta) : null
+  const path = (await downloadShown($, room, shown.files ?? []))[0] ?? null
   if (!path) return void $.ui.toast("Couldn't get that file")
+  // A page opens in the browser pane, where it runs (inside the project).
+  if (shown.kind === 'page') {
+    if (inDesktop === undefined) inDesktop = (await $.env.get('CLAUDE_CODE_ENTRYPOINT')) === 'claude-desktop'
+    const opened = inDesktop ? await $.mcp.call('Claude_Browser', 'preview_start', { url: `file://${path}` }).catch(() => null) : null
+    if (opened && !opened.isError) return
+  }
   const result = await desk($, 'ccd_view', 'show_pane', { pane: 'file', path })
   if (result === null) $.ui.log(`Saved to ${path}`)
 }
