@@ -10,7 +10,7 @@ Share a Claude Code session with a link. Teammates open it, land in a Claude Cod
   - the footer and working line say who's here and whose turn it is;
   - a Room panel has people, activity, host controls and a side chat Claude never reads;
   - in Desktop, the session list marks and pins shared sessions.
-- **What Claude shows, everyone sees.** When the host's Claude opens a file in the side panel or the Files pane, draws a widget, or opens a page or a local dev server in the browser pane, each guest's own Claude Code opens the same thing. A dev server it only gives the address of (`http://localhost:3000/…`) is shared too, at that page, once something answers there; so are the ones it opened or gave out before you pressed **Share everything**, if they're still running. Files are saved in the guest's project under `.shared-session/` (kept out of git), and a dev server is reached through the room server.
+- **What Claude shows, everyone sees.** When the host's Claude opens a file in the side panel or the Files pane, draws a widget, or opens a page or a local dev server in the browser pane, each guest's own Claude Code opens the same thing. A dev server it only gives the address of (`http://localhost:3000/…`) is shared too, at that page, once something answers there; so are the ones it opened or gave out before you pressed **Share everything**, if they're still running. Files are saved in the guest's project under `.shared-session/` (kept out of git), and a dev server is reached through the room server. Screenshots the host's Claude takes (the browser pane's, a computer's) and images it opens show in the guest's tool cards as they do in the host's.
 
 Built as a Claude Code plugin of function hooks (a "mod"), plus a small room server that runs on Cloudflare or as a single Node process. **It works right after install:** sharing goes through a public server this project runs ([what it sees and keeps](#privacy-and-the-public-server)), and teams can point it at their own.
 
@@ -70,10 +70,10 @@ It stops with a `NEEDS HUMAN` line at the one or two steps that need a person. S
 
 Out of the box, Share uses `https://claude-share.proud-limit-da0a.workers.dev`, run by this project ([its page](https://claude-share.proud-limit-da0a.workers.dev/)). Joining a link always uses the server in that link.
 
-- **What it sees:** while a session is shared, its prompts, Claude's replies, the tools it runs with the first lines of their results, the side chat, and files or local previews the host's Claude shows. Sharing a session that already has history asks first whether to include it; everything means everything the session stored, from before any compaction too (its newest 4,000 rows).
+- **What it sees:** while a session is shared, its prompts, Claude's replies, the tools it runs with the first lines of their results and the pictures in them (screenshots, images Claude opens), the side chat, and files or local previews the host's Claude shows. **What Claude shows → Stays with me** keeps the pictures and files on the host's machine. Sharing a session that already has history asks first whether to include it; everything means everything the session stored, from before any compaction too (its newest 4,000 rows).
 - **How long:** a room and everything in it is deleted 24 hours after the host stops sharing or was last seen. No accounts, no analytics, no request logs.
 - **Who can see it:** anyone with the room's link. It's encrypted in transit, not end to end: the server can read what passes through it.
-- **Limits:** per network, 6 new rooms and 30 joins a minute; per room, 20 people, 50 MB of files and 900 posts a minute. Abused rooms get ended.
+- **Limits:** per network, 6 new rooms and 30 joins a minute; per room, 20 people, 100 MB of files and 900 posts a minute. Abused rooms get ended.
 
 To keep sessions on your own infrastructure, run your own server (below) and set it in the plugin's `server` option or `SHARED_SESSION_SERVER`.
 
@@ -121,14 +121,14 @@ Previews are served on a second port (`PREVIEW_PORT`, default `PORT` + 1); set `
 - **The link is the key.** Room ids are 128-bit random values; anyone holding a link can join while the host shares. Names are self-declared: `git config user.name`, else the computer's username.
 - **The server relays plaintext.** It sees the shared transcript: prompts, replies, tool calls and results. Run it somewhere you trust.
 - **Guests can't act on the host's machine without the host.** By default, only reads inside the host's project run without asking; a guest's request to read anywhere else, edit, run commands or use the web asks the host first. "Always allow" trusts one person for the session. The host can require approval for every tool, or none. The question comes up in Claude Code's own dialog; where that can't show (a settings hook that takes AskUserQuestion, say), it's asked in the row above the prompt instead, never answered for the host.
-- **What Claude shows travels too, unless the host keeps it.** Files Claude shows go through the server (10 MB each, deleted with the room). The host can keep them in Room → Host controls.
+- **What Claude shows travels too, unless the host keeps it.** Files Claude shows, and the pictures in its tool results (screenshots, images it opens; the newest 60 results' worth from a shared history), go through the server (10 MB each, 100 MB a room, deleted with the room). The host can keep them in Room → Host controls.
 - **Previews are for the room only.** Each guest opens a preview with a link that lasts ten minutes and lets in only the first browser that uses it. The host's plugin only fetches ports the host shared, and previews end with the room.
 - **Previews carry WebSockets.** A dev server's live reload works through a preview, and so do Next.js 16 dev pages, which don't start without their socket. The host's plugin relays each socket with a small Node script (`plugin/relay/ws-relay.cjs`); without Node on the host's machine, pages still load but their sockets don't connect. A browser holds one preview at a time (they share one host name), so joining opens the newest and the Room's **Open** switches.
 - **Only what a person types travels.** Desktop's hidden context notes are stripped from prompts before they leave a machine. A link relayed by another session, a channel or a task never joins anything.
 
 ## Limits
 
-- **Guests' tool cards are replays.** The host's tool calls show in a guest's transcript as tool cards (Bash, Read, Edit…) with the host's results, drawn by the plugin's own `replay` tool, which runs nothing. Each result is cut to its first 40 lines. A guest's session lists that tool while joined.
+- **Guests' tool cards are replays.** The host's tool calls show in a guest's transcript as tool cards (Bash, Read, Edit…) with the host's results, drawn by the plugin's own `replay` tool, which runs nothing. Each result is cut to its first 40 lines; its pictures come whole. A guest's session lists that tool while joined.
 - **Not mirrored:** subagents' inner steps and pasted images.
 - **No "Alex is typing…".** The engine doesn't see keystrokes in Claude Desktop's composer.
 - **Needs `curl` for live updates.** Each shared session keeps one `curl` process reading the room's stream, so a quiet room makes no requests. Without `curl`, or against a server too old to stream, the plugin polls instead, from every 0.4 s while busy down to every 15 s when quiet.

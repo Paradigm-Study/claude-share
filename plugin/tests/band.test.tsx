@@ -45,7 +45,8 @@ function world(
     // Shell work: an upload answers with the file's id; anything else succeeds.
     if (e.argv[0] === '/bin/sh') {
       if (e.input?.includes('/files"') && e.input.includes('--data-binary')) {
-        yield { stream: 'stdout' as const, text: JSON.stringify({ id: 'f'.repeat(64), name: 'chart.html', type: 'text/html', size: 42 }) }
+        const picture = e.input.includes('content-type: image/png')
+        yield { stream: 'stdout' as const, text: JSON.stringify(picture ? { id: 'a'.repeat(64), name: 'image-1.png', type: 'image/png', size: 68 } : { id: 'f'.repeat(64), name: 'chart.html', type: 'text/html', size: 42 }) }
       }
       if (e.input?.includes('echo copied')) yield { stream: 'stdout' as const, text: 'copied\n' }
       // A dev server answers on 3340 only.
@@ -427,6 +428,38 @@ test('a host who keeps what Claude shows sends nothing', async ($, on) => {
   await $.tool.call({ tool: 'SendUserFile', files: ['chart.html'], display: 'render', status: 'normal' } as never)
   await asked.clock.advance(200)
   expect(asked.posted.some(e => e.type === 'artifact')).toBe(false)
+})
+
+// A session whose Claude took a screenshot: a call, its result as the
+// transcript keeps it (an image block, then text), and words after it.
+const SHOT = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC'
+const SHOT_HISTORY = [
+  { role: 'user', content: 'Show me the course page' },
+  { role: 'assistant', content: [{ type: 'tool_use', id: 'toolu_shot1', name: 'mcp__Claude_Browser__computer', input: { action: 'screenshot' } }] },
+  {
+    role: 'user',
+    content: [{ type: 'tool_result', tool_use_id: 'toolu_shot1', content: [{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: SHOT } }, { type: 'text', text: 'Took a screenshot' }] }],
+  },
+  { role: 'assistant', content: [{ type: 'text', text: 'Here is the course page.' }] },
+]
+
+test("a screenshot the host's Claude took goes to the room as a file, named on its row, in order", async ($, on) => {
+  const asked = world(on, { history: SHOT_HISTORY })
+  const ui = await $.ui.mount(band('desktop'))
+  await ui.press({ key: 'share' })
+  await ui.press({ key: 'share-all' })
+  await asked.clock.advance(200)
+  const upload = asked.spawned.find(s => s.argv[0] === '/bin/sh' && s.input?.includes('content-type: image/png'))
+  expect(upload?.input).toContain('base64 -d')
+  expect(upload?.input).toContain(SHOT.slice(0, 40))
+  expect(upload?.input).not.toContain("Bearer t'") // the token goes in curl's config on stdin
+  const rows = asked.posted.filter(e => e.type === 'row')
+  const shot = rows.find(e => e.body.id === 'toolu_shot1' && e.body.kind === 'result')
+  expect(shot?.body.text).toBe('Took a screenshot')
+  expect(shot?.body.images).toEqual([{ id: 'a'.repeat(64), type: 'image/png', size: 68 }])
+  expect('media' in (shot?.body ?? {})).toBe(false) // the bytes go as a file, never in a row
+  // What came after it waited for it.
+  expect(rows.map(e => e.body.kind)).toEqual(['user', 'tool', 'result', 'assistant'])
 })
 
 test('a guest sees what the host showed in the Room, with Open', async ($, on) => {

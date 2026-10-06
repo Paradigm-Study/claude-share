@@ -25,6 +25,9 @@ const PORT = Number(process.env.E2E_PORT ?? 8787)
 const SERVER = (process.env.SHARE_SERVER ?? `http://localhost:${PORT}`).replace(/\/+$/, '')
 
 // Model access as the machine's user has it: their settings' env, else ours.
+// A 16×16 red PNG: what the host's Claude reads in the picture check.
+const SWATCH_PNG = 'iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAIAAACQkWg2AAAAF0lEQVR4nGP4z8BAEiJN9aiGUQ1DSgMAkPn/Afnh+ngAAAAASUVORK5CYII='
+
 const MODEL_ENV = (() => {
   try {
     return JSON.parse(readFileSync(join(process.env.HOME, '.claude', 'settings.json'), 'utf8')).env ?? {}
@@ -368,6 +371,20 @@ try {
     guest.lines.filter(l => l.type === 'result').every(l => !(l.total_cost_usd > 0)),
     guest.lines.filter(l => l.type === 'result').map(l => l.total_cost_usd).join(','),
   )
+
+  // A picture the host's Claude looks at (an image it reads, a screenshot)
+  // shows in the guest's card as an image, as it does in the host's.
+  writeFileSync(join(hostDir, 'swatch.png'), Buffer.from(SWATCH_PNG, 'base64'))
+  const pictureAt = guest.lines.length
+  host.say('Use the Read tool on swatch.png, then reply with just its main color in one word.')
+  await until('host read the picture', () => host.lines.some(l => l.type === 'result' && /red/i.test(l.result ?? '')), 120_000).catch(() => null)
+  const pictured = () =>
+    guest.lines
+      .slice(pictureAt)
+      .flatMap(l => (l.type === 'user' && Array.isArray(l.message?.content) ? l.message.content : []))
+      .some(b => b.type === 'tool_result' && Array.isArray(b.content) && b.content.some(x => x.type === 'image' && x.source?.type === 'base64' && x.source.data?.length > 50))
+  await until("guest's card has the picture", pictured, 60_000).catch(() => null)
+  check("a picture the host's Claude reads shows in the guest's card as an image", pictured())
 
   await until('Sam sees Alex\'s exchange', () => transcriptOf(sam).includes('Alex: What is 17 times 3') && assistantText(sam).some(t => /\b51\b/.test(t)), 30_000).catch(() => null)
   check('a third person sees Alex\'s prompt and the answer', transcriptOf(sam).includes('Alex: What is 17 times 3') && assistantText(sam).some(t => /\b51\b/.test(t)))

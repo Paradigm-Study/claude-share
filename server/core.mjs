@@ -25,7 +25,7 @@ const MAX_BODY = 512_000
 // Files the host's Claude shows (a page, an image, a widget too big for an
 // event): kept by the room, read with a member's token, gone with the room.
 const FILE_MAX = 10 * 1024 * 1024
-const ROOM_FILES_MAX = 50 * 1024 * 1024
+const ROOM_FILES_MAX = 100 * 1024 * 1024 // screenshots the host's Claude takes go up too
 export const ROOM_SEATS_MAX = 20 // people in one room besides the host
 // Previews: a guest's browser asks the room, the room asks the host's stream,
 // the host's plugin asks its own localhost and posts the answer back.
@@ -756,11 +756,11 @@ section.more { padding:0 0 72px; }
   <section class="more prose" id="privacy">
     <h2>What this server sees and keeps</h2>
     <ul>
-      <li><b>What passes through:</b> while a session is shared, its prompts, Claude's replies, the tools it runs with the first lines of their results, the side chat, and any files or local previews the host's Claude shows. Sharing a session that already has history asks first whether to include it.</li>
+      <li><b>What passes through:</b> while a session is shared, its prompts, Claude's replies, the tools it runs with the first lines of their results and the pictures in them (screenshots, images it opens), the side chat, and any files or local previews the host's Claude shows. Sharing a session that already has history asks first whether to include it.</li>
       <li><b>How long:</b> a room and everything in it is deleted 24 hours after the host stops sharing or was last seen. There are no accounts, no analytics, and no request logs kept.</li>
       <li><b>Who can see it:</b> anyone with the room's link. Links are long and random; forward one only to people you'd hand the session to. Content is encrypted in transit, not end to end: the server can read what passes through it.</li>
       <li><b>What runs where:</b> a teammate's prompt runs on the host's machine. Reads inside the host's project run without asking; everything else asks the host first, by default.</li>
-      <li><b>Limits:</b> new rooms and joins are rate-limited per network, rooms hold up to 20 people and 50 MB of files. Rooms that are abused get ended.</li>
+      <li><b>Limits:</b> new rooms and joins are rate-limited per network, rooms hold up to 20 people and 100 MB of files. Rooms that are abused get ended.</li>
       <li><b>Your own server:</b> teams that want their sessions on their own infrastructure can run the same server on Cloudflare or Node in a few minutes (<a href="https://github.com/Paradigm-Study/claude-share#host-a-server">how</a>), and set it in the plugin.</li>
     </ul>
     <p>Questions or abuse reports: open an issue on <a href="https://github.com/Paradigm-Study/claude-share/issues">GitHub</a>.</p>

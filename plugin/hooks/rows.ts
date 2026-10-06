@@ -18,6 +18,26 @@ export type Row = {
   id?: string
   /** A tool row's input as the host's Claude sent it, when small enough to replay. */
   input?: Record<string, unknown>
+  /** A result row's pictures (a screenshot, an image read), as room files. */
+  images?: RoomImage[]
+  /** The host's own copy of those pictures, before they go up; never sent. */
+  media?: Media[]
+}
+
+/** A picture in the room's files: its id (the bytes' SHA-256), type and size. */
+export type RoomImage = { id: string; type: string; size: number }
+/** A picture's bytes, base64, and its type. */
+export type Media = { data: string; type: string }
+
+/** The pictures in a tool result: the Messages API's base64 image blocks (and MCP's). */
+export function imagesOf(content: unknown): Media[] {
+  const out: Media[] = []
+  for (const b of blocksOf(content) as (Block & { source?: { type?: unknown; media_type?: unknown; data?: unknown }; data?: unknown; mimeType?: unknown })[]) {
+    if (b.type !== 'image') continue
+    if (b.source?.type === 'base64' && typeof b.source.data === 'string' && typeof b.source.media_type === 'string') out.push({ data: b.source.data, type: b.source.media_type })
+    else if (typeof b.data === 'string' && typeof b.mimeType === 'string') out.push({ data: b.data, type: b.mimeType })
+  }
+  return out
 }
 
 type Block = {
@@ -156,11 +176,13 @@ export function rowsFromMessage(
         // A file read's lines come numbered ("   12\tcode"); the numbers are noise
         // here, and so is what the engine adds for the model (reminders).
         const text = textOf(block.content).replace(SYSTEM_BLOCKS, '').replace(/^ *\d+\t/gm, '').trim()
+        const media = imagesOf(block.content)
         rows.push({
           kind: 'result',
-          text: text ? clip(text, RESULT_LINES, RESULT_CHARS) : '(no output)',
+          text: text ? clip(text, RESULT_LINES, RESULT_CHARS) : media.length ? '' : '(no output)',
           isError: block.is_error === true || undefined,
           id: block.tool_use_id,
+          ...(media.length ? { media } : {}),
         })
       }
     } else if (role === 'assistant') {

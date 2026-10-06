@@ -22,7 +22,7 @@ import type { ShareActivity, ShareChat, ShareFileMeta, ShareMode, SharePerson, S
 import { ACCENT, BAD, GOOD, ROSE, ago, avatarSvg, bannerSvg, labelsFor, stackSvg, toolGlyph } from './look'
 import type { Face } from './look'
 import { delivered, rowsFromMessage, rowsToMarkdown, splitSpeaker, summarizeTool } from './rows'
-import type { Row } from './rows'
+import type { Media, RoomImage, Row } from './rows'
 import { SERVER_URL } from './server'
 import { readsInside } from './paths'
 
@@ -478,7 +478,8 @@ async function serverOf($: $): Promise<string> {
   return url
 }
 let myName: string | undefined
-let outbox: { type: string; body: Record<string, unknown> }[] = []
+// An entry held (`hold`) waits for its pictures to go up, and what follows it waits too.
+let outbox: { type: string; body: Record<string, unknown>; hold?: boolean }[] = []
 let flushTimer: Timer | null = null
 let flushing = false
 let flushFailures = 0
@@ -567,6 +568,57 @@ function send($: $, type: string, body: Record<string, unknown>) {
   }
 }
 
+// Host: a row to the room. A result's pictures (a screenshot, an image the
+// host's Claude read) go up as room files first, the row waiting in order for
+// them and what follows waiting for it, so a guest's card shows them as the
+// host's does. "What Claude shows: Stays with me" keeps them here. `media`
+// is the host's copy and never leaves.
+function sendRow($: $, row: Row, withMedia = true) {
+  const { media, ...plain } = row
+  if (!media?.length || !withMedia) return send($, 'row', plain)
+  const entry: { type: string; body: Record<string, unknown>; hold?: boolean } = { type: 'row', body: plain, hold: true }
+  outbox.push(entry)
+  void upImages($, media)
+    .then(images => {
+      if (images.length) entry.body = { ...entry.body, images }
+    })
+    .catch(() => {})
+    .finally(() => {
+      delete entry.hold
+      scheduleFlush($, 0)
+    })
+  void $.clock.now().then(now => {
+    lastActivity = now
+  })
+  kickPoll($)
+}
+
+const IMAGES_PER_RESULT = 8
+const HISTORY_IMAGES = 60 // results whose pictures a shared history carries, newest first
+const IMAGE_MAX = 8 * 1024 * 1024 // bytes; a room file holds 10 MB
+let uploading = 0
+const uploadWaiters: (() => void)[] = []
+
+async function upImages($: $, media: Media[]): Promise<RoomImage[]> {
+  const room = await read($, roomA)
+  if (!room || (await read($, policyA)).files === 'off') return []
+  const out: RoomImage[] = []
+  for (const [i, m] of media.slice(0, IMAGES_PER_RESULT).entries()) {
+    if (m.data.length * 0.75 > IMAGE_MAX) continue
+    // A few at a time: a shared history can hold dozens.
+    while (uploading >= 3) await new Promise<void>(done => uploadWaiters.push(done))
+    uploading += 1
+    try {
+      const meta = await uploadImage($, room, m, `image-${i + 1}.${m.type.split('/')[1]?.replace('jpeg', 'jpg') || 'png'}`)
+      if (meta) out.push({ id: meta.id, type: meta.type, size: meta.size })
+    } finally {
+      uploading -= 1
+      uploadWaiters.shift()?.()
+    }
+  }
+  return out
+}
+
 function scheduleFlush($: $, ms: number) {
   if (flushTimer) return
   flushTimer = $.clock.after(ms, () => {
@@ -585,12 +637,12 @@ async function flush($: $) {
   // Up to 200 events and ~400 KB a post (the server takes 512 KB).
   let take = 0
   let bytes = 0
-  while (take < Math.min(200, outbox.length)) {
+  while (take < Math.min(200, outbox.length) && !outbox[take]!.hold) {
     bytes += JSON.stringify(outbox[take]).length
     if (take > 0 && bytes > 400_000) break
     take += 1
   }
-  const batch = outbox.splice(0, take)
+  const batch = outbox.splice(0, take).map(({ type, body }) => ({ type, body }))
   if (batch.length === 0) return
   flushing = true
   let retry = false
@@ -788,7 +840,7 @@ async function pause($: $, ms: number) {
 // Guest: the result of a call the host's Claude made, for its card here: read
 // from the room (the stream, or a short poll) until the host has it, the
 // host's turn ends, or the person stops this turn. Waits are budget-free.
-async function hostResult($: $, room: ShareRoom, call: { hostId: string; seq: number; turnId?: string }, signal: AbortSignal): Promise<string> {
+async function hostResult($: $, room: ShareRoom, call: { hostId: string; seq: number; turnId?: string }, signal: AbortSignal): Promise<string | ReplayBlock[]> {
   const deadline = (await $.clock.now()) + 30 * 60_000
   let cursor = call.seq
   while (!signal.aborted && (await $.clock.now()) < deadline) {
@@ -796,7 +848,7 @@ async function hostResult($: $, room: ShareRoom, call: { hostId: string; seq: nu
     for (const event of page?.events ?? []) {
       cursor = Math.max(cursor, event.seq)
       const row = event.body as unknown as Row
-      if (event.type === 'row' && row.kind === 'result' && row.id === call.hostId) return `${row.isError ? 'Error: ' : ''}${stripLineNumbers(row.text)}`
+      if (event.type === 'row' && row.kind === 'result' && row.id === call.hostId) return withImages($, room, `${row.isError ? 'Error: ' : ''}${stripLineNumbers(row.text)}`, row.images)
       if (event.type === 'turn' && event.body.state === 'end' && (!call.turnId || event.body.turnId === call.turnId)) return "(the host's turn ended before this finished)"
       if (event.type === 'ended') return '(sharing ended)'
     }
@@ -1311,7 +1363,11 @@ async function share($: $, surface?: RenderSurface, opts: { history?: boolean } 
   // What happened before Share, so people who join see the whole session,
   // and the dev servers Claude opened then, still running, open for them too.
   // The newest rows a room keeps (it holds 5000 events), oldest first.
-  for (const row of messages.flatMap(message => rowsFromMessage(message, name, cwd)).slice(-4000)) send($, 'row', row)
+  const earlier = messages.flatMap(message => rowsFromMessage(message, name, cwd)).slice(-4000)
+  // Pictures from the newest results only: a room holds 100 MB of files.
+  let pictures = 0
+  const withPictures = new Set(earlier.filter(r => r.media?.length).reverse().filter(() => pictures++ < HISTORY_IMAGES))
+  for (const row of earlier) sendRow($, row, withPictures.has(row))
   void shareLocal($, localOpens(messages)).catch(() => {})
   startFeed($)
   const copied = await $.ui.copy({ text: room.url, surface }).catch(() => ({ isCopied: false }))
@@ -1775,6 +1831,63 @@ async function uploadFile($: $, room: ShareRoom, path: string, name = baseName(p
   }
 }
 
+// Host: a picture's bytes (base64, as the transcript holds them) to the room.
+async function uploadImage($: $, room: ShareRoom, media: Media, name: string): Promise<ShareFileMeta | null> {
+  const config = [roomConfig(room, 'files'), `header = ${cfg(`x-file-name: ${encodeURIComponent(name)}`)}`, `header = ${cfg(`content-type: ${media.type}`)}`, 'max-time = 60'].join('\n')
+  const b64 = (media.data.replace(/[^A-Za-z0-9+/=]/g, '').match(/.{1,76}/g) ?? []).join('\n')
+  const data = fence(b64)
+  const tag = fence(config)
+  const { out } = await sh(
+    $,
+    [
+      'd=$(mktemp -d) || exit 1',
+      `trap 'rm -rf "$d"' EXIT`,
+      `cat > "$d/b" <<'${data}'`,
+      b64,
+      data,
+      '{ base64 -d < "$d/b" > "$d/f" || base64 -D -i "$d/b" -o "$d/f"; } 2>/dev/null || exit 1',
+      `curl -K - -X POST --data-binary @"$d/f" <<'${tag}'`,
+      config,
+      tag,
+      '',
+    ].join('\n'),
+  )
+  try {
+    const meta = JSON.parse(out) as Partial<ShareFileMeta>
+    return typeof meta.id === 'string' ? (meta as ShareFileMeta) : null
+  } catch {
+    return null
+  }
+}
+
+// Guest: a room picture's bytes, base64, kept for the session's later cards.
+const pictureCache = new Map<string, string>()
+async function downloadImage($: $, room: ShareRoom, image: RoomImage): Promise<string | null> {
+  const kept = pictureCache.get(image.id)
+  if (kept) return kept
+  const config = [roomConfig(room, `files/${image.id}`), 'max-time = 60'].join('\n')
+  const tag = fence(config)
+  const { out, code } = await sh($, `curl -K - -f <<'${tag}' | base64 | tr -d '\\n\\r '\n${config}\n${tag}\n`)
+  const data = out.trim()
+  if (code !== 0 || !data || !/^[A-Za-z0-9+/=]+$/.test(data)) return null
+  pictureCache.set(image.id, data)
+  if (pictureCache.size > 40) pictureCache.delete(pictureCache.keys().next().value as string)
+  return data
+}
+
+// Guest: a host result as the card shows it: its text, and its pictures as
+// image blocks, as the host's own card holds them.
+type ReplayBlock = { type: 'text'; text: string } | { type: 'image'; source: { type: 'base64'; media_type: string; data: string } }
+async function withImages($: $, room: ShareRoom, text: string, images: RoomImage[] | undefined): Promise<string | ReplayBlock[]> {
+  if (!images?.length) return text
+  const blocks: ReplayBlock[] = text ? [{ type: 'text', text }] : []
+  for (const image of images) {
+    const data = await downloadImage($, room, image)
+    if (data) blocks.push({ type: 'image', source: { type: 'base64', media_type: image.type, data } })
+  }
+  return blocks.length ? blocks : text || '(the picture didn\'t come through)'
+}
+
 // Host: text (a widget too big for an event) to the room, as a file.
 async function uploadText($: $, room: ShareRoom, text: string, name: string): Promise<ShareFileMeta | null> {
   const tag = fence(text)
@@ -2168,12 +2281,20 @@ function outputText(output: unknown): string {
   return output === undefined || output === null ? '' : JSON.stringify(output)
 }
 
+// How many pictures a result holds (image blocks).
+function imageCount(output: unknown): number {
+  const blocks = Array.isArray(output) ? output : output && typeof output === 'object' && Array.isArray((output as { content?: unknown }).content) ? (output as { content: unknown[] }).content : []
+  return blocks.filter(b => b && typeof b === 'object' && (b as { type?: unknown }).type === 'image').length
+}
+
 // The line or two the terminal shows under a call, folded as it folds its own.
-function replayLines(tool: string, input: Record<string, unknown>, out: string, errored: boolean): string[] {
+function replayLines(tool: string, input: Record<string, unknown>, out: string, errored: boolean, pictures = 0): string[] {
   const text = out.replace(/^Error: /, '').trimEnd()
   const all = text ? text.split('\n') : []
   const count = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`
   if (errored) return [`Error: ${all[0] ?? 'failed'}`]
+  // A picture the host's Claude looked at: said as the terminal says its own.
+  if (pictures) return tool === 'Read' ? [pictures === 1 ? 'Read image' : `Read ${count(pictures, 'image')}`] : [...(all.length ? [all[0]!] : []), pictures === 1 ? '[Image]' : `[${count(pictures, 'image')}]`]
   const first = (n: number) => (all.length <= n ? all : [...all.slice(0, n), `… +${count(all.length - n, 'line')}`])
   switch (tool) {
     case 'Read': {
@@ -2336,7 +2457,7 @@ const liveRuns = new Map<string, RideRun>()
 // plugin's own tool, answered with the host's result: the card a session
 // draws for its own calls, and nothing runs on this machine. By card id.
 const REPLAY_TOOL = 'mcp__shared-session__replay'
-const hostCalls = new Map<string, { hostId: string; seq: number; turnId?: string; result?: string }>()
+const hostCalls = new Map<string, { hostId: string; seq: number; turnId?: string; result?: string; images?: RoomImage[] }>()
 // Guest: an earlier exchange's turn whose calls were shown, owed its last words.
 const staticRuns = new Map<string, { tail: string }>()
 const EXCHANGE_CARDS = 200 // calls drawn as cards in one earlier exchange; the rest as text
@@ -2406,7 +2527,7 @@ function historyBlocks(rows: Row[]): { blocks: HistoryBlock[]; tail: string; run
       run = joinRun(run, id, row.tool)
       if (run) runs.add(run)
       const res = results.get(row.id)
-      hostCalls.set(id, { hostId: row.id, seq: 0, result: res ? `${res.isError ? 'Error: ' : ''}${stripLineNumbers(res.text)}` : '(no result)' })
+      hostCalls.set(id, { hostId: row.id, seq: 0, result: res ? `${res.isError ? 'Error: ' : ''}${stripLineNumbers(res.text)}` : '(no result)', images: res?.images })
       if (hostCalls.size > 3000) hostCalls.delete(hostCalls.keys().next().value as string)
       blocks.push({ id, input: { tool: row.tool, summary: row.text, input: row.input } })
       replayed.add(row.id)
@@ -3127,7 +3248,7 @@ export const register: Register = (on, options) => {
     const call = hostCalls.get(e.tool_use_id)
     const room = await read($, roomA)
     if (!call || !room) return { result: 'Nothing to show here: this tool replays a shared session.' } as never
-    if (call.result !== undefined) return { result: call.result } as never
+    if (call.result !== undefined) return { result: await withImages($, room, call.result, call.images) } as never
     return { result: await hostResult($, room, call, next.signal) } as never
   }).catch(async () => ({ result: "The host's result didn't come through." }) as never)
 
@@ -3145,7 +3266,7 @@ export const register: Register = (on, options) => {
     if (run?.hidden) return <Box />
     if (run?.tools) return <Text dimColor>{`  ${runLine({ tools: run.tools })}`}</Text>
     const summary = typeof input.summary === 'string' ? input.summary.split('\n')[0]!.slice(0, 160) : ''
-    const lines = e.props.isRunning ? [] : replayLines(input.tool, (input.input ?? {}) as Record<string, unknown>, outputText(e.props.output), e.props.isErrored)
+    const lines = e.props.isRunning ? [] : replayLines(input.tool, (input.input ?? {}) as Record<string, unknown>, outputText(e.props.output), e.props.isErrored, imageCount(e.props.output))
     return (
       <Box flexDirection="column">
         <Box flexDirection="row">
@@ -3182,7 +3303,7 @@ export const register: Register = (on, options) => {
     for (const row of rowsFromMessage(stored.message ?? e.message, typed ? host : null, cwd)) {
       // A guest's prompt reached the model as "Name: text"; show it as theirs.
       const spoken = fromGuest && row.kind === 'user' ? splitSpeaker(row.text) : null
-      send($, 'row', spoken ? { ...row, who: spoken.who, text: spoken.text } : row)
+      sendRow($, spoken ? { ...row, who: spoken.who, text: spoken.text } : row)
       if (row.kind === 'assistant' && LOCAL_URL.test(row.text)) void shareLocal($, localPages(row.text))
     }
     return stored
