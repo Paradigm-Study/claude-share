@@ -16,6 +16,8 @@ export type ShareRoom = {
   seq: number
   /** When this session started sharing or joined, ms since the epoch. */
   since: number
+  /** The team it's shared with: listed for its people, whose access setting says who joins. */
+  team?: { id: string; name: string } | null
 }
 
 export type SharePerson = { id: string; name: string; role: 'host' | 'guest'; online: boolean; /** Their plugin's version, as the room heard it. */ version?: string }
@@ -76,6 +78,47 @@ export type ShareShown = {
   closed?: boolean
 }
 
+/** The person signed in to the share server (GitHub or Google). */
+export type ShareAccount = { id: string; name: string; login?: string; email?: string; provider: string }
+
+/** A team, as one of its people sees it (domains and orgs: owners only). */
+export type ShareTeam = {
+  id: string
+  name: string
+  role: 'owner' | 'member'
+  /** `members`: only people in the team join its sessions; `link`: anyone with a link. */
+  access: 'members' | 'link'
+  domains?: string[]
+  githubOrgs?: string[]
+  invite: string
+}
+
+/** A session shared with a team, as the team's list shows it. */
+export type ShareTeamSession = { id: string; url: string; title: string; host: string; hostAccount?: string; hostOnline: boolean; people: string[]; createdAt: number }
+
+/** The Team panel: who's signed in, their teams, and what's shared with the one shown. */
+export type ShareTeams = {
+  /** The share server these are on. */
+  server: string
+  account: ShareAccount | null
+  teams: ShareTeam[]
+  /** The team the panel shows, and Share goes to unless `byLink`. */
+  current: string | null
+  /** Share goes by link alone, not to the team. */
+  byLink: boolean
+  sessions: ShareTeamSession[]
+  members: { id: string; name: string; login?: string; role: 'owner' | 'member' }[]
+  /** Who the server signs people in with. */
+  providers: { id: string; label: string }[]
+  /** A sign-in waiting in the browser. */
+  signingIn: { provider: string; url: string; until: number } | null
+  /** An invite link to take once signed in. */
+  invite: { server: string; code: string } | null
+  /** When the list was last asked for, ms since the epoch (0: never). */
+  loaded: number
+  error: string | null
+}
+
 declare module 'claude-code' {
   interface PluginState {
     'shared-session': {
@@ -120,6 +163,8 @@ declare module 'claude-code' {
       liveUpdates: 'running' | 'next' | 'pinned' | null
       /** Pages the host's Claude published, by artifact id: what goes to the room again when one is opened again. */
       pages: Record<string, Record<string, unknown>>
+      /** The Team panel's sign-in, teams and team sessions. */
+      teams: ShareTeams
     }
   }
 }

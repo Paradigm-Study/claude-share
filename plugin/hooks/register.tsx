@@ -18,7 +18,7 @@
 import { atom, memberOf, read, update } from 'claude-code'
 import type { Elements, EngineInterface, HookStream, ProcessSpawnChunk, ProcessSpawnResult, Register, RenderChildren, RenderSurface, Timer, TurnStepChunk } from 'claude-code'
 
-import type { ShareActivity, ShareChat, ShareFileMeta, ShareMode, SharePerson, SharePolicy, ShareRoom, ShareShown, ShareWorking } from '../types'
+import type { ShareAccount, ShareActivity, ShareChat, ShareFileMeta, ShareMode, SharePerson, SharePolicy, ShareRoom, ShareShown, ShareTeam, ShareTeams, ShareTeamSession, ShareWorking } from '../types'
 import { ACCENT, BAD, GOOD, ROSE, ago, avatarSvg, bannerSvg, labelsFor, stackSvg, toolGlyph } from './look'
 import type { Face } from './look'
 import { attachmentsOf, delivered, rowsFromMessage, rowsToMarkdown, splitSpeaker, summarizeTool } from './rows'
@@ -31,6 +31,7 @@ type UI = Elements[RenderSurface]
 
 const PLUGIN = 'shared-session'
 const ROOM = 'shared-room' // the Room panel's id
+const TEAM = 'shared-team' // the Team panel's id
 const ASK_HEADER = 'Shared' // marks the approval question this plugin asks
 // How this session hears about the room. While a plugin has a request in
 // flight, the engine holds every prompt after the first until it returns, so
@@ -91,6 +92,8 @@ const confirmingA = atom({ plugin: 'shared-session', key: 'confirming' } as cons
 const newerA = atom({ plugin: 'shared-session', key: 'newer' } as const, null as string | null)
 const pagesA = atom({ plugin: 'shared-session', key: 'pages' } as const, {} as Record<string, Record<string, unknown>>)
 const updatesA = atom({ plugin: 'shared-session', key: 'updates' } as const, null as boolean | null)
+const NO_TEAMS: ShareTeams = { server: '', account: null, teams: [], current: null, byLink: false, sessions: [], members: [], providers: [], signingIn: null, invite: null, loaded: 0, error: null }
+const teamsA = atom({ plugin: 'shared-session', key: 'teams' } as const, NO_TEAMS)
 
 // Context a host app puts into the person's message (Claude Desktop adds a
 // <system-reminder> to a first prompt): not typed, and never shared.
@@ -122,6 +125,8 @@ const PERSON = new Set(['composer', 'sdk', 'bridge'])
 
 // A share link: <server origin, with any path prefix>/s/<room id>, alone.
 const LINK = /^\s*(https?:\/\/[^\s]+?)\/s\/([A-Za-z0-9_-]{16,64})\/?\s*$/
+// A team's invite link (`/i/<code>`), pasted as a message.
+const INVITE = /^\s*(https?:\/\/[^\s]+?)\/i\/([A-Za-z0-9_-]{8,40})\/?\s*$/
 
 type ServerEvent = {
   seq: number
@@ -137,6 +142,7 @@ class ApiError extends Error {
   constructor(
     message: string,
     readonly status: number,
+    readonly data: Record<string, unknown> = {},
   ) {
     super(message)
   }
@@ -535,10 +541,12 @@ async function api<T>(
   $: $,
   server: string,
   path: string,
-  init: { method?: string; token?: string; body?: unknown } = {},
+  init: { method?: string; token?: string; body?: unknown; account?: string } = {},
 ): Promise<T> {
   const headers: Record<string, string> = { 'content-type': 'application/json' }
   if (init.token) headers.authorization = `Bearer ${init.token}`
+  // Who's signed in, for a team's session: a header, never the address.
+  if (init.account) headers['x-shared-session-account'] = init.account
   const version = await ownVersion($)
   if (version) headers['x-shared-session-version'] = version
   const res = await $.http.fetch(`${server}${path}`, {
@@ -550,7 +558,7 @@ async function api<T>(
   try {
     data = JSON.parse(res.text)
   } catch {}
-  if (!res.ok) throw new ApiError(typeof data.error === 'string' ? data.error : `HTTP ${res.status}`, res.status)
+  if (!res.ok) throw new ApiError(typeof data.error === 'string' ? data.error : `HTTP ${res.status}`, res.status, data)
   return data as T
 }
 
@@ -1448,8 +1456,10 @@ async function readBackward($: $, path: string, upTo: number, out: HistoryMessag
 }
 
 // `history: false` shares only what happens from now on: nothing earlier goes
-// out, not even the first prompt as the room's title.
-async function share($: $, surface?: RenderSurface, opts: { history?: boolean } = {}): Promise<ShareRoom> {
+// out, not even the first prompt as the room's title. Signed in, it goes to
+// the team the Team panel shows (listed for its people, its access setting
+// saying who joins); `team: false` shares by link alone.
+async function share($: $, surface?: RenderSurface, opts: { history?: boolean; team?: boolean } = {}): Promise<ShareRoom> {
   const mode = await read($, modeA)
   if (mode === 'guest') throw new Error('Leave the session you joined before sharing this one.')
   await update($, askingA, () => null)
@@ -1466,12 +1476,14 @@ async function share($: $, surface?: RenderSurface, opts: { history?: boolean } 
   const firstPrompt = messages.flatMap(m => rowsFromMessage(m, name, cwd)).find(row => row.kind === 'user')?.text
   const folder = cwd.split('/').filter(Boolean).at(-1) ?? 'session'
   const title = firstPrompt ? `${folder}: ${(firstPrompt.split('\n')[0] ?? '').slice(0, 80)}` : folder
+  const signedIn = opts.team === false ? null : await signInFor($, server)
+  const team = signedIn ? await shareTeam($, server) : null
 
-  const created = await api<{ id: string; url: string; token: string; seq: number; title: string; latest?: string }>(
+  const created = await api<{ id: string; url: string; token: string; seq: number; title: string; latest?: string; team?: { id: string; name: string } }>(
     $,
     server,
     '/api/rooms',
-    { method: 'POST', body: { name, title, fromNow: opts.history === false || undefined } },
+    { method: 'POST', body: { name, title, fromNow: opts.history === false || undefined, team: team?.id }, account: team ? signedIn?.token : undefined },
   )
   const room: ShareRoom = {
     server,
@@ -1483,6 +1495,7 @@ async function share($: $, surface?: RenderSurface, opts: { history?: boolean } 
     seat: 'host',
     seq: created.seq,
     since: await $.clock.now(),
+    team: created.team ?? null,
   }
   await update($, roomA, () => room)
   await update($, modeA, () => 'host')
@@ -1500,10 +1513,10 @@ async function share($: $, surface?: RenderSurface, opts: { history?: boolean } 
   void shareLocal($, localOpens(messages)).catch(() => {})
   startFeed($)
   const copied = await $.ui.copy({ text: room.url, surface }).catch(() => ({ isCopied: false }))
-  $.ui.toast(copied.isCopied ? 'Sharing · link copied' : 'Sharing · the link is in the transcript')
-  $.ui.log(
-    `Sharing${opts.history === false ? ' from now on' : ''}. Anyone with this link can join and prompt this session: ${room.url}`,
-  )
+  $.ui.toast(copied.isCopied ? `Sharing${room.team ? ` with ${room.team.name}` : ''} · link copied` : 'Sharing · the link is in the transcript')
+  const access = room.team ? ((await read($, teamsA)).teams.find(x => x.id === room.team?.id) ?? null) : null
+  $.ui.log(`Sharing${opts.history === false ? ' from now on' : ''}${room.team ? ` with ${room.team.name}` : ''}. ${whoJoins(room, access)}: ${room.url}`)
+  if (room.team) void refreshTeams($).catch(() => {})
   await markSidebar($, current => `👥 Live · ${current || room.title}`)
   return room
 }
@@ -1877,6 +1890,8 @@ function approvalPreview(tool: string, input: unknown, cwd: string): string {
 
 async function join($: $, server: string, id: string) {
   const name = await whoami($)
+  // Signed in to that server: a session shared with a team asks who this is.
+  const signedIn = await signInFor($, server)
   const joined = await api<{
     token: string
     seat: string
@@ -1888,7 +1903,8 @@ async function join($: $, server: string, id: string) {
     latest?: string
     fromNow?: boolean
     hostVersion?: string
-  }>($, server, `/api/rooms/${id}/join`, { method: 'POST', body: { name } })
+    team?: { id: string; name: string }
+  }>($, server, `/api/rooms/${id}/join`, { method: 'POST', body: { name }, account: signedIn?.token })
   void readUpdates($).then(() => noteLatest($, joined.latest))
   const room: ShareRoom = {
     server,
@@ -1900,6 +1916,7 @@ async function join($: $, server: string, id: string) {
     seat: joined.seat,
     seq: joined.seq,
     since: await $.clock.now(),
+    team: joined.team ?? null,
   }
   await update($, roomA, () => room)
   await update($, modeA, () => 'guest')
@@ -3000,7 +3017,7 @@ function describe(a: ShareActivity): string {
 
 // Share pressed in a session with history: everything earlier would go to
 // everyone with the link, so the row (or the Room) asks first.
-function shareChoice($: $, el: UI, prompts: number, where: 'band' | 'room', surface: RenderSurface) {
+function shareChoice($: $, el: UI, prompts: number, where: 'band' | 'room', surface: RenderSurface, team: string | null) {
   const { Box, Text, Button } = el
   const go = (history: boolean, surface?: RenderSurface) =>
     void share($, surface, { history }).catch(error => {
@@ -3011,7 +3028,7 @@ function shareChoice($: $, el: UI, prompts: number, where: 'band' | 'room', surf
     <Box flexDirection="column" gap={where === 'room' ? 1 : 0} paddingRight={where === 'band' && surface === 'terminal' ? 4 : 0}>
       <Box flexDirection="row" gap={1} flexWrap="wrap">
         <Text bold>Share this session?</Text>
-        <Text dimColor>{`Everyone with the link will see its ${prompts} earlier prompt${prompts === 1 ? '' : 's'} and Claude's replies.`}</Text>
+        <Text dimColor>{`${team ? `Everyone in ${team}` : 'Everyone with the link'} will see its ${prompts} earlier prompt${prompts === 1 ? '' : 's'} and Claude's replies.`}</Text>
       </Box>
       <Box flexDirection="row" gap={1} justifyContent={where === 'band' ? 'flex-end' : 'flex-start'}>
         <Button key="share-all" label="Share everything" variant="primary" onPress={press => go(true, press.surface)} />
@@ -3022,8 +3039,30 @@ function shareChoice($: $, el: UI, prompts: number, where: 'band' | 'room', surf
   )
 }
 
+// What joining did, as the first reply in the guest's transcript.
+async function joinedNote($: $, joined: Awaited<ReturnType<typeof join>>): Promise<string> {
+  const { room, history, fromNow, hostVersion } = joined
+  const policy = await read($, policyA)
+  return [
+    `You joined **${room.host}'s session**${room.team ? ` in ${room.team.name}` : ''}.`,
+    policy.prompts === 'watch'
+      ? `It's watch-only for now: you see every turn live and can chat with everyone in the **Room**.`
+      : `What you type here runs there, on ${room.host}'s machine, and everyone sees the replies live.`,
+    `The **Room** (above the prompt, or \`/room\`) shows who's here and has a side chat Claude doesn't read. **Leave** is up there too.${history.length ? ` What happened before you joined follows, ${history.length === 1 ? 'one prompt' : `${history.length} prompts`} with their replies.` : fromNow ? ` ${room.host} shared from that point on, so what came before isn't shown.` : ''}`,
+    hostVersion && newerThan(CARDS_FROM, hostVersion)
+      ? `\n\n> ${room.host}'s Claude Code runs Shared Sessions ${hostVersion}, so their tool calls show here as text, not cards. Once they update (\`${UPDATE_COMMAND}\`) and restart Claude Code, they show as cards.`
+      : '',
+  ].join(' ')
+}
+
 // Why a link didn't join, in words a person can act on.
 function joinFailure(error: unknown, server: string): string {
+  // A team's session: who may join is the team's to say.
+  if (error instanceof ApiError && typeof error.data.team === 'string' && (error.status === 401 || error.status === 403)) {
+    return error.data.signIn
+      ? `This session is for **${error.data.team}**. Sign in with an account in that team in the **Team** panel (it just opened, or \`/team\`), then paste the link again.`
+      : `${error.message} Once you're in, paste the link again.`
+  }
   if (isGone(error)) return "That shared session has ended: the host stopped sharing, or the room expired. Ask them for a new link."
   if (error instanceof ApiError) return `Couldn't join that shared session: ${error.message}`
   return `Couldn't reach the share server at ${server}. Check your connection, then paste the link again.`
@@ -3049,6 +3088,478 @@ const selectOf = (el: UI) => ('Select' in el ? el.Select : undefined)
 
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Teams: sign in with GitHub or Google, and what's shared goes to your team.
+// The Team panel lists the sessions its people share, each a press from
+// joining; their access setting (members only, or anyone with the link) is
+// the server's to enforce at every join. The sign-in is the share server's
+// token, kept in ~/.claude/shared-session/account.json (only this user can
+// read it) per server, sent in a header to the server that gave it, never in
+// an address or a process's arguments.
+
+type SavedSignIn = { token: string; account: ShareAccount; /** The team Share goes to; null: by link alone; absent: the first team. */ current?: string | null }
+
+async function accountFile($: $): Promise<string | null> {
+  const home = await $.env.get('HOME')
+  return home ? `${home}/.claude/shared-session/account.json` : null
+}
+
+async function readSignIns($: $): Promise<Record<string, SavedSignIn>> {
+  const path = await accountFile($)
+  if (!path) return {}
+  try {
+    const data = JSON.parse(await $.fs.read(path)) as { servers?: Record<string, SavedSignIn> }
+    return data?.servers && typeof data.servers === 'object' ? data.servers : {}
+  } catch {
+    return {}
+  }
+}
+
+async function signInFor($: $, server: string): Promise<SavedSignIn | null> {
+  const saved = (await readSignIns($))[server]
+  return saved && typeof saved.token === 'string' && saved.account ? saved : null
+}
+
+// Written through a shell with a umask, so the file is never readable by
+// anyone else, not even for a moment; the token goes on stdin.
+async function saveSignIn($: $, server: string, value: SavedSignIn | null) {
+  const path = await accountFile($)
+  if (!path) return
+  const all = await readSignIns($)
+  if (value) all[server] = value
+  else delete all[server]
+  const body = JSON.stringify({ servers: all }, null, 2)
+  const tag = fence(body)
+  const tmp = `${path}.tmp`
+  await sh($, `umask 077\nmkdir -p ${sq(path.replace(/\/[^/]+$/, ''))}\ncat > ${sq(tmp)} <<'${tag}'\n${body}\n${tag}\nchmod 600 ${sq(tmp)}\nmv ${sq(tmp)} ${sq(path)}\n`)
+}
+
+function randomSecret(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(32))
+  return [...bytes].map(b => b.toString(16).padStart(2, '0')).join('')
+}
+
+async function sha256Hex(text: string): Promise<string> {
+  const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text)))
+  return [...digest].map(b => b.toString(16).padStart(2, '0')).join('')
+}
+
+// The person's own browser (or Claude Desktop, for a claude:// link).
+// SHARED_SESSION_NO_BROWSER=1 (the end-to-end test) opens nothing.
+async function openExternal($: $, url: string): Promise<boolean> {
+  if ((await $.env.get('SHARED_SESSION_NO_BROWSER')) === '1') return false
+  const { code } = await sh($, `u=${sq(url)}\nif command -v open >/dev/null 2>&1; then open "$u"\nelif command -v xdg-open >/dev/null 2>&1; then xdg-open "$u" >/dev/null 2>&1 &\nelse exit 1\nfi\n`)
+  return code === 0
+}
+
+// A link element takes only https: (or http://localhost) addresses.
+const linkable = (url: string) => /^https:\/\//.test(url) || /^http:\/\/localhost[:/]/.test(url)
+
+// Who can join a room, said plainly.
+function whoJoins(room: ShareRoom, team: ShareTeam | { access?: string } | null): string {
+  if (!room.team) return 'Anyone with this link can join and prompt this session'
+  if (team?.access === 'link') return `Everyone in ${room.team.name} sees it in their Team panel, and anyone with the link can join`
+  return `Everyone in ${room.team.name} sees it in their Team panel and can join; the link works only for people in ${room.team.name}`
+}
+
+// The team Share goes to now, if any.
+async function shareTeam($: $, server: string): Promise<{ id: string; name: string } | null> {
+  const saved = await signInFor($, server)
+  if (!saved || saved.current === null) return null
+  let t = await read($, teamsA)
+  if (t.server !== server || !t.account) {
+    await refreshTeams($)
+    t = await read($, teamsA)
+  }
+  const team = t.teams.find(x => x.id === saved.current) ?? (saved.current === undefined ? t.teams[0] : undefined)
+  return team ? { id: team.id, name: team.name } : null
+}
+
+async function shareTeamName($: $): Promise<string | null> {
+  const t = await read($, teamsA)
+  if (!t.account || t.byLink || !t.current) return null
+  return t.teams.find(x => x.id === t.current)?.name ?? null
+}
+
+// Who's signed in, their teams, and the shown team's sessions and people.
+async function refreshTeams($: $) {
+  let server: string
+  try {
+    server = await serverOf($)
+  } catch {
+    return
+  }
+  const before = await read($, teamsA)
+  const providers =
+    before.server === server && before.providers.length
+      ? before.providers
+      : await api<{ providers: { id: string; label: string }[] }>($, server, '/api/auth/providers')
+          .then(r => r.providers)
+          .catch(() => [])
+  const saved = await signInFor($, server)
+  const now = await $.clock.now()
+  if (!saved) {
+    await update($, teamsA, t => ({ ...NO_TEAMS, server, providers, signingIn: t.server === server ? t.signingIn : null, invite: t.invite, loaded: now }))
+    return
+  }
+  try {
+    const me = await api<{ account: ShareAccount; teams: ShareTeam[] }>($, server, '/api/me', { token: saved.token })
+    // Shown: the team Share goes to, else (by link alone, or it's gone) the first.
+    const current = (me.teams.find(x => x.id === saved.current) ?? me.teams[0])?.id ?? null
+    const [sessions, detail] = current
+      ? await Promise.all([
+          api<{ sessions: ShareTeamSession[] }>($, server, `/api/teams/${current}/sessions`, { token: saved.token }).then(r => r.sessions),
+          api<{ members: ShareTeams['members'] }>($, server, `/api/teams/${current}`, { token: saved.token }).then(r => r.members),
+        ])
+      : [[], []]
+    await update($, teamsA, t => ({
+      ...t,
+      server,
+      providers,
+      account: me.account,
+      teams: me.teams,
+      current,
+      byLink: saved.current === null,
+      sessions,
+      members: detail,
+      signingIn: null,
+      loaded: now,
+      error: null,
+    }))
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 401) {
+      // The sign-in was ended (signed out elsewhere, the account deleted).
+      await saveSignIn($, server, null)
+      await update($, teamsA, () => ({ ...NO_TEAMS, server, providers, loaded: now, error: 'Your sign-in ended. Sign in again.' }))
+      return
+    }
+    await update($, teamsA, t => ({ ...t, server, providers, loaded: now, error: `Couldn't reach the share server: ${String((error as Error)?.message ?? error)}` }))
+  }
+}
+
+let signInRun = 0
+
+// Opens the server's sign-in in the browser with the hash of a secret kept
+// here, then asks for the sign-in with that secret every 2 s for ten minutes.
+async function startSignIn($: $, provider: string): Promise<string> {
+  const server = await serverOf($)
+  const verifier = randomSecret()
+  const t = await read($, teamsA)
+  const invite = t.invite && t.invite.server === server ? `&invite=${encodeURIComponent(t.invite.code)}` : ''
+  const url = `${server}/auth/${encodeURIComponent(provider)}/start?login=${await sha256Hex(verifier)}${invite}`
+  const run = ++signInRun
+  const until = (await $.clock.now()) + 10 * 60_000
+  await update($, teamsA, x => ({ ...x, server, signingIn: { provider, url, until }, error: null }))
+  await openExternal($, url)
+  const tick = async () => {
+    if (run !== signInRun) return
+    if ((await $.clock.now()) > until) {
+      await update($, teamsA, x => ({ ...x, signingIn: null }))
+      return
+    }
+    const r = await api<{ status: string; token?: string; account?: ShareAccount; joined?: string | null }>($, server, '/api/auth/poll', { method: 'POST', body: { verifier } }).catch(() => null)
+    if (run !== signInRun) return
+    if (r?.status === 'done' && r.token && r.account) {
+      signInRun++
+      await saveSignIn($, server, { token: r.token, account: r.account, ...(r.joined ? { current: r.joined } : {}) })
+      await update($, teamsA, x => ({ ...x, signingIn: null, invite: null }))
+      $.ui.toast(`Signed in as ${r.account.name}`)
+      await refreshTeams($)
+      return
+    }
+    $.clock.after(2_000, () => void tick().catch(() => {}))
+  }
+  $.clock.after(2_000, () => void tick().catch(() => {}))
+  return url
+}
+
+async function cancelSignIn($: $) {
+  signInRun++
+  await update($, teamsA, x => ({ ...x, signingIn: null }))
+}
+
+async function signOut($: $, opts: { deleteAccount?: boolean } = {}) {
+  const server = await serverOf($)
+  const saved = await signInFor($, server)
+  if (saved) {
+    await api($, server, opts.deleteAccount ? '/api/me' : '/api/auth/logout', { method: opts.deleteAccount ? 'DELETE' : 'POST', token: saved.token }).catch(() => {})
+    await saveSignIn($, server, null)
+  }
+  await update($, teamsA, t => ({ ...NO_TEAMS, server, providers: t.providers }))
+  $.ui.toast(opts.deleteAccount ? 'Account deleted' : 'Signed out')
+}
+
+// A call to the team API as the person signed in; their sign-in ending signs them out here.
+async function teamCall<T>($: $, path: string, init: { method?: string; body?: unknown } = {}): Promise<T> {
+  const server = await serverOf($)
+  const saved = await signInFor($, server)
+  if (!saved) throw new ApiError('Sign in first: /team', 401)
+  try {
+    return await api<T>($, server, path, { ...init, token: saved.token })
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 401) await refreshTeams($)
+    throw error
+  }
+}
+
+// Which team Share goes to (and the panel shows): an id, or null for the link alone.
+async function setCurrentTeam($: $, id: string | null) {
+  const server = await serverOf($)
+  const saved = await signInFor($, server)
+  if (!saved) return
+  await saveSignIn($, server, { ...saved, current: id })
+  await refreshTeams($)
+}
+
+async function createTeam($: $, name: string): Promise<ShareTeam | null> {
+  const trimmed = name.trim()
+  if (!trimmed) return null
+  const { team } = await teamCall<{ team: ShareTeam }>($, '/api/teams', { method: 'POST', body: { name: trimmed } })
+  await setCurrentTeam($, team.id)
+  $.ui.toast(`Made ${team.name}. Copy its invite link for your teammates`)
+  return team
+}
+
+async function changeTeam($: $, body: Record<string, unknown>) {
+  const t = await read($, teamsA)
+  if (!t.current) return
+  await teamCall($, `/api/teams/${t.current}`, { method: 'PATCH', body })
+  await refreshTeams($)
+}
+
+async function newInvite($: $) {
+  const t = await read($, teamsA)
+  if (!t.current) return
+  await teamCall($, `/api/teams/${t.current}/invite`, { method: 'POST' })
+  await refreshTeams($)
+  $.ui.toast('New invite link. The old one no longer works')
+}
+
+async function leaveTeam($: $) {
+  const t = await read($, teamsA)
+  const team = t.teams.find(x => x.id === t.current)
+  if (!team) return
+  await teamCall($, `/api/teams/${team.id}/members/me`, { method: 'DELETE' })
+  const server = await serverOf($)
+  const saved = await signInFor($, server)
+  if (saved) await saveSignIn($, server, { ...saved, current: undefined })
+  await refreshTeams($)
+  $.ui.toast(`Left ${team.name}`)
+}
+
+const inviteUrl = (t: ShareTeams, team: ShareTeam) => `${t.server}/i/${team.invite}`
+
+let teamOpen = false
+let teamTimer: Timer | null = null
+
+// The Team panel: fresh when it opens, and every 20 s while it's open.
+async function openTeam($: $) {
+  teamOpen = true
+  // A session with no panels (a headless run) still answers in words.
+  await $.ui.open({ id: TEAM, title: 'Team', focus: true, closeOnEscape: true, rows: 60 }).catch(() => {})
+  void refreshTeams($).catch(() => {})
+  if (!teamTimer) {
+    teamTimer = $.clock.every(20_000, () => {
+      if (teamOpen) void refreshTeams($).catch(() => {})
+    })
+  }
+}
+
+// Joins sessions from the Team panel. The first joins here when this
+// session is fresh; otherwise Claude Desktop opens a new session with its
+// link ready (Desktop fills the prompt, the person presses Enter). Desktop
+// holds one new-session draft at a time, so the rest wait in the store
+// (`JOIN_QUEUE`, read by every session) and each session that joins one
+// opens the next (`continueJoins`). In a terminal, the commands that start
+// them are copied.
+const JOIN_QUEUE = 'joinQueue'
+type JoinQueue = { current: string; rest: { id: string; url: string }[]; at: number }
+const deepLink = (url: string) => `claude://code/new?q=${encodeURIComponent(url)}`
+
+async function joinFromTeam($: $, sessions: ShareTeamSession[], surface?: RenderSurface) {
+  const room = await read($, roomA)
+  const [first, ...rest] = sessions.filter(s => s.id !== room?.id)
+  if (!first) return
+  const fresh = (await read($, modeA)) === 'idle' && !localTurnActive && (await earlierPrompts($)) === 0
+  const desktop = (await $.env.get('CLAUDE_CODE_ENTRYPOINT')) === 'claude-desktop'
+  if (desktop) await $.store.set(JOIN_QUEUE, { current: first.id, rest: rest.map(s => ({ id: s.id, url: s.url })), at: await $.clock.now() } satisfies JoinQueue)
+  const commands = (list: ShareTeamSession[]) =>
+    copyText($, list.map(s => `claude ${sq(s.url)}`).join('\n'), list.length === 1 ? 'Command copied: run it in a new terminal to join' : `${list.length} commands copied: run each in its own terminal`, surface)
+  if (fresh) {
+    await $.ui.close({ id: TEAM }).catch(() => {})
+    await joinHere($, first.url)
+    if (!desktop && rest.length) await commands(rest)
+    return
+  }
+  if (desktop && (await openExternal($, deepLink(first.url)))) {
+    $.ui.toast(rest.length ? `Opened ${first.host}'s session: press Enter there to join. The other ${rest.length} open one after another as each joins` : `Opened ${first.host}'s session: press Enter there to join`)
+    return
+  }
+  await commands([first, ...rest])
+}
+
+// A session joined the room Join all opened it for: the next one opens.
+async function continueJoins($: $, joined: string) {
+  const queue = (await $.store.get(JOIN_QUEUE).catch(() => undefined)) as JoinQueue | undefined
+  if (!queue || queue.current !== joined) return
+  const now = await $.clock.now()
+  const [next, ...rest] = queue.rest
+  if (!next || now - queue.at > 10 * 60_000) {
+    await $.store.delete(JOIN_QUEUE).catch(() => {})
+    return
+  }
+  await $.store.set(JOIN_QUEUE, { current: next.id, rest, at: now } satisfies JoinQueue)
+  await openExternal($, deepLink(next.url))
+}
+
+// In a fresh session: join, and the first turn says so and plays back what
+// came before, as pasting the link does.
+async function joinHere($: $, url: string) {
+  const link = LINK.exec(url)
+  if (!link?.[1] || !link[2]) return
+  try {
+    const joined = await join($, link[1], link[2])
+    laterRides.unshift({ text: `Join ${joined.room.host}'s session`, ride: { kind: 'note', text: await joinedNote($, joined), then: joined.history, open: joined.open } })
+    scheduleRides($)
+    void continueJoins($, joined.room.id).catch(() => {})
+  } catch (error) {
+    $.ui.toast("Couldn't join")
+    $.ui.log(joinFailure(error, link[1]).replace(/\*\*/g, ''))
+  }
+}
+
+// An invite link pasted as a message: in the team now if signed in to its
+// server, else once signed in (the Team panel opens for that).
+async function takeInvite($: $, server: string, code: string): Promise<string> {
+  const ours = await serverOf($).catch(() => '')
+  if (server !== ours) {
+    return `This invite is for the share server at ${server}, and this Claude Code shares through ${ours || 'another one'}. To use that team, set the plugin's server to ${server} (\`node scripts/setup.mjs host --server ${server}\` in the claude-share repo), then paste the link again.`
+  }
+  const saved = await signInFor($, server)
+  if (saved) {
+    try {
+      const r = await api<{ team: ShareTeam; joined: boolean }>($, server, `/api/invites/${code}`, { method: 'POST', token: saved.token })
+      await saveSignIn($, server, { ...saved, current: r.team.id })
+      await openTeam($)
+      return `${r.joined ? "You're in" : "You're already in"} **${r.team.name}**. The **Team** panel (it just opened, or \`/team\`) lists the sessions its people share; press **Join** on one. What you share now goes to ${r.team.name}.`
+    } catch (error) {
+      if (!(error instanceof ApiError && error.status === 401)) return `Couldn't use that invite: ${String((error as Error)?.message ?? error)}`
+      await saveSignIn($, server, null)
+    }
+  }
+  await update($, teamsA, t => ({ ...t, invite: { server, code } }))
+  await openTeam($)
+  return 'To join this team, sign in with GitHub or Google in the **Team** panel (it just opened, or `/team`). You join the team as soon as you\'re signed in.'
+}
+
+// Host: who an open room is shared with, a team or the link alone. Everyone already in stays.
+async function setRoomTeam($: $, teamId: string | null) {
+  const room = await read($, roomA)
+  if (!room || (await read($, modeA)) !== 'host') return
+  const saved = await signInFor($, room.server)
+  try {
+    const r = await api<{ team: { id: string; name: string } | null }>($, room.server, `/api/rooms/${room.id}/team`, { method: 'POST', token: room.token, account: saved?.token, body: { team: teamId } })
+    await update($, roomA, rm => (rm ? { ...rm, team: r.team } : rm))
+    $.ui.toast(r.team ? `Shared with ${r.team.name}` : 'Shared by link alone now')
+    void refreshTeams($).catch(() => {})
+  } catch (error) {
+    $.ui.toast(`Couldn't change it: ${String((error as Error)?.message ?? error)}`)
+  }
+}
+
+// /team, and its words for a terminal or a script.
+async function teamCommand($: $, args: string): Promise<{ text: string }> {
+  const [verb = '', ...rest] = args.trim().split(/\s+/).filter(Boolean)
+  const arg = rest.join(' ')
+  const t0 = await read($, teamsA)
+  try {
+    switch (verb.toLowerCase()) {
+      case '':
+        await openTeam($)
+        return { text: 'Opened the Team panel.' }
+      case 'signin':
+      case 'login': {
+        await refreshTeams($)
+        const t = await read($, teamsA)
+        if (t.account) return { text: `Signed in as ${t.account.name}. /team signout to sign out.` }
+        const provider = arg.toLowerCase() || (t.providers.length === 1 ? t.providers[0]?.id : '')
+        if (!provider || !t.providers.some(p => p.id === provider)) {
+          return { text: t.providers.length ? `Sign in with: ${t.providers.map(p => `/team signin ${p.id}`).join(' or ')}` : "This share server doesn't offer sign-in." }
+        }
+        const url = await startSignIn($, provider)
+        return { text: `Sign in with ${t.providers.find(p => p.id === provider)?.label ?? provider} in your browser; this session picks it up when you're done. If no browser opened: ${url}` }
+      }
+      case 'signout':
+      case 'logout':
+        await signOut($)
+        return { text: 'Signed out.' }
+      case 'delete-account':
+        await signOut($, { deleteAccount: true })
+        return { text: 'Deleted your account on the share server: your sign-in, and your place in every team.' }
+      case 'create': {
+        const team = await createTeam($, arg)
+        if (!team) return { text: 'Name it: /team create <name>' }
+        return { text: `Made ${team.name}; what you share goes to it. Invite people with this link: ${(await read($, teamsA)).server}/i/${team.invite}` }
+      }
+      case 'invite': {
+        const team = t0.teams.find(x => x.id === t0.current)
+        if (!team) return { text: 'No team yet: /team create <name>' }
+        await copyText($, inviteUrl(t0, team), 'Invite link copied')
+        return { text: `Anyone who opens this link (and signs in) joins ${team.name}: ${inviteUrl(t0, team)}` }
+      }
+      case 'sessions':
+      case 'list': {
+        await refreshTeams($)
+        const t = await read($, teamsA)
+        const team = t.teams.find(x => x.id === t.current)
+        if (!t.account) return { text: 'Sign in first: /team signin' }
+        if (!team) return { text: 'No team yet: /team create <name>, or paste an invite link.' }
+        if (!t.sessions.length) return { text: `Nothing is shared with ${team.name} right now.` }
+        return { text: [`Shared with ${team.name}:`, ...t.sessions.map((s, i) => `${i + 1}. ${s.title} (${s.host}${s.hostOnline ? '' : ', away'}): ${s.url}`), '', 'Paste a link to join, or /team join all.'].join('\n') }
+      }
+      case 'join': {
+        await refreshTeams($)
+        const t = await read($, teamsA)
+        const pick = arg.toLowerCase() === 'all' ? t.sessions : t.sessions.filter((_, i) => String(i + 1) === arg)
+        if (!pick.length) return { text: 'Which? /team join <number from /team sessions>, or /team join all' }
+        await joinFromTeam($, pick)
+        return { text: `Joining ${pick.length === 1 ? pick[0]?.title : `${pick.length} sessions`}.` }
+      }
+      case 'use': {
+        await refreshTeams($)
+        const t = await read($, teamsA)
+        if (arg.toLowerCase() === 'link') {
+          await setCurrentTeam($, null)
+          return { text: 'Share now goes by link alone.' }
+        }
+        const team = t.teams.find(x => x.name.toLowerCase() === arg.toLowerCase() || x.id === arg)
+        if (!team) return { text: `Your teams: ${t.teams.map(x => x.name).join(', ') || 'none'}. /team use <name> or /team use link` }
+        await setCurrentTeam($, team.id)
+        return { text: `Share now goes to ${team.name}.` }
+      }
+      case 'access': {
+        const access = arg.toLowerCase()
+        if (access !== 'members' && access !== 'link') return { text: '/team access members (only people in the team join its sessions) or /team access link (anyone with a link)' }
+        await changeTeam($, { access })
+        return { text: access === 'members' ? 'Only people in the team join its sessions now.' : 'Anyone with a link joins the team\'s sessions now.' }
+      }
+      case 'domains':
+        await changeTeam($, { domains: arg })
+        return { text: arg ? `People who sign in with a verified email at ${arg} join by themselves.` : 'No email domain joins by itself now.' }
+      case 'orgs':
+        await changeTeam($, { githubOrgs: arg })
+        return { text: arg ? `People in the GitHub organization${rest.length > 1 ? 's' : ''} ${arg} join by themselves when they sign in with GitHub.` : 'No GitHub organization joins by itself now.' }
+      case 'leave':
+        await leaveTeam($)
+        return { text: 'Left the team.' }
+      default:
+        return { text: '/team opens the Team panel. Also: /team signin [github|google], /team create <name>, /team invite, /team sessions, /team join <n|all>, /team use <name|link>, /team access members|link, /team domains <a.com …>, /team orgs <org …>, /team leave, /team signout, /team delete-account' }
+    }
+  } catch (error) {
+    return { text: `Couldn't: ${String((error as Error)?.message ?? error)}` }
+  }
+}
+
 // /share-session: shares, or in a session with earlier prompts asks first.
 // What Claude is told when it asks for the share command itself.
 async function shareAnswer($: $): Promise<string> {
@@ -3063,25 +3574,30 @@ async function shareAnswer($: $): Promise<string> {
 }
 
 async function shareCommand($: $, e: { args: string }): Promise<{ text: string }> {
-  const choice = e.args.trim().toLowerCase()
+  const words = e.args.trim().toLowerCase().split(/\s+/).filter(Boolean)
+  const choice = words.find(w => w === 'all' || w === 'new') ?? ''
+  // `link`: by link alone, not to the team.
+  const byLink = words.includes('link')
   try {
-    if ((await read($, modeA)) === 'idle' && choice !== 'all' && choice !== 'new') {
+    if ((await read($, modeA)) === 'idle' && !choice) {
       const prompts = await earlierPrompts($)
       if (prompts > 0) {
+        const team = byLink ? null : await shareTeamName($)
         // The row above the prompt offers the same two, a press away (by keys in a terminal).
         await update($, askingA, () => ({ prompts }))
         return {
           text: [
-            `This session has ${prompts} earlier prompt${prompts === 1 ? '' : 's'}. Everyone with the link would see them, and Claude's replies.`,
+            `This session has ${prompts} earlier prompt${prompts === 1 ? '' : 's'}. ${team ? `Everyone in ${team}` : 'Everyone with the link'} would see them, and Claude's replies.`,
             '',
-            '- `/share-session all` shares the session as it is',
-            '- `/share-session new` shares only what happens from now on',
+            `- \`/share-session all${byLink ? ' link' : ''}\` shares the session as it is`,
+            `- \`/share-session new${byLink ? ' link' : ''}\` shares only what happens from now on`,
           ].join('\n'),
         }
       }
     }
-    const room = await share($, undefined, { history: choice !== 'new' })
-    return { text: `Sharing this session${choice === 'new' ? ' from now on' : ''}. Anyone with the link can join: ${room.url}` }
+    const room = await share($, undefined, { history: choice !== 'new', team: !byLink })
+    const team = room.team ? (await read($, teamsA)).teams.find(t => t.id === room.team?.id) ?? null : null
+    return { text: `Sharing this session${choice === 'new' ? ' from now on' : ''}${room.team ? ` with ${room.team.name}` : ''}. ${whoJoins(room, team)}: ${room.url}` }
   } catch (error) {
     return { text: `Couldn't share: ${String((error as Error)?.message ?? error)}` }
   }
@@ -3093,12 +3609,25 @@ export const register: Register = (on, options) => {
   on('session.start', async ($, e, next) => {
     const started = await next(e)
     // Not /share: Claude has its own. Every name here is the plugin's alone.
-    await $.command.register({ name: 'share-session', description: 'Share this session with a link: /share-session [all | new]' })
+    await $.command.register({ name: 'share-session', description: 'Share this session (with your team when signed in): /share-session [all | new] [link]' })
+    await $.command.register({ name: 'team', description: "Your team's shared sessions, one click to join: /team [signin | create <name> | invite | signout]" })
     await $.command.register({ name: 'stop-sharing', description: 'Stop sharing this session, or leave the one you joined' })
     await $.command.register({ name: 'room', description: 'Open the Room: who is here, activity, side chat' })
     await $.command.register({ name: 'share-file', description: 'Show a file to everyone in the shared session: /share-file <path>' })
     await $.command.register({ name: 'share-preview', description: "Let teammates open this machine's localhost: /share-preview <port> [title]" })
     void readUpdates($)
+    // Signed in: the team and what's shared with it, for Share and the Team button.
+    void serverOf($)
+      .then(server => signInFor($, server))
+      .then(saved => (saved ? refreshTeams($) : undefined))
+      .catch(() => {})
+    // …and kept current while this session isn't in one, for the Team button's count.
+    $.clock.every(5 * 60_000, () => {
+      void (async () => {
+        if (teamOpen || !(await read($, teamsA)).account || (await read($, modeA)) !== 'idle') return
+        await refreshTeams($)
+      })().catch(() => {})
+    })
     // Loaded anew (an update in place, a reload): the rows this plugin drew
     // draw again with this code, the room and the transcript as they were.
     $.ui.invalidate('ui.render')
@@ -3136,6 +3665,9 @@ export const register: Register = (on, options) => {
   // never reaches the model.
   on('command.run', { command: 'share-session' }, ($, e) => shareCommand($, e))
   on('command.run', { command: 'shared-session:share-session' }, ($, e) => shareCommand($, e))
+
+  on('command.run', { command: 'team' }, ($, e) => teamCommand($, e.args ?? ''))
+  on('command.run', { command: 'shared-session:team' }, ($, e) => teamCommand($, e.args ?? ''))
 
   on('command.run', { command: 'room' }, async $ => {
     if ((await read($, modeA)) === 'idle') return { text: 'This session is not shared. Press Share above the prompt, or type /share-session.' }
@@ -3178,6 +3710,11 @@ export const register: Register = (on, options) => {
 
   on('ui.close', async ($, e, next) => {
     if (e.id === ROOM) roomOpen = false
+    if (e.id === TEAM) {
+      teamOpen = false
+      teamTimer?.cancel()
+      teamTimer = null
+    }
     return next(e)
   })
 
@@ -3199,26 +3736,19 @@ export const register: Register = (on, options) => {
       // did, then what happened before plays back, all without a model call.
       try {
         if (mode === 'guest') await leave($)
-        const { room, history, open, fromNow, hostVersion } = await join($, link[1], link[2])
-        const policy = await read($, policyA)
-        answerWith({
-          kind: 'note',
-          text: [
-            `You joined **${room.host}'s session**.`,
-            policy.prompts === 'watch'
-              ? `It's watch-only for now: you see every turn live and can chat with everyone in the **Room**.`
-              : `What you type here runs there, on ${room.host}'s machine, and everyone sees the replies live.`,
-            `The **Room** (above the prompt, or \`/room\`) shows who's here and has a side chat Claude doesn't read. **Leave** is up there too.${history.length ? ` What happened before you joined follows, ${history.length === 1 ? 'one prompt' : `${history.length} prompts`} with their replies.` : fromNow ? ` ${room.host} shared from that point on, so what came before isn't shown.` : ''}`,
-            hostVersion && newerThan(CARDS_FROM, hostVersion)
-              ? `\n\n> ${room.host}'s Claude Code runs Shared Sessions ${hostVersion}, so their tool calls show here as text, not cards. Once they update (\`${UPDATE_COMMAND}\`) and restart Claude Code, they show as cards.`
-              : '',
-          ].join(' '),
-          then: history,
-          open,
-        })
+        const joined = await join($, link[1], link[2])
+        answerWith({ kind: 'note', text: await joinedNote($, joined), then: joined.history, open: joined.open })
+        void continueJoins($, joined.room.id).catch(() => {})
       } catch (error) {
         answerWith({ kind: 'note', text: joinFailure(error, link[1]), then: [] })
+        if (error instanceof ApiError && error.data.signIn) void openTeam($)
       }
+      return next(e)
+    }
+    // A team's invite link: in the team once signed in, its sessions in the Team panel.
+    const invite = INVITE.exec(typed)
+    if (invite?.[1] && invite[2] && mode !== 'host' && PERSON.has(e.origin.kind)) {
+      answerWith({ kind: 'note', text: await takeInvite($, invite[1], invite[2]), then: [] })
       return next(e)
     }
     // The update command, typed here by a guest (the "is out" line names it):
@@ -3844,6 +4374,263 @@ export const register: Register = (on, options) => {
   // The Room: who's here, the side chat, what was shown, what happened, and
   // the settings, in that order; the one button that ends it last. Plain rows
   // in the app's own type, grouped by space, with the meta on the right.
+  // The Team panel: sign in, the team's live sessions a press from joining,
+  // its invite link, and (owners) who may join and who joins by themselves.
+  on('ui.render', { component: 'Pane', requestId: TEAM }, async ($, e) => {
+    const el = $.ui.resolve(e)
+    const { Box, Text, Button } = el
+    const Svg = svgOf(el, e.surface)
+    const Input = inputOf(el)
+    const Select = selectOf(el)
+    const Link = 'Link' in el ? el.Link : undefined
+    const t = await read($, teamsA)
+    const now = await $.clock.now()
+    const room = await read($, roomA)
+    const mode = await read($, modeA)
+    const fail = (what: string) => (error: unknown) => $.ui.toast(`Couldn't ${what}: ${String((error as Error)?.message ?? error)}`)
+    const section = (key: string, title: string, meta: string, rows: RenderChildren) => (
+      <Box key={key} flexDirection="column" gap={1}>
+        <Box flexDirection="row" justifyContent="space-between" alignItems="center">
+          <Text bold>{title}</Text>
+          {meta ? <Text dimColor>{meta}</Text> : null}
+        </Box>
+        {rows}
+      </Box>
+    )
+    const setting = (label: string, picker: RenderChildren) => (
+      <Box flexDirection="row" alignItems="center" gap={1}>
+        <Box width="40%" flexShrink={0}>
+          <Text dimColor>{label}</Text>
+        </Box>
+        <Box flexGrow={1}>{picker}</Box>
+      </Box>
+    )
+
+    if (!t.account) {
+      const signing = t.signingIn
+      const label = t.providers.find(p => p.id === signing?.provider)?.label ?? signing?.provider
+      return (
+        <Box flexDirection="column" gap={1}>
+          <Text bold>Teams</Text>
+          <Text dimColor>Sign in, and what you share goes to your team: everyone in it sees it here and joins with one press. What they share shows here for you.</Text>
+          {t.invite ? <Text>You'll join the team from your invite as soon as you're signed in.</Text> : null}
+          {t.error ? <Text dimColor>{t.error}</Text> : null}
+          {signing ? (
+            <Box flexDirection="column" gap={1} marginTop={1}>
+              <Text>{`Finish signing in with ${label} in your browser…`}</Text>
+              <Box flexDirection="row" gap={1} alignItems="center">
+                {Link && linkable(signing.url) ? <Link href={signing.url} label="Open the sign-in page" /> : null}
+                <Button key="signin-cancel" label="Cancel" plain dimColor onPress={() => void cancelSignIn($)} />
+              </Box>
+            </Box>
+          ) : t.providers.length ? (
+            <Box flexDirection="row" gap={1} marginTop={1}>
+              {t.providers.map((p, i) => (
+                <Button key={`signin-${p.id}`} label={`Sign in with ${p.label}`} variant={i === 0 ? 'primary' : undefined} onPress={() => void startSignIn($, p.id).catch(fail('sign in'))} />
+              ))}
+            </Box>
+          ) : t.loaded ? (
+            <Text dimColor>This share server doesn't offer sign-in, so teams aren't available on it.</Text>
+          ) : (
+            <Text dimColor>Loading…</Text>
+          )}
+        </Box>
+      )
+    }
+
+    const account = t.account
+    const team = t.teams.find(x => x.id === t.current) ?? null
+    const signedInLine = (
+      <Box flexDirection="row" gap={1} alignItems="center" justifyContent="space-between">
+        <Text dimColor wrap="truncate-end">{`Signed in as ${account.name}${account.login && account.login !== account.name ? ` (${account.login})` : ''} with ${account.provider === 'github' ? 'GitHub' : account.provider === 'google' ? 'Google' : account.provider}`}</Text>
+        <Button key="signout" label="Sign out" plain dimColor onPress={() => void signOut($)} />
+      </Box>
+    )
+
+    if (!team) {
+      return (
+        <Box flexDirection="column" gap={2}>
+          <Box flexDirection="column" gap={1}>
+            <Text bold>Teams</Text>
+            <Text dimColor>Make a team and send its invite link to teammates, or paste an invite link someone sent you as your message.</Text>
+          </Box>
+          {Input ? (
+            <Input key="team-new" placeholder="Team name" submitLabel="Create team" autoFocus onSubmit={(value: string) => void createTeam($, value).catch(fail('make the team'))} />
+          ) : (
+            <Text dimColor>/team create &lt;name&gt;</Text>
+          )}
+          {t.error ? <Text dimColor>{t.error}</Text> : null}
+          {signedInLine}
+        </Box>
+      )
+    }
+
+    const owner = team.role === 'owner'
+    const joinable = t.sessions.filter(s => s.id !== room?.id && s.hostOnline)
+    const invite = inviteUrl(t, team)
+    const sessionRow = (s: ShareTeamSession) => {
+      const mine = s.hostAccount === account.id
+      const inIt = room?.id === s.id
+      const others = s.people.filter(n => n !== s.host)
+      return (
+        <Box key={`ts-${s.id}`} flexDirection="row" gap={1} alignItems="center" justifyContent="space-between">
+          <Box flexDirection="row" gap={1} alignItems="center" flexShrink={1}>
+            {Svg ? <Svg source={avatarSvg({ name: s.host, online: s.hostOnline }, 24)} alt={s.host} width={24} height={24} /> : <Text dimColor={!s.hostOnline}>{s.hostOnline ? '●' : '○'}</Text>}
+            <Box flexDirection="column" flexShrink={1}>
+              <Text bold={s.hostOnline} wrap="truncate-end">
+                {s.title}
+              </Text>
+              <Text dimColor wrap="truncate-end">
+                {[mine ? 'You' : s.host, s.hostOnline ? '' : 'away', others.length ? `with ${listNames(others)}` : '', ago(s.createdAt, now)].filter(Boolean).join(' · ')}
+              </Text>
+            </Box>
+          </Box>
+          <Box flexShrink={0}>
+            {inIt ? (
+              <Text dimColor>{mode === 'host' ? 'This session' : "You're in it"}</Text>
+            ) : mine && mode === 'host' ? null : (
+              <Button key={`join-${s.id}`} label="Join" variant={s.hostOnline ? 'primary' : undefined} plain={s.hostOnline ? undefined : true} onPress={press => void joinFromTeam($, [s], press.surface)} />
+            )}
+          </Box>
+        </Box>
+      )
+    }
+
+    return (
+      <Box flexDirection="column" gap={2}>
+        <Box flexDirection="column" gap={1}>
+          {t.teams.length > 1 && Select ? (
+            setting(
+              'Team',
+              <Select key="team-pick" value={team.id} options={t.teams.map(x => ({ value: x.id, label: x.name }))} onSelect={(value: string) => void setCurrentTeam($, value)} />,
+            )
+          ) : (
+            <Text bold>{team.name}</Text>
+          )}
+          <Text dimColor>
+            {t.byLink
+              ? `What you share goes by link alone, not to ${team.name}.`
+              : `What you share goes to ${team.name}. ${team.access === 'link' ? 'Anyone with its link can join too.' : 'Only people in it can join.'}`}
+          </Text>
+        </Box>
+
+        {section(
+          'live',
+          'Live now',
+          t.sessions.length ? `${t.sessions.length} shared` : '',
+          <Box flexDirection="column" gap={1}>
+            {t.sessions.map(sessionRow)}
+            {t.sessions.length ? null : <Text dimColor>{`Nothing is shared with ${team.name} right now. Sessions people share with it show here.`}</Text>}
+            <Box flexDirection="row" gap={1}>
+              {joinable.length > 1 ? <Button key="join-all" label={`Join all ${joinable.length}`} variant="primary" onPress={press => void joinFromTeam($, joinable, press.surface)} /> : null}
+              <Button key="team-refresh" label="Refresh" plain dimColor onPress={() => void refreshTeams($).catch(() => {})} />
+            </Box>
+            {mode === 'idle' ? null : <Text dimColor>Joining opens a new session for each; this one stays as it is.</Text>}
+          </Box>,
+        )}
+
+        {section(
+          'invite',
+          'Invite',
+          `${t.members.length} ${t.members.length === 1 ? 'person' : 'people'}`,
+          <Box flexDirection="column" gap={1}>
+            <Box flexDirection="row" alignItems="center" gap={1} borderStyle="round" borderDimColor paddingX={1}>
+              <Box flexGrow={1} flexShrink={1}>
+                <Text dimColor wrap="truncate-middle">
+                  {invite.replace(/^https?:\/\//, '')}
+                </Text>
+              </Box>
+              <Button key="invite-copy" label="Copy invite link" plain onPress={press => void copyText($, invite, 'Invite link copied', press.surface)} />
+            </Box>
+            <Text dimColor wrap="truncate-end">
+              {t.members.map(m => `${m.name}${m.role === 'owner' ? ' (owner)' : ''}`).join(', ')}
+            </Text>
+          </Box>,
+        )}
+
+        {owner
+          ? section(
+              'team-settings',
+              'Settings',
+              'for everyone in the team',
+              <Box flexDirection="column" gap={1}>
+                {Select
+                  ? setting(
+                      'Who joins its sessions',
+                      <Select
+                        key="team-access"
+                        value={team.access}
+                        options={[
+                          { value: 'members', label: 'Only people in the team' },
+                          { value: 'link', label: 'Anyone with the link' },
+                        ]}
+                        onSelect={(value: string) => void changeTeam($, { access: value === 'link' ? 'link' : 'members' }).catch(fail('change it'))}
+                      />,
+                    )
+                  : null}
+                {Input
+                  ? setting(
+                      'Joins by email domain',
+                      <Input key={`team-domains-${(team.domains ?? []).join(',')}`} value={(team.domains ?? []).join(', ')} placeholder="example.com" submitLabel="Save" onSubmit={(value: string) => void changeTeam($, { domains: value }).catch(fail('save it'))} />,
+                    )
+                  : null}
+                {Input
+                  ? setting(
+                      'Joins by GitHub org',
+                      <Input key={`team-orgs-${(team.githubOrgs ?? []).join(',')}`} value={(team.githubOrgs ?? []).join(', ')} placeholder="your-org" submitLabel="Save" onSubmit={(value: string) => void changeTeam($, { githubOrgs: value }).catch(fail('save it'))} />,
+                    )
+                  : null}
+                <Text dimColor>People who sign in with a verified email at those domains, or with GitHub as a member of those organizations, join the team by themselves. You can add your own email's domain (not a public one like gmail.com) and organizations you're in.</Text>
+                <Box flexDirection="row" gap={1}>
+                  <Button key="invite-new" label="New invite link" plain onPress={() => void newInvite($).catch(fail('make a new link'))} />
+                </Box>
+              </Box>,
+            )
+          : null}
+
+        {section(
+          'you',
+          'You',
+          '',
+          <Box flexDirection="column" gap={1}>
+            {Select
+              ? setting(
+                  'What you share goes',
+                  <Select
+                    key="share-to"
+                    value={t.byLink ? 'link' : team.id}
+                    options={[...t.teams.map(x => ({ value: x.id, label: `To ${x.name}` })), { value: 'link', label: 'By link alone' }]}
+                    onSelect={(value: string) => void setCurrentTeam($, value === 'link' ? null : value)}
+                  />,
+                )
+              : null}
+            {room && mode === 'host'
+              ? setting(
+                  'This session',
+                  <Box flexDirection="row" gap={1} alignItems="center">
+                    <Text dimColor>{room.team ? `Shared with ${room.team.name}` : 'Shared by link'}</Text>
+                    {room.team ? (
+                      <Button key="room-unteam" label="By link alone" plain onPress={() => void setRoomTeam($, null)} />
+                    ) : (
+                      <Button key="room-team" label={`Share with ${team.name}`} plain onPress={() => void setRoomTeam($, team.id)} />
+                    )}
+                  </Box>,
+                )
+              : null}
+            {t.error ? <Text dimColor>{t.error}</Text> : null}
+            {signedInLine}
+            <Box flexDirection="row" gap={1}>
+              {Input ? <Input key="team-new" placeholder="New team name" submitLabel="Create team" onSubmit={(value: string) => void createTeam($, value).catch(fail('make the team'))} /> : null}
+            </Box>
+            <Box flexDirection="row" gap={1}>
+              <Button key="team-leave" label={`Leave ${team.name}`} plain dimColor onPress={() => void leaveTeam($).catch(fail('leave'))} />
+            </Box>
+          </Box>,
+        )}
+      </Box>
+    )
+  })
+
   on('ui.render', { component: 'Pane', requestId: ROOM }, async ($, e) => {
     const el = $.ui.resolve(e)
     const { Box, Text, Button } = el
@@ -3873,7 +4660,7 @@ export const register: Register = (on, options) => {
     )
 
     if (v.mode === 'idle' || !room) {
-      if (v.asking) return shareChoice($, el, v.asking.prompts, 'room', e.surface)
+      if (v.asking) return shareChoice($, el, v.asking.prompts, 'room', e.surface, await shareTeamName($))
       return (
         <Box flexDirection="column" gap={1}>
           <Text bold>This session isn't shared</Text>
@@ -3966,6 +4753,12 @@ export const register: Register = (on, options) => {
             </Box>
             <Button key="room-copy" label="Copy link" plain onPress={press => void copyLink($, room.url, press.surface)} />
           </Box>
+          {room.team ? (
+            <Box flexDirection="row" gap={1} alignItems="center" justifyContent="space-between">
+              <Text dimColor wrap="truncate-end">{isHost ? `Shared with ${room.team.name}: its people see it in their Team panel` : `Shared with ${room.team.name}`}</Text>
+              <Button key="room-team-open" label="Team" plain onPress={() => void openTeam($)} />
+            </Box>
+          ) : null}
           {isHost ? null : <Text dimColor>{rulesLine(v.policy, room.host)}</Text>}
           {newer ? (
             <Box flexDirection="row" gap={1} alignItems="center" justifyContent="space-between">
@@ -4220,12 +5013,17 @@ export const register: Register = (on, options) => {
     const v = await view($)
 
     if (v.mode === 'idle') {
-      if (v.asking) return shareChoice($, el, v.asking.prompts, 'band', e.surface)
+      const teamName = await shareTeamName($)
+      if (v.asking) return shareChoice($, el, v.asking.prompts, 'band', e.surface, teamName)
+      // Sessions teammates share now, a press from joining in the Team panel.
+      const t = await read($, teamsA)
+      const live = t.account ? t.sessions.filter(s => s.hostOnline && s.hostAccount !== t.account?.id).length : 0
       return (
-        <Box flexDirection="row" justifyContent="flex-end" paddingRight={e.surface === 'terminal' ? 4 : 0}>
+        <Box flexDirection="row" justifyContent="flex-end" gap={1} paddingRight={e.surface === 'terminal' ? 4 : 0}>
+          <Button key="team" label={live ? `Team · ${live} live` : 'Team'} plain dimColor={!live} onPress={() => void openTeam($)} />
           <Button
             key="share"
-            label="Share"
+            label={teamName ? `Share with ${teamName.length > 24 ? `${teamName.slice(0, 23)}…` : teamName}` : 'Share'}
             plain
             dimColor
             onPress={press => {

@@ -12,6 +12,10 @@
 // Previews run on a second Worker from this same script (ROLE = "preview",
 // wrangler.preview.toml), its own workers.dev host name, bound to the rooms
 // here: every path there is the host's app.
+//
+// Accounts and teams (server/teams.mjs) live in one more Durable Object, the
+// directory: sign-in, teams and their lists of sessions. Rooms ask it who may
+// share with a team and join one; it asks rooms how they are when listing.
 
 import {
   Room,
@@ -45,6 +49,7 @@ import {
   hostSocketAllowed,
   sendableClose,
 } from './core.mjs'
+import { Directory, providersFrom } from './teams.mjs'
 
 const ROOM_TTL_MS = 24 * 60 * 60 * 1000
 const pad = seq => String(seq).padStart(12, '0')
@@ -83,6 +88,19 @@ export default {
     if (url.pathname === '/api/health') return json({ ok: true })
     if (url.pathname === '/api/version') return versionInfo()
     if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/privacy')) return homePage(origin)
+    if (env.DIRECTORY && Directory.owns(url.pathname)) {
+      if (Directory.limited(url.pathname, req.method) && !(await env.JOIN_LIMIT.limit({ key: `auth:${req.headers.get('cf-connecting-ip') ?? 'unknown'}` })).success) return limitedResponse('join')
+      const headers = new Headers(req.headers)
+      headers.set('x-share-origin', origin)
+      return directoryStub(env).fetch(
+        new Request(`https://directory.internal${url.pathname}${url.search}`, {
+          method: req.method,
+          headers,
+          body: req.method === 'GET' || req.method === 'HEAD' ? undefined : await req.arrayBuffer(),
+          redirect: 'manual',
+        }),
+      )
+    }
 
     let id
     let rest
@@ -237,7 +255,8 @@ export class RoomObject {
 
     if (rest === 'create') {
       if (this.room) return json({ error: 'exists' }, 409)
-      const { room, response } = await createRoom(req, id, now, origin)
+      const { room, response } = await createRoom(req, id, now, origin, { directory: directoryClient(this.env) })
+      if (!room) return response
       this.attach(room)
       this.savedSeq = 0
       await this.persist()
@@ -266,7 +285,7 @@ export class RoomObject {
     }
 
     const admin = Boolean(this.env?.ADMIN_TOKEN) && req.headers.get('authorization') === `Bearer ${this.env.ADMIN_TOKEN}`
-    const ctx = { previewOrigin: req.headers.get('x-preview-origin') ?? '', admin }
+    const ctx = { previewOrigin: req.headers.get('x-preview-origin') ?? '', admin, directory: directoryClient(this.env) }
     const { response, changed } = await roomRequest(this.room, req, rest, now, origin, ctx)
     if (changed) await this.persist()
     return response
@@ -475,5 +494,55 @@ export class GateObject {
     this.day.count += 1
     await this.state.storage.put(`day:${key}`, this.day.count)
     return json({ ok: true })
+  }
+}
+
+// The one directory of accounts and teams.
+const directoryStub = env => env.DIRECTORY.get(env.DIRECTORY.idFromName('directory'))
+
+// What a room asks the directory, over its stub (paths the Worker never
+// forwards from outside).
+const DIRECTORY_CALLS = ['shareCheck', 'joinCheck', 'register', 'unregister']
+function directoryClient(env) {
+  if (!env?.DIRECTORY) return null
+  const call = name => async (...args) => {
+    const res = await directoryStub(env).fetch(`https://directory.internal/rpc/${name}`, { method: 'POST', body: JSON.stringify(args) })
+    const data = await res.json()
+    if (!res.ok) throw new Error(data.error ?? `directory: HTTP ${res.status}`)
+    return data.result
+  }
+  return Object.fromEntries(DIRECTORY_CALLS.map(name => [name, call(name)]))
+}
+
+export class DirectoryObject {
+  constructor(state, env) {
+    const storage = state.storage
+    const kv = {
+      get: key => storage.get(key),
+      put: (key, value) => storage.put(key, value),
+      delete: key => storage.delete(key),
+      list: async prefix => [...(await storage.list({ prefix })).entries()],
+    }
+    // How a room is, for a team's list: its own info, or nothing once it's gone.
+    const roomInfo = async id => {
+      if (!ROOM_ID.test(id)) return null
+      const res = await env.ROOMS.get(env.ROOMS.idFromName(id)).fetch(`https://room.internal/${id}/`)
+      return res.ok ? res.json() : null
+    }
+    this.directory = new Directory(kv, { providers: providersFrom(env), roomInfo })
+  }
+
+  async fetch(req) {
+    const url = new URL(req.url)
+    if (url.pathname.startsWith('/rpc/')) {
+      const name = url.pathname.slice('/rpc/'.length)
+      if (!DIRECTORY_CALLS.includes(name)) return json({ error: 'Not found' }, 404)
+      try {
+        return json({ result: (await this.directory[name](...(await req.json()))) ?? null })
+      } catch (error) {
+        return json({ error: String(error?.message ?? error) }, 500)
+      }
+    }
+    return this.directory.handle(req, req.headers.get('x-share-origin') ?? url.origin)
   }
 }

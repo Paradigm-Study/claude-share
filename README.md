@@ -12,6 +12,8 @@ Share a Claude Code session with a link. Teammates open it, land in a Claude Cod
   - in Desktop, the session list marks and pins shared sessions.
 - **What Claude shows, everyone sees.** When the host's Claude opens a file in the side panel or the Files pane, draws a widget, or opens a page or a local dev server in the browser pane, each guest's own Claude Code opens the same thing. A dev server it only gives the address of (`http://localhost:3000/…`) is shared too, at that page, once something answers there; so are the ones it opened or gave out before you pressed **Share everything**, if they're still running. Files are saved in the guest's project under `.shared-session/` (kept out of git), and a dev server is reached through the room server. Screenshots the host's Claude takes (the browser pane's, a computer's) and images it opens show in the guest's tool cards as they do in the host's. A page it publishes (an Artifact) arrives with its pictures and other files beside it, and opens whole in the guest's browser pane, again whenever it's opened again; nobody needs the private claude.ai link. The Room shows anyone whose plugin is out of date, and a guest who types the update command into the session has it run on their own computer. A guest's message can carry attachments (images, PDFs): they're saved in the host's project and the host's Claude opens them.
 
+- **Teams.** Sign in with GitHub or Google, make a team, and what you share goes to it: everyone in the team sees your live sessions in their **Team** panel and joins with one press (**Join all** for every one). Teammates come in by invite link, by their email's domain or by their GitHub organization; each team says whether its sessions are for its people only or for anyone with the link.
+
 Built as a Claude Code plugin of function hooks (a "mod"), plus a small room server that runs on Cloudflare or as a single Node process. **It works right after install:** sharing goes through a public server this project runs ([what it sees and keeps](#privacy-and-the-public-server)), and teams can point it at their own.
 
 ## Install
@@ -54,7 +56,8 @@ It stops with a `NEEDS HUMAN` line at the one or two steps that need a person. S
 
 ## Use it
 
-- **Join:** open a share link. Its page opens Claude Desktop with the link in a new session's prompt box, so you press Enter. Pasting a link into any Claude Code session works too. Joining needs only the plugin: no server, account or sign-in.
+- **Join:** open a share link. Its page opens Claude Desktop with the link in a new session's prompt box, so you press Enter. Pasting a link into any Claude Code session works too. Joining needs only the plugin: no server, account or sign-in (except for a session shared with a team that keeps its sessions to its people).
+- **Team:** press **Team** above the prompt, or type `/team`. Sign in with GitHub or Google (your browser opens; Claude Code picks the sign-in up), then make a team and send people its invite link (they paste it as a message, or open it). The panel lists the sessions shared with your team right now: **Join** joins one in the session you're in if it's fresh, or opens a new Claude Desktop session with its link ready (press Enter); **Join all** does that for every one, one after another: each session that joins opens the next. Once you're in a team, **Share** goes to it (the button says **Share with Acme**); `/share-session link`, or **What you share goes → By link alone**, shares by link only. Owners choose who joins the team's sessions (**Only people in the team**, the default, or **Anyone with the link**) and who joins the team by themselves: a verified email at a domain (`acme.com`), or a GitHub organization. An owner can add only their own email's domain (never a public one like gmail.com) and organizations they're in, so nobody can pull strangers in. In a terminal: `/team signin`, `/team create <name>`, `/team invite`, `/team sessions`, `/team join <n|all>`, `/team use <name|link>`, `/team access members|link`, `/team domains …`, `/team orgs …`, `/team leave`, `/team signout`, `/team delete-account`.
 - **Share:** press **Share** above the prompt, or type `/share-session`. In a session that already has prompts, it asks first whether teammates may see them: **Share everything**, or **Only from now on** (`/share-session all` or `/share-session new`). The link is copied. It goes through the public server unless you set your own (below).
 - **Room:** press **Room** above the prompt, or type `/room`, for:
   - who's here and who Claude is working for;
@@ -71,8 +74,9 @@ It stops with a `NEEDS HUMAN` line at the one or two steps that need a person. S
 Out of the box, Share uses `https://claude-share.proud-limit-da0a.workers.dev`, run by this project ([its page](https://claude-share.proud-limit-da0a.workers.dev/)). Joining a link always uses the server in that link.
 
 - **What it sees:** while a session is shared, its prompts and the files people attach to them, Claude's replies, the tools it runs with the first lines of their results and the pictures in them (screenshots, images Claude opens), the side chat, and files or local previews the host's Claude shows. **What Claude shows → Stays with me** keeps the pictures and files on the host's machine. Sharing a session that already has history asks first whether to include it; everything means everything the session stored, from before any compaction too (its newest 4,000 rows).
-- **How long:** a room and everything in it is deleted 24 hours after the host stops sharing or was last seen. No accounts, no analytics, no request logs.
-- **Who can see it:** anyone with the room's link. It's encrypted in transit, not end to end: the server can read what passes through it.
+- **How long:** a room and everything in it is deleted 24 hours after the host stops sharing or was last seen. No analytics, no request logs.
+- **Accounts, only for teams:** sharing and joining need none. Sign in to use teams, and the server keeps your name, username, verified email, the GitHub organizations you're in, your teams and their settings, and which open sessions are shared with each team. Sign-ins are kept as hashes, never the token. All of it stays until you delete your account (`/team delete-account`), which removes it at once. On your machine, the sign-in is in `~/.claude/shared-session/account.json`, readable only by you.
+- **Who can see it:** anyone with the room's link; for a session shared with a team that keeps its sessions to its people, only people in that team. It's encrypted in transit, not end to end: the server can read what passes through it.
 - **Limits:** per network, 6 new rooms and 30 joins a minute; per room, 20 people, 100 MB of files and 900 posts a minute. Abused rooms get ended.
 
 To keep sessions on your own infrastructure, run your own server (below) and set it in the plugin's `server` option or `SHARED_SESSION_SERVER`.
@@ -97,6 +101,13 @@ PORT=8787 PUBLIC_URL=https://share.example.com DATA_FILE=./rooms.json node serve
 
 Previews are served on a second port (`PREVIEW_PORT`, default `PORT` + 1); set `PREVIEW_URL` to how people reach it, such as `https://preview.example.com`.
 
+**Teams on your own server** need sign-in, from GitHub, Google or both. Make an OAuth app and give the server its id and secret:
+
+- **GitHub:** Settings → Developer settings → OAuth Apps → New OAuth App. Homepage URL: your server. Authorization callback URL: `https://<your server>/auth/github/callback`. It asks for `read:user user:email read:org` (the organizations are for teams that let a GitHub organization in; an organization that restricts third-party apps lists only once an owner approves the app).
+- **Google:** Google Cloud console → APIs & Services → Credentials → Create credentials → OAuth client ID → Web application. Authorized redirect URI: `https://<your server>/auth/google/callback`. Scopes: `openid email profile`.
+
+On Cloudflare, `npx wrangler secret put GITHUB_CLIENT_ID` (and `GITHUB_CLIENT_SECRET`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`). On Node, the same names as environment variables; accounts and teams are kept in `DATA_FILE` with the rooms. A server with neither has no sign-in, and teams aren't offered on it.
+
 **Then point Claude Code at it.** Use any one of these:
 
 - run `/plugin configure shared-session` and enter the address;
@@ -119,6 +130,7 @@ Previews are served on a second port (`PREVIEW_PORT`, default `PORT` + 1); set `
 ## Security model
 
 - **The link is the key.** Room ids are 128-bit random values; anyone holding a link can join while the host shares. Names are self-declared: `git config user.name`, else the computer's username.
+- **A team can keep its sessions to its people.** A session shared with a team whose setting is **Only people in the team** lets in only people signed in with an account in that team, checked against the team as it is at each join. Sign-in uses the provider's verified email for domains, and GitHub's own membership list for organizations. Claude Code opens the sign-in page with only a hash of a secret it keeps, and collects the sign-in with that secret, so a sign-in link seen elsewhere can't be used to take it.
 - **The server relays plaintext.** It sees the shared transcript: prompts, replies, tool calls and results. Run it somewhere you trust.
 - **Guests can't act on the host's machine without the host.** By default, only reads inside the host's project run without asking; a guest's request to read anywhere else, edit, run commands or use the web asks the host first. "Always allow" trusts one person for the session. The host can require approval for every tool, or none. The question comes up in Claude Code's own dialog; where that can't show (a settings hook that takes AskUserQuestion, say), it's asked in the row above the prompt instead, never answered for the host.
 - **What Claude shows travels too, unless the host keeps it.** Files Claude shows, and the pictures in its tool results (screenshots, images it opens; the newest 60 results' worth from a shared history), go through the server (10 MB each, 100 MB a room, deleted with the room). The host can keep them in Room → Host controls.

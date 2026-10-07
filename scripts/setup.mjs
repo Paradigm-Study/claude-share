@@ -314,6 +314,9 @@ async function deploy(claude) {
   const ready = await health(url, { waitMs: 300_000 }) // a new subdomain's certificate takes a minute or so
   if (ready !== true) return fail(`the server is not answering yet (${ready}); a new workers.dev certificate can take a few minutes — run \`node scripts/setup.mjs check --server ${url}\` shortly`)
   ok('server is up')
+  // Teams need sign-in, which only a person can set up (OAuth apps, secrets).
+  const providers = await fetch(`${url}/api/auth/providers`).then(r => r.json()).then(d => d.providers ?? []).catch(() => [])
+  if (!providers.length) note(`teams are off on this server until it has sign-in: make a GitHub and/or Google OAuth app with callback ${url}/auth/github/callback (or /auth/google/callback), then \`npx wrangler secret put GITHUB_CLIENT_ID\` and the rest (README: "Teams on your own server"). Sharing and joining by link work without it`)
   installPlugin(claude, url)
   console.log(`\nTeammates install with one line:\n  claude plugin marketplace add ${MARKETPLACE} && claude plugin install ${PLUGIN} --config server=${url}`)
 }

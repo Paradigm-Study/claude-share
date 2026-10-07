@@ -39,6 +39,8 @@ function world(
     people?: { id: string; name: string; role: string; online: boolean; version?: string }[]
     /** Transcript files by path: the shell's ls, cat/head | tac | grep, and grep -l over them. */
     transcripts?: Record<string, string>
+    /** The share server's teams: signed in (account.json), its sessions, a join it refuses. */
+    team?: { signedIn?: boolean; sessions?: unknown[]; refuseJoin?: boolean; access?: 'members' | 'link' }
   } = {},
 ) {
   const asked: string[] = []
@@ -72,6 +74,13 @@ function world(
         return { value: { code: 0, signal: null } }
       }
     }
+    if (e.argv[0] === '/bin/sh' && e.input?.startsWith('umask 077')) {
+      // The sign-in file: written from the here-document, then moved in place.
+      const body = /cat > '[^']+' <<'(\w+)'\n([\s\S]*?)\n\1\n/.exec(e.input)
+      const to = /mv '[^']+' '([^']+)'/.exec(e.input)
+      if (body && to) files.set(to[1]!, body[2]!)
+      return { value: { code: 0, signal: null } }
+    }
     if (e.argv[0] === '/bin/sh') {
       if (e.input?.includes('/files"') && e.input.includes('--data-binary')) {
         const picture = e.input.includes('content-type: image/png')
@@ -91,10 +100,11 @@ function world(
   // A Claude Desktop session, unless a test says otherwise.
   const desktop = { CLAUDE_CODE_ENTRYPOINT: 'claude-desktop', ...opts.env }
   mock.env(on, opts.server === false ? { USER: 'scott', HOME: '/home/scott', ...desktop } : { USER: 'scott', HOME: '/home/scott', SHARED_SESSION_SERVER: 'http://localhost:8787', ...desktop })
-  if (opts.store) mock.store(on, opts.store)
+  mock.store(on, opts.store ?? {})
   // The files the plugin reads: its own manifest, and the person's settings.
   const files = new Map<string, string>()
   if (opts.settings !== undefined) files.set('/home/scott/.claude/settings.json', opts.settings)
+  if (opts.team?.signedIn) files.set(ACCOUNT_FILE, JSON.stringify({ servers: { 'http://localhost:8787': { token: TEAM_TOKEN, account: ME } } }))
   for (const [path, text] of Object.entries(opts.files ?? {})) files.set(path, text)
   const written: { path: string; text: string }[] = []
   on('fs.read', ($, e) => {
@@ -116,6 +126,12 @@ function world(
     return { value: undefined }
   })
   on('ui.copy', () => ({ value: { isCopied: true } }))
+  const opened: string[] = []
+  on('ui.open', ($, e) => {
+    opened.push(e.id)
+    return { value: { isPlaced: true as const } }
+  })
+  on('ui.close', () => ({ value: undefined }))
   on('command.register', ($, e) => ({ value: { command: e.name } }))
   on('session.cwd', () => ({ value: '/tmp/demo' }))
   on('session.messages', () => ({ value: (opts.history ?? []) as never }))
@@ -141,8 +157,11 @@ function world(
   const posted: { type: string; body: Record<string, unknown> }[] = []
   const versions: string[] = []
   const urls: string[] = []
+  const sent: { path: string; headers: Record<string, string>; body: Record<string, unknown> }[] = []
   on('http.fetch', ($, e) => {
     urls.push(e.url)
+    const headers = (e.init?.headers ?? {}) as Record<string, string>
+    sent.push({ path: e.url.replace(/^https?:\/\/[^/]+/, ''), headers, body: e.init?.body ? JSON.parse(e.init.body) : {} })
     const method = e.init?.method ?? 'GET'
     const path = e.url.replace(/^https?:\/\/[^/]+/, '').replace(/\?.*$/, '')
     asked.push(`${method} ${path}`)
@@ -155,8 +174,23 @@ function world(
       { id: 'seat2', name: 'Alex', role: 'guest', online: true },
     ]
     let body: unknown = { ok: true }
-    if (method === 'POST' && path === '/api/rooms') {
-      body = { id: 'room0000000000000002', url: 'http://localhost:8787/s/room0000000000000002', token: 't', seq: 0, title: 'demo' }
+    const signedIn = headers.authorization === `Bearer ${TEAM_TOKEN}`
+    const team = { id: 'team0001', name: 'Acme', role: 'owner', access: opts.team?.access ?? 'members', domains: [], githubOrgs: [], invite: 'invite0001' }
+    if (path === '/api/auth/providers') {
+      body = { providers: [{ id: 'github', label: 'GitHub' }, { id: 'google', label: 'Google' }] }
+    } else if (path === '/api/auth/poll') {
+      body = { status: 'done', token: TEAM_TOKEN, account: ME, joined: null }
+    } else if (path === '/api/me' || path.startsWith('/api/teams') || path.startsWith('/api/invites/')) {
+      if (!signedIn) return { value: { status: 401, ok: false, headers: {}, text: '{"error":"Sign in first"}' } }
+      if (path === '/api/me') body = { account: ME, teams: [team] }
+      else if (path === '/api/teams/team0001/sessions') body = { sessions: opts.team?.sessions ?? [] }
+      else if (path === '/api/teams/team0001') body = { team, members: [{ id: ME.id, name: ME.name, role: 'owner' }] }
+      else if (path.startsWith('/api/invites/')) body = { team, joined: true }
+    } else if (method === 'POST' && path === '/api/rooms') {
+      const forTeam = sent.at(-1)?.body.team === 'team0001' && headers['x-shared-session-account'] === TEAM_TOKEN
+      body = { id: 'room0000000000000002', url: 'http://localhost:8787/s/room0000000000000002', token: 't', seq: 0, title: 'demo', ...(forTeam ? { team: { id: 'team0001', name: 'Acme' } } : {}) }
+    } else if (path.endsWith('/join') && opts.team?.refuseJoin && headers['x-shared-session-account'] !== TEAM_TOKEN) {
+      return { value: { status: 403, ok: false, headers: {}, text: JSON.stringify({ error: 'This session is for Acme.', team: 'Acme', signIn: true }) } }
     } else if (path.endsWith('/join')) {
       body = { token: 'g', seat: 'seat1', title: 'demo', host: 'Sam', seq: 1, history: [], people, latest: opts.latest }
     } else if (path.endsWith('/events') && method === 'GET') {
@@ -166,17 +200,31 @@ function world(
     }
     return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify(body) } }
   })
-  return Object.assign(asked, { clock, logged, spawned, posted, versions, written, urls, submitted })
+  return Object.assign(asked, { clock, logged, spawned, posted, versions, written, urls, submitted, sent, opened, files })
 }
 
-test('a session that is not shared shows one Share button', async ($, on) => {
+// A press settles before work waiting on the runtime's own promises does (a
+// sign-in's SHA-256): look again, the clock a step on each time.
+async function eventually<T>(clock: { advance: (ms: number) => Promise<void> }, get: () => T, tries = 100): Promise<T> {
+  for (let i = 0; i < tries && !get(); i++) await clock.advance(1)
+  return get()
+}
+
+const ACCOUNT_FILE = '/home/scott/.claude/shared-session/account.json'
+const TEAM_TOKEN = 'ssa_teamtoken000000000000000000'
+const ME = { id: 'acct0001', name: 'Scott', login: 'scottfan', email: 'scott@acme.test', provider: 'github' }
+const TEAM_PANE = { plugin: 'shared-session', surface: 'desktop', component: 'Pane', requestId: 'shared-team', props: { title: 'Team', isFocused: false, bodyColumns: 60, placement: 'dock', scroll: { offset: 0, bodyRows: 40 }, view: {} } } as never
+const teamSession = (n: number, host = 'Sam') => ({ id: `room000000000000010${n}`, url: `http://localhost:8787/s/room000000000000010${n}`, title: `demo: work ${n}`, host, hostAccount: `acct-${host}`, hostOnline: true, people: [host], createdAt: 500 })
+
+test('a session that is not shared shows Share, and Team beside it', async ($, on) => {
   world(on)
   for (const surface of SURFACES) {
     const ui = await $.ui.mount(band(surface))
     const share = await ui.find({ key: 'share' })
     expect(share?.type).toBe('Button')
     expect(share?.props.label).toBe('Share')
-    expect(await ui.findAll({ type: 'Button' })).toHaveLength(1)
+    expect((await ui.find({ key: 'team' }))?.props.label).toBe('Team')
+    expect(await ui.findAll({ type: 'Button' })).toHaveLength(2)
     await ui.unmount()
   }
 })
@@ -916,4 +964,112 @@ test("a guest's read runs without asking only inside the host's project", async 
   expect(readsInside('Read', { file_path: '/tmp/demo/../demo-other/x' }, cwd)).toBe(false)
   expect(readsInside('Glob', { pattern: '/etc/**' }, cwd)).toBe(false)
   expect(readsInside('Grep', { pattern: 'key', path: '/' }, cwd)).toBe(false)
+})
+
+test('signing in opens the browser with only a hash of the secret, and keeps the sign-in where only this user reads it', async ($, on) => {
+  const asked = world(on)
+  await $.command.run({ command: 'team' } as never)
+  expect(asked.opened).toContain('shared-team')
+  await asked.clock.advance(10)
+  const pane = await $.ui.mount(TEAM_PANE)
+  await pane.press({ key: 'signin-github' })
+  const browser = await eventually(asked.clock, () => asked.spawned.find(s => s.input?.includes('/auth/github/start?login=')))
+  const login = /login=([0-9a-f]{64})/.exec(browser?.input ?? '')?.[1]
+  expect(login).toBeDefined()
+  await asked.clock.advance(2_100)
+  const poll = await eventually(asked.clock, () => asked.sent.find(r => r.path === '/api/auth/poll'))
+  const verifier = String(poll?.body.verifier ?? '')
+  const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier)))
+  expect([...digest].map(b => b.toString(16).padStart(2, '0')).join('')).toBe(login)
+  expect(asked.urls.some(u => u.includes(verifier))).toBe(false)
+  // Saved through a umask, the token on stdin, never in arguments or an address.
+  const save = await eventually(asked.clock, () => asked.spawned.find(s => s.input?.startsWith('umask 077')))
+  expect(save?.input).toContain(TEAM_TOKEN)
+  expect(asked.spawned.some(s => s.argv.join(' ').includes('ssa_'))).toBe(false)
+  expect(asked.urls.some(u => u.includes('ssa_'))).toBe(false)
+  expect(JSON.parse(asked.files.get(ACCOUNT_FILE) ?? '{}').servers['http://localhost:8787'].token).toBe(TEAM_TOKEN)
+  await eventually(asked.clock, () => asked.sent.some(r => r.path === '/api/teams/team0001'))
+  await asked.clock.advance(10)
+  expect(await pane.find({ type: 'Text', text: 'Acme' })).toBeDefined()
+})
+
+test('signed in with a team, Share goes to it, the sign-in in a header and never an address', async ($, on) => {
+  const asked = world(on, { team: { signedIn: true } })
+  await $.command.run({ command: 'team', args: 'sessions' } as never)
+  const ui = await $.ui.mount(band('desktop'))
+  expect((await ui.find({ key: 'share' }))?.props.label).toBe('Share with Acme')
+  await ui.press({ key: 'share' })
+  const made = asked.sent.find(r => r.path === '/api/rooms')
+  expect(made?.body.team).toBe('team0001')
+  expect(made?.headers['x-shared-session-account']).toBe(TEAM_TOKEN)
+  expect(asked.urls.some(u => u.includes('ssa_'))).toBe(false)
+  expect(asked.logged.some(l => l.startsWith('Sharing with Acme. Everyone in Acme sees it in their Team panel and can join; the link works only for people in Acme'))).toBe(true)
+})
+
+test('/share-session link shares by link alone, even signed in', async ($, on) => {
+  const asked = world(on, { team: { signedIn: true } })
+  const r = await $.command.run({ command: 'share-session', args: 'link' } as never)
+  await asked.clock.advance(100)
+  expect(asked.sent.find(x => x.path === '/api/rooms')?.body.team).toBeUndefined()
+  expect(asked.sent.find(x => x.path === '/api/rooms')?.headers['x-shared-session-account']).toBeUndefined()
+  expect(JSON.stringify(r)).toContain('Anyone with this link can join')
+})
+
+test("the Team panel lists the team's live sessions; Join in a fresh session joins here, the sign-in sent", async ($, on) => {
+  const asked = world(on, { team: { signedIn: true, sessions: [teamSession(1), teamSession(2, 'Kim')] } })
+  await $.command.run({ command: 'team' } as never)
+  await asked.clock.advance(10)
+  const pane = await $.ui.mount(TEAM_PANE)
+  expect(await pane.find({ type: 'Text', text: 'demo: work 1' })).toBeDefined()
+  expect((await pane.find({ key: 'join-all' }))?.props.label).toBe('Join all 2')
+  await pane.press({ key: 'join-room0000000000000101' })
+  const join = await eventually(asked.clock, () => asked.sent.find(r => r.path === '/api/rooms/room0000000000000101/join'))
+  expect(join?.headers['x-shared-session-account']).toBe(TEAM_TOKEN)
+  await eventually(asked.clock, () => asked.submitted.some(p => p.text === "Join Sam's session"))
+  expect(asked.submitted.some(p => p.text === "Join Sam's session")).toBe(true)
+  const row = await $.ui.mount(band('desktop'))
+  expect((await row.find({ type: 'Text', text: /Sam's session/ }))?.props.bold).toBe(true)
+})
+
+test('Join all from a session in use opens a new Claude Desktop session, and each that joins opens the next', async ($, on) => {
+  const asked = world(on, { team: { signedIn: true, sessions: [teamSession(1), teamSession(2, 'Kim')] }, history: [{ role: 'user', content: 'Fix the build' }] })
+  await $.command.run({ command: 'team', args: '' } as never)
+  await asked.clock.advance(10)
+  const pane = await $.ui.mount(TEAM_PANE)
+  await pane.press({ key: 'join-all' })
+  // Desktop holds one new-session draft at a time: one opens, the other waits.
+  const deep = () => asked.spawned.filter(s => s.input?.includes('claude://code/new?q='))
+  expect(deep().length).toBe(1)
+  expect(deep()[0]?.input).toContain(encodeURIComponent('http://localhost:8787/s/room0000000000000101'))
+  expect(asked.sent.some(r => r.path.endsWith('/join'))).toBe(false)
+  // The session it opened joins (here, as the same store stands in for it): the next opens.
+  await $.prompt.submit({ text: 'http://localhost:8787/s/room0000000000000101', origin: { kind: 'composer' }, wait: false })
+  await eventually(asked.clock, () => deep().length === 2)
+  expect(deep().length).toBe(2)
+  expect(deep()[1]?.input).toContain(encodeURIComponent('http://localhost:8787/s/room0000000000000102'))
+})
+
+test("a members-only session refuses someone not signed in, and the Team panel opens to sign in", async ($, on) => {
+  const asked = world(on, { team: { refuseJoin: true } })
+  await $.prompt.submit({ text: LINK, origin: { kind: 'composer' }, wait: false })
+  await eventually(asked.clock, () => asked.opened.includes('shared-team'))
+  expect(asked.opened).toContain('shared-team')
+  const row = await $.ui.mount(band('desktop'))
+  expect(await row.find({ key: 'share' })).toBeDefined() // still not joined
+})
+
+test('an invite link pasted joins the team when signed in; signed out, signing in carries it', async ($, on) => {
+  const asked = world(on)
+  await $.prompt.submit({ text: 'http://localhost:8787/i/invite0001', origin: { kind: 'composer' }, wait: false })
+  await eventually(asked.clock, () => asked.opened.includes('shared-team'))
+  expect(asked.opened).toContain('shared-team')
+  const pane = await $.ui.mount(TEAM_PANE)
+  await pane.press({ key: 'signin-google' })
+  expect(await eventually(asked.clock, () => asked.spawned.some(s => s.input?.includes('/auth/google/start?login=') && s.input.includes('&invite=invite0001')))).toBe(true)
+  await asked.clock.advance(2_100)
+  await eventually(asked.clock, () => asked.files.has(ACCOUNT_FILE))
+  // Signed in now: another invite is taken at once.
+  await $.prompt.submit({ text: 'http://localhost:8787/i/invite0002', origin: { kind: 'composer' }, wait: false })
+  const taken = await eventually(asked.clock, () => asked.sent.find(r => r.path === '/api/invites/invite0002'))
+  expect(taken?.headers.authorization).toBe(`Bearer ${TEAM_TOKEN}`)
 })

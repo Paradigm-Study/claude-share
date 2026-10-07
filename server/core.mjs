@@ -71,6 +71,7 @@ export class Room {
     this.createdAt = data.createdAt
     this.endedAt = data.endedAt ?? null
     this.fromNow = data.fromNow === true // shared without what came before
+    this.team = data.team ?? null // { id, name, account }: shared with a team, whose access setting says who joins
     this.seq = data.seq ?? 0
     this.events = data.events ?? []
     this.seats = new Map(Object.entries(data.seats ?? {}))
@@ -101,13 +102,14 @@ export class Room {
     return room
   }
 
-  static create({ id, name, title, now, fromNow, version }) {
+  static create({ id, name, title, now, fromNow, version, team }) {
     return new Room({
       id,
       title: String(title ?? '').trim().slice(0, 120) || 'Claude Code session',
       host: { name: clampName(name), token: token(24), lastSeen: now, version: version ?? undefined },
       createdAt: now,
       fromNow: fromNow === true,
+      team: team ?? null,
     })
   }
 
@@ -119,6 +121,7 @@ export class Room {
       createdAt: this.createdAt,
       endedAt: this.endedAt,
       fromNow: this.fromNow || undefined,
+      team: this.team ?? undefined,
       seq: this.seq,
       events: this.events,
       seats: Object.fromEntries(this.seats),
@@ -189,7 +192,7 @@ export class Room {
 
   // What a client is sent: everything after its cursor, and the room now.
   page(after, now) {
-    return { seq: this.seq, events: this.since(after), people: this.people(now), ended: Boolean(this.endedAt), title: this.title }
+    return { seq: this.seq, events: this.since(after), people: this.people(now), ended: Boolean(this.endedAt), title: this.title, team: this.team?.name }
   }
 
   since(after) {
@@ -286,6 +289,7 @@ export function shareUrl(origin, id) {
 // and nothing below 0.9.8 updates itself, so everyone moves up once, here.
 export const PLUGIN_LATEST = manifest.version
 export const PLUGIN_MIN = '0.10.1'
+export const TEAMS_FROM = '0.11.0' // the first plugin that signs in, for a team's sessions
 export const UPDATE_COMMAND = 'claude plugin marketplace update claude-share && claude plugin update shared-session@claude-share'
 
 const versionParts = v => String(v).split('.').map(n => Number.parseInt(n, 10) || 0)
@@ -366,9 +370,15 @@ export class Windows {
 }
 
 // POST /api/rooms: the host's Share. Returns the room and the host's token.
-export async function createRoom(req, id, now, origin) {
+// Shared with a team (`team`, the host signed in), the room goes on the
+// team's list, and the team's access setting says who may join; refused, no
+// room is made (`room` is absent).
+export async function createRoom(req, id, now, origin, ctx = {}) {
   const body = await readJson(req)
-  const room = Room.create({ id, name: body.name, title: body.title, now, fromNow: body.fromNow, version: clientVersion(req) })
+  const team = body.team ? await teamFor(req, body.team, ctx) : null
+  if (team?.error) return { response: team.error }
+  const room = Room.create({ id, name: body.name, title: body.title, now, fromNow: body.fromNow, version: clientVersion(req), team })
+  if (team) await listWithTeam(room, origin, ctx)
   return {
     room,
     response: json({
@@ -378,9 +388,33 @@ export async function createRoom(req, id, now, origin) {
       seq: room.seq,
       title: room.title,
       latest: PLUGIN_LATEST,
+      team: team ? { id: team.id, name: team.name } : undefined,
     }),
   }
 }
+
+// The account a request comes from (the plugin's sign-in), never in a URL.
+const accountOf = req => req.headers.get('x-shared-session-account') ?? ''
+
+async function teamFor(req, teamId, ctx) {
+  if (!ctx.directory) return { error: json({ error: "This share server doesn't have teams." }, 400) }
+  const check = await ctx.directory.shareCheck(String(teamId), accountOf(req))
+  if (!check.ok) return { error: json({ error: check.error }, check.status) }
+  return { ...check.team, account: check.account.id }
+}
+
+function listWithTeam(room, origin, ctx) {
+  return ctx.directory.register(room.team.id, {
+    id: room.id,
+    url: shareUrl(origin, room.id),
+    title: room.title,
+    host: room.host.name,
+    hostAccount: room.team.account,
+    createdAt: room.createdAt,
+  })
+}
+
+const teamOf = room => (room.team ? { id: room.team.id, name: room.team.name } : undefined)
 
 // Everything under /api/rooms/:id/... and /s/:id. `changed` tells the caller
 // whether to persist the room.
@@ -417,6 +451,7 @@ async function handleRoom(room, req, rest, now, origin, ctx) {
         people: room.people(now),
         ended: Boolean(room.endedAt),
         hostVersion: room.host.version,
+        team: teamOf(room),
       }),
     }
   }
@@ -425,6 +460,17 @@ async function handleRoom(room, req, rest, now, origin, ctx) {
     if (room.endedAt) return { response: json({ error: 'This session is no longer shared.' }, 410) }
     const outdated = outdatedClient(req)
     if (outdated) return { response: outdated }
+    // Shared with a team: its access setting, as it is now, says who joins.
+    if (room.team) {
+      if (!ctx.directory) return { response: json({ error: `This session is for ${room.team.name}, and this server can't check who's in it.` }, 503) }
+      const check = await ctx.directory.joinCheck(room.team.id, accountOf(req))
+      // A plugin from before teams can't sign in: what it needs is the update.
+      const version = clientVersion(req)
+      if (!check.ok && (!version || compareVersions(version, TEAMS_FROM) < 0)) {
+        return { response: json({ error: `This session is for ${room.team.name}, and joining it needs a sign-in, which Shared Sessions ${TEAMS_FROM} and newer have. Update in a terminal: ${UPDATE_COMMAND}, then open the link again in a new session.`, team: room.team.name, update: UPDATE_COMMAND }, 403) }
+      }
+      if (!check.ok) return { response: json({ error: check.error, team: room.team.name, signIn: check.status === 401 || undefined }, check.status === 401 ? 403 : check.status) }
+    }
     if (room.seats.size >= ROOM_SEATS_MAX) return { response: json({ error: `This session is full: ${ROOM_SEATS_MAX} people have joined.` }, 403) }
     const body = await readJson(req)
     const { token: seatToken, seat } = room.join(body.name, now, clientVersion(req))
@@ -442,6 +488,7 @@ async function handleRoom(room, req, rest, now, origin, ctx) {
         fromNow: room.fromNow || undefined,
         latest: PLUGIN_LATEST,
         hostVersion: room.host.version,
+        team: teamOf(room),
       }),
     }
   }
@@ -450,6 +497,7 @@ async function handleRoom(room, req, rest, now, origin, ctx) {
   if (rest === 'admin-end' && method === 'POST') {
     if (!ctx.admin) return { response: json({ error: 'Not found' }, 404) }
     room.end(now)
+    await unlist(room, ctx)
     return { changed: true, response: json({ ok: true }) }
   }
 
@@ -491,6 +539,7 @@ async function handleRoom(room, req, rest, now, origin, ctx) {
         people: room.people(at),
         ended: Boolean(room.endedAt),
         title: room.title,
+        team: room.team?.name,
       }),
     }
   }
@@ -523,10 +572,30 @@ async function handleRoom(room, req, rest, now, origin, ctx) {
   if (rest === 'end' && method === 'POST') {
     if (auth.role !== 'host') return { response: json({ error: 'Only the host can stop sharing.' }, 403) }
     room.end(now)
+    await unlist(room, ctx)
     return { changed: true, response: json({ ok: true }) }
   }
 
+  // The host shares an open room with a team, another one, or the link alone
+  // (`team: null`). Everyone already in stays.
+  if (rest === 'team' && method === 'POST') {
+    if (auth.role !== 'host') return { response: json({ error: 'Only the host chooses who it is shared with.' }, 403) }
+    if (room.endedAt) return { response: json({ error: 'This session is no longer shared.' }, 410) }
+    const body = await readJson(req)
+    const team = body.team ? await teamFor(req, body.team, ctx) : null
+    if (team?.error) return { response: team.error }
+    await unlist(room, ctx)
+    room.team = team
+    if (team) await listWithTeam(room, origin, ctx)
+    room.wake()
+    return { changed: true, response: json({ team: teamOf(room) ?? null }) }
+  }
+
   return { response: json({ error: 'Not found' }, 404) }
+}
+
+async function unlist(room, ctx) {
+  if (room.team && ctx.directory) await ctx.directory.unregister(room.team.id, room.id).catch(() => {})
 }
 
 // One open stream: a JSON line now (everything after `after`), another each
@@ -767,8 +836,9 @@ section.more { padding:0 0 72px; }
     <h2>What this server sees and keeps</h2>
     <ul>
       <li><b>What passes through:</b> while a session is shared, its prompts and the files people attach to them, Claude's replies, the tools it runs with the first lines of their results and the pictures in them (screenshots, images it opens), the side chat, and any files or local previews the host's Claude shows. Sharing a session that already has history asks first whether to include it.</li>
-      <li><b>How long:</b> a room and everything in it is deleted 24 hours after the host stops sharing or was last seen. There are no accounts, no analytics, and no request logs kept.</li>
-      <li><b>Who can see it:</b> anyone with the room's link. Links are long and random; forward one only to people you'd hand the session to. Content is encrypted in transit, not end to end: the server can read what passes through it.</li>
+      <li><b>How long:</b> a room and everything in it is deleted 24 hours after the host stops sharing or was last seen. There are no analytics, and no request logs kept.</li>
+      <li><b>Accounts, only for teams:</b> sharing and joining need none. If you sign in (GitHub or Google) to use teams, the server keeps your name, username, verified email, which GitHub organizations you're in, the teams you're in and their settings, and which open sessions are shared with each team. Sign-ins are kept as hashes, never the token itself. They stay until you delete your account (<code>/team delete-account</code>), which removes them at once.</li>
+      <li><b>Who can see it:</b> anyone with the room's link, or for a session shared with a team that keeps it to its people, only the people in that team. Links are long and random; forward one only to people you'd hand the session to. Content is encrypted in transit, not end to end: the server can read what passes through it.</li>
       <li><b>What runs where:</b> a teammate's prompt runs on the host's machine. Reads inside the host's project run without asking; everything else asks the host first, by default.</li>
       <li><b>Limits:</b> new rooms and joins are rate-limited per network, rooms hold up to 20 people and 100 MB of files. Rooms that are abused get ended.</li>
       <li><b>Your own server:</b> teams that want their sessions on their own infrastructure can run the same server on Cloudflare or Node in a few minutes (<a href="https://github.com/Paradigm-Study/claude-share#host-a-server">how</a>), and set it in the plugin.</li>
@@ -1079,6 +1149,7 @@ export function landingPage(room, url, now) {
     host: room.host.name,
     ended: Boolean(room.endedAt),
     people: room.people(now),
+    team: room.team?.name ?? '',
   }
   const json = JSON.stringify(data).replace(/</g, '\\u003c')
   const host = escapeHtml(room.host.name)
@@ -1156,6 +1227,7 @@ ${PAGE_CSS}</style></head>
   $('copy3').addEventListener('click', function () { navigator.clipboard.writeText(INSTALL).then(function () { $('install').textContent = 'Copied. Paste it in a terminal.'; setTimeout(function () { $('install').textContent = INSTALL; }, 1800); }); });
   Array.prototype.forEach.call(document.querySelectorAll('.hn'), function (n) { n.textContent = data.host; });
   $('open').href = data.deepLink; $('go').href = data.deepLink;
+  if (data.team) $('eyebrow').textContent = data.host + ' is sharing with ' + data.team;
   function render(d) {
     var seen = {}; var people = d.people.filter(function (p) { if (seen[p.name]) return false; seen[p.name] = 1; return true; });
     people.sort(function (a, b) { return (b.role === 'host') - (a.role === 'host') || b.online - a.online; });

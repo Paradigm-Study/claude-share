@@ -4,7 +4,9 @@
 //
 // PUBLIC_URL is optional: without it, links use the request's Host (and
 // X-Forwarded-* behind a proxy or tunnel). DATA_FILE is optional: without it,
-// rooms live in memory only. Previews of a host's localhost are served on a
+// rooms (and accounts and teams) live in memory only. Sign-in for teams:
+// GITHUB_CLIENT_ID/GITHUB_CLIENT_SECRET, GOOGLE_CLIENT_ID/GOOGLE_CLIENT_SECRET
+// (AUTH_TEST=1 adds a provider that signs in whoever the link names, for tests). Previews of a host's localhost are served on a
 // second port (PREVIEW_PORT, default PORT + 1), a host name of their own so an
 // app's root-relative paths work; PREVIEW_URL says how people reach it.
 
@@ -12,6 +14,7 @@ import { createServer } from 'node:http'
 import { createHash } from 'node:crypto'
 import { readFileSync, writeFileSync, renameSync } from 'node:fs'
 
+import { Directory, mapStore, providersFrom } from './teams.mjs'
 import { Room, ROOM_ID, SEAT_TIMEOUT_MS, createRoom, roomRequest, previewRequest, previewRoomOf, notFound, json, publicOrigin, token, missingPage, previewMissing, homePage, outdatedClient, versionInfo, limitOf, limitedResponse, closedResponse, Windows, SOCKET_ID, previewSocketTarget, announceSocket, hostSocketAllowed, sendableClose } from './core.mjs'
 
 const PORT = Number(process.env.PORT ?? 8787)
@@ -29,6 +32,7 @@ function previewOrigin(req) {
 }
 
 const rooms = new Map()
+const directoryData = new Map() // accounts and teams (server/teams.mjs)
 
 // When a stream closes, check again once its grace period is over: the seat
 // may not come back, and everyone else should see that.
@@ -46,6 +50,7 @@ if (DATA_FILE) {
   try {
     const saved = JSON.parse(readFileSync(DATA_FILE, 'utf8'))
     for (const data of saved.rooms ?? []) rooms.set(data.id, watch(Room.resume(data, Date.now())))
+    for (const [key, value] of Object.entries(saved.directory ?? {})) directoryData.set(key, value)
     console.log(`loaded ${rooms.size} rooms from ${DATA_FILE}`)
   } catch {}
 }
@@ -56,7 +61,7 @@ function save() {
   saveTimer = setTimeout(() => {
     saveTimer = null
     const tmp = `${DATA_FILE}.tmp`
-    writeFileSync(tmp, JSON.stringify({ rooms: [...rooms.values()].map(r => r.toJSON()) }))
+    writeFileSync(tmp, JSON.stringify({ rooms: [...rooms.values()].map(r => r.toJSON()), directory: Object.fromEntries(directoryData) }))
     renameSync(tmp, DATA_FILE)
   }, 500)
 }
@@ -79,6 +84,14 @@ setInterval(() => {
 const windows = new Windows()
 const clientIp = req => req.headers.get('x-client-ip') ?? 'unknown'
 
+// What a team's list shows of a room: what its own info says.
+const roomInfoOf = async id => {
+  const room = rooms.get(id)
+  if (!room) return null
+  return { title: room.title, people: room.people(Date.now()), ended: Boolean(room.endedAt) }
+}
+const directory = new Directory(mapStore(directoryData, () => save()), { providers: providersFrom(process.env), roomInfo: roomInfoOf })
+
 async function route(req) {
   const url = new URL(req.url)
   const origin = publicOrigin(req, PUBLIC_URL)
@@ -88,13 +101,18 @@ async function route(req) {
   if (url.pathname === '/api/health') return json({ ok: true, rooms: rooms.size })
   if (url.pathname === '/api/version') return versionInfo()
   if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/privacy')) return homePage(origin)
+  if (Directory.owns(url.pathname)) {
+    if (Directory.limited(url.pathname, req.method) && !windows.hit('join', `a:${clientIp(req)}`, now)) return limitedResponse('join')
+    return directory.handle(req, origin, now)
+  }
 
   if (req.method === 'POST' && url.pathname === '/api/rooms') {
     const outdated = outdatedClient(req)
     if (outdated) return outdated
     if (process.env.NEW_ROOMS === 'off') return closedResponse()
     if (!windows.hit('create', `c:${clientIp(req)}`, now)) return limitedResponse('create')
-    const { room, response } = await createRoom(req, token(16), now, origin)
+    const { room, response } = await createRoom(req, token(16), now, origin, { directory })
+    if (!room) return response
     rooms.set(room.id, watch(room))
     save()
     return response
@@ -126,7 +144,7 @@ async function route(req) {
   }
 
   const admin = Boolean(process.env.ADMIN_TOKEN) && req.headers.get('authorization') === `Bearer ${process.env.ADMIN_TOKEN}`
-  const { response, changed } = await roomRequest(room, req, rest, now, origin, { previewOrigin: previewOrigin(req), admin })
+  const { response, changed } = await roomRequest(room, req, rest, now, origin, { previewOrigin: previewOrigin(req), admin, directory })
   if (changed) save()
   return response
 }

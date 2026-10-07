@@ -38,6 +38,13 @@ class_name = "RoomObject"
 name = "GATE"
 class_name = "GateObject"
 
+# Accounts and teams (server/teams.mjs). Sign-in needs secrets:
+#   npx wrangler secret put GITHUB_CLIENT_ID   (and GITHUB_CLIENT_SECRET)
+#   npx wrangler secret put GOOGLE_CLIENT_ID   (and GOOGLE_CLIENT_SECRET)
+[[durable_objects.bindings]]
+name = "DIRECTORY"
+class_name = "DirectoryObject"
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["RoomObject"]
@@ -55,3 +62,7 @@ deleted_classes = ["SharedRoom"]
 [[migrations]]
 tag = "v4"
 new_sqlite_classes = ["GateObject"]
+
+[[migrations]]
+tag = "v5"
+new_sqlite_classes = ["DirectoryObject"]

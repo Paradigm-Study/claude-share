@@ -12,7 +12,7 @@ import { spawn } from 'node:child_process'
 import { createServer, request as httpRequest } from 'node:http'
 import { request as httpsRequest } from 'node:https'
 import { createHash, randomBytes } from 'node:crypto'
-import { mkdirSync, existsSync, rmSync, writeFileSync, createWriteStream, readdirSync, readFileSync } from 'node:fs'
+import { mkdirSync, existsSync, rmSync, writeFileSync, createWriteStream, readdirSync, readFileSync, statSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -52,7 +52,8 @@ const check = (name, ok, detail = '') => {
 
 function startServer() {
   const child = spawn(process.execPath, [join(ROOT, 'server/node.mjs')], {
-    env: { ...process.env, PORT: String(PORT) },
+    // AUTH_TEST: a sign-in provider that signs in whoever its link names, for the team checks.
+    env: { ...process.env, PORT: String(PORT), AUTH_TEST: '1' },
     stdio: ['ignore', 'pipe', 'pipe'],
   })
   const log = createWriteStream(join(WORK, 'server.log'))
@@ -66,6 +67,7 @@ function session(name, cwd, extraArgs = [], logName = name, extraEnv = {}) {
   // the machine's user leak into the run (model access comes from the env).
   const home = join(WORK, `${name}-home`)
   mkdirSync(home, { recursive: true })
+  mkdirSync(cwd, { recursive: true })
   const env = {
     HOME: home,
     PATH: process.env.PATH,
@@ -247,9 +249,8 @@ function transcriptOf(s) {
 const UPDATE_LINE = 'claude plugin marketplace update claude-share && claude plugin update shared-session@claude-share'
 const roomInfo = async id => (await fetch(`${SERVER}/api/rooms/${id}`)).json()
 
-try {
-  if (!process.env.EXTERNAL_SERVER) startServer()
-  await until('server', async () => (await fetch(`${SERVER}/api/health`).catch(() => null))?.ok)
+// Sharing: hosts and guests, everything a shared session carries.
+async function sharing() {
 
   // A plugin older than the server's minimum (or one that doesn't say) can't
   // share or join, and is told the command that updates it.
@@ -601,6 +602,89 @@ try {
     const gone = await fetch(`${origin}/`, { headers: { cookie } })
     check('previews end with the room', gone.status === 404)
   }
+}
+
+// Teams: sign in from Claude Code (the server's test provider stands in for
+// GitHub and Google), make a team, share with it. A teammate who takes the
+// invite finds the session in the team's list and joins; someone outside
+// the team is refused until the team lets anyone with the link in.
+async function teams() {
+  const providers = await fetch(`${SERVER}/api/auth/providers`).then(r => r.json()).catch(() => ({}))
+  if (providers.providers?.some(p => p.id === 'test')) {
+    const NO_BROWSER = { SHARED_SESSION_NO_BROWSER: '1' }
+    const accountOf = s => {
+      try {
+        return JSON.parse(readFileSync(join(s.home, '.claude', 'shared-session', 'account.json'), 'utf8')).servers?.[SERVER] ?? null
+      } catch {
+        return null
+      }
+    }
+    const signIn = async (s, email) => {
+      const before = s.text.length
+      s.say('/team signin test')
+      // Links are read from the stream's JSON: they end at a quote or a backslash.
+      const url = await until(`${s.name}'s sign-in link`, () => /If no browser opened: (https?:\/\/[^\s"\\]+)/.exec(s.text.slice(before))?.[1], 60_000)
+      await fetch(`${url}&email=${encodeURIComponent(email)}&name=${s.name}`)
+      return until(`${s.name} signed in`, () => accountOf(s), 30_000)
+    }
+    const pat = session('Pat', join(WORK, 'pat'), [], 'Pat', NO_BROWSER)
+    const patSignIn = await signIn(pat, 'pat@acme.test')
+    pat.say('/team create Acme')
+    const invite = await until('the team', () => /Invite people with this link: (https?:\/\/[^\s"\\]+)/.exec(pat.text)?.[1], 30_000)
+    const keptPrivate = (statSync(join(pat.home, '.claude', 'shared-session', 'account.json')).mode & 0o077) === 0
+    check('signing in from Claude Code keeps the sign-in where only its user reads it, and a team is made', Boolean(patSignIn?.token) && keptPrivate && Boolean(invite), invite)
+    pat.say('/share-session all')
+    const teamLink = await until('a team share', () => /Sharing this session with Acme\. [^\n]*?: (https?:\/\/[^\s"\\]+?\/s\/[A-Za-z0-9_-]+)/.exec(pat.text)?.[1], 30_000)
+    const teamRoom = teamLink.split('/s/')[1]
+    check('Share goes to the team', (await roomInfo(teamRoom)).team?.name === 'Acme', teamLink)
+
+    // Quinn opens the invite link, signs in, and is in the team.
+    const quinn = session('Quinn', join(WORK, 'quinn'), [], 'Quinn', NO_BROWSER)
+    quinn.type(invite)
+    await until('the invite answered', () => /sign in with GitHub or Google/i.test(quinn.text), 60_000)
+    await signIn(quinn, 'quinn@elsewhere.test')
+    quinn.say('/team sessions')
+    await until("Quinn's list", () => quinn.text.includes(teamLink), 30_000)
+    check("someone who takes the invite sees the team's session in its list", true)
+    // A fresh session of Quinn's (the same sign-in) joins it.
+    const quinnJoin = session('Quinn', join(WORK, 'quinn-join'), [], 'Quinn-join', NO_BROWSER)
+    quinnJoin.type(teamLink)
+    await until('Quinn joins', async () => (await roomInfo(teamRoom)).people?.some(p => p.name === 'Quinn'), 60_000)
+    check('and joins it', true)
+
+    // Rae is signed in but not in Acme: refused, until Acme lets links in.
+    const rae = session('Rae', join(WORK, 'rae'), [], 'Rae', NO_BROWSER)
+    await signIn(rae, 'rae@outside.test')
+    const raeJoin = session('Rae', join(WORK, 'rae-join'), [], 'Rae-join', NO_BROWSER)
+    raeJoin.type(teamLink)
+    await until("Rae's refusal", () => /This session is for Acme, and Rae isn't in it/.test(raeJoin.text), 60_000)
+    check("someone outside the team can't join its session", !(await roomInfo(teamRoom)).people?.some(p => p.name === 'Rae'))
+    pat.say('/team access link')
+    await until('access changed', () => /Anyone with a link joins/.test(pat.text), 30_000)
+    const raeAgain = session('Rae', join(WORK, 'rae-again'), [], 'Rae-again', NO_BROWSER)
+    raeAgain.type(teamLink)
+    await until('Rae joins', async () => (await roomInfo(teamRoom)).people?.some(p => p.name === 'Rae'), 60_000)
+    check('once the team lets anyone with the link in, they can', true)
+
+    pat.say('/stop-sharing')
+    await until('team share ended', async () => (await roomInfo(teamRoom)).ended === true, 30_000)
+    const before = quinn.text.length
+    quinn.say('/team sessions')
+    await until("Quinn's list again", () => /Nothing is shared with Acme right now/.test(quinn.text.slice(before)), 30_000)
+    check("a session that stops sharing leaves the team's list", true)
+  } else {
+    console.log('(teams: skipped, the server has no test sign-in)')
+  }
+}
+
+try {
+  // A server already on the port (one an earlier run left) would be tested in place of this code.
+  if (!process.env.EXTERNAL_SERVER && (await fetch(`${SERVER}/api/health`).catch(() => null))) throw new Error(`something already answers on ${SERVER}; stop it first`)
+  if (!process.env.EXTERNAL_SERVER) startServer()
+  await until('server', async () => (await fetch(`${SERVER}/api/health`).catch(() => null))?.ok)
+  // E2E_ONLY=teams runs just the team checks.
+  if (process.env.E2E_ONLY !== 'teams') await sharing()
+  await teams()
 } catch (error) {
   check('run', false, String(error?.message ?? error))
 } finally {
