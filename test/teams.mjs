@@ -42,7 +42,7 @@ const signIn = async (email, name, invite = '') => {
   ok((await call('/api/auth/poll', { method: 'POST', body: { verifier: 'W'.repeat(40) } })).data.status === 'expired', 'a wrong secret gets nothing')
   const polled = await call('/api/auth/poll', { method: 'POST', body: { verifier } })
   const again = await call('/api/auth/poll', { method: 'POST', body: { verifier } })
-  ok(String(page.data).includes(`Signed in as ${name}`) && polled.data.status === 'done' && again.data.status === 'expired', `${name} signs in, and the sign-in is handed over once`)
+  ok(String(page.data).includes(`signed in, ${name}`) && polled.data.status === 'done' && again.data.status === 'expired', `${name} signs in, and the sign-in is handed over once`)
   return polled.data.token
 }
 try {

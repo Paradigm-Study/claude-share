@@ -2908,7 +2908,7 @@ function rideStep(ride: Ride, state: RideState, event: ServerEvent, host: string
     return ''
   }
   if (event.type === 'approval' && body.pending && typeof body.what === 'string') {
-    return `\n> ⏳ Waiting for **${host}** to allow \`${body.what}\`\n\n`
+    return `\n> ◷ Waiting for **${host}** to allow \`${body.what}\`\n\n`
   }
   if (event.type === 'approval' && body.pending === false && typeof body.what === 'string') {
     return body.allowed ? `> ✓ ${host} allowed it\n\n` : `> ✕ ${host} declined it\n\n`
@@ -2973,6 +2973,8 @@ function faces(v: View): Face[] {
 
 function presence(v: View): string {
   const others = [...new Set(v.everyone.filter(p => p.online && p.role === 'guest' && p.id !== v.me).map(p => p.name))]
+  // "Sharing with Acme" already says with: the people are just here.
+  if (v.mode === 'host' && v.room?.team) return others.length ? `${listNames(others)} here` : 'no one has joined yet'
   if (v.mode === 'host') return others.length ? `with ${listNames(others)}` : 'waiting for people to join'
   const hostAway = !v.everyone.some(p => p.role === 'host' && p.online)
   return [others.length ? `with ${listNames(others)}` : '', hostAway ? `${v.room?.host} is away` : ''].filter(Boolean).join(' · ')
@@ -2983,12 +2985,12 @@ function statusLine(v: View): string | null {
   const w = v.working
   if (v.connection === 'reconnecting') return `↻  Reconnecting to the room… what you send goes out once it's back`
   if (v.mode === 'host') {
-    if (w?.byGuest && w.waitingFor) return `⚠  ${w.by} is waiting for your OK on ${w.waitingFor}`
+    if (w?.byGuest && w.waitingFor) return `⚠\uFE0E  ${w.by} is waiting for your OK on ${w.waitingFor}`
     if (w?.byGuest) return `◐  Claude is working for ${w.by}`
     if (v.policy.prompts === 'watch') return '◎  Watch-only: teammates follow along and chat'
     return null
   }
-  if (w?.waitingFor) return `⏳  Waiting for ${host} to allow ${w.waitingFor}`
+  if (w?.waitingFor) return `◷  Waiting for ${host} to allow ${w.waitingFor}`
   if (w) return `◐  Claude is working for ${w.by === myName ? 'you' : w.by}`
   if (v.policy.prompts === 'watch') return `◎  ${host} set this session to watch-only. Chat in the Room panel.`
   return null
@@ -4378,6 +4380,8 @@ export const register: Register = (on, options) => {
   // in the app's own type, grouped by space, with the meta on the right.
   // The Team panel: sign in, the team's live sessions a press from joining,
   // its invite link, and (owners) who may join and who joins by themselves.
+  // One primary action at a time: Join all when two or more are live, else
+  // the one Join; sign-in's first provider when signed out.
   on('ui.render', { component: 'Pane', requestId: TEAM }, async ($, e) => {
     const el = $.ui.resolve(e)
     const { Box, Text, Button } = el
@@ -4407,21 +4411,21 @@ export const register: Register = (on, options) => {
         <Box flexGrow={1}>{picker}</Box>
       </Box>
     )
+    const providerName = (id: string) => t.providers.find(p => p.id === id)?.label ?? (id === 'github' ? 'GitHub' : id === 'google' ? 'Google' : id)
 
     if (!t.account) {
       const signing = t.signingIn
-      const label = t.providers.find(p => p.id === signing?.provider)?.label ?? signing?.provider
       return (
         <Box flexDirection="column" gap={1}>
-          <Text bold>Teams</Text>
-          <Text dimColor>Sign in, and what you share goes to your team: everyone in it sees it here and joins with one press. What they share shows here for you.</Text>
-          {t.invite ? <Text>You'll join the team from your invite as soon as you're signed in.</Text> : null}
+          <Text bold>Share with your team</Text>
+          <Text dimColor>Sign in, and what you share goes to your team. Their live sessions show here, a press from joining.</Text>
+          {t.invite ? <Text>Your invite is waiting: you join the team as soon as you're signed in.</Text> : null}
           {t.error ? <Text dimColor>{t.error}</Text> : null}
           {signing ? (
             <Box flexDirection="column" gap={1} marginTop={1}>
-              <Text>{`Finish signing in with ${label} in your browser…`}</Text>
+              <Text>{`Finish signing in with ${providerName(signing.provider)} in your browser…`}</Text>
               <Box flexDirection="row" gap={1} alignItems="center">
-                {Link && linkable(signing.url) ? <Link href={signing.url} label="Open the sign-in page" /> : null}
+                {Link && linkable(signing.url) ? <Link href={signing.url} label="Open the sign-in page again" /> : null}
                 <Button key="signin-cancel" label="Cancel" plain dimColor onPress={() => void cancelSignIn($)} />
               </Box>
             </Box>
@@ -4432,7 +4436,7 @@ export const register: Register = (on, options) => {
               ))}
             </Box>
           ) : t.loaded ? (
-            <Text dimColor>This share server doesn't offer sign-in, so teams aren't available on it.</Text>
+            <Text dimColor>This share server has no sign-in, so teams aren't available on it. Sharing by link still works.</Text>
           ) : (
             <Text dimColor>Loading…</Text>
           )}
@@ -4442,56 +4446,67 @@ export const register: Register = (on, options) => {
 
     const account = t.account
     const team = t.teams.find(x => x.id === t.current) ?? null
-    const signedInLine = (
+    const accountRow = (
       <Box flexDirection="row" gap={1} alignItems="center" justifyContent="space-between">
-        <Text dimColor wrap="truncate-end">{`Signed in as ${account.name}${account.login && account.login !== account.name ? ` (${account.login})` : ''} with ${account.provider === 'github' ? 'GitHub' : account.provider === 'google' ? 'Google' : account.provider}`}</Text>
+        <Text dimColor wrap="truncate-end">{`Signed in as ${account.name}${account.login && account.login !== account.name ? ` (${account.login})` : ''} · ${providerName(account.provider)}`}</Text>
         <Button key="signout" label="Sign out" plain dimColor onPress={() => void signOut($)} />
       </Box>
     )
+    const newTeam = (autoFocus: boolean) =>
+      Input ? (
+        <Input
+          key="team-new"
+          placeholder="Team name"
+          submitLabel="Create team"
+          autoFocus={autoFocus || undefined}
+          onSubmit={(value: string) => void createTeam($, value).then(() => update($, teamsA, x => ({ ...x, creating: false }))).catch(fail('make the team'))}
+        />
+      ) : (
+        <Text dimColor>/team create &lt;name&gt;</Text>
+      )
 
     if (!team) {
       return (
         <Box flexDirection="column" gap={2}>
           <Box flexDirection="column" gap={1}>
-            <Text bold>Teams</Text>
-            <Text dimColor>Make a team and send its invite link to teammates, or paste an invite link someone sent you as your message.</Text>
+            <Text bold>Make your team</Text>
+            <Text dimColor>Name it, then send its invite link to teammates. Got a link from someone? Paste it as your message instead.</Text>
           </Box>
-          {Input ? (
-            <Input key="team-new" placeholder="Team name" submitLabel="Create team" autoFocus onSubmit={(value: string) => void createTeam($, value).catch(fail('make the team'))} />
-          ) : (
-            <Text dimColor>/team create &lt;name&gt;</Text>
-          )}
+          {newTeam(true)}
           {t.error ? <Text dimColor>{t.error}</Text> : null}
-          {signedInLine}
+          {accountRow}
         </Box>
       )
     }
 
     const owner = team.role === 'owner'
-    const joinable = t.sessions.filter(s => s.id !== room?.id && s.hostOnline)
+    const joinable = t.sessions.filter(s => s.id !== room?.id && s.hostOnline && !(s.hostAccount === account.id && mode === 'host'))
     const invite = inviteUrl(t, team)
     const sessionRow = (s: ShareTeamSession) => {
       const mine = s.hostAccount === account.id
       const inIt = room?.id === s.id
       const others = s.people.filter(n => n !== s.host)
+      const canJoin = joinable.includes(s)
       return (
         <Box key={`ts-${s.id}`} flexDirection="row" gap={1} alignItems="center" justifyContent="space-between">
           <Box flexDirection="row" gap={1} alignItems="center" flexShrink={1}>
             {Svg ? <Svg source={avatarSvg({ name: s.host, online: s.hostOnline }, 24)} alt={s.host} width={24} height={24} /> : <Text dimColor={!s.hostOnline}>{s.hostOnline ? '●' : '○'}</Text>}
             <Box flexDirection="column" flexShrink={1}>
-              <Text bold={s.hostOnline} wrap="truncate-end">
+              <Text bold={s.hostOnline} dimColor={!s.hostOnline} wrap="truncate-end">
                 {s.title}
               </Text>
               <Text dimColor wrap="truncate-end">
-                {[mine ? 'You' : s.host, s.hostOnline ? '' : 'away', others.length ? `with ${listNames(others)}` : '', ago(s.createdAt, now)].filter(Boolean).join(' · ')}
+                {[mine ? 'You' : s.host, s.hostOnline ? `shared ${ago(s.createdAt, now)}` : 'away', others.length ? `with ${listNames(others)}` : ''].filter(Boolean).join(' · ')}
               </Text>
             </Box>
           </Box>
           <Box flexShrink={0}>
             {inIt ? (
               <Text dimColor>{mode === 'host' ? 'This session' : "You're in it"}</Text>
-            ) : mine && mode === 'host' ? null : (
-              <Button key={`join-${s.id}`} label="Join" variant={s.hostOnline ? 'primary' : undefined} plain={s.hostOnline ? undefined : true} onPress={press => void joinFromTeam($, [s], press.surface)} />
+            ) : canJoin ? (
+              <Button key={`join-${s.id}`} label="Join" variant={joinable.length === 1 ? 'primary' : undefined} onPress={press => void joinFromTeam($, [s], press.surface)} />
+            ) : mine ? null : (
+              <Button key={`join-${s.id}`} label="Join" plain dimColor onPress={press => void joinFromTeam($, [s], press.surface)} />
             )}
           </Box>
         </Box>
@@ -4502,18 +4517,35 @@ export const register: Register = (on, options) => {
       <Box flexDirection="column" gap={2}>
         <Box flexDirection="column" gap={1}>
           {t.teams.length > 1 && Select ? (
-            setting(
-              'Team',
-              <Select key="team-pick" value={team.id} options={t.teams.map(x => ({ value: x.id, label: x.name }))} onSelect={(value: string) => void setCurrentTeam($, value)} />,
-            )
+            setting('Team', <Select key="team-pick" value={team.id} options={t.teams.map(x => ({ value: x.id, label: x.name }))} onSelect={(value: string) => void setCurrentTeam($, value)} />)
           ) : (
-            <Text bold>{team.name}</Text>
+            <Box flexDirection="row" justifyContent="space-between" alignItems="center">
+              <Text bold>{team.name}</Text>
+              <Text dimColor>{`${t.members.length} ${t.members.length === 1 ? 'person' : 'people'}`}</Text>
+            </Box>
           )}
-          <Text dimColor>
-            {t.byLink
-              ? `What you share goes by link alone, not to ${team.name}.`
-              : `What you share goes to ${team.name}. ${team.access === 'link' ? 'Anyone with its link can join too.' : 'Only people in it can join.'}`}
-          </Text>
+          {Select
+            ? setting(
+                'What you share goes',
+                <Select
+                  key="share-to"
+                  value={t.byLink ? 'link' : team.id}
+                  options={[...t.teams.map(x => ({ value: x.id, label: `To ${x.name}` })), { value: 'link', label: 'By link alone' }]}
+                  onSelect={(value: string) => void setCurrentTeam($, value === 'link' ? null : value)}
+                />,
+              )
+            : null}
+          <Text dimColor>{t.byLink ? `Your sessions stay off ${team.name}'s list; send the link to whoever should join.` : team.access === 'link' ? `Shared sessions show here for everyone in ${team.name}, and anyone with the link can join.` : `Shared sessions show here for everyone in ${team.name}. Only its people can join.`}</Text>
+          {room && mode === 'host' ? (
+            <Box flexDirection="row" gap={1} alignItems="center" justifyContent="space-between">
+              <Text dimColor wrap="truncate-end">{room.team ? `This session is shared with ${room.team.name}` : 'This session is shared by link'}</Text>
+              {room.team ? (
+                <Button key="room-unteam" label="Link only" plain onPress={() => void setRoomTeam($, null)} />
+              ) : (
+                <Button key="room-team" label={`Share with ${team.name}`} plain onPress={() => void setRoomTeam($, team.id)} />
+              )}
+            </Box>
+          ) : null}
         </Box>
 
         {section(
@@ -4522,19 +4554,20 @@ export const register: Register = (on, options) => {
           t.sessions.length ? `${t.sessions.length} shared` : '',
           <Box flexDirection="column" gap={1}>
             {t.sessions.map(sessionRow)}
-            {t.sessions.length ? null : <Text dimColor>{`Nothing is shared with ${team.name} right now. Sessions people share with it show here.`}</Text>}
-            <Box flexDirection="row" gap={1}>
-              {joinable.length > 1 ? <Button key="join-all" label={`Join all ${joinable.length}`} variant="primary" onPress={press => void joinFromTeam($, joinable, press.surface)} /> : null}
-              <Button key="team-refresh" label="Refresh" plain dimColor onPress={() => void refreshTeams($).catch(() => {})} />
-            </Box>
-            {mode === 'idle' ? null : <Text dimColor>Joining opens a new session for each; this one stays as it is.</Text>}
+            {t.sessions.length ? null : <Text dimColor>{`Nothing is shared with ${team.name} right now. A session someone shares with it shows up here.`}</Text>}
+            {joinable.length > 1 ? (
+              <Box flexDirection="row" gap={1} alignItems="center">
+                <Button key="join-all" label="Join all" variant="primary" onPress={press => void joinFromTeam($, joinable, press.surface)} />
+                <Text dimColor>{mode === 'idle' ? 'The first joins here, the rest in new sessions' : 'Each opens in a new session'}</Text>
+              </Box>
+            ) : null}
           </Box>,
         )}
 
         {section(
           'invite',
           'Invite',
-          `${t.members.length} ${t.members.length === 1 ? 'person' : 'people'}`,
+          '',
           <Box flexDirection="column" gap={1}>
             <Box flexDirection="row" alignItems="center" gap={1} borderStyle="round" borderDimColor paddingX={1}>
               <Box flexGrow={1} flexShrink={1}>
@@ -4554,11 +4587,11 @@ export const register: Register = (on, options) => {
           ? section(
               'team-settings',
               'Settings',
-              'for everyone in the team',
+              `for everyone in ${team.name}`,
               <Box flexDirection="column" gap={1}>
                 {Select
                   ? setting(
-                      'Who joins its sessions',
+                      'Who can join',
                       <Select
                         key="team-access"
                         value={team.access}
@@ -4572,19 +4605,20 @@ export const register: Register = (on, options) => {
                   : null}
                 {Input
                   ? setting(
-                      'Joins by email domain',
+                      'Join by email domain',
                       <Input key={`team-domains-${(team.domains ?? []).join(',')}`} value={(team.domains ?? []).join(', ')} placeholder="example.com" submitLabel="Save" onSubmit={(value: string) => void changeTeam($, { domains: value }).catch(fail('save it'))} />,
                     )
                   : null}
                 {Input
                   ? setting(
-                      'Joins by GitHub org',
+                      'Join by GitHub org',
                       <Input key={`team-orgs-${(team.githubOrgs ?? []).join(',')}`} value={(team.githubOrgs ?? []).join(', ')} placeholder="your-org" submitLabel="Save" onSubmit={(value: string) => void changeTeam($, { githubOrgs: value }).catch(fail('save it'))} />,
                     )
                   : null}
-                <Text dimColor>People who sign in with a verified email at those domains, or with GitHub as a member of those organizations, join the team by themselves. You can add your own email's domain (not a public one like gmail.com) and organizations you're in.</Text>
-                <Box flexDirection="row" gap={1}>
-                  <Button key="invite-new" label="New invite link" plain onPress={() => void newInvite($).catch(fail('make a new link'))} />
+                <Text dimColor>People who sign in with a verified email at the domain, or with GitHub as a member of the org, join by themselves. You can add your own email's domain (not a public one like gmail.com) and orgs you're in.</Text>
+                <Box flexDirection="row" gap={1} alignItems="center">
+                  <Button key="invite-new" label="Replace invite link" plain onPress={() => void newInvite($).catch(fail('replace the link'))} />
+                  <Text dimColor>The old link stops working</Text>
                 </Box>
               </Box>,
             )
@@ -4595,36 +4629,16 @@ export const register: Register = (on, options) => {
           'You',
           '',
           <Box flexDirection="column" gap={1}>
-            {Select
-              ? setting(
-                  'What you share goes',
-                  <Select
-                    key="share-to"
-                    value={t.byLink ? 'link' : team.id}
-                    options={[...t.teams.map(x => ({ value: x.id, label: `To ${x.name}` })), { value: 'link', label: 'By link alone' }]}
-                    onSelect={(value: string) => void setCurrentTeam($, value === 'link' ? null : value)}
-                  />,
-                )
-              : null}
-            {room && mode === 'host'
-              ? setting(
-                  'This session',
-                  <Box flexDirection="row" gap={1} alignItems="center">
-                    <Text dimColor>{room.team ? `Shared with ${room.team.name}` : 'Shared by link'}</Text>
-                    {room.team ? (
-                      <Button key="room-unteam" label="By link alone" plain onPress={() => void setRoomTeam($, null)} />
-                    ) : (
-                      <Button key="room-team" label={`Share with ${team.name}`} plain onPress={() => void setRoomTeam($, team.id)} />
-                    )}
-                  </Box>,
-                )
-              : null}
+            {accountRow}
+            {t.creating ? newTeam(true) : null}
             {t.error ? <Text dimColor>{t.error}</Text> : null}
-            {signedInLine}
-            <Box flexDirection="row" gap={1}>
-              {Input ? <Input key="team-new" placeholder="New team name" submitLabel="Create team" onSubmit={(value: string) => void createTeam($, value).catch(fail('make the team'))} /> : null}
-            </Box>
-            <Box flexDirection="row" gap={1}>
+            <Box flexDirection="row" gap={1} justifyContent="space-between">
+              <Button
+                key="team-create"
+                label={t.creating ? 'Cancel' : 'New team'}
+                plain
+                onPress={() => void update($, teamsA, x => ({ ...x, creating: !x.creating }))}
+              />
               <Button key="team-leave" label={`Leave ${team.name}`} plain dimColor onPress={() => void leaveTeam($).catch(fail('leave'))} />
             </Box>
           </Box>,
@@ -5065,7 +5079,7 @@ export const register: Register = (on, options) => {
                 {live ? '●' : '↻'}
               </Text>
             )}
-            <Text bold>{v.mode === 'host' ? 'Sharing' : `${v.room?.host}'s session`}</Text>
+            <Text bold>{v.mode === 'host' ? (v.room?.team ? `Sharing with ${v.room.team.name}` : 'Sharing') : `${v.room?.host}'s session`}</Text>
             {here ? (
               <Text dimColor wrap="truncate-end">
                 {here}
@@ -5090,7 +5104,7 @@ export const register: Register = (on, options) => {
         </Box>
         {v.mode === 'host' && approving ? (
           <Box flexDirection="column">
-            <Text wrap="truncate-end">{`⚠  ${approving.who} wants Claude to run ${approving.what}`}</Text>
+            <Text wrap="truncate-end">{`⚠\uFE0E  ${approving.who} wants Claude to run ${approving.what}`}</Text>
             <Box flexDirection="row" gap={1}>
               <Button key="approve-once" label="Allow once" variant="primary" onPress={() => bandAnswer?.('Allow once')} />
               <Button key="approve-always" label={approving.always} plain onPress={() => bandAnswer?.(approving.always)} />

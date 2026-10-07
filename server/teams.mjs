@@ -19,7 +19,7 @@
 // `joinCheck` when someone joins one) and tell it two (`register`,
 // `unregister`); it asks rooms how they are (`roomInfo`) when listing.
 
-import { json, token } from './core.mjs'
+import { json, token, brandPage, commandBox, COPY_SCRIPT, INSTALL_COMMAND } from './core.mjs'
 
 const LOGIN_MS = 10 * 60 * 1000
 const LOGIN_ID = /^[A-Za-z0-9_-]{20,64}$/
@@ -65,17 +65,16 @@ const domainOf = email => (String(email ?? '').toLowerCase().split('@')[1] ?? ''
 const listOf = (value, test) =>
   [...new Set((Array.isArray(value) ? value : String(value ?? '').split(/[\s,]+/)).map(v => String(v).trim().toLowerCase().replace(/^@/, '')).filter(v => v && test.test(v)))].slice(0, 20)
 
-function page(title, body) {
-  const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c])
-  return new Response(
-    `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(title)}</title>
-<style>:root{color-scheme:light dark}body{font:16px/1.5 -apple-system,system-ui,sans-serif;max-width:34rem;margin:15vh auto;padding:0 1.5rem;color:#1f1f1f;background:#faf9f5}
-h1{font-size:1.4rem;margin:0 0 .5rem}p{color:#5f5f5f}a.btn{display:inline-block;margin:.5rem .5rem 0 0;padding:.55rem 1rem;border-radius:.6rem;background:#1f1f1f;color:#fff;text-decoration:none}
-code{background:#0000000d;padding:.1rem .35rem;border-radius:.3rem}@media(prefers-color-scheme:dark){body{background:#1f1e1d;color:#ececec}p{color:#b5b5b5}a.btn{background:#ececec;color:#1f1f1f}code{background:#ffffff14}}</style>
-<h1>${esc(title)}</h1>${body}`,
-    { headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' } },
-  )
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c])
+
+// The sign-in and invite pages, in the site's look (brandPage): an eyebrow,
+// the heading, then its words as paragraphs (escaped here) and whatever
+// follows them (already markup).
+function page(eyebrow, heading, lines, more = {}) {
+  const body = (Array.isArray(lines) ? lines : [lines]).map(line => `<p class="sub-copy">${line}</p>`).join('')
+  return brandPage({ title: heading, eyebrow, heading, body, ...more })
 }
+const startAgain = 'Start again from Claude Code: press <b>Team</b> above the prompt, or type <code>/team</code>.'
 
 export class Directory {
   // kv: { get(key), put(key, value), delete(key), list(prefix) → [key, value][] }
@@ -213,6 +212,11 @@ export class Directory {
     if (!account) return { ok: false, status: 401, team: team.name, error: `This session is for ${team.name}. Sign in with an account in that team (/team in Claude Code), then open the link again.` }
     if (!(await this.kv.get(`mem:${team.id}:${account.id}`))) return { ok: false, status: 403, team: team.name, error: `This session is for ${team.name}, and ${account.name} isn't in it. Ask someone in the team for its invite link.` }
     return { ok: true, account: { id: account.id, name: account.name } }
+  }
+
+  // A team's access setting, for a session's page to say who can join.
+  async teamAccess(teamId) {
+    return (await this.kv.get(`team:${teamId}`))?.access ?? null
   }
 
   async register(teamId, room) {
@@ -412,12 +416,12 @@ export class Directory {
   // link seen in a browser's history, or a process list, can't collect it. An
   // invite code, when given, is taken once they're signed in.
   async start(provider, url, origin, now) {
-    if (!this.providers[provider]) return page("Sign-in isn't set up", '<p>This share server has no sign-in for that provider.</p>')
+    if (!this.providers[provider]) return page('Sign-in', "This sign-in isn't set up", 'This share server has no sign-in with that provider. Sharing by link works without one.')
     const login = url.searchParams.get('login') ?? ''
-    if (!LOGIN_ID.test(login)) return page('Sign-in link not valid', '<p>Start again from Claude Code: <code>/team</code>.</p>')
+    if (!LOGIN_ID.test(login)) return page('Sign-in', "This sign-in link isn't complete", startAgain)
     const invite = url.searchParams.get('invite') ?? ''
     const known = await this.kv.get(`login:${login}`)
-    if (known?.status === 'done') return page('Already signed in', '<p>Go back to Claude Code.</p>')
+    if (known?.status === 'done') return page('Signed in', "You're already signed in", 'Go back to Claude Code. You can close this tab.')
     // Sign-ins nobody finished or collected go after their ten minutes.
     for (const prefix of ['login:', 'state:']) for (const [key, rec] of await this.kv.list(prefix)) if (rec.exp < now) await this.kv.delete(key)
     await this.kv.put(`login:${login}`, { status: 'pending', exp: now + LOGIN_MS })
@@ -440,16 +444,15 @@ export class Directory {
 
   async callback(provider, url, origin, now) {
     const state = await this.kv.get(`state:${url.searchParams.get('state') ?? ''}`)
-    if (!state || state.provider !== provider || state.exp < now) return page('Sign-in expired', '<p>Start again from Claude Code: <code>/team</code>.</p>')
+    if (!state || state.provider !== provider || state.exp < now) return page('Sign-in', 'This sign-in expired', ['A sign-in waits ten minutes.', startAgain])
     await this.kv.delete(`state:${url.searchParams.get('state')}`)
     const code = url.searchParams.get('code')
-    if (!code) return page('Sign-in cancelled', '<p>Nothing changed. Start again from Claude Code when you like.</p>')
+    if (!code) return page('Sign-in', 'Sign-in cancelled', 'Nothing changed. Sign in from Claude Code whenever you like.')
     try {
       const identity = await this.identity(provider, code, `${origin}/auth/${provider}/callback`)
       return await this.finish(identity, state.login, state.invite, now)
     } catch (error) {
-      const esc = t => String(t).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c])
-      return page("Sign-in didn't work", `<p>${esc(String(error?.message ?? error).slice(0, 200))}</p><p>Start again from Claude Code: <code>/team</code>.</p>`)
+      return page('Sign-in', "Sign-in didn't work", [esc(String(error?.message ?? error).slice(0, 200)), startAgain])
     }
   }
 
@@ -461,8 +464,10 @@ export class Directory {
       if (res.ok) joined = (await res.json()).team ?? null
     }
     await this.kv.put(`login:${login}`, { status: 'done', token: secret, joined: joined?.id ?? null, exp: now + LOGIN_MS })
-    const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c])
-    return page(`Signed in as ${account.name}`, `<p>${joined ? `You're in <b>${esc(joined.name)}</b>. ` : ''}Go back to Claude Code; it has the sign-in. You can close this tab.</p>`)
+    return page('Signed in', `You're signed in, ${account.name}`, [
+      ...(joined ? [`You're in <b>${esc(joined.name)}</b> now: its live sessions show in your Team panel.`] : []),
+      'Go back to Claude Code: it has picked up the sign-in. You can close this tab.',
+    ])
   }
 
   // Delivered once, to whoever has the secret behind `login`: Claude Code
@@ -508,19 +513,29 @@ export class Directory {
     throw new Error('unknown provider')
   }
 
-  // An invite link opened in a browser: what it is, and how to take it in Claude Code.
+  // An invite link opened in a browser: what it is, and how to take it in
+  // Claude Code (Desktop opens a new session with the link as its prompt).
   async invitePage(code, origin) {
     const teamId = /^[A-Za-z0-9_-]{8,40}$/.test(code) ? await this.kv.get(`inv:${code}`) : null
     const team = teamId ? await this.kv.get(`team:${teamId}`) : null
-    if (!team) return page("This invite doesn't work any more", '<p>Ask someone in the team for a new link.</p>')
+    if (!team) return page('Team invite', "This invite doesn't work any more", 'Someone in the team made a new link, or the team is gone. Ask them for the current one.', { status: 404 })
     const link = `${origin}/i/${code}`
-    const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c])
-    return page(
-      `Join ${team.name}`,
-      `<p>Teammates share their Claude Code sessions with <b>${esc(team.name)}</b>, and everyone in it can open them in their own Claude Code.</p>
-<p><a class="btn" href="claude://code/new?q=${encodeURIComponent(link)}">Open in Claude Desktop</a></p>
-<p>In a terminal: start <code>claude</code> and paste this link as your message. First time? Install the plugin once:<br><code>claude plugin marketplace add Paradigm-Study/claude-share &amp;&amp; claude plugin install shared-session@claude-share</code></p>`,
-    )
+    const name = esc(team.name)
+    return page('Team invite', `Join ${team.name}`, [`${name} shares its Claude Code sessions here. Join, and they show in your Team panel as they go live, a press from joining.`], {
+      after: `<div class="cta">
+  <a class="btn-primary" href="claude://code/new?q=${encodeURIComponent(link)}"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17 17 7M9 7h8v8"/></svg>Open in Claude Desktop</a>
+  <button type="button" class="btn-ghost" data-copy="invite-link">Copy link</button>
+</div>
+<p class="status">A new session opens with the invite as its message: press Enter, then sign in with GitHub or Google.</p>
+<code id="invite-link" hidden>${esc(link)}</code>
+<details class="first">
+  <summary>First time? Install the plugin once</summary>
+  <p>Paste this in a terminal, then start a new Claude Code session (or quit and reopen Claude Desktop):</p>
+  ${commandBox('install', INSTALL_COMMAND, 'Copy install command')}
+  <p>In a terminal instead of Desktop? Start <code class="inline">claude</code> and paste the invite link as your message.</p>
+</details>`,
+      script: COPY_SCRIPT,
+    })
   }
 }
 

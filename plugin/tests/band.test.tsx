@@ -1021,7 +1021,9 @@ test("the Team panel lists the team's live sessions; Join in a fresh session joi
   await asked.clock.advance(10)
   const pane = await $.ui.mount(TEAM_PANE)
   expect(await pane.find({ type: 'Text', text: 'demo: work 1' })).toBeDefined()
-  expect((await pane.find({ key: 'join-all' }))?.props.label).toBe('Join all 2')
+  // One primary: Join all, the rows' own Join quieter.
+  expect((await pane.find({ key: 'join-all' }))?.props.variant).toBe('primary')
+  expect((await pane.find({ key: 'join-room0000000000000101' }))?.props.variant).toBeUndefined()
   await pane.press({ key: 'join-room0000000000000101' })
   const join = await eventually(asked.clock, () => asked.sent.find(r => r.path === '/api/rooms/room0000000000000101/join'))
   expect(join?.headers['x-shared-session-account']).toBe(TEAM_TOKEN)

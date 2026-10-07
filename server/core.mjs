@@ -439,7 +439,9 @@ async function handleRoom(room, req, rest, now, origin, ctx) {
   const url = new URL(req.url)
 
   if (rest === 'page' && method === 'GET') {
-    return { response: landingPage(room, shareUrl(origin, room.id), now) }
+    // A team's session says up front when only its people can join.
+    const access = room.team && ctx.directory ? await ctx.directory.teamAccess(room.team.id).catch(() => null) : null
+    return { response: landingPage(room, shareUrl(origin, room.id), now, { access }) }
   }
 
   if (rest === '' && method === 'GET') {
@@ -794,7 +796,6 @@ const previewPage = (status, title, text) =>
 // The server's own front page: what this is, the one-line install, and what
 // the server sees and keeps (the disclosure a public server owes its users).
 export function homePage(origin) {
-  const install = 'claude plugin marketplace add Paradigm-Study/claude-share && claude plugin install shared-session@claude-share'
   const html = `<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -806,7 +807,7 @@ export function homePage(origin) {
 <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@500;600&family=Gowun+Batang:wght@400;700&display=swap" rel="stylesheet">
 <style>
 ${PAGE_CSS}
-.prose { max-width:64ch; color:var(--muted); font-size:15px; line-height:1.6; }
+.prose { max-width:64ch; color:var(--muted); font-size:15px; line-height:1.6; text-wrap:pretty; }
 .prose h2 { font-family:var(--display); font-weight:400; font-size:26px; color:var(--ink); margin:0 0 12px; }
 .prose ul { padding-left:18px; margin:10px 0; } .prose li { margin:6px 0; }
 .prose b { color:var(--ink); font-weight:600; }
@@ -827,8 +828,8 @@ section.more { padding:0 0 72px; }
       <h1>Share a Claude Code session with a link</h1>
       <p class="sub-copy">Teammates join from their own Claude Code and talk to it. One session does the work, everyone sees every turn as it streams, and the host approves what runs on their machine.</p>
       <div class="install">
-        <div class="composer"><span class="slash">$</span><code id="install">${install}</code><button id="copy" title="Copy" aria-label="Copy install command"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2.5"/><path d="M5 15V6a2 2 0 0 1 2-2h9"/></svg></button></div>
-        <p class="status">Then start a new session and press <b>Share</b> above the prompt (or type /share-session). Requires Claude Code 2.1.286 or later.</p>
+        ${commandBox('install', INSTALL_COMMAND, 'Copy install command')}
+        <p class="status">Then start a new session and press <b>Share</b> above the prompt (or type /share-session). For your team, press <b>Team</b>: sign in with GitHub or Google, and everything your team shares is a press from joining. Requires Claude Code 2.1.286 or later.</p>
       </div>
     </div>
   </section>
@@ -847,44 +848,70 @@ section.more { padding:0 0 72px; }
   </section>
 </main>
 <footer class="wrap"><q>Everyone in one session, Claude in the middle.</q></footer>
-<script>
-document.getElementById('copy').addEventListener('click', function () {
-  var code = document.getElementById('install'); var text = code.textContent;
-  navigator.clipboard.writeText(text).then(function () { code.textContent = 'Copied. Paste it in a terminal.'; setTimeout(function () { code.textContent = text; }, 1600); });
-});
-</script>
+<script>${COPY_SCRIPT}</script>
 </body></html>`
   return new Response(html, { headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'public, max-age=300' } })
 }
 
-// A link to a room that isn't here (ended long ago and swept, or mistyped):
-// the landing page's look, and what to do.
-export function missingPage() {
+// A page in the site's own look: the nav, an eyebrow, a serif heading, its
+// words, then whatever follows (buttons, a command to copy). The account,
+// invite and not-found pages are all this; callers escape what they pass.
+export function brandPage({ title, eyebrow = '', heading, body = '', after = '', mark = '', status = 200, script = '' }) {
   const html = `<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>This shared session isn't here</title>
+<title>${escapeHtml(title ?? heading)}</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@500;600&family=Gowun+Batang:wght@400;700&display=swap" rel="stylesheet">
 <style>
-${PAGE_CSS}</style></head>
+${PAGE_CSS}
+.page { max-width:640px; padding:64px 0 72px; }
+.page .sub-copy + .sub-copy { margin-top:12px; }
+.page .cta { margin-top:28px; }
+.page .first { margin-top:22px; }
+</style></head>
 <body>
 <header class="wrap nav">
-  <a class="brand" href="#"><svg viewBox="0 0 500 500" aria-hidden="true">${LOGO_PATHS}</svg><span class="word">Paradigm</span><span class="sub">Shared session</span></a>
-  <span class="live ended"><i></i><span>ENDED</span></span>
+  <a class="brand" href="/"><svg viewBox="0 0 500 500" aria-hidden="true">${LOGO_PATHS}</svg><span class="word">Paradigm</span><span class="sub">Shared sessions</span></a>
+  ${mark}
 </header>
 <main class="wrap">
-  <section class="hero" style="grid-template-columns:minmax(0,1fr)">
-    <div>
-      <span class="eyebrow">Link not found</span>
-      <h1>This shared session isn't here</h1>
-      <p class="sub-copy">It ended, or the link is incomplete. Ask whoever sent it for a new one.</p>
-    </div>
+  <section class="page">
+    ${eyebrow ? `<span class="eyebrow">${escapeHtml(eyebrow)}</span>` : ''}
+    <h1>${escapeHtml(heading)}</h1>
+    ${body}
+    ${after}
   </section>
 </main>
 <footer class="wrap"><q>Everyone in one session, Claude in the middle.</q></footer>
+${script ? `<script>${script}</script>` : ''}
 </body></html>`
-  return new Response(html, { status: 404, headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' } })
+  return new Response(html, { status, headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' } })
+}
+
+// The one-line install, as a command to copy (pages that hand people off to
+// Claude Code show it under "First time?").
+export const INSTALL_COMMAND = 'claude plugin marketplace add Paradigm-Study/claude-share && claude plugin install shared-session@claude-share'
+export const COPY_ICON = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2.5"/><path d="M5 15V6a2 2 0 0 1 2-2h9"/></svg>'
+export const commandBox = (id, text, label) => `<div class="composer"><span class="slash" aria-hidden="true">$</span><code id="${id}">${escapeHtml(text)}</code><button type="button" data-copy="${id}" aria-label="${escapeHtml(label)}">${COPY_ICON}</button></div>`
+// Every [data-copy] button copies its code's text and says so for a moment:
+// in the code's place when it shows, else on the button itself.
+export const COPY_SCRIPT = `document.querySelectorAll('[data-copy]').forEach(function (b) { b.addEventListener('click', function () {
+  var code = document.getElementById(b.getAttribute('data-copy')); var text = code.getAttribute('data-text') || code.textContent; code.setAttribute('data-text', text);
+  var where = code.hidden ? b : code; var was = where.getAttribute('data-was') || where.innerHTML; where.setAttribute('data-was', was);
+  navigator.clipboard.writeText(text).then(function () { where.textContent = 'Copied'; setTimeout(function () { where.innerHTML = was; }, 1500); }); }); });`
+
+// A link to a room that isn't here (ended long ago and swept, or mistyped):
+// the landing page's look, and what to do.
+export function missingPage() {
+  return brandPage({
+    title: "This shared session isn't here",
+    eyebrow: 'Link not found',
+    heading: "This shared session isn't here",
+    body: '<p class="sub-copy">It ended, or the link is incomplete. Ask whoever sent it for a new one.</p>',
+    mark: '<span class="live ended"><i></i><span>ENDED</span></span>',
+    status: 404,
+  })
 }
 
 // A preview link whose room isn't here.
@@ -1080,23 +1107,30 @@ a { color:inherit; text-decoration:none; }
 .eyebrow { display:inline-block; font-family:var(--mono); font-size:12px; letter-spacing:.12em; text-transform:uppercase; font-weight:500;
   color:var(--accent-ink); background:var(--accent-wash); padding:6px 13px; border-radius:999px; margin-bottom:22px; }
 h1 { font-family:var(--display); font-weight:400; font-size:46px; line-height:1.08; letter-spacing:.005em; margin:0 0 18px; overflow-wrap:anywhere; text-wrap:balance; }
-.sub-copy { margin:0; font-size:16px; line-height:1.55; color:var(--muted); max-width:46ch; }
+.sub-copy { margin:0; font-size:16px; line-height:1.55; color:var(--muted); max-width:46ch; text-wrap:pretty; }
+.note { display:flex; gap:9px; align-items:flex-start; margin:18px 0 0; max-width:46ch; font-size:14px; line-height:1.5; color:var(--ink-soft); text-wrap:pretty; }
+.note svg { flex:none; width:15px; height:15px; margin-top:3px; color:var(--accent-ink); }
 .people { display:flex; align-items:center; gap:14px; margin:26px 0 0; }
 .dots { display:flex; gap:5px; }
 .dot { position:relative; display:grid; place-items:center; width:30px; height:30px; border-radius:50%; background:var(--dot); color:var(--dot-ink);
-  font-size:12px; font-weight:650; letter-spacing:.02em; transition:transform .22s var(--ease); }
+  font-size:12px; font-weight:650; letter-spacing:.02em; transition:transform .2s var(--ease); }
 .dot.two { font-size:10.5px; }
 .dot.away { background:transparent; color:var(--dot); box-shadow:inset 0 0 0 1.5px var(--dot); }
-.dot:hover { transform:scale(1.1); }
+@media (hover: hover) and (pointer: fine) { .dot:hover { transform:scale(1.06); } }
 .dot[data-name]:hover::after { content:attr(data-name); position:absolute; bottom:calc(100% + 8px); left:50%; transform:translateX(-50%); white-space:nowrap;
   padding:3px 8px; border-radius:6px; background:var(--ink); color:var(--bg); font-size:11px; font-weight:500; pointer-events:none; }
-.count { font-size:14px; color:var(--muted); min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; } .count b { color:var(--ink); font-weight:600; }
+.count { font-size:14px; color:var(--muted); min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-variant-numeric:tabular-nums; } .count b { color:var(--ink); font-weight:600; }
 .cta { display:flex; align-items:center; gap:22px; margin-top:30px; }
-.btn-primary { display:inline-flex; align-items:center; gap:9px; background:var(--ink); color:var(--bg); font:500 15px var(--body); padding:13px 24px; border:0;
-  border-radius:.5rem; box-shadow:var(--shadow-md); cursor:pointer; transition:transform .14s var(--ease), opacity .14s; }
-.btn-primary:hover { transform:translateY(-1px); opacity:.92; }
-.btn-ghost { font:500 15px var(--body); color:var(--accent-ink); background:none; border:0; padding:0; cursor:pointer; transition:opacity .14s; }
-.btn-ghost:hover { opacity:.6; }
+.btn-primary { display:inline-flex; align-items:center; gap:9px; min-height:46px; background:var(--ink); color:var(--bg); font:500 15px var(--body); padding:13px 24px; border:0;
+  border-radius:.5rem; box-shadow:var(--shadow-md); cursor:pointer; transition:transform .14s var(--ease), opacity .14s ease; }
+.btn-primary:active { transform:scale(.97); }
+.btn-ghost { display:inline-flex; align-items:center; min-height:44px; font:500 15px var(--body); color:var(--accent-ink); background:none; border:0; padding:0 4px; margin:0 -4px; cursor:pointer; transition:opacity .14s ease; }
+.btn-ghost:active { opacity:.5; }
+@media (hover: hover) and (pointer: fine) {
+  .btn-primary:hover { opacity:.9; }
+  .btn-ghost:hover { opacity:.65; }
+}
+:focus-visible { outline:2px solid var(--accent); outline-offset:3px; border-radius:6px; }
 .status { min-height:20px; margin:14px 0 0; font-size:13px; color:var(--faint); }
 /* the notebook window */
 .window { position:relative; width:100%; max-width:520px; margin:0 0 0 auto; background:var(--surface); border:1px solid var(--line); border-radius:6px; box-shadow:var(--shadow-lg); }
@@ -1114,20 +1148,22 @@ h1 { font-family:var(--display); font-weight:400; font-size:46px; line-height:1.
 .step .ico { flex:none; width:16px; height:16px; color:var(--muted); }
 .step.done { color:var(--ink); } .step.done .ico { color:var(--good); }
 .step b { font-weight:600; color:var(--ink); }
-.step.go { cursor:pointer; border-color:var(--accent); background:var(--accent-wash); color:var(--ink); transition:transform .14s var(--ease), box-shadow .18s; }
-.step.go:hover { transform:translateY(-1px); box-shadow:var(--shadow-md); }
+.step.go { cursor:pointer; border-color:var(--accent); background:var(--accent-wash); color:var(--ink); transition:transform .14s var(--ease), box-shadow .18s ease; }
+.step.go:active { transform:scale(.99); }
+@media (hover: hover) and (pointer: fine) { .step.go:hover { box-shadow:var(--shadow-md); } }
 .step.go .ico { color:var(--accent-ink); }
 .composer { margin-top:4px; border:1px solid var(--line); border-radius:6px; background:var(--surface); padding:12px 14px; display:flex; align-items:center; gap:8px; }
 .composer .slash { color:var(--faint); font-family:var(--mono); }
 .composer code { flex:1; min-width:0; font:12.5px var(--mono); color:var(--ink-soft); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.composer button { flex:none; border:0; background:none; color:var(--muted); cursor:pointer; padding:2px; transition:color .15s, transform .14s var(--ease); }
-.composer button:hover { color:var(--ink); transform:translateY(-1px); }
+.composer button { flex:none; display:grid; place-items:center; width:36px; height:36px; margin:-9px -9px -9px 0; border:0; border-radius:6px; background:none; color:var(--muted); cursor:pointer; transition:color .15s ease, background-color .15s ease, transform .12s var(--ease); }
+.composer button:active { transform:scale(.94); }
+@media (hover: hover) and (pointer: fine) { .composer button:hover { color:var(--ink); background:var(--accent-wash); } }
 .first { margin-top:6px; font-size:13px; color:var(--muted); }
-.first summary { cursor:pointer; list-style:none; color:var(--accent-ink); font-weight:500; }
+.first summary { display:inline-block; padding:6px 0; cursor:pointer; list-style:none; color:var(--accent-ink); font-weight:500; }
 .first summary::-webkit-details-marker { display:none; }
 .first summary::before { content:"+ "; font-family:var(--mono); }
 .first[open] summary::before { content:"– "; }
-.first p { margin:8px 0; }
+.first p { margin:8px 0; text-wrap:pretty; }
 .first .composer { margin-top:0; }
 .first code.inline { font:12.5px var(--mono); background:var(--accent-wash); color:var(--accent-ink); padding:1px 5px; border-radius:4px; }
 .status a { color:var(--accent-ink); text-decoration:underline; text-underline-offset:2px; }
@@ -1139,7 +1175,7 @@ footer q { font-family:var(--display); font-size:17px; color:var(--muted); quote
 @media (prefers-reduced-motion: reduce) { * { animation:none !important; transition:none !important; } }
 `
 
-export function landingPage(room, url, now) {
+export function landingPage(room, url, now, opts = {}) {
   const deepLink = `claude://code/new?q=${encodeURIComponent(url)}`
   const data = {
     id: room.id,
@@ -1151,7 +1187,8 @@ export function landingPage(room, url, now) {
     people: room.people(now),
     team: room.team?.name ?? '',
   }
-  const json = JSON.stringify(data).replace(/</g, '\\u003c')
+  const json = JSON.stringify(data)
+  const membersOnly = room.team && opts.access === 'members'.replace(/</g, '\\u003c')
   const host = escapeHtml(room.host.name)
   const html = `<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
@@ -1178,6 +1215,7 @@ ${PAGE_CSS}</style></head>
       <span class="eyebrow" id="eyebrow">${host} is sharing</span>
       <h1 id="title"></h1>
       <p class="sub-copy" id="subcopy">A live Claude Code session. Join from your own Claude Code: your prompts run in <span class="hn"></span>'s session, and everyone sees the replies as they stream.</p>
+      ${membersOnly ? `<p class="note join"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg><span>Only people in ${escapeHtml(room.team.name)} can join. In Claude Code, press <b>Team</b> above the prompt and sign in first.</span></p>` : ''}
       <div class="people"><div class="dots" id="dots"></div><div class="count" id="count"></div></div>
       <div class="cta" id="cta">
         <a class="btn-primary" id="open" href="#"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 17 17 7M9 7h8v8"/></svg>Open in Claude Code</a>
@@ -1235,8 +1273,9 @@ ${PAGE_CSS}</style></head>
     var dots = $('dots'); dots.textContent = ''; people.slice(0, 8).forEach(function (p) { dots.appendChild(dot(p)); });
     var here = people.filter(function (p) { return p.online; });
     var count = $('count'); count.textContent = '';
-    var b = document.createElement('b'); b.textContent = here.length + ' here'; count.appendChild(b);
-    if (here.length) count.appendChild(document.createTextNode(' · ' + here.map(function (p) { return p.name; }).join(', ')));
+    if (!here.length) { count.textContent = data.host + ' is away right now'; }
+    else { var b = document.createElement('b'); b.textContent = here.length + ' here'; count.appendChild(b);
+      count.appendChild(document.createTextNode(' · ' + here.map(function (p) { return p.name; }).join(', '))); }
     ['pill', 'pill2'].forEach(function (id) { $(id).classList.toggle('ended', d.ended); $(id).lastElementChild.textContent = d.ended ? 'ENDED' : 'LIVE'; });
     $('cta').hidden = d.ended; $('ended-step').hidden = !d.ended; document.querySelector('.people').hidden = d.ended;
     Array.prototype.forEach.call(document.querySelectorAll('.join'), function (n) { n.hidden = d.ended; });

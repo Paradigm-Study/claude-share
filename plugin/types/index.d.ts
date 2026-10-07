@@ -117,6 +117,8 @@ export type ShareTeams = {
   /** When the list was last asked for, ms since the epoch (0: never). */
   loaded: number
   error: string | null
+  /** The panel's new-team field is open. */
+  creating?: boolean
 }
 
 declare module 'claude-code' {

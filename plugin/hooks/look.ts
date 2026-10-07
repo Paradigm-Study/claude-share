@@ -110,23 +110,28 @@ export function stackSvg(faces: readonly Face[], opts: { live: boolean; size?: n
 /**
  * The Room panel's banner, as Paradigm's landing window: a paper card with a
  * hairline edge, the three muted dots and a mono label in its bar, the host's
- * dot, a serif title, and Clover perched on the frame. Dark: ink card.
+ * dot, a serif title, and Clover perched on the frame. Its surfaces are warm
+ * like Claude's own: paper on the light theme, and on the dark one a card a
+ * step lighter than the app behind it (navy read as a foreign object there).
  */
 export function bannerSvg(o: { title: string; host: string; live: boolean; detail: string; status?: string; width?: number }): string {
   const w = o.width ?? 420
   const top = 30 // room above the frame for Clover
   const h = top + 108
-  const fit = (text: string, px: number, size: number) => {
-    const max = Math.floor(px / (size * 0.55))
+  // An average glyph is about half an em in both faces (measured: 0.45 in the
+  // serif title, 0.5 in the text): a guess on the wide side cut titles with a
+  // fifth of the line still free.
+  const fit = (text: string, px: number, em: number) => {
+    const max = Math.floor(px / em)
     return text.length > max ? `${text.slice(0, Math.max(1, max - 1)).trimEnd()}…` : text
   }
-  const title = fit(o.title, w - 70 - 20, 16)
-  const detail = fit(o.detail, w - 70 - 20, 12)
+  const title = fit(o.title, w - 62 - 18, 16.5 * 0.47)
+  const detail = fit(o.detail, w - 62 - 18, 12 * 0.52)
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">
 <style>
-.card{fill:#fffdfc;stroke:#dde1e7}.bar{stroke:#dde1e7}.grid{fill:${INK};fill-opacity:.05}.title{fill:${INK}}.detail{fill:#4b5563}.label{fill:#2c4a7b}.wash{fill:#e4ecf7}
+.card{fill:#fffdfc;stroke:#e6e1d9}.bar{stroke:#e6e1d9}.grid{fill:#1f1e1d;fill-opacity:.05}.title{fill:${INK}}.detail{fill:#5f5d58}.label{fill:#2c4a7b}.wash{fill:#e4ecf7}
 ${DOTS.replace(/^<style>|<\/style>$/g, '')}
-@media (prefers-color-scheme: dark){.card{fill:#0b1726;stroke:#223247}.bar{stroke:#223247}.grid{fill:#ffffff;fill-opacity:.06}.title{fill:${PAPER}}.detail{fill:#9aa3ad}.label{fill:#b9cdeb}.wash{fill:#1b2b43}.cat{filter:url(#night)}}
+@media (prefers-color-scheme: dark){.card{fill:#30302e;stroke:#43423e}.bar{stroke:#43423e}.grid{fill:#ffffff;fill-opacity:.05}.title{fill:#f2f0eb}.detail{fill:#a9a69e}.label{fill:#c3d3ea}.wash{fill:#3a3f47}.cat{filter:url(#night)}}
 </style>
 <defs><filter id="night" color-interpolation-filters="sRGB"><feColorMatrix type="matrix" values="-1 0 0 0 1 0 -1 0 0 1 0 0 -1 0 1 0 0 0 .9 0"/></filter>
 <pattern id="g" width="14" height="14" patternUnits="userSpaceOnUse"><circle class="grid" cx="2" cy="2" r="1"/></pattern>
