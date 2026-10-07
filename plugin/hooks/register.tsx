@@ -3190,13 +3190,15 @@ async function refreshTeams($: $) {
     return
   }
   const before = await read($, teamsA)
+  const saved = await signInFor($, server)
+  // Signed out, the sign-in buttons are what's shown: asked for each time, so
+  // a provider the server gains (or loses) shows up without a new session.
   const providers =
-    before.server === server && before.providers.length
+    saved && before.server === server && before.providers.length
       ? before.providers
       : await api<{ providers: { id: string; label: string }[] }>($, server, '/api/auth/providers')
           .then(r => r.providers)
-          .catch(() => [])
-  const saved = await signInFor($, server)
+          .catch(() => (before.server === server ? before.providers : []))
   const now = await $.clock.now()
   if (!saved) {
     await update($, teamsA, t => ({ ...NO_TEAMS, server, providers, signingIn: t.server === server ? t.signingIn : null, invite: t.invite, loaded: now }))

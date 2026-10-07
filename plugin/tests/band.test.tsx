@@ -40,7 +40,7 @@ function world(
     /** Transcript files by path: the shell's ls, cat/head | tac | grep, and grep -l over them. */
     transcripts?: Record<string, string>
     /** The share server's teams: signed in (account.json), its sessions, a join it refuses. */
-    team?: { signedIn?: boolean; sessions?: unknown[]; refuseJoin?: boolean; access?: 'members' | 'link' }
+    team?: { signedIn?: boolean; sessions?: unknown[]; refuseJoin?: boolean; access?: 'members' | 'link'; providers?: { id: string; label: string }[] }
   } = {},
 ) {
   const asked: string[] = []
@@ -177,7 +177,7 @@ function world(
     const signedIn = headers.authorization === `Bearer ${TEAM_TOKEN}`
     const team = { id: 'team0001', name: 'Acme', role: 'owner', access: opts.team?.access ?? 'members', domains: [], githubOrgs: [], invite: 'invite0001' }
     if (path === '/api/auth/providers') {
-      body = { providers: [{ id: 'github', label: 'GitHub' }, { id: 'google', label: 'Google' }] }
+      body = { providers: opts.team?.providers ?? [{ id: 'github', label: 'GitHub' }, { id: 'google', label: 'Google' }] }
     } else if (path === '/api/auth/poll') {
       body = { status: 'done', token: TEAM_TOKEN, account: ME, joined: null }
     } else if (path === '/api/me' || path.startsWith('/api/teams') || path.startsWith('/api/invites/')) {
@@ -1072,4 +1072,20 @@ test('an invite link pasted joins the team when signed in; signed out, signing i
   await $.prompt.submit({ text: 'http://localhost:8787/i/invite0002', origin: { kind: 'composer' }, wait: false })
   const taken = await eventually(asked.clock, () => asked.sent.find(r => r.path === '/api/invites/invite0002'))
   expect(taken?.headers.authorization).toBe(`Bearer ${TEAM_TOKEN}`)
+})
+
+test('signed out, the Team panel asks for the sign-ins each time, so one the server gains shows up', async ($, on) => {
+  const providers = [{ id: 'github', label: 'GitHub' }]
+  const asked = world(on, { team: { providers } })
+  await $.command.run({ command: 'team', args: '' } as never)
+  await eventually(asked.clock, () => asked.sent.some(r => r.path === '/api/auth/providers'))
+  await asked.clock.advance(10)
+  const pane = await $.ui.mount(TEAM_PANE)
+  expect(await pane.find({ key: 'signin-github' })).toBeDefined()
+  expect(await pane.find({ key: 'signin-google' })).toBeUndefined()
+  providers.push({ id: 'google', label: 'Google' })
+  await asked.clock.advance(20_000) // the open panel's refresh
+  await eventually(asked.clock, () => asked.sent.filter(r => r.path === '/api/auth/providers').length >= 2)
+  await asked.clock.advance(10)
+  expect(await pane.find({ key: 'signin-google' })).toBeDefined()
 })
