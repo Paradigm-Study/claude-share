@@ -21,6 +21,60 @@ export const KEEPALIVE_MS = 25_000 // a line on every open stream, so proxies ke
 export const STREAM_MAX_MS = 5 * 60_000
 const POLL_WAIT_MS = 20_000
 const MAX_TEXT = 32_000 // chars; keeps one stored event under the Durable Object value limit
+// Claude Code hands a plugin at most 4 MiB of a response body, in bytes (cut
+// silently, measured: 1.4 million Chinese characters is all that comes
+// through), and a long session's history is many times that. So a client
+// that asks (`max`, bytes) gets events in pages of at most that size, oldest
+// first, with `more` while there are others; one that can't page gets the
+// newest events that fit, rather than a body cut mid-JSON.
+const PAGE_BYTES_CAP = 3_500_000
+
+// A string's size in UTF-8, what the limit counts.
+function utf8Length(text) {
+  let n = 0
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i)
+    if (c < 0x80) n += 1
+    else if (c < 0x800) n += 2
+    else if (c >= 0xd800 && c < 0xdc00) {
+      n += 4
+      i++
+    } else n += 3
+  }
+  return n
+}
+const sizeOf = event => utf8Length(JSON.stringify(event)) + 1
+
+// Events oldest first while they fit in `max` bytes (one at least).
+function pageOf(events, max) {
+  let size = 2
+  const out = []
+  for (const event of events) {
+    const n = sizeOf(event)
+    if (out.length && size + n > max) return { events: out, more: true }
+    size += n
+    out.push(event)
+  }
+  return { events: out, more: false }
+}
+
+// The newest events that fit in `max` bytes, oldest first.
+function newestOf(events, max) {
+  let size = 2
+  let from = events.length
+  while (from > 0) {
+    const n = sizeOf(events[from - 1])
+    if (size + n > max && from < events.length) break
+    size += n
+    from--
+  }
+  return events.slice(from)
+}
+
+const maxOf = url => {
+  const max = Number(url.searchParams.get('max'))
+  return Number.isFinite(max) && max > 0 ? Math.min(Math.max(max, 64_000), PAGE_BYTES_CAP) : 0
+}
 const MAX_BODY = 512_000
 // Files the host's Claude shows (a page, an image, a widget too big for an
 // event): kept by the room, read with a member's token, gone with the room.
@@ -476,6 +530,10 @@ async function handleRoom(room, req, rest, now, origin, ctx) {
     if (room.seats.size >= ROOM_SEATS_MAX) return { response: json({ error: `This session is full: ${ROOM_SEATS_MAX} people have joined.` }, 403) }
     const body = await readJson(req)
     const { token: seatToken, seat } = room.join(body.name, now, clientVersion(req))
+    // A long history in pages (see PAGE_BYTES_CAP): the first here, the rest
+    // from events?after=historySeq.
+    const max = maxOf(url)
+    const page = max ? pageOf(room.events, max) : { events: newestOf(room.events, PAGE_BYTES_CAP), more: false }
     return {
       changed: true,
       response: json({
@@ -485,7 +543,9 @@ async function handleRoom(room, req, rest, now, origin, ctx) {
         title: room.title,
         host: room.host.name,
         seq: room.seq,
-        history: room.events,
+        history: page.events,
+        more: page.more || undefined,
+        historySeq: page.more ? page.events.at(-1)?.seq : undefined,
         people: room.people(now),
         fromNow: room.fromNow || undefined,
         latest: PLUGIN_LATEST,
@@ -534,10 +594,14 @@ async function handleRoom(room, req, rest, now, origin, ctx) {
     await room.wait(after, wait)
     const at = Date.now()
     room.touch(auth, at)
+    const max = maxOf(url)
+    const page = max ? pageOf(room.since(after), max) : { events: room.since(after), more: false }
     return {
       response: json({
-        seq: room.seq,
-        events: room.since(after),
+        // Cut short, the cursor stops at the last event sent.
+        seq: page.more ? page.events.at(-1).seq : room.seq,
+        more: page.more || undefined,
+        events: page.events,
         people: room.people(at),
         ended: Boolean(room.endedAt),
         title: room.title,

@@ -604,6 +604,37 @@ async function sharing() {
   }
 }
 
+// A session with a long history (well over the 4 MiB of an answer Claude
+// Code hands a plugin): a guest who pastes its link joins, and its whole
+// history plays, the first exchange and the last, page by page.
+async function longHistory() {
+  const V = { 'content-type': 'application/json', 'x-shared-session-version': '9.9.9' }
+  const made = await fetch(`${SERVER}/api/rooms`, { method: 'POST', headers: V, body: JSON.stringify({ name: 'Morgan', title: 'long: a session with a long history' }) }).then(r => r.json())
+  // Mostly Chinese, as the team writes: the limit is bytes (three each here),
+  // so a page measured in characters would still come back cut.
+  const words = '帮我看看这个问题，然后修一下。'.repeat(700) // ~10,500 characters, ~31,500 bytes
+  const events = []
+  for (let i = 1; i <= 160; i++) {
+    const marker = i === 1 ? ' FIRST-WORDS-ZEBRA' : i === 160 ? ' LAST-WORDS-OTTER' : ''
+    events.push({ type: 'row', body: { kind: 'user', who: 'Morgan', text: `Question ${i}${marker}` } })
+    events.push({ type: 'row', body: { kind: 'assistant', text: `Answer ${i}. ${words}` } })
+  }
+  // A request body is at most 512 KB: a few rows at a time.
+  for (let i = 0; i < events.length; i += 24) {
+    await fetch(`${SERVER}/api/rooms/${made.id}/events`, { method: 'POST', headers: { ...V, authorization: `Bearer ${made.token}` }, body: JSON.stringify({ events: events.slice(i, i + 24) }) })
+  }
+  const whole = await fetch(`${SERVER}/api/rooms/${made.id}/events?after=0&wait=0`, { headers: { ...V, authorization: `Bearer ${made.token}` } }).then(r => r.text())
+  const remy = session('Remy', join(WORK, 'remy'))
+  remy.type(made.url)
+  await until('Remy in the long room', async () => (await roomInfo(made.id)).people?.some(p => p.name === 'Remy'), 60_000)
+  await until("Remy's replay of the whole history", () => transcriptOf(remy).includes('LAST-WORDS-OTTER'), 180_000)
+  check(
+    `someone joining a session whose history is over 4 MiB (${(Buffer.byteLength(whole) / 1048576).toFixed(1)} MiB) gets it all`,
+    transcriptOf(remy).includes('FIRST-WORDS-ZEBRA') && !/Couldn't (reach|join)/.test(remy.text),
+  )
+  await fetch(`${SERVER}/api/rooms/${made.id}/end`, { method: 'POST', headers: { ...V, authorization: `Bearer ${made.token}` } })
+}
+
 // Teams: sign in from Claude Code (the server's test provider stands in for
 // GitHub and Google), make a team, share with it. A teammate who takes the
 // invite finds the session in the team's list and joins; someone outside
@@ -682,9 +713,12 @@ try {
   if (!process.env.EXTERNAL_SERVER && (await fetch(`${SERVER}/api/health`).catch(() => null))) throw new Error(`something already answers on ${SERVER}; stop it first`)
   if (!process.env.EXTERNAL_SERVER) startServer()
   await until('server', async () => (await fetch(`${SERVER}/api/health`).catch(() => null))?.ok)
-  // E2E_ONLY=teams runs just the team checks.
-  if (process.env.E2E_ONLY !== 'teams') await sharing()
-  await teams()
+  // E2E_ONLY=teams (or long, or a list of them) runs just those checks.
+  const only = new Set((process.env.E2E_ONLY ?? '').split(',').filter(Boolean))
+  const runs = name => !only.size || only.has(name)
+  if (runs('sharing')) await sharing()
+  if (runs('long')) await longHistory()
+  if (runs('teams')) await teams()
 } catch (error) {
   check('run', false, String(error?.message ?? error))
 } finally {

@@ -41,6 +41,8 @@ function world(
     transcripts?: Record<string, string>
     /** The share server's teams: signed in (account.json), its sessions, a join it refuses. */
     team?: { signedIn?: boolean; sessions?: unknown[]; refuseJoin?: boolean; access?: 'members' | 'link'; providers?: { id: string; label: string }[] }
+    /** The room's history comes in pages: the join's first, then events after it; `failRest` fails the second. */
+    paged?: { failRest?: boolean }
   } = {},
 ) {
   const asked: string[] = []
@@ -191,6 +193,14 @@ function world(
       body = { id: 'room0000000000000002', url: 'http://localhost:8787/s/room0000000000000002', token: 't', seq: 0, title: 'demo', ...(forTeam ? { team: { id: 'team0001', name: 'Acme' } } : {}) }
     } else if (path.endsWith('/join') && opts.team?.refuseJoin && headers['x-shared-session-account'] !== TEAM_TOKEN) {
       return { value: { status: 403, ok: false, headers: {}, text: JSON.stringify({ error: 'This session is for Acme.', team: 'Acme', signIn: true }) } }
+    } else if (path.endsWith('/join') && opts.paged) {
+      const row = (seq: number, text: string) => ({ seq, type: 'row', from: { seat: 'host', name: 'Sam', role: 'host' }, ts: 900, body: { kind: 'user', who: 'Sam', text } })
+      body = { token: 'g', seat: 'seat1', title: 'demo', host: 'Sam', seq: 3, history: [row(1, 'first page')], more: true, historySeq: 1, people }
+      void row
+    } else if (opts.paged && path.endsWith('/events') && method === 'GET' && /after=1&/.test(e.url)) {
+      if (opts.paged.failRest) return { value: { status: 500, ok: false, headers: {}, text: '{"error":"boom"}' } }
+      const row = (seq: number, text: string) => ({ seq, type: 'row', from: { seat: 'host', name: 'Sam', role: 'host' }, ts: 900, body: { kind: 'user', who: 'Sam', text } })
+      body = { seq: 3, events: [row(2, 'second page'), row(3, 'third')], people, ended: false, title: 'demo' }
     } else if (path.endsWith('/join')) {
       body = { token: 'g', seat: 'seat1', title: 'demo', host: 'Sam', seq: 1, history: [], people, latest: opts.latest }
     } else if (path.endsWith('/events') && method === 'GET') {
@@ -1025,7 +1035,7 @@ test("the Team panel lists the team's live sessions; Join in a fresh session joi
   expect((await pane.find({ key: 'join-all' }))?.props.variant).toBe('primary')
   expect((await pane.find({ key: 'join-room0000000000000101' }))?.props.variant).toBeUndefined()
   await pane.press({ key: 'join-room0000000000000101' })
-  const join = await eventually(asked.clock, () => asked.sent.find(r => r.path === '/api/rooms/room0000000000000101/join'))
+  const join = await eventually(asked.clock, () => asked.sent.find(r => r.path.startsWith('/api/rooms/room0000000000000101/join')))
   expect(join?.headers['x-shared-session-account']).toBe(TEAM_TOKEN)
   await eventually(asked.clock, () => asked.submitted.some(p => p.text === "Join Sam's session"))
   expect(asked.submitted.some(p => p.text === "Join Sam's session")).toBe(true)
@@ -1090,4 +1100,24 @@ test('signed out, the Team panel asks for the sign-ins each time, so one the ser
   await eventually(asked.clock, () => asked.sent.filter(r => r.path === '/api/auth/providers').length >= 2)
   await asked.clock.advance(10)
   expect(await pane.find({ key: 'signin-google' })).toBeDefined()
+})
+
+test('a long history comes in pages: the join asks for them, and reads every one', async ($, on) => {
+  const asked = world(on, { paged: {} })
+  await $.prompt.submit({ text: LINK, origin: { kind: 'composer' }, wait: false })
+  await eventually(asked.clock, () => asked.urls.some(u => u.includes('/events?after=1&wait=0&max=')))
+  expect(asked.urls.some(u => /\/join\?max=\d+/.test(u))).toBe(true)
+  // Every read of the room's events asks for pages the engine can carry.
+  expect(asked.urls.filter(u => u.includes('/events?')).every(u => u.includes('max='))).toBe(true)
+  const row = await $.ui.mount(band('desktop'))
+  expect((await row.find({ type: 'Text', text: /Sam's session/ }))?.props.bold).toBe(true)
+})
+
+test('a join that fails after the seat was taken gives the seat back', async ($, on) => {
+  const asked = world(on, { paged: { failRest: true } })
+  await $.prompt.submit({ text: LINK, origin: { kind: 'composer' }, wait: false })
+  await eventually(asked.clock, () => asked.includes('POST /api/rooms/room0000000000000001/leave'))
+  expect(asked).toContain('POST /api/rooms/room0000000000000001/leave')
+  const row = await $.ui.mount(band('desktop'))
+  expect(await row.find({ key: 'share' })).toBeDefined() // not left half in
 })

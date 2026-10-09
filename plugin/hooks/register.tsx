@@ -136,7 +136,12 @@ type ServerEvent = {
   body: Record<string, unknown>
 }
 
-type EventsPage = { seq: number; events: ServerEvent[]; people: SharePerson[]; ended: boolean; title: string }
+type EventsPage = { seq: number; events: ServerEvent[]; people: SharePerson[]; ended: boolean; title: string; more?: boolean }
+
+// The engine hands a plugin at most 4 MiB of a response body, in bytes, cut
+// without a word (measured), and a long session's history is many times
+// that: rooms send events in pages of at most this many bytes when asked (`max`).
+const PAGE_BYTES = 3_000_000
 
 class ApiError extends Error {
   constructor(
@@ -147,6 +152,9 @@ class ApiError extends Error {
     super(message)
   }
 }
+
+// The request never got an answer: the server is unreachable from here.
+class NetworkError extends Error {}
 
 // ---------------------------------------------------------------------------
 // Module state. A reload starts these over; what must survive is in $.state.
@@ -549,16 +557,25 @@ async function api<T>(
   if (init.account) headers['x-shared-session-account'] = init.account
   const version = await ownVersion($)
   if (version) headers['x-shared-session-version'] = version
-  const res = await $.http.fetch(`${server}${path}`, {
-    method: init.method ?? 'GET',
-    headers,
-    body: init.body === undefined ? undefined : JSON.stringify(init.body),
-  })
+  let res: Awaited<ReturnType<typeof $.http.fetch>>
+  try {
+    res = await $.http.fetch(`${server}${path}`, {
+      method: init.method ?? 'GET',
+      headers,
+      body: init.body === undefined ? undefined : JSON.stringify(init.body),
+    })
+  } catch (error) {
+    throw new NetworkError(String((error as Error)?.message ?? error))
+  }
   let data: Record<string, unknown> = {}
+  let parsed = !res.text
   try {
     data = JSON.parse(res.text)
+    parsed = true
   } catch {}
   if (!res.ok) throw new ApiError(typeof data.error === 'string' ? data.error : `HTTP ${res.status}`, res.status, data)
+  // An answer cut short (over the engine's 4 MiB) is a failure, never an empty one.
+  if (!parsed) throw new ApiError("the share server's answer didn't come through whole", 502)
   return data as T
 }
 
@@ -898,7 +915,7 @@ async function ridePage($: $, room: ShareRoom, cursor: number): Promise<EventsPa
     const events = after()
     return { seq: Math.max(cursor, ...events.map(e => e.seq)), events, people: await read($, peopleA), ended: streamEnded, title: room.title }
   }
-  return api<EventsPage>($, room.server, `/api/rooms/${room.id}/events?after=${cursor}&wait=${RIDE_WAIT_MS}`, { token: room.token })
+  return api<EventsPage>($, room.server, `/api/rooms/${room.id}/events?after=${cursor}&wait=${RIDE_WAIT_MS}&max=${PAGE_BYTES}`, { token: room.token })
 }
 
 // Without a stream: poll, fast while something is happening, then less and
@@ -926,7 +943,7 @@ async function pollOnce($: $, generation: number) {
   const mode = await read($, modeA)
   if (!room || mode === 'idle') return
   try {
-    const page = await api<EventsPage>($, room.server, `/api/rooms/${room.id}/events?after=${room.seq}&wait=0`, {
+    const page = await api<EventsPage>($, room.server, `/api/rooms/${room.id}/events?after=${room.seq}&wait=0&max=${PAGE_BYTES}`, {
       token: room.token,
     })
     if (generation !== pollGeneration) return
@@ -936,7 +953,7 @@ async function pollOnce($: $, generation: number) {
     if (page.events.length > 0 || (await read($, workingA))) lastActivity = now
     await receive($, mode, room, page)
     if (generation === pollGeneration && (await read($, modeA)) !== 'idle') {
-      pollDelay = pollWait(now)
+      pollDelay = page.more ? 0 : pollWait(now) // a page with more after it: the next at once
       $.clock.after(pollDelay, () => void pollOnce($, generation))
     }
   } catch (error) {
@@ -1670,7 +1687,7 @@ async function resumeJoined($: $) {
   let missed: ServerEvent[] = []
   let people: SharePerson[] | null = null
   try {
-    const page = await api<EventsPage>($, room.server, `/api/rooms/${room.id}/events?after=${room.seq}&wait=0`, { token: room.token })
+    const page = await eventsSince($, room, room.seq)
     if (page.ended) return void (await over())
     missed = page.events
     people = page.people
@@ -1680,13 +1697,16 @@ async function resumeJoined($: $) {
     if (error instanceof ApiError && error.status === 401) {
       // The seat was let go: a new one, and what happened since the old one's last.
       try {
-        const joined = await api<{ token: string; seat: string; seq: number; title: string; history: ServerEvent[]; people: SharePerson[] }>(
+        const joined = await api<{ token: string; seat: string; seq: number; title: string; history: ServerEvent[]; people: SharePerson[]; more?: boolean; historySeq?: number }>(
           $,
           room.server,
-          `/api/rooms/${room.id}/join`,
-          { method: 'POST', body: { name: await whoami($) } },
+          `/api/rooms/${room.id}/join?max=${PAGE_BYTES}`,
+          { method: 'POST', body: { name: await whoami($) }, account: (await signInFor($, room.server))?.token },
         )
+        // Only what came after the old seat's last: page from there.
+        const from = Math.max(saved.room.seq, joined.more && typeof joined.historySeq === 'number' ? joined.historySeq : joined.seq)
         missed = joined.history.filter(e => e.seq > saved.room.seq)
+        if (joined.more && from < joined.seq) missed.push(...(await eventsSince($, { server: room.server, id: room.id, token: joined.token }, from, joined.seq)).events.filter(e => e.seq > saved.room.seq && e.type !== 'delta'))
         people = joined.people
         room = { ...room, token: joined.token, seat: joined.seat, seq: joined.seq, title: joined.title }
       } catch (again) {
@@ -1748,7 +1768,7 @@ async function resumeHosting($: $) {
   if (now - saved.at > HOSTING_KEEP_MS) return
   let page: EventsPage | null = null
   try {
-    page = await api<EventsPage>($, saved.room.server, `/api/rooms/${saved.room.id}/events?after=${saved.room.seq}&wait=0`, { token: saved.room.token })
+    page = await eventsSince($, saved.room, saved.room.seq)
   } catch (error) {
     if (isGone(error)) return void $.ui.log('The session you shared ended while this one was closed.')
     // Unreachable for now: share on, and the feed keeps trying.
@@ -1904,54 +1924,84 @@ async function join($: $, server: string, id: string) {
     fromNow?: boolean
     hostVersion?: string
     team?: { id: string; name: string }
-  }>($, server, `/api/rooms/${id}/join`, { method: 'POST', body: { name }, account: signedIn?.token })
-  void readUpdates($).then(() => noteLatest($, joined.latest))
-  const room: ShareRoom = {
-    server,
-    id,
-    url: `${server}/s/${id}`,
-    title: joined.title,
-    host: joined.host,
-    token: joined.token,
-    seat: joined.seat,
-    seq: joined.seq,
-    since: await $.clock.now(),
-    team: joined.team ?? null,
-  }
-  await update($, roomA, () => room)
-  await update($, modeA, () => 'guest')
-  await readyReplay($)
-  await update($, peopleA, () => joined.people)
-  await update($, workingA, () => null)
-  // The room as it stands: its timeline, its chat, the host's policy.
-  for (const event of joined.history) await absorb($, room, 'guest', event, false)
+    more?: boolean
+    historySeq?: number
+  }>($, server, `/api/rooms/${id}/join?max=${PAGE_BYTES}`, { method: 'POST', body: { name }, account: signedIn?.token })
+  try {
+    // A long history comes in pages (the engine hands a plugin at most 4 MiB
+    // of an answer): the rest of it, up to where the room stood at the join.
+    let history = joined.history
+    if (joined.more && typeof joined.historySeq === 'number') {
+      const rest = await eventsSince($, { server, id, token: joined.token }, joined.historySeq, joined.seq)
+      history = [...history, ...rest.events.filter(e => e.type !== 'delta')]
+    }
+    void readUpdates($).then(() => noteLatest($, joined.latest))
+    const room: ShareRoom = {
+      server,
+      id,
+      url: `${server}/s/${id}`,
+      title: joined.title,
+      host: joined.host,
+      token: joined.token,
+      seat: joined.seat,
+      seq: joined.seq,
+      since: await $.clock.now(),
+      team: joined.team ?? null,
+    }
+    await update($, roomA, () => room)
+    await update($, modeA, () => 'guest')
+    await readyReplay($)
+    await update($, peopleA, () => joined.people)
+    await update($, workingA, () => null)
+    // The room as it stands: its timeline, its chat, the host's policy.
+    for (const event of history) await absorb($, room, 'guest', event, false)
 
-  // A turn still running on the host plays out live; everything before it is
-  // shown as it was, one exchange per prompt.
-  const starts = joined.history.filter(e => e.type === 'turn' && e.body.state === 'start')
-  const ends = new Set(joined.history.filter(e => e.type === 'turn' && e.body.state === 'end').map(e => e.body.turnId))
-  const running = starts.filter(e => !ends.has(e.body.turnId)).at(-1)
-  const past = joined.history.filter(e => e.type === 'row' && (!running || e.seq < running.seq))
-  if (running) noteHostTurn(running)
-  // Previews the host still has open open here too, after the history (one
-  // shown in the running turn opens as that turn plays out).
-  const closed = new Set(joined.history.filter(e => e.type === 'preview' && e.body.state === 'closed').map(e => e.body.pid))
-  const open = new Map<string, ServerEvent>()
-  for (const e of joined.history) {
-    if (e.type !== 'artifact' || e.body.kind !== 'preview' || typeof e.body.pid !== 'string' || closed.has(e.body.pid)) continue
-    if (running && e.seq > running.seq) continue
-    open.set(e.body.pid, e)
+    // A turn still running on the host plays out live; everything before it is
+    // shown as it was, one exchange per prompt.
+    const starts = history.filter(e => e.type === 'turn' && e.body.state === 'start')
+    const ends = new Set(history.filter(e => e.type === 'turn' && e.body.state === 'end').map(e => e.body.turnId))
+    const running = starts.filter(e => !ends.has(e.body.turnId)).at(-1)
+    const past = history.filter(e => e.type === 'row' && (!running || e.seq < running.seq))
+    if (running) noteHostTurn(running)
+    // Previews the host still has open open here too, after the history (one
+    // shown in the running turn opens as that turn plays out).
+    const closed = new Set(history.filter(e => e.type === 'preview' && e.body.state === 'closed').map(e => e.body.pid))
+    const open = new Map<string, ServerEvent>()
+    for (const e of history) {
+      if (e.type !== 'artifact' || e.body.kind !== 'preview' || typeof e.body.pid !== 'string' || closed.has(e.body.pid)) continue
+      if (running && e.seq > running.seq) continue
+      open.set(e.body.pid, e)
+    }
+    startFeed($)
+    await markSidebar($, () => `👥 ${room.host} · ${room.title}`)
+    return {
+      room,
+      history: exchanges(past.map(e => e.body as unknown as Row), joined.host),
+      // One preview opens: they share one host name, so a browser holds one at a
+      // time (the newest); the rest are in the Room, a press of Open away.
+      open: [...open.values()].slice(-1),
+      fromNow: joined.fromNow === true,
+      hostVersion: typeof joined.hostVersion === 'string' ? joined.hostVersion : null,
+    }
+  } catch (error) {
+    // Seated but not in: the seat goes, so nobody sees a guest who isn't there.
+    await api($, server, `/api/rooms/${id}/leave`, { method: 'POST', token: joined.token }).catch(() => {})
+    if ((await read($, roomA))?.id === id) await reset($)
+    throw error
   }
-  startFeed($)
-  await markSidebar($, () => `👥 ${room.host} · ${room.title}`)
-  return {
-    room,
-    history: exchanges(past.map(e => e.body as unknown as Row), joined.host),
-    // One preview opens: they share one host name, so a browser holds one at a
-    // time (the newest); the rest are in the Room, a press of Open away.
-    open: [...open.values()].slice(-1),
-    fromNow: joined.fromNow === true,
-    hostVersion: typeof joined.hostVersion === 'string' ? joined.hostVersion : null,
+}
+
+// Everything in a room after `after` (up to `until`, when given), page by
+// page so no answer passes what the engine hands a plugin.
+async function eventsSince($: $, room: { server: string; id: string; token: string }, after: number, until = Number.POSITIVE_INFINITY): Promise<EventsPage> {
+  const events: ServerEvent[] = []
+  let cursor = after
+  for (;;) {
+    const page = await api<EventsPage>($, room.server, `/api/rooms/${room.id}/events?after=${cursor}&wait=0&max=${PAGE_BYTES}`, { token: room.token })
+    for (const event of page.events) if (event.seq <= until) events.push(event)
+    const stuck = page.seq <= cursor
+    cursor = page.seq
+    if (!page.more || stuck || cursor >= until) return { ...page, seq: Math.min(cursor, until), events, more: false }
   }
 }
 
@@ -3067,7 +3117,9 @@ function joinFailure(error: unknown, server: string): string {
   }
   if (isGone(error)) return "That shared session has ended: the host stopped sharing, or the room expired. Ask them for a new link."
   if (error instanceof ApiError) return `Couldn't join that shared session: ${error.message}`
-  return `Couldn't reach the share server at ${server}. Check your connection, then paste the link again.`
+  // Only a request that got no answer is the network; anything else says what it was.
+  if (error instanceof NetworkError) return `Couldn't reach the share server at ${server}. Check your connection, then paste the link again.`
+  return `Couldn't join that shared session: ${String((error as Error)?.message ?? error)}. Paste the link again; if it keeps happening, the update command may help: \`${UPDATE_COMMAND}\``
 }
 
 // What a guest may do here, in a line.
