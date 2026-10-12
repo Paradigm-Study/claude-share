@@ -147,7 +147,7 @@ On Cloudflare, `npx wrangler secret put GITHUB_CLIENT_ID` (and `GITHUB_CLIENT_SE
 - **Failed host turns:** guests see a note in the reply when the host's turn errors or is refused.
 - **Previews are plain HTTP.** No WebSockets, so a dev server's hot reload doesn't reach guests; they reload. Request bodies are limited to 1 MB and responses to 20 MB. The host needs `sh` and `curl` (macOS or Linux).
 - **What's shown opens by itself.** A page or preview opens in a guest's browser pane without asking, even in auto mode; a guest can choose in the Room to be asked first, and a public link always asks. A terminal guest gets the file saved and a note instead of a viewer.
-- **Session list changes are Desktop-only.** The 👥 title and the pin use Claude Desktop's own sidebar tools. Elsewhere they're skipped. In auto mode (Desktop's default for new sessions), Claude Code's classifier sometimes refuses a plugin's pin; the plugin asks again as your own request (you pressed Share, or joined), tries twice more, then the Room offers **Allow pinning**, which adds allow rules for exactly those sidebar tools to `~/.claude/settings.json`.
+- **Session list changes are Desktop-only.** The 👥 title and the pin use Claude Desktop's own sidebar tools. Elsewhere they're skipped. In auto mode (Desktop's default for new sessions), Claude Code refuses a plugin's pin unless an allow rule covers it; after a refusal, **Allow pinning** shows above the prompt (and in the Room), and pressing it once adds allow rules for exactly those sidebar tools to `~/.claude/settings.json`. Shared sessions pin themselves from then on, and ones left unpinned pin within a minute.
 
 ## Develop
 

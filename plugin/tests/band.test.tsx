@@ -457,17 +457,18 @@ test('the host can make the session watch-only from the Room', async ($, on) => 
 function sidebar(on: On, start: { title: string; pinned?: boolean; refuse?: boolean }) {
   const calls: string[] = []
   let pinned = start.pinned === true
+  let refusing = start.refuse === true
   on('mcp.call', ($, e) => {
     calls.push(e.tool === 'get_session' ? 'get_session' : `${e.tool} ${JSON.stringify(e.args)}`)
     if (e.tool === 'set_pinned') {
-      if (start.refuse) return { value: { content: [{ type: 'text', text: 'not allowed' }], isError: true } }
+      if (refusing) return { value: { content: [{ type: 'text', text: 'The server-side auto mode classifier gave no verdict' }], isError: true } }
       pinned = (e.args as { pinned: boolean }).pinned
     }
     const text = e.tool === 'get_session' ? JSON.stringify({ sessionId: 'local_test', title: start.title, ...(pinned ? { pinned: true } : {}) }) : 'ok'
     return { value: { content: [{ type: 'text', text }], isError: false } }
   })
-  // The same pin made through the tool call path (the person's request).
-  return Object.assign(calls, { pin: (value: boolean) => void (pinned = value) })
+  // The person pins or unpins by hand; pinning gets allowed.
+  return Object.assign(calls, { pin: (value: boolean) => void (pinned = value), refuse: (value: boolean) => void (refusing = value) })
 }
 
 test("sharing marks the session's sidebar row, and stopping puts it back", async ($, on) => {
@@ -1283,26 +1284,24 @@ test("a title made from a prompt with a picture leaves Claude Code's note about 
   expect(await pane.find({ type: 'Text', text: 'agent-composition-ux-9e06eb: make this match the mock' })).toBeDefined()
 })
 
-test("a pin Desktop refuses from the plugin goes again as the person's own request, and sticks", async ($, on) => {
-  const asked = world(on)
+test('a refused pin puts Allow pinning above the prompt; pressing it adds the rules and pins', async ($, on) => {
+  const asked = world(on, { settings: '{"model":"opus"}' })
   const calls = sidebar(on, { title: 'Fix login flow', refuse: true })
-  const made: Record<string, unknown>[] = []
-  on('tool.call', { tool: 'mcp__ccd_sidebar__set_pinned' }, ($, e) => {
-    made.push(e as unknown as Record<string, unknown>)
-    calls.pin(true)
-    return { result: 'ok' } as never
-  })
   const ui = await $.ui.mount(band('desktop'))
   await ui.press({ key: 'share' })
-  await asked.clock.advance(100)
-  expect(made).toHaveLength(1)
-  expect(made[0]?.session_id).toBe('local_test')
-  expect(made[0]?.pinned).toBe(true)
-  expect(String(made[0]?.consent)).toContain('The user chose to share this session')
-  // Nothing tried again, nothing said: it took.
-  await asked.clock.advance(90_000)
-  expect(made).toHaveLength(1)
-  expect(asked.logged.some(line => line.includes("didn't let this plugin pin"))).toBe(false)
+  await asked.clock.advance(81_000) // refused, tried again twice
+  expect(asked.store.get('pinLog')).toBeDefined()
+  expect(await ui.find({ key: 'band-allow-pin' })).toBeDefined()
+  // Not in a terminal: it has no sidebar.
+  const terminal = await $.ui.mount(band('terminal'))
+  expect(await terminal.find({ key: 'band-allow-pin' })).toBeUndefined()
+  calls.refuse(false) // an allow rule lets the call through
+  await ui.press({ key: 'band-allow-pin' })
+  await asked.clock.advance(10)
+  const settings = JSON.parse(asked.files.get('/home/scott/.claude/settings.json') ?? '{}')
+  expect(settings.permissions.allow).toContain('mcp__ccd_sidebar__set_pinned')
+  expect(calls.at(-2)).toBe('set_pinned {"session_id":"local_test","pinned":true}')
+  expect(await ui.find({ key: 'band-allow-pin' })).toBeUndefined()
 })
 
 test('a guest whose seat the room let go (asleep, offline) takes a new one and stays in the session', async ($, on) => {
@@ -1400,31 +1399,37 @@ test("a session that shares or joins tells the others here, and stops when it's 
   expect(asked.store.has('live:room0000000000000001:session-test-0001')).toBe(false)
 })
 
-test('a joined row whose pin never took is pinned when the plugin loads again (an update in place)', async ($, on) => {
-  const asked = world(on)
+test('a joined row whose pin never took pins when pinning is allowed, or the plugin loads again', async ($, on) => {
+  const asked = world(on, { settings: '{}' })
   const calls = sidebar(on, { title: 'Session room0000000000000001', refuse: true })
-  let allowed = false
-  const made: Record<string, unknown>[] = []
-  on('tool.call', { tool: 'mcp__ccd_sidebar__set_pinned' }, ($, e) => {
-    made.push(e as unknown as Record<string, unknown>)
-    if (!allowed) return { deny: 'no verdict' } as never
-    calls.pin(true)
-    return { result: 'ok' } as never
-  })
   on('session.start', ($, e) => ({ cwd: e.cwd }))
+  const pins = () => calls.filter(c => c === 'set_pinned {"session_id":"local_test","pinned":true}').length
+  await $.session.start(START)
   await $.prompt.submit({ text: LINK, origin: { kind: 'composer' }, wait: false })
   await asked.clock.advance(100_000) // refused, tried again twice, given up
   expect(asked.logged.some(line => line.includes("didn't let this plugin pin"))).toBe(true)
-  // A version that gets past the refusal loads: the row is pinned, as joined.
-  allowed = true
-  const before = made.length
-  await $.session.start(START)
-  await asked.clock.advance(2_100)
-  expect(made.length).toBe(before + 1)
-  expect(String(made.at(-1)?.consent)).toContain("Earlier in this session the user chose to join Sam's shared session")
-  // Pinned once: another load leaves it be, even if the person unpins it.
+  // Pinning allowed in another session: this one pins within a minute.
+  calls.refuse(false)
+  asked.files.set('/home/scott/.claude/settings.json', JSON.stringify({ permissions: { allow: ['mcp__ccd_sidebar__set_pinned'] } }))
+  const before = pins()
+  await asked.clock.advance(60_100)
+  expect(pins()).toBe(before + 1)
+  // Pinned once: a later load leaves the row as the person keeps it.
   calls.pin(false)
   await $.session.start(START)
   await asked.clock.advance(2_100)
-  expect(made.length).toBe(before + 1)
+  expect(pins()).toBe(before + 1)
+})
+
+test('a row a version before this marked, its pin refused, pins when this version loads', async ($, on) => {
+  const asked = world(on)
+  const calls = sidebar(on, { title: 'Session room0000000000000001', refuse: true })
+  on('session.start', ($, e) => ({ cwd: e.cwd }))
+  await $.prompt.submit({ text: LINK, origin: { kind: 'composer' }, wait: false })
+  await asked.clock.advance(100_000)
+  calls.refuse(false)
+  await $.session.start(START) // the update loads in place
+  await asked.clock.advance(2_100)
+  expect(calls.at(-2)).toBe('set_pinned {"session_id":"local_test","pinned":true}')
+  expect((asked.store.get('pinLog') as { line: string }[]).some(e => e.line.startsWith('pinning again'))).toBe(true)
 })
