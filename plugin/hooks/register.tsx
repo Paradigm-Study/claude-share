@@ -18,7 +18,7 @@
 import { atom, memberOf, read, update } from 'claude-code'
 import type { Elements, EngineInterface, HookStream, ProcessSpawnChunk, ProcessSpawnResult, Register, RenderChildren, RenderSurface, Timer, TurnStepChunk } from 'claude-code'
 
-import type { ShareAccount, ShareActivity, ShareChat, ShareFileMeta, ShareMode, SharePerson, SharePolicy, ShareRoom, ShareShown, ShareTeam, ShareTeams, ShareTeamSession, ShareWorking } from '../types'
+import type { ShareAccount, ShareActivity, ShareChat, ShareFileMeta, ShareInvite, ShareMode, SharePerson, SharePolicy, ShareRoom, ShareShown, ShareTeam, ShareTeams, ShareTeamSession, ShareWorking } from '../types'
 import { ACCENT, BAD, GOOD, ROSE, ago, avatarSvg, bannerSvg, labelsFor, stackSvg, toolGlyph } from './look'
 import type { Face } from './look'
 import { attachmentsOf, delivered, rowsFromMessage, rowsToMarkdown, splitSpeaker, summarizeTool } from './rows'
@@ -94,6 +94,8 @@ const pagesA = atom({ plugin: 'shared-session', key: 'pages' } as const, {} as R
 const updatesA = atom({ plugin: 'shared-session', key: 'updates' } as const, null as boolean | null)
 const NO_TEAMS: ShareTeams = { server: '', account: null, teams: [], current: null, byLink: false, sessions: [], members: [], providers: [], signingIn: null, invite: null, loaded: 0, error: null }
 const teamsA = atom({ plugin: 'shared-session', key: 'teams' } as const, NO_TEAMS)
+const invitesA = atom({ plugin: 'shared-session', key: 'invites' } as const, [] as ShareInvite[])
+const invitedA = atom({ plugin: 'shared-session', key: 'invited' } as const, {} as Record<string, number>)
 
 // Context a host app puts into the person's message (Claude Desktop adds a
 // <system-reminder> to a first prompt): not typed, and never shared.
@@ -1516,6 +1518,7 @@ async function share($: $, surface?: RenderSurface, opts: { history?: boolean; t
   }
   await update($, roomA, () => room)
   await update($, modeA, () => 'host')
+  await update($, invitedA, () => ({}))
   void readUpdates($).then(() => noteLatest($, created.latest))
   await update($, peopleA, () => [{ id: 'host', name, role: 'host', online: true }])
 
@@ -3259,7 +3262,7 @@ async function refreshTeams($: $) {
     return
   }
   try {
-    const me = await api<{ account: ShareAccount; teams: ShareTeam[] }>($, server, '/api/me', { token: saved.token })
+    const me = await api<{ account: ShareAccount; teams: ShareTeam[]; teammates?: ShareTeams['teammates'] }>($, server, '/api/me', { token: saved.token })
     // Shown: the team Share goes to, else (by link alone, or it's gone) the first.
     const current = (me.teams.find(x => x.id === saved.current) ?? me.teams[0])?.id ?? null
     const [sessions, detail] = current
@@ -3274,6 +3277,7 @@ async function refreshTeams($: $) {
       providers,
       account: me.account,
       teams: me.teams,
+      teammates: me.teammates ?? [],
       current,
       byLink: saved.current === null,
       sessions,
@@ -3573,6 +3577,15 @@ async function teamCommand($: $, args: string): Promise<{ text: string }> {
         if (!t.sessions.length) return { text: `Nothing is shared with ${team.name} right now.` }
         return { text: [`Shared with ${team.name}:`, ...t.sessions.map((s, i) => `${i + 1}. ${s.title} (${s.host}${s.hostOnline ? '' : ', away'}): ${s.url}`), '', 'Paste a link to join, or /team join all.'].join('\n') }
       }
+      case 'invites': {
+        const server = await serverOf($)
+        const saved = await signInFor($, server)
+        if (!saved) return { text: 'Sign in first: /team signin' }
+        const list = (await api<{ invites: ShareInvite[] }>($, server, '/api/me/invites', { token: saved.token })).invites
+        await update($, invitesA, () => list)
+        if (!list.length) return { text: 'No invites right now.' }
+        return { text: ['Invited:', ...list.map((i, n) => `${n + 1}. ${i.room.title} (from ${i.from.name}): ${i.room.url}`), '', 'Paste a link to join.'].join('\n') }
+      }
       case 'join': {
         await refreshTeams($)
         const t = await read($, teamsA)
@@ -3609,10 +3622,98 @@ async function teamCommand($: $, args: string): Promise<{ text: string }> {
         await leaveTeam($)
         return { text: 'Left the team.' }
       default:
-        return { text: '/team opens the Team panel. Also: /team signin [github|google], /team create <name>, /team invite, /team sessions, /team join <n|all>, /team use <name|link>, /team access members|link, /team domains <a.com …>, /team orgs <org …>, /team leave, /team signout, /team delete-account' }
+        return { text: '/team opens the Team panel. Also: /team signin [github|google], /team create <name>, /team invite, /team invites, /team sessions, /team join <n|all>, /team use <name|link>, /team access members|link, /team domains <a.com …>, /team orgs <org …>, /team leave, /team signout, /team delete-account' }
     }
   } catch (error) {
     return { text: `Couldn't: ${String((error as Error)?.message ?? error)}` }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Session invites: a host invites teammates (by account) to the session it
+// shares, and each one's Claude Code shows it above the prompt and in the
+// Team panel, no link to pass around. A machine's sessions share one copy
+// in the store; whichever finds it older than 30 s asks the server, so ten
+// open sessions make one request, not ten.
+
+const INVITES_KEY = 'sessionInvites'
+const INVITES_EVERY_MS = 30_000
+type InviteCache = { at: number; server: string; list: ShareInvite[] }
+
+const sameInvites = (a: ShareInvite[], b: ShareInvite[]) =>
+  a.length === b.length && a.every((x, i) => x.room.id === b[i]?.room.id && x.at === b[i]?.at && x.room.title === b[i]?.room.title)
+
+async function pollInvites($: $) {
+  let server: string
+  try {
+    server = await serverOf($)
+  } catch {
+    return
+  }
+  const saved = await signInFor($, server)
+  if (!saved) {
+    if ((await read($, invitesA)).length) await update($, invitesA, () => [])
+    return
+  }
+  const now = await $.clock.now()
+  const cache = (await $.store.get(INVITES_KEY).catch(() => undefined)) as InviteCache | undefined
+  let list = cache?.server === server ? cache.list : []
+  if (!cache || cache.server !== server || now - cache.at >= INVITES_EVERY_MS) {
+    // Claimed first, so the machine's other sessions wait for this answer.
+    await $.store.set(INVITES_KEY, { at: now, server, list } satisfies InviteCache).catch(() => {})
+    try {
+      list = (await api<{ invites: ShareInvite[] }>($, server, '/api/me/invites', { token: saved.token })).invites
+      await $.store.set(INVITES_KEY, { at: now, server, list } satisfies InviteCache).catch(() => {})
+    } catch {}
+  }
+  if (!sameInvites(await read($, invitesA), list)) await update($, invitesA, () => list)
+}
+
+// An invite answered (joined or set aside): gone here, in the machine's other
+// sessions at their next look, and on the server.
+async function dropInvite($: $, roomId: string) {
+  await update($, invitesA, list => list.filter(i => i.room.id !== roomId))
+  const cache = (await $.store.get(INVITES_KEY).catch(() => undefined)) as InviteCache | undefined
+  if (cache) await $.store.set(INVITES_KEY, { ...cache, list: cache.list.filter(i => i.room.id !== roomId) }).catch(() => {})
+  const server = await serverOf($).catch(() => '')
+  const saved = server ? await signInFor($, server) : null
+  if (saved) await api($, server, `/api/me/invites/${encodeURIComponent(roomId)}`, { method: 'DELETE', token: saved.token }).catch(() => {})
+}
+
+// Join an invited session the way the Team panel joins one: here when this
+// session is fresh, else in a new one with its link ready.
+async function joinInvited($: $, invite: ShareInvite, surface?: RenderSurface) {
+  await dropInvite($, invite.room.id)
+  await joinFromTeam($, [{ id: invite.room.id, url: invite.room.url, title: invite.room.title, host: invite.room.host, hostOnline: true, people: [], createdAt: invite.at }], surface)
+}
+
+// Host: invite teammates (account ids) to this session.
+async function inviteToRoom($: $, ids: string[]): Promise<string> {
+  const room = await read($, roomA)
+  if (!room || (await read($, modeA)) !== 'host') return 'Share this session first: press Share or type /share-session.'
+  const saved = await signInFor($, room.server)
+  if (!saved) return 'Sign in first to invite teammates: press Team above the prompt, or /team signin.'
+  const r = await api<{ invited: string[]; refused: string[] }>($, room.server, `/api/rooms/${room.id}/invite`, { method: 'POST', token: room.token, account: saved.token, body: { to: ids } })
+  const now = await $.clock.now()
+  await update($, invitedA, m => ({ ...m, ...Object.fromEntries(ids.filter(id => !r.refused.includes(id)).map(id => [id, now])) }))
+  return r.invited.length ? `Invited ${listNames(r.invited)}: it shows in their Claude Code within a minute.` : "Couldn't invite them: you can invite people who share a team with you."
+}
+
+// /invite <name>: by name or GitHub login, a teammate's or several.
+async function inviteCommand($: $, args: string): Promise<{ text: string }> {
+  try {
+    await refreshTeams($)
+    const t = await read($, teamsA)
+    if (!t.account) return { text: 'Sign in first to invite teammates: press Team above the prompt, or /team signin.' }
+    const mates = t.teammates ?? []
+    const wanted = args.split(/[,\s]+/).map(w => w.trim().toLowerCase().replace(/^@/, '')).filter(Boolean)
+    if (!wanted.length) return { text: mates.length ? `Invite whom? ${mates.map(m => m.name).join(', ')}. /invite <name>` : 'No teammates to invite yet: make a team in /team and send its invite link.' }
+    const picks = wanted.map(w => mates.find(m => m.name.toLowerCase() === w || m.login?.toLowerCase() === w) ?? mates.find(m => m.name.toLowerCase().startsWith(w) || m.login?.toLowerCase().startsWith(w)))
+    const missing = wanted.filter((_, i) => !picks[i])
+    if (missing.length) return { text: `No teammate called ${missing.join(', ')}. You can invite: ${mates.map(m => m.name).join(', ') || 'nobody yet'}.` }
+    return { text: await inviteToRoom($, [...new Set(picks.map(m => m!.id))]) }
+  } catch (error) {
+    return { text: `Couldn't invite: ${String((error as Error)?.message ?? error)}` }
   }
 }
 
@@ -3667,6 +3768,7 @@ export const register: Register = (on, options) => {
     // Not /share: Claude has its own. Every name here is the plugin's alone.
     await $.command.register({ name: 'share-session', description: 'Share this session (with your team when signed in): /share-session [all | new] [link]' })
     await $.command.register({ name: 'team', description: "Your team's shared sessions, one click to join: /team [signin | create <name> | invite | signout]" })
+    await $.command.register({ name: 'invite', description: 'Invite a teammate into this shared session, in their Claude Code: /invite <name>' })
     await $.command.register({ name: 'stop-sharing', description: 'Stop sharing this session, or leave the one you joined' })
     await $.command.register({ name: 'room', description: 'Open the Room: who is here, activity, side chat' })
     await $.command.register({ name: 'share-file', description: 'Show a file to everyone in the shared session: /share-file <path>' })
@@ -3677,6 +3779,9 @@ export const register: Register = (on, options) => {
       .then(server => signInFor($, server))
       .then(saved => (saved ? refreshTeams($) : undefined))
       .catch(() => {})
+    // Invites teammates sent: a look every 10 s at the machine's shared copy.
+    $.clock.after(2_000, () => void pollInvites($).catch(() => {}))
+    $.clock.every(10_000, () => void pollInvites($).catch(() => {}))
     // …and kept current while this session isn't in one, for the Team button's count.
     $.clock.every(5 * 60_000, () => {
       void (async () => {
@@ -3722,6 +3827,8 @@ export const register: Register = (on, options) => {
   on('command.run', { command: 'share-session' }, ($, e) => shareCommand($, e))
   on('command.run', { command: 'shared-session:share-session' }, ($, e) => shareCommand($, e))
 
+  on('command.run', { command: 'invite' }, ($, e) => inviteCommand($, e.args ?? ''))
+  on('command.run', { command: 'shared-session:invite' }, ($, e) => inviteCommand($, e.args ?? ''))
   on('command.run', { command: 'team' }, ($, e) => teamCommand($, e.args ?? ''))
   on('command.run', { command: 'shared-session:team' }, ($, e) => teamCommand($, e.args ?? ''))
 
@@ -4498,6 +4605,31 @@ export const register: Register = (on, options) => {
 
     const account = t.account
     const team = t.teams.find(x => x.id === t.current) ?? null
+    // Sessions teammates invited you to, each a press from joining.
+    const invites = await read($, invitesA)
+    const invitesSection = invites.length
+      ? section(
+          'invites',
+          'Invited',
+          '',
+          <Box flexDirection="column" gap={1}>
+            {invites.map(invite => (
+              <Box key={`inv-${invite.room.id}`} flexDirection="row" gap={1} alignItems="center" justifyContent="space-between">
+                <Box flexDirection="column" flexShrink={1}>
+                  <Text bold wrap="truncate-end">
+                    {invite.room.title}
+                  </Text>
+                  <Text dimColor wrap="truncate-end">{`${invite.from.name} invited you · ${ago(invite.at, now)}`}</Text>
+                </Box>
+                <Box flexDirection="row" gap={1} flexShrink={0}>
+                  <Button key={`inv-join-${invite.room.id}`} label="Join" variant="primary" onPress={press => void joinInvited($, invite, press.surface)} />
+                  <Button key={`inv-dismiss-${invite.room.id}`} label="Dismiss" plain dimColor onPress={() => void dropInvite($, invite.room.id)} />
+                </Box>
+              </Box>
+            ))}
+          </Box>,
+        )
+      : null
     const accountRow = (
       <Box flexDirection="row" gap={1} alignItems="center" justifyContent="space-between">
         <Text dimColor wrap="truncate-end">{`Signed in as ${account.name}${account.login && account.login !== account.name ? ` (${account.login})` : ''} · ${providerName(account.provider)}`}</Text>
@@ -4520,6 +4652,7 @@ export const register: Register = (on, options) => {
     if (!team) {
       return (
         <Box flexDirection="column" gap={2}>
+          {invitesSection}
           <Box flexDirection="column" gap={1}>
             <Text bold>Make your team</Text>
             <Text dimColor>Name it, then send its invite link to teammates. Got a link from someone? Paste it as your message instead.</Text>
@@ -4567,6 +4700,7 @@ export const register: Register = (on, options) => {
 
     return (
       <Box flexDirection="column" gap={2}>
+        {invitesSection}
         <Box flexDirection="column" gap={1}>
           {t.teams.length > 1 && Select ? (
             setting('Team', <Select key="team-pick" value={team.id} options={t.teams.map(x => ({ value: x.id, label: x.name }))} onSelect={(value: string) => void setCurrentTeam($, value)} />)
@@ -4796,6 +4930,44 @@ export const register: Register = (on, options) => {
     const joinedAt = (name: string) => activity.find(a => a.kind === 'join' && a.who === name)?.ts
     const prompts = (name: string) => activity.filter(a => a.kind === 'prompt' && a.who === name).length
     const detail = live ? `${isHost ? "You're sharing" : `Hosted by ${room.host}`} · ${online} here` : 'Reconnecting to the room…'
+    // Host: teammates to invite straight into this session (their Claude Code shows it).
+    const teamsNow = isHost ? await read($, teamsA) : null
+    const invited = isHost ? await read($, invitedA) : {}
+    const mates = (teamsNow?.teammates ?? []).filter(m => !people.some(p => p.online && p.name === m.name))
+    const inviteSection = !isHost ? null : !teamsNow?.account ? (
+      <Box flexDirection="row" gap={1} alignItems="center" justifyContent="space-between">
+        <Text dimColor wrap="truncate-end">Sign in to invite teammates straight into this session.</Text>
+        <Button key="room-invite-signin" label="Team" plain onPress={() => void openTeam($)} />
+      </Box>
+    ) : mates.length ? (
+      section(
+        'invite',
+        'Invite teammates',
+        'it shows in their Claude Code',
+        <Box flexDirection="column" gap={1}>
+          {mates.slice(0, 8).map(m => (
+            <Box key={`mate-${m.id}`} flexDirection="row" gap={1} alignItems="center" justifyContent="space-between">
+              <Text wrap="truncate-end">{m.login && m.login !== m.name ? `${m.name} (${m.login})` : m.name}</Text>
+              {invited[m.id] ? (
+                <Text dimColor>{`Invited ${ago(invited[m.id] ?? now, now)}`}</Text>
+              ) : (
+                <Button
+                  key={`invite-${m.id}`}
+                  label="Invite"
+                  plain
+                  onPress={() =>
+                    void inviteToRoom($, [m.id])
+                      .then(text => $.ui.toast(text))
+                      .catch(error => $.ui.toast(`Couldn't invite: ${String(error?.message ?? error)}`))
+                  }
+                />
+              )}
+            </Box>
+          ))}
+          {mates.length > 8 ? <Text dimColor>{`And ${mates.length - 8} more: /invite <name>`}</Text> : null}
+        </Box>,
+      )
+    ) : null
     const roles = (p: Face) =>
       [p.note?.includes('host') ? 'Host' : '', p.note?.includes('you') ? 'You' : '', p.online ? '' : 'Away'].filter(Boolean).join(' · ')
 
@@ -4875,6 +5047,8 @@ export const register: Register = (on, options) => {
             {isHost && people.length <= 1 ? <Text dimColor>No one yet. Send the link to a teammate; it opens in their Claude Code.</Text> : null}
           </Box>,
         )}
+
+        {inviteSection}
 
         {section(
           'chat',
@@ -5083,6 +5257,26 @@ export const register: Register = (on, options) => {
     if (v.mode === 'idle') {
       const teamName = await shareTeamName($)
       if (v.asking) return shareChoice($, el, v.asking.prompts, 'band', e.surface, teamName)
+      // A teammate's invite comes first: one row, Join the one primary.
+      const invites = await read($, invitesA)
+      const invite = invites[0]
+      if (invite) {
+        return (
+          <Box flexDirection="row" gap={1} alignItems="center" justifyContent="space-between" paddingRight={e.surface === 'terminal' ? 4 : 0}>
+            <Box flexDirection="row" gap={1} alignItems="center" flexShrink={1}>
+              {Svg ? <Svg source={avatarSvg({ name: invite.from.name, online: true }, 24)} alt={invite.from.name} width={24} height={24} /> : <Text color={ROSE}>●</Text>}
+              <Text bold>{`${invite.from.name} invites you`}</Text>
+              <Text dimColor wrap="truncate-end">
+                {`${invite.room.title}${invites.length > 1 ? ` · ${invites.length - 1} more in Team` : ''}`}
+              </Text>
+            </Box>
+            <Box flexDirection="row" gap={1} flexShrink={0}>
+              <Button key="invite-join" label="Join" variant="primary" onPress={press => void joinInvited($, invite, press.surface).catch(error => $.ui.toast(`Couldn't join: ${String(error?.message ?? error)}`))} />
+              <Button key="invite-dismiss" label="Dismiss" plain dimColor onPress={() => void dropInvite($, invite.room.id)} />
+            </Box>
+          </Box>
+        )
+      }
       // Sessions teammates share now, a press from joining in the Team panel.
       const t = await read($, teamsA)
       const live = t.account ? t.sessions.filter(s => s.hostOnline && s.hostAccount !== t.account?.id).length : 0

@@ -96,6 +96,9 @@ export type ShareTeam = {
 /** A session shared with a team, as the team's list shows it. */
 export type ShareTeamSession = { id: string; url: string; title: string; host: string; hostAccount?: string; hostOnline: boolean; people: string[]; createdAt: number }
 
+/** A host's invite to a session, as the invitee's Claude Code shows it. */
+export type ShareInvite = { room: { id: string; url: string; title: string; host: string }; from: { name: string }; at: number }
+
 /** The Team panel: who's signed in, their teams, and what's shared with the one shown. */
 export type ShareTeams = {
   /** The share server these are on. */
@@ -108,6 +111,8 @@ export type ShareTeams = {
   byLink: boolean
   sessions: ShareTeamSession[]
   members: { id: string; name: string; login?: string; role: 'owner' | 'member' }[]
+  /** Everyone who shares a team with you: whom you can invite to a session. */
+  teammates?: { id: string; name: string; login?: string }[]
   /** Who the server signs people in with. */
   providers: { id: string; label: string }[]
   /** A sign-in waiting in the browser. */
@@ -167,6 +172,10 @@ declare module 'claude-code' {
       pages: Record<string, Record<string, unknown>>
       /** The Team panel's sign-in, teams and team sessions. */
       teams: ShareTeams
+      /** Sessions teammates invited you to, newest first, until joined or dismissed. */
+      invites: ShareInvite[]
+      /** Host: teammates invited to this session, by account id, and when. */
+      invited: Record<string, number>
     }
   }
 }

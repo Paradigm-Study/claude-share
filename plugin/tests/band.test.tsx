@@ -41,6 +41,8 @@ function world(
     transcripts?: Record<string, string>
     /** The share server's teams: signed in (account.json), its sessions, a join it refuses. */
     team?: { signedIn?: boolean; sessions?: unknown[]; refuseJoin?: boolean; access?: 'members' | 'link'; providers?: { id: string; label: string }[] }
+    /** Sessions teammates invited this person to. */
+    invites?: unknown[]
     /** The room's history comes in pages: the join's first, then events after it; `failRest` fails the second. */
     paged?: { failRest?: boolean }
   } = {},
@@ -182,9 +184,14 @@ function world(
       body = { providers: opts.team?.providers ?? [{ id: 'github', label: 'GitHub' }, { id: 'google', label: 'Google' }] }
     } else if (path === '/api/auth/poll') {
       body = { status: 'done', token: TEAM_TOKEN, account: ME, joined: null }
+    } else if (path.startsWith('/api/me/invites')) {
+      if (!signedIn) return { value: { status: 401, ok: false, headers: {}, text: '{"error":"Sign in first"}' } }
+      body = method === 'GET' ? { invites: opts.invites ?? [] } : { ok: true }
+    } else if (method === 'POST' && /\/api\/rooms\/[^/]+\/invite$/.test(path)) {
+      body = headers['x-shared-session-account'] === TEAM_TOKEN ? { invited: ['Kim'], refused: [] } : { invited: [], refused: [] }
     } else if (path === '/api/me' || path.startsWith('/api/teams') || path.startsWith('/api/invites/')) {
       if (!signedIn) return { value: { status: 401, ok: false, headers: {}, text: '{"error":"Sign in first"}' } }
-      if (path === '/api/me') body = { account: ME, teams: [team] }
+      if (path === '/api/me') body = { account: ME, teams: [team], teammates: [{ id: 'acct-kim', name: 'Kim', login: 'kimk' }] }
       else if (path === '/api/teams/team0001/sessions') body = { sessions: opts.team?.sessions ?? [] }
       else if (path === '/api/teams/team0001') body = { team, members: [{ id: ME.id, name: ME.name, role: 'owner' }] }
       else if (path.startsWith('/api/invites/')) body = { team, joined: true }
@@ -1120,4 +1127,48 @@ test('a join that fails after the seat was taken gives the seat back', async ($,
   expect(asked).toContain('POST /api/rooms/room0000000000000001/leave')
   const row = await $.ui.mount(band('desktop'))
   expect(await row.find({ key: 'share' })).toBeDefined() // not left half in
+})
+
+const INVITE = { room: { id: 'room0000000000000201', url: 'http://localhost:8787/s/room0000000000000201', title: 'demo: fix the build', host: 'Sam' }, from: { name: 'Sam' }, at: 900 }
+
+test("a teammate's invite shows above the prompt; Join joins it and clears it everywhere", async ($, on) => {
+  const asked = world(on, { team: { signedIn: true }, invites: [INVITE] })
+  await $.command.run({ command: 'team', args: 'invites' } as never)
+  const row = await $.ui.mount(band('desktop'))
+  expect(await row.find({ type: 'Text', text: 'Sam invites you' })).toBeDefined()
+  expect(await row.find({ type: 'Text', text: 'demo: fix the build' })).toBeDefined()
+  expect((await row.find({ key: 'invite-join' }))?.props.variant).toBe('primary')
+  expect(await row.find({ key: 'share' })).toBeUndefined() // one thing at a time
+  await row.press({ key: 'invite-join' })
+  await eventually(asked.clock, () => asked.urls.some(u => u.includes('/api/rooms/room0000000000000201/join')))
+  expect(asked).toContain('DELETE /api/me/invites/room0000000000000201')
+  expect(asked.sent.find(r => r.path.startsWith('/api/rooms/room0000000000000201/join'))?.headers['x-shared-session-account']).toBe(TEAM_TOKEN)
+})
+
+test('Dismiss sets an invite aside, and the row goes back to Share', async ($, on) => {
+  const asked = world(on, { team: { signedIn: true }, invites: [INVITE] })
+  await $.command.run({ command: 'team', args: 'invites' } as never)
+  const row = await $.ui.mount(band('desktop'))
+  await row.press({ key: 'invite-dismiss' })
+  await eventually(asked.clock, () => asked.includes('DELETE /api/me/invites/room0000000000000201'))
+  expect(await row.find({ key: 'share' })).toBeDefined()
+})
+
+test('the host invites a teammate from the Room, as themselves, and sees who was invited', async ($, on) => {
+  const asked = world(on, { team: { signedIn: true } })
+  const row = await $.ui.mount(band('desktop'))
+  await $.command.run({ command: 'team', args: 'sessions' } as never)
+  await row.press({ key: 'share' })
+  await asked.clock.advance(50)
+  const pane = await $.ui.mount({ plugin: 'shared-session', surface: 'desktop', component: 'Pane', requestId: 'shared-room', props: PANE })
+  expect(await pane.find({ type: 'Text', text: 'Kim (kimk)' })).toBeDefined()
+  await pane.press({ key: 'invite-acct-kim' })
+  const sentInvite = await eventually(asked.clock, () => asked.sent.find(r => r.path === '/api/rooms/room0000000000000002/invite'))
+  expect(sentInvite?.body.to).toEqual(['acct-kim'])
+  expect(sentInvite?.headers['x-shared-session-account']).toBe(TEAM_TOKEN)
+  await asked.clock.advance(10)
+  expect(await pane.find({ type: 'Text', text: /^Invited/ })).toBeDefined()
+  // And by name, in a terminal.
+  const r = await $.command.run({ command: 'invite', args: 'kim' } as never)
+  expect(JSON.stringify(r)).toContain('Invited Kim')
 })

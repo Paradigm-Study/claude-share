@@ -642,6 +642,19 @@ async function handleRoom(room, req, rest, now, origin, ctx) {
     return { changed: true, response: json({ ok: true }) }
   }
 
+  // The host invites teammates by account (the host signed in): each sees it
+  // in their own Claude Code, no link to pass on.
+  if (rest === 'invite' && method === 'POST') {
+    if (auth.role !== 'host') return { response: json({ error: 'Only the host invites people.' }, 403) }
+    if (room.endedAt) return { response: json({ error: 'This session is no longer shared.' }, 410) }
+    if (!ctx.directory) return { response: json({ error: "This share server doesn't have accounts." }, 400) }
+    if (!room.posts.hit('events', 'all', now)) return { response: limitedResponse('events') }
+    const body = await readJson(req)
+    const result = await ctx.directory.sessionInvite(accountOf(req), { id: room.id, url: shareUrl(origin, room.id), title: room.title, host: room.host.name }, body.to)
+    if (!result.ok) return { response: json({ error: result.error }, result.status) }
+    return { response: json({ invited: result.invited, refused: result.refused }) }
+  }
+
   // The host shares an open room with a team, another one, or the link alone
   // (`team: null`). Everyone already in stays.
   if (rest === 'team' && method === 'POST') {
@@ -902,7 +915,7 @@ section.more { padding:0 0 72px; }
     <ul>
       <li><b>What passes through:</b> while a session is shared, its prompts and the files people attach to them, Claude's replies, the tools it runs with the first lines of their results and the pictures in them (screenshots, images it opens), the side chat, and any files or local previews the host's Claude shows. Sharing a session that already has history asks first whether to include it.</li>
       <li><b>How long:</b> a room and everything in it is deleted 24 hours after the host stops sharing or was last seen. There are no analytics, and no request logs kept.</li>
-      <li><b>Accounts, only for teams:</b> sharing and joining need none. If you sign in (GitHub or Google) to use teams, the server keeps your name, username, verified email, which GitHub organizations you're in, the teams you're in and their settings, and which open sessions are shared with each team. Sign-ins are kept as hashes, never the token itself. They stay until you delete your account (<code>/team delete-account</code>), which removes them at once.</li>
+      <li><b>Accounts, only for teams:</b> sharing and joining need none. If you sign in (GitHub or Google) to use teams, the server keeps your name, username, verified email, which GitHub organizations you're in, the teams you're in and their settings, which open sessions are shared with each team, and invites to a session (who invited whom, until it's joined, dismissed, ends, or 12 hours pass). Sign-ins are kept as hashes, never the token itself. They stay until you delete your account (<code>/team delete-account</code>), which removes them at once.</li>
       <li><b>Who can see it:</b> anyone with the room's link, or for a session shared with a team that keeps it to its people, only the people in that team. Links are long and random; forward one only to people you'd hand the session to. Content is encrypted in transit, not end to end: the server can read what passes through it.</li>
       <li><b>What runs where:</b> a teammate's prompt runs on the host's machine. Reads inside the host's project run without asking; everything else asks the host first, by default.</li>
       <li><b>Limits:</b> new rooms and joins are rate-limited per network, rooms hold up to 20 people and 100 MB of files. Rooms that are abused get ended.</li>

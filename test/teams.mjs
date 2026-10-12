@@ -71,6 +71,19 @@ try {
   ok(cj.status === 403 && !cj.data.signIn, `Carol refused: ${cj.data.error}`)
   const bj = await call(`/api/rooms/${room.id}/join`, { method: 'POST', acct: bob, body: { name: 'Bob' } })
   ok(bj.status === 200 && bj.data.team?.name === 'Acme', 'Bob joins')
+  // Invites to a session, straight to a teammate's Claude Code.
+  const bobId = (await call('/api/me', { tok: bob })).data.account.id
+  const carolId = (await call('/api/me', { tok: carol })).data.account.id
+  ok((await call('/api/me', { tok: alice })).data.teammates.some(m => m.id === bobId), "a host's teammates are listed for inviting")
+  const inv = await call(`/api/rooms/${room.id}/invite`, { method: 'POST', tok: room.token, acct: alice, body: { to: [bobId, carolId] } })
+  ok(inv.status === 200 && inv.data.invited.join() === 'Bob' && inv.data.refused.join() === carolId, 'a host invites a teammate, not someone outside their teams')
+  const pending = (await call('/api/me/invites', { tok: bob })).data.invites
+  ok(pending.length === 1 && pending[0].room.url === room.url && pending[0].from.name === 'Alice', 'the teammate sees the invite, from whom and to what')
+  ok((await call('/api/me/invites', { tok: carol })).data.invites.length === 0, 'nobody else does')
+  ok((await call(`/api/rooms/${room.id}/invite`, { method: 'POST', tok: bj.data.token, acct: bob, body: { to: [carolId] } })).status === 403, "a guest can't invite")
+  await call(`/api/me/invites/${room.id}`, { method: 'DELETE', tok: bob })
+  ok((await call('/api/me/invites', { tok: bob })).data.invites.length === 0, 'a dismissed invite is gone')
+  await call(`/api/rooms/${room.id}/invite`, { method: 'POST', tok: room.token, acct: alice, body: { to: [bobId] } })
   // access link
   ok((await call(`/api/teams/${team.id}`, { method: 'PATCH', tok: bob, body: { access: 'link' } })).status === 403, "Bob (member) can't change access")
   await call(`/api/teams/${team.id}`, { method: 'PATCH', tok: alice, body: { access: 'link' } })
@@ -87,6 +100,7 @@ try {
   await call(`/api/rooms/${room.id}/team`, { method: 'POST', tok: room.token, acct: alice, body: { team: team.id } })
   ok((await call(`/api/teams/${team.id}/sessions`, { tok: bob })).data.sessions.length === 1, 'and back on')
   await call(`/api/rooms/${room.id}/end`, { method: 'POST', tok: room.token })
+  ok((await call('/api/me/invites', { tok: bob })).data.invites.length === 0, "an ended session's invite goes")
   ok((await call(`/api/teams/${team.id}/sessions`, { tok: bob })).data.sessions.length === 0, 'ended room leaves the list')
   // owner leaves -> next member owner
   await call(`/api/teams/${team.id}/members/me`, { method: 'DELETE', tok: alice })

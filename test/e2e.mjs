@@ -677,6 +677,13 @@ async function teams() {
     quinn.say('/team sessions')
     await until("Quinn's list", () => quinn.text.includes(teamLink), 30_000)
     check("someone who takes the invite sees the team's session in its list", true)
+    // Pat invites Quinn by name: it waits in Quinn's own Claude Code.
+    pat.say('/invite quinn')
+    await until('Pat invites Quinn', () => /Invited Quinn/.test(pat.text), 30_000)
+    const quinnBefore = quinn.text.length
+    quinn.say('/team invites')
+    await until("Quinn's invites", () => quinn.text.slice(quinnBefore).includes(teamLink), 30_000)
+    check('a host invites a teammate by name, and it waits in their Claude Code', /from Pat/.test(quinn.text.slice(quinnBefore)))
     // A fresh session of Quinn's (the same sign-in) joins it.
     const quinnJoin = session('Quinn', join(WORK, 'quinn-join'), [], 'Quinn-join', NO_BROWSER)
     quinnJoin.type(teamLink)

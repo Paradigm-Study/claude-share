@@ -14,6 +14,7 @@
 //   left:<team>:<acct>        left or was removed: its domain or org rule doesn't take them back
 //   dom:<domain>:<team>, org:<org>:<team>   who joins by themselves
 //   live:<team>:<room>        a session shared with the team { id, url, title, host, hostAccount, createdAt }
+//   sinv:<acct>:<room>        a host's invite to that session { room: { id, url, title, host }, from: { id, name }, at, exp }
 //
 // Rooms ask it two things (`shareCheck` when one is shared with a team,
 // `joinCheck` when someone joins one) and tell it two (`register`,
@@ -22,6 +23,7 @@
 import { json, token, brandPage, commandBox, COPY_SCRIPT, INSTALL_COMMAND } from './core.mjs'
 
 const LOGIN_MS = 10 * 60 * 1000
+const INVITE_MS = 12 * 60 * 60 * 1000 // a session invite lasts half a day at most
 const LOGIN_ID = /^[A-Za-z0-9_-]{20,64}$/
 const TEAM_ID = /^[A-Za-z0-9_-]{8,40}$/
 const NAME_MAX = 60
@@ -219,6 +221,50 @@ export class Directory {
     return (await this.kv.get(`team:${teamId}`))?.access ?? null
   }
 
+  // People who share a team with this account: whom it may invite.
+  async teammates(account) {
+    const seen = new Map()
+    for (const [key] of await this.kv.list(`myteam:${account.id}:`)) {
+      for (const m of await this.members(key.split(':')[2])) if (m.id !== account.id && !seen.has(m.id)) seen.set(m.id, { id: m.id, name: m.name, login: m.login })
+    }
+    return [...seen.values()].sort((a, b) => a.name.localeCompare(b.name))
+  }
+
+  // A host invites teammates to the session it shares: each sees it in their
+  // own Claude Code until they join, dismiss it, it ends, or a day passes.
+  // Only people who share a team with the host can be invited.
+  async sessionInvite(tokenText, room, to, now = Date.now()) {
+    const account = await this.accountOf(tokenText)
+    if (!account) return { ok: false, status: 401, error: 'Sign in to invite people: /team in Claude Code.' }
+    const mates = new Map((await this.teammates(account)).map(m => [m.id, m]))
+    const invited = []
+    const refused = []
+    for (const id of (Array.isArray(to) ? to : []).slice(0, 50).map(String)) {
+      const mate = mates.get(id)
+      if (!mate) {
+        refused.push(id)
+        continue
+      }
+      await this.kv.put(`sinv:${id}:${room.id}`, { room, from: { id: account.id, name: account.name }, at: now, exp: now + INVITE_MS })
+      invited.push(mate.name)
+    }
+    return { ok: true, invited, refused }
+  }
+
+  // An account's invites still good: an ended or expired session's go.
+  async invitesOf(account, now) {
+    const out = []
+    for (const [key, invite] of await this.kv.list(`sinv:${account.id}:`)) {
+      const info = invite.exp > now ? await this.roomInfo(invite.room.id).catch(() => null) : null
+      if (!info || info.ended) {
+        await this.kv.delete(key)
+        continue
+      }
+      out.push({ room: { ...invite.room, title: info.title ?? invite.room.title }, from: { name: invite.from.name }, at: invite.at })
+    }
+    return out.sort((a, b) => b.at - a.at)
+  }
+
   async register(teamId, room) {
     await this.kv.put(`live:${teamId}:${room.id}`, room)
   }
@@ -254,7 +300,7 @@ export class Directory {
 
   // Every path this owns: /auth/…, /api/auth/…, /api/me, /api/teams…, /api/invites/…, /i/<code>.
   static owns(pathname) {
-    return /^\/(auth\/|api\/auth\/|api\/me$|api\/teams(\/|$)|api\/invites\/|i\/)/.test(pathname)
+    return /^\/(auth\/|api\/auth\/|api\/me(\/invites(\/[^/]+)?)?$|api\/teams(\/|$)|api\/invites\/|i\/)/.test(pathname)
   }
 
   // What one address may do only so often (the join limit): start a sign-in,
@@ -283,7 +329,12 @@ export class Directory {
         await this.kv.delete(`tok:${await sha256(String(req.headers.get('authorization')).replace(/^Bearer\s+/i, '').trim())}`)
         return json({ ok: true })
       }
-      if (url.pathname === '/api/me' && method === 'GET') return json({ account: this.accountView(account), teams: await this.teamsOf(account) })
+      if (url.pathname === '/api/me' && method === 'GET') return json({ account: this.accountView(account), teams: await this.teamsOf(account), teammates: await this.teammates(account) })
+      if (url.pathname === '/api/me/invites' && method === 'GET') return json({ invites: await this.invitesOf(account, now) })
+      if (parts[0] === 'api' && parts[1] === 'me' && parts[2] === 'invites' && parts.length === 4 && method === 'DELETE') {
+        await this.kv.delete(`sinv:${account.id}:${parts[3]}`)
+        return json({ ok: true })
+      }
       if (url.pathname === '/api/me' && method === 'DELETE') return this.deleteAccount(account)
       if (url.pathname === '/api/teams' && method === 'POST') return this.createTeam(account, await readBody(req), now)
       if (parts[0] === 'api' && parts[1] === 'invites' && parts.length === 3 && method === 'POST') return this.acceptInvite(account, parts[2], now)
@@ -403,6 +454,7 @@ export class Directory {
   async deleteAccount(account) {
     for (const [key] of await this.kv.list(`myteam:${account.id}:`)) await this.removeMember(key.split(':')[2], account.id, { remember: false })
     for (const [key, rec] of await this.kv.list('tok:')) if (rec.account === account.id) await this.kv.delete(key)
+    for (const [key] of await this.kv.list(`sinv:${account.id}:`)) await this.kv.delete(key)
     for (const ident of new Set([...(account.idents ?? []), `ident:${account.provider}:${account.subject}`])) await this.kv.delete(ident)
     if (account.email) await this.kv.delete(`email:${account.email}`)
     await this.kv.delete(`acct:${account.id}`)

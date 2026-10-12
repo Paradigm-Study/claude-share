@@ -502,7 +502,7 @@ const directoryStub = env => env.DIRECTORY.get(env.DIRECTORY.idFromName('directo
 
 // What a room asks the directory, over its stub (paths the Worker never
 // forwards from outside).
-const DIRECTORY_CALLS = ['shareCheck', 'joinCheck', 'register', 'unregister', 'teamAccess']
+const DIRECTORY_CALLS = ['shareCheck', 'joinCheck', 'register', 'unregister', 'teamAccess', 'sessionInvite']
 function directoryClient(env) {
   if (!env?.DIRECTORY) return null
   const call = name => async (...args) => {
