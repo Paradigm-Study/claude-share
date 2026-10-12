@@ -162,7 +162,7 @@ declare module 'claude-code' {
       /** Host: the previews this session shares, port → preview id. */
       previews: Record<string, string>
       /** Claude Desktop's sidebar row as it was before sharing marked it, to put back. */
-      sidebar: { title: string; pinned: boolean; id?: string } | null
+      sidebar: { title: string; pinned: boolean; id?: string; /** The pin sharing or joining made took. */ pinOk?: boolean } | null
       /** Share was pressed in a session with history: the row asks whether to include it. */
       asking: { prompts: number } | null
       /** Whether this session hears the room: `live`, or `reconnecting` after failed tries. */

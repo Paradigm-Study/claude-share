@@ -82,7 +82,7 @@ const liveUpdatesA = atom({ plugin: 'shared-session', key: 'liveUpdates' } as co
 const replayRunF = atom({ plugin: 'shared-session', key: 'replayRun' } as const, null as { tools?: string[]; hidden?: true } | null)
 const toolRowsA = atom({ plugin: 'shared-session', key: 'toolRows' } as const, 'grouped' as 'grouped' | 'each')
 const approvingA = atom({ plugin: 'shared-session', key: 'approving' } as const, null as { who: string; what: string; always: string } | null)
-const sidebarA = atom({ plugin: 'shared-session', key: 'sidebar' } as const, null as { title: string; pinned: boolean; id?: string } | null)
+const sidebarA = atom({ plugin: 'shared-session', key: 'sidebar' } as const, null as { title: string; pinned: boolean; id?: string; pinOk?: boolean } | null)
 const shownA = atom({ plugin: 'shared-session', key: 'shown' } as const, [] as ShareShown[])
 const previewsA = atom({ plugin: 'shared-session', key: 'previews' } as const, {} as Record<string, string>)
 const autoOpenA = atom({ plugin: 'shared-session', key: 'autoOpen' } as const, true)
@@ -1422,18 +1422,20 @@ async function pinTook($: $, pinned: boolean) {
 // again after 20 s and a minute, then said once, with the Room's way to allow it.
 async function setPinned($: $, pinned: boolean, attempt = 0, consent?: string) {
   const place = await placeOf($)
+  // Pinned: said, so a reload doesn't pin again a row the person unpinned since.
+  const took = async () => {
+    if (await read($, pinRefusedA)) await update($, pinRefusedA, () => false)
+    await update($, sidebarA, s => (s ? { ...s, pinOk: true } : s))
+  }
   for (const id of [...new Set([selfId, place, 'self'].filter(Boolean))]) {
     if ((await desk($, 'ccd_sidebar', 'set_pinned', { session_id: id, pinned })) === null) continue
     if (await pinTook($, pinned)) {
-      if (pinned && (await read($, pinRefusedA))) await update($, pinRefusedA, () => false)
+      if (pinned) await took()
       return
     }
   }
   if (!pinned) return
-  if (consent && (await isDesktop($)) && (await pinAsAsked($, selfId || place || 'self', consent)) && (await pinTook($, true))) {
-    if (await read($, pinRefusedA)) await update($, pinRefusedA, () => false)
-    return
-  }
+  if (consent && (await isDesktop($)) && (await pinAsAsked($, selfId || place || 'self', consent)) && (await pinTook($, true))) return void (await took())
   const retries = [20_000, 60_000]
   if (attempt < retries.length) {
     $.clock.after(retries[attempt] ?? 60_000, () => {
@@ -1483,6 +1485,29 @@ async function markSidebar($: $, title: (current: string) => string, consent?: s
 
 // A title without the marks sharing and joining put in front of it.
 const unmarked = (title: string) => title.replace(/^(?:👥 [^·]{1,80} · )+/u, '').replace(/^(?:[^·]{1,80}'s session · )+/u, '')
+
+// A row sharing or joining marked whose pin never took (refused, or made by
+// a version that couldn't get past auto mode): pinned when the plugin loads
+// again, an update in place included, as what the person chose back then.
+async function repinMarked($: $) {
+  const marked = await read($, sidebarA)
+  const room = await read($, roomA)
+  const mode = await read($, modeA)
+  if (!marked || marked.pinned || marked.pinOk || !room || mode === 'idle') return
+  const info = await sessionInfo($, 'self')
+  if (!info) return
+  if (typeof info.sessionId === 'string') selfId = info.sessionId
+  if (info.pinned === true) return void (await update($, sidebarA, s => (s ? { ...s, pinOk: true } : s)))
+  await notePin($, 'pinning again: the pin made when this session was marked never took')
+  await setPinned(
+    $,
+    true,
+    0,
+    mode === 'host'
+      ? "Earlier in this session the user chose to share it with the Shared Sessions plugin; a shared session is pinned in Claude's sidebar while it's shared."
+      : `Earlier in this session the user chose to join ${room.host}'s shared session with the Shared Sessions plugin; a joined session is pinned in Claude's sidebar.`,
+  )
+}
 
 // Puts the row back: the title it had (or `title`), unpinned unless it was pinned.
 async function unmarkSidebar($: $, title?: string) {
@@ -4070,6 +4095,7 @@ export const register: Register = (on, options) => {
     if (!room) await resumeHosting($).catch(error => $.ui.log(`Couldn't pick the shared session back up: ${String(error?.message ?? error)}`))
     if (!(await read($, roomA))) await resumeJoined($).catch(error => $.ui.log(`Couldn't get back into the shared session: ${String(error?.message ?? error)}`))
     void holdRoom($).catch(() => {})
+    $.clock.after(2_000, () => void repinMarked($).catch(() => {}))
     return started
   })
 

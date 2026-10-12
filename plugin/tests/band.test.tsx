@@ -1399,3 +1399,32 @@ test("a session that shares or joins tells the others here, and stops when it's 
   await asked.clock.advance(10)
   expect(asked.store.has('live:room0000000000000001:session-test-0001')).toBe(false)
 })
+
+test('a joined row whose pin never took is pinned when the plugin loads again (an update in place)', async ($, on) => {
+  const asked = world(on)
+  const calls = sidebar(on, { title: 'Session room0000000000000001', refuse: true })
+  let allowed = false
+  const made: Record<string, unknown>[] = []
+  on('tool.call', { tool: 'mcp__ccd_sidebar__set_pinned' }, ($, e) => {
+    made.push(e as unknown as Record<string, unknown>)
+    if (!allowed) return { deny: 'no verdict' } as never
+    calls.pin(true)
+    return { result: 'ok' } as never
+  })
+  on('session.start', ($, e) => ({ cwd: e.cwd }))
+  await $.prompt.submit({ text: LINK, origin: { kind: 'composer' }, wait: false })
+  await asked.clock.advance(100_000) // refused, tried again twice, given up
+  expect(asked.logged.some(line => line.includes("didn't let this plugin pin"))).toBe(true)
+  // A version that gets past the refusal loads: the row is pinned, as joined.
+  allowed = true
+  const before = made.length
+  await $.session.start(START)
+  await asked.clock.advance(2_100)
+  expect(made.length).toBe(before + 1)
+  expect(String(made.at(-1)?.consent)).toContain("Earlier in this session the user chose to join Sam's shared session")
+  // Pinned once: another load leaves it be, even if the person unpins it.
+  calls.pin(false)
+  await $.session.start(START)
+  await asked.clock.advance(2_100)
+  expect(made.length).toBe(before + 1)
+})
