@@ -1223,6 +1223,13 @@ test('the host invites a teammate from the Room, as themselves, and sees who was
   expect(sentInvite?.headers['x-shared-session-account']).toBe(TEAM_TOKEN)
   await asked.clock.advance(10)
   expect(await pane.find({ type: 'Text', text: /^Invited/ })).toBeDefined()
+  // Not here yet: invited again from the same row, and the invite goes out again.
+  expect((await pane.find({ key: 'invite-acct-kim' }))?.props.label).toBe('Invite again')
+  const invitesSent = () => asked.sent.filter(r => r.path === '/api/rooms/room0000000000000002/invite').length
+  const before = invitesSent()
+  await pane.press({ key: 'invite-acct-kim' })
+  await eventually(asked.clock, () => invitesSent() > before)
+  expect(invitesSent()).toBe(before + 1)
   // And by name, in a terminal.
   const r = await $.command.run({ command: 'invite', args: 'kim' } as never)
   expect(JSON.stringify(r)).toContain('Invited Kim')

@@ -4166,7 +4166,7 @@ async function pollInvites($: $) {
   await update($, invitesA, () => list)
   // In a room, this session's row is the room's: a new invite says so once,
   // and waits as a button in the row.
-  const fresh = list.find(i => !had.some(h => h.room.id === i.room.id))
+  const fresh = list.find(i => !had.some(h => inviteKey(h) === inviteKey(i))) // a new one, or one sent again
   if (fresh && (await read($, modeA)) !== 'idle') $.ui.toast(`${fresh.from.name} invites you to ${tidyTitle(fresh.room.title)}`)
 }
 
@@ -5593,20 +5593,22 @@ export const register: Register = (on, options) => {
               {faceOf(el, e.surface, { name: m.name, online: false })}
               <Text wrap="truncate-end">{m.login && m.login !== m.name ? `${m.name} (${m.login})` : m.name}</Text>
             </Box>
-            {invited[m.id] ? (
-              <Text color="success">{`Invited ${ago(invited[m.id] ?? now, now)}`}</Text>
-            ) : (
+            {/* Invited, and still not here: asked again, it shows in their Claude
+                Code anew (and notifies them again), even if they'd set it aside. */}
+            <Box flexDirection="row" gap={1} alignItems="center" flexShrink={0}>
+              {invited[m.id] ? <Text color="success">{`Invited ${ago(invited[m.id] ?? now, now)}`}</Text> : null}
               <Button
                 key={`invite-${m.id}`}
-                label="Invite"
+                label={invited[m.id] ? 'Invite again' : 'Invite'}
                 plain
+                dimColor={Boolean(invited[m.id])}
                 onPress={() =>
                   void inviteToRoom($, [m.id])
                     .then(text => $.ui.toast(text))
                     .catch(error => $.ui.toast(`Couldn't invite: ${String(error?.message ?? error)}`))
                 }
               />
-            )}
+            </Box>
           </Box>
         ))}
         {mates.length > 8 ? <Text dimColor>{`And ${mates.length - 8} more: /invite <name>`}</Text> : null}

@@ -78,6 +78,12 @@ try {
   const pending = (await call('/api/me/invites', { tok: bob })).data.invites
   ok(pending.length === 1 && pending[0].room.url === room.url && pending[0].from.name === 'Alice', 'the teammate sees the invite, from whom and to what')
   ok((await call('/api/me/invites', { tok: carol })).data.invites.length === 0, 'nobody else does')
+  // Set aside, then invited again: it's back, and as a new one (its time moved on).
+  await call(`/api/me/invites/${room.id}`, { method: 'DELETE', tok: bob })
+  await new Promise(r => setTimeout(r, 5))
+  await call(`/api/rooms/${room.id}/invite`, { method: 'POST', tok: room.token, acct: alice, body: { to: [bobId] } })
+  const again = (await call('/api/me/invites', { tok: bob })).data.invites
+  ok(again.length === 1 && again[0].at > pending[0].at, 'someone who set an invite aside can be invited again, and it counts as new')
   const bj = await call(`/api/rooms/${room.id}/join`, { method: 'POST', acct: bob, body: { name: 'Bob' } })
   ok(bj.status === 200 && bj.data.team?.name === 'Acme', 'Bob joins')
   ok((await call(`/api/rooms/${room.id}/invite`, { method: 'POST', tok: bj.data.token, acct: bob, body: { to: [carolId] } })).status === 403, "a guest can't invite")
