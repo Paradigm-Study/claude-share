@@ -3819,8 +3819,9 @@ let teamOpen = false
 let teamTimer: Timer | null = null
 
 // The Team panel: fresh when it opens, and every 20 s while it's open.
-async function openTeam($: $) {
+async function openTeam($: $, page?: 'live' | 'people' | 'settings') {
   teamOpen = true
+  if (page) await update($, teamTabA, () => page)
   // A session with no panels (a headless run) still answers in words.
   await $.ui.open({ id: TEAM, title: 'Team', focus: true, closeOnEscape: true, rows: 60 }).catch(() => {})
   void refreshTeams($).catch(() => {})
@@ -4160,7 +4161,13 @@ async function pollInvites($: $) {
       }
     } catch {}
   }
-  if (!sameInvites(await read($, invitesA), list)) await update($, invitesA, () => list)
+  const had = await read($, invitesA)
+  if (sameInvites(had, list)) return
+  await update($, invitesA, () => list)
+  // In a room, this session's row is the room's: a new invite says so once,
+  // and waits as a button in the row.
+  const fresh = list.find(i => !had.some(h => h.room.id === i.room.id))
+  if (fresh && (await read($, modeA)) !== 'idle') $.ui.toast(`${fresh.from.name} invites you to ${tidyTitle(fresh.room.title)}`)
 }
 
 // A desktop notification for an invite: the terminal's own channel where
@@ -5971,6 +5978,10 @@ export const register: Register = (on, options) => {
     const roomLabel = v.unread ? `Room · ${v.unread} new` : `Room · ${people.filter(p => p.online).length}`
     const pin = !stopping && e.surface === 'desktop' && (await read($, pinRefusedA))
     const signedIn = isHost && Boolean((await read($, teamsA)).account)
+    // An invite to another session waits here too (every session may be in a
+    // room): a button in the row, in place of the two it can spare.
+    const invites = stopping ? [] : await read($, invitesA)
+    const invite = invites[0]
     return row(
       [
         chip(el, e.surface, live),
@@ -5998,9 +6009,19 @@ export const register: Register = (on, options) => {
         ),
       ],
       [
+        invite ? (
+          <Button key="invite-open" label={`${invite.from.name} invites you${invites.length > 1 ? ` · ${invites.length}` : ''}`} plain onPress={() => void openTeam($, 'live')}>
+            {[
+              <Text key="who" bold color={colorFor(invite.from.name)}>
+                {invite.from.name}
+              </Text>,
+              <Text key="what" color="claude">{` invites you${invites.length > 1 ? ` · ${invites.length}` : ''}`}</Text>,
+            ]}
+          </Button>
+        ) : null,
         pin ? <Button key="band-allow-pin" label="Pin" plain onPress={() => void allowDeskTools($)} /> : null,
-        signedIn && !stopping ? <Button key="invite" label="Invite" plain onPress={() => void openRoom($, 'people')} /> : null,
-        isHost && !stopping ? <Button key="copy" label="Copy link" plain dimColor onPress={press => void (v.room ? copyLink($, v.room.url, press.surface) : undefined)} /> : null,
+        signedIn && !stopping && !invite ? <Button key="invite" label="Invite" plain onPress={() => void openRoom($, 'people')} /> : null,
+        isHost && !stopping && !invite ? <Button key="copy" label="Copy link" plain dimColor onPress={press => void (v.room ? copyLink($, v.room.url, press.surface) : undefined)} /> : null,
         <Button key="room" label={roomLabel} plain dimColor={!v.unread} onPress={() => void openRoom($)}>
           {v.unread
             ? [

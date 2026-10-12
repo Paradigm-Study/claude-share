@@ -1569,3 +1569,27 @@ test("a guest's working line says what the host's Claude is doing this moment", 
   const row = await $.ui.mount(band('desktop'))
   expect(await row.find({ type: 'Text', text: 'Writing notes.md · 4k characters' })).toBeDefined()
 })
+
+test("an invite shows in a session that's in a room too: a button in its row, Join a press away", async ($, on) => {
+  const asked = world(on, { team: { signedIn: true }, invites: [INVITE] })
+  const ui = await $.ui.mount(band('desktop'))
+  await ui.press({ key: 'share' })
+  await asked.clock.advance(50)
+  await $.command.run({ command: 'team', args: 'invites' } as never) // the machine's look at its invites
+  await asked.clock.advance(10)
+  // Still one row, the room's: the invite is a button in it, in place of two it can spare.
+  expect(((await ui.drawn()) as { props: { flexDirection?: string } }).props.flexDirection).toBe('row')
+  expect((await ui.find({ key: 'invite-open' }))?.props.label).toBe('Sam invites you')
+  expect(await ui.find({ key: 'copy' })).toBeUndefined()
+  expect(await ui.find({ key: 'room' })).toBeDefined()
+  expect(await ui.find({ key: 'stop-sharing' })).toBeDefined()
+  await ui.press({ key: 'invite-open' })
+  expect(asked.opened).toContain('shared-team')
+  const pane = await $.ui.mount(TEAM_PANE)
+  expect(await pane.find({ key: 'inv-join-room0000000000000201' })).toBeDefined()
+  // Dismissed there, the row has its buttons back.
+  await pane.press({ key: 'inv-dismiss-room0000000000000201' })
+  await asked.clock.advance(10)
+  expect(await ui.find({ key: 'invite-open' })).toBeUndefined()
+  expect(await ui.find({ key: 'copy' })).toBeDefined()
+})
