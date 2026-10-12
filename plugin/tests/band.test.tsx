@@ -1503,3 +1503,69 @@ test('the row above the prompt stays one row: a refused pin is a button in it, n
   expect((await ui.find({ key: 'band-allow-pin' }))?.props.label).toBe('Pin')
   expect(await ui.find({ type: 'Text', text: /Live/ })).toBeDefined()
 })
+
+// The host's Claude, standing in: a step that thinks, says a line, then writes a file.
+function model(on: On) {
+  on('turn.step', async function* ($, e) {
+    yield { kind: 'thinking', index: 0, text: 'Let me think about the layout' } as never
+    yield { kind: 'text', index: 1, text: 'Writing it now.' } as never
+    yield { kind: 'tool', index: 2, id: 'toolu_w1', name: 'Write' } as never
+    yield { kind: 'input', index: 2, json: '{"file_path":"/tmp/demo/notes.md","content":"' } as never
+    yield { kind: 'input', index: 2, json: 'x'.repeat(2500) } as never
+    yield { kind: 'input', index: 2, json: '"}' } as never
+    yield { kind: 'stop', stopReason: 'tool_use', usage: null } as never
+    return { turnId: e.turnId, index: e.index, answer: 'Writing it now.', toolUses: [{ name: 'Write', input: {} }], stopReason: 'tool_use', usage: null } as never
+  })
+}
+const STEP = { turnId: 'turn-1', index: 0, model: 'claude-opus-5-5', messageCount: 1 } as never
+
+test("while someone watches, the host's Claude thinking, writing and drafting a call goes out live", async ($, on) => {
+  const people = [
+    { id: 'host', name: 'scott', role: 'host', online: true },
+    { id: 'seat2', name: 'Alex', role: 'guest', online: true },
+  ]
+  const asked = world(on, { stream: [{ seq: 1, events: [], people, ended: false, title: 'demo' }] })
+  model(on)
+  const ui = await $.ui.mount(band('desktop'))
+  await ui.press({ key: 'share' })
+  await asked.clock.advance(50)
+  for await (const _ of $.turn.step(STEP)) void _
+  await asked.clock.advance(300)
+  const deltas = asked.posted.filter(e => e.type === 'delta').map(e => e.body)
+  expect(deltas.find(d => typeof d.thinking === 'string')?.thinking).toBe('Let me think about the layout')
+  expect(deltas.find(d => typeof d.text === 'string')?.text).toBe('Writing it now.')
+  // The call goes as a line saying what it's for and how far along, never its arguments.
+  const drafting = deltas.map(d => d.drafting as { tool: string; target: string; chars: number } | undefined).filter(Boolean)
+  expect(drafting.at(-1)).toEqual({ tool: 'Write', target: 'notes.md', chars: 2545 })
+  expect(JSON.stringify(deltas)).not.toContain('xxxxxxxxxx')
+})
+
+test('a host alone in the room sends nothing live', async ($, on) => {
+  const asked = world(on, { stream: [{ seq: 1, events: [], people: [{ id: 'host', name: 'scott', role: 'host', online: true }], ended: false, title: 'demo' }] })
+  model(on)
+  const ui = await $.ui.mount(band('desktop'))
+  await ui.press({ key: 'share' })
+  await asked.clock.advance(50)
+  for await (const _ of $.turn.step(STEP)) void _
+  await asked.clock.advance(300)
+  expect(asked.posted.some(e => e.type === 'delta')).toBe(false)
+})
+
+test("a guest's working line says what the host's Claude is doing this moment", async ($, on) => {
+  const sam = { seat: 'host', name: 'Sam', role: 'host' }
+  const people = [
+    { id: 'host', name: 'Sam', role: 'host', online: true },
+    { id: 'seat1', name: 'scott', role: 'guest', online: true },
+  ]
+  const events = [
+    { seq: 2, type: 'turn', from: sam, ts: 902, body: { state: 'start', turnId: 'turn-9', by: 'Alex', prompt: 'Write the notes' } },
+    { seq: 3, type: 'delta', from: sam, ts: 903, body: { turnId: 'turn-9', drafting: { tool: 'Write', target: 'notes.md', chars: 4200 } } },
+  ]
+  const asked = world(on, { people, stream: [{ seq: 3, events, people, ended: false, title: 'demo' }] })
+  await $.prompt.submit({ text: LINK, origin: { kind: 'composer' }, wait: false })
+  await asked.clock.advance(50)
+  const spinner = await $.ui.mount({ plugin: 'shared-session', surface: 'desktop', component: 'Spinner', props: { word: 'Working', message: null, suffix: '…', mode: 'requesting' } })
+  expect((await spinner.find({ type: 'Text' }))?.text).toBe('Writing notes.md · 4k characters · for Alex')
+  const row = await $.ui.mount(band('desktop'))
+  expect(await row.find({ type: 'Text', text: 'Writing notes.md · 4k characters' })).toBeDefined()
+})

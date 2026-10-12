@@ -18,7 +18,7 @@
 import { atom, memberOf, read, update } from 'claude-code'
 import type { Elements, EngineInterface, HookStream, ProcessSpawnChunk, ProcessSpawnResult, Register, RenderChildren, RenderSurface, Timer, TurnStepChunk } from 'claude-code'
 
-import type { ShareAccount, ShareActivity, ShareChat, ShareFileMeta, ShareInvite, ShareMode, SharePerson, SharePolicy, ShareRoom, ShareShown, ShareTeam, ShareTeams, ShareTeamSession, ShareWorking } from '../types'
+import type { ShareAccount, ShareActivity, ShareChat, ShareDoing, ShareFileMeta, ShareInvite, ShareMode, SharePerson, SharePolicy, ShareRoom, ShareShown, ShareTeam, ShareTeams, ShareTeamSession, ShareWorking } from '../types'
 import { BAD, GOOD, ago, avatarSvg, cloverSvg, colorFor, colorsFor, labelsFor, stackSvg, toolGlyph } from './look'
 import type { Face } from './look'
 import { attachmentsOf, delivered, rowsFromMessage, rowsToMarkdown, splitSpeaker, summarizeTool } from './rows'
@@ -636,10 +636,15 @@ async function stillSeated($: $, room: ShareRoom, status: number): Promise<boole
   return false
 }
 
+// The kind of a live piece: what Claude writes, thinks, or a call it drafts.
+const deltaKind = (body: Record<string, unknown>) => (typeof body.text === 'string' ? 'text' : typeof body.thinking === 'string' ? 'thinking' : 'drafting')
+
 function send($: $, type: string, body: Record<string, unknown>) {
   const last = outbox.at(-1)
-  if (type === 'delta' && last?.type === 'delta' && last.body.turnId === body.turnId) {
-    last.body = { ...last.body, text: `${last.body.text}${body.text}` }
+  if (type === 'delta' && last?.type === 'delta' && last.body.turnId === body.turnId && deltaKind(last.body) === deltaKind(body)) {
+    // Pieces waiting for the next post join up; a draft's newest line replaces the last.
+    const kind = deltaKind(body)
+    last.body = kind === 'drafting' ? body : { ...last.body, [kind]: `${last.body[kind]}${body[kind]}` }
   } else {
     outbox.push({ type, body })
   }
@@ -650,6 +655,50 @@ function send($: $, type: string, body: Record<string, unknown>) {
     })
     kickPoll($)
   }
+}
+
+// Host: what the host's Claude writes, thinks and drafts while a step runs,
+// live to whoever else is here: 'delta' events, which the room passes on and
+// never stores. Alone in the room, nothing goes. A tool call being written
+// goes as a progress line (which tool, what it's for, how far along), never
+// its arguments: they arrive whole in the call's row once it's made.
+async function liveFeed($: $, turnId: string): Promise<(chunk: TurnStepChunk) => void> {
+  const othersHere = async () => (await read($, peopleA)).some(p => p.online && p.role !== 'host')
+  let watching = await othersHere()
+  let seen = 0
+  const drafts = new Map<number, { tool: string; head: string; chars: number; sent: number; target: string }>()
+  return chunk => {
+    // Someone may join mid-step: looked at again every 50 pieces.
+    if (++seen % 50 === 0) void othersHere().then(w => void (watching = w), () => {})
+    if (!watching) return
+    if (chunk.kind === 'text' && chunk.text) send($, 'delta', { turnId, text: chunk.text })
+    else if (chunk.kind === 'thinking' && chunk.text) send($, 'delta', { turnId, thinking: chunk.text })
+    else if (chunk.kind === 'tool') {
+      drafts.set(chunk.index, { tool: chunk.name, head: '', chars: 0, sent: 0, target: '' })
+      send($, 'delta', { turnId, drafting: { tool: chunk.name, target: '', chars: 0 } })
+    } else if (chunk.kind === 'input') {
+      const d = drafts.get(chunk.index)
+      if (!d) return
+      d.chars += chunk.json.length
+      if (d.head.length < 2000) d.head += chunk.json
+      const target = d.target || draftTarget(d.head)
+      // A line when it's clear what the call is for, then every 2,000 characters.
+      if ((target && !d.target) || d.chars - d.sent >= 2000) {
+        d.target = target
+        d.sent = d.chars
+        send($, 'delta', { turnId, drafting: { tool: d.tool, target, chars: d.chars } })
+      }
+    }
+  }
+}
+
+// What a tool call being written is for, from the start of its arguments: a
+// file's name, a command's first line, a pattern.
+function draftTarget(json: string): string {
+  const m = /"(file_path|notebook_path|path|command|pattern|url|description|query|prompt)"\s*:\s*"((?:[^"\\]|\\.){1,240})"/.exec(json)
+  if (!m) return ''
+  const value = m[2]!.replace(/\\n/g, '\n').replace(/\\(.)/g, '$1')
+  return /path$/.test(m[1]!) ? (value.split('/').pop() ?? value) : (value.split('\n')[0] ?? '').slice(0, 80)
 }
 
 // Host: a row to the room. A result's pictures (a screenshot, an image the
@@ -1229,9 +1278,30 @@ async function receive($: $, mode: ShareMode, room: ShareRoom, page: EventsPage)
         }
         break
       case 'delta':
-        if (mode === 'guest' && typeof body.text === 'string') {
+        if (mode !== 'guest' || body.turnId !== (await read($, workingA))?.turnId) break
+        if (typeof body.text === 'string') {
           const text = body.text
-          await update($, workingA, w => (w ? { ...w, tail: `${w.tail}${text}`.slice(-TAIL_CHARS) } : w))
+          await update($, workingA, w => (w ? { ...w, tail: `${w.tail}${text}`.slice(-TAIL_CHARS), doing: null } : w))
+        } else if (typeof body.thinking === 'string') {
+          // Said once: the thinking itself plays in the turn.
+          const thinking: ShareDoing = { kind: 'thinking' }
+          if ((await read($, workingA))?.doing?.kind !== 'thinking') await update($, workingA, w => (w ? { ...w, doing: thinking } : w))
+        } else if (body.drafting && typeof body.drafting === 'object') {
+          const d = body.drafting as { tool?: unknown; target?: unknown; chars?: unknown }
+          const doing: ShareDoing = { kind: 'writing', tool: String(d.tool ?? ''), target: typeof d.target === 'string' ? d.target : '', chars: Number(d.chars) || 0 }
+          await update($, workingA, w => (w ? { ...w, doing } : w))
+        }
+        break
+      case 'row':
+        // A call made: it runs until its result comes back.
+        if (mode === 'guest') {
+          const row = body as unknown as Row
+          if (row.kind === 'tool' && row.tool) {
+            const doing: ShareDoing = { kind: 'running', tool: row.tool, target: (row.text ?? '').split('\n')[0]!.slice(0, 80) }
+            await update($, workingA, w => (w ? { ...w, doing } : w))
+          } else if (row.kind === 'result' || row.kind === 'assistant') {
+            await update($, workingA, w => (w?.doing ? { ...w, doing: null } : w))
+          }
         }
         break
       case 'turn':
@@ -3427,6 +3497,19 @@ function settingOf(el: UI, label: string, picker: RenderChildren) {
   )
 }
 
+// A moment of the host's step in words: "Writing notes.md · 4k characters".
+function doingLine(d: ShareDoing): string {
+  const what = d.target || d.tool || ''
+  if (d.kind === 'thinking') return 'Thinking'
+  if (d.kind === 'writing') {
+    const size = d.chars && d.chars >= 1000 ? ` · ${Math.round(d.chars / 1000)}k characters` : ''
+    const verb = d.tool === 'Write' ? 'Writing' : d.tool === 'Edit' || d.tool === 'MultiEdit' || d.tool === 'NotebookEdit' ? 'Editing' : d.tool === 'Bash' ? 'Writing a command:' : `Preparing ${d.tool}`
+    return `${verb}${what && what !== d.tool ? ` ${what}` : ''}${size}`
+  }
+  const verb = d.tool === 'Bash' ? 'Running' : d.tool === 'Read' ? 'Reading' : d.tool === 'Grep' || d.tool === 'Glob' ? 'Searching' : d.tool === 'WebFetch' || d.tool === 'WebSearch' ? 'Looking up' : d.tool === 'Agent' || d.tool === 'Task' ? 'An agent is on' : `Running ${d.tool}`
+  return `${verb}${what && what !== d.tool ? ` ${what}` : ''}`
+}
+
 // What's happening in the room, beside its name in the row above the prompt:
 // whose turn it is (their name in their color), else who's here.
 function nowOf(el: UI, v: View, colors: Map<string, string>) {
@@ -3450,6 +3533,7 @@ function nowOf(el: UI, v: View, colors: Map<string, string>) {
         <Text dimColor wrap="truncate-end">{`waiting for ${host} to allow ${w.waitingFor}`}</Text>
       )
     }
+    if (v.mode === 'guest' && w.doing) return <Text color="claude" wrap="truncate-end">{doingLine(w.doing)}</Text>
     if (v.mode === 'guest' && w.by === myName) return <Text color="claude" wrap="truncate-end">Claude is working on your prompt</Text>
     return (
       <Text wrap="truncate-end">
@@ -4533,12 +4617,18 @@ export const register: Register = (on, options) => {
         ridesInStep.delete(e.turnId)
         liveRuns.set(e.turnId, run)
         const state = run.state
-        const refused = run.lastCall ? refusedCalls.get(run.lastCall.id) : undefined
-        if (run.lastCall && refused !== undefined) {
-          const line = await refusedNote($, room, run.lastCall.event, refused)
-          answer += line
-          yield { kind: 'text', index: 0, text: line } satisfies TurnStepChunk
+        // This step's blocks, numbered as they come, as a response's are: the
+        // host's thinking (shown live, not kept), the words, then a call.
+        let blocks = 0
+        let textAt = -1
+        let thinkAt = -1
+        const words = (text: string) => {
+          if (textAt < 0) textAt = blocks++
+          answer += text
+          return { kind: 'text', index: textAt, text } satisfies TurnStepChunk
         }
+        const refused = run.lastCall ? refusedCalls.get(run.lastCall.id) : undefined
+        if (run.lastCall && refused !== undefined) yield words(await refusedNote($, room, run.lastCall.event, refused))
         if (run.lastCall) refusedCalls.delete(run.lastCall.id)
         run.lastCall = undefined
         // Esc here stops the shared turn. The engine stops reading this stream
@@ -4559,9 +4649,7 @@ export const register: Register = (on, options) => {
           if (action) {
             const replay = await replayOf($, room, action).catch(() => null)
             if (!replay) continue
-            const line = `\n\n${replay.label}${replay.note ? ` · ${replay.note}` : ''}\n\n`
-            answer += line
-            yield { kind: 'text', index: 0, text: line } satisfies TurnStepChunk
+            yield words(`\n\n${replay.label}${replay.note ? ` · ${replay.note}` : ''}\n\n`)
             if (replay.call) {
               call = replay.call
               run.lastCall = { id: '', event: action }
@@ -4584,11 +4672,14 @@ export const register: Register = (on, options) => {
           }
           for (const event of page.events) {
             run.cursor = Math.max(run.cursor, event.seq)
-            const piece = rideStep(ride, state, event, room.host)
-            if (piece) {
-              answer += piece
-              yield { kind: 'text', index: 0, text: piece } satisfies TurnStepChunk
+            // The host's Claude thinking: shown live here, as the host sees it.
+            if (event.type === 'delta' && typeof event.body.thinking === 'string' && state.current && event.body.turnId === state.current.turnId) {
+              if (thinkAt < 0 || textAt > thinkAt) thinkAt = blocks++
+              yield { kind: 'thinking', index: thinkAt, text: event.body.thinking } satisfies TurnStepChunk
+              continue
             }
+            const piece = rideStep(ride, state, event, room.host)
+            if (piece) yield words(piece)
             // A call to make: everything after it waits, so it lands in order.
             if (state.done || state.actions.length) break
           }
@@ -4612,17 +4703,15 @@ export const register: Register = (on, options) => {
           const grown = replayed ? joinRun(before, id, replayed) : null
           openRuns.set(e.turnId, grown)
           if (grown) await saveRun($, grown) // its first row's line counts one more
-          yield { kind: 'tool', index: 1, id, name: call.name } satisfies TurnStepChunk
-          yield { kind: 'input', index: 1, json: JSON.stringify(call.input) } satisfies TurnStepChunk
+          const at = blocks++
+          yield { kind: 'tool', index: at, id, name: call.name } satisfies TurnStepChunk
+          yield { kind: 'input', index: at, json: JSON.stringify(call.input) } satisfies TurnStepChunk
           yield { kind: 'stop', stopReason: 'tool_use', usage: null } satisfies TurnStepChunk
           return { turnId: e.turnId, index: e.index, answer, toolUses: [{ name: call.name, input: call.input }], stopReason: 'tool_use', usage: null }
         }
         // The step after a call ends with something to read: an empty reply
         // makes the engine ask for one more step.
-        if (!answer && e.index > 0) {
-          answer = 'Opened.'
-          yield { kind: 'text', index: 0, text: answer } satisfies TurnStepChunk
-        }
+        if (!answer && e.index > 0) yield words('Opened.')
       }
       yield { kind: 'stop', stopReason: 'end_turn', usage: null } satisfies TurnStepChunk
       return { turnId: e.turnId, index: e.index, answer, toolUses: [], stopReason: 'end_turn', usage: null }
@@ -4643,8 +4732,9 @@ export const register: Register = (on, options) => {
 
     const stream = next(e)
     if (e.agentId !== undefined || mode !== 'host') return yield* stream
+    const feed = await liveFeed($, e.turnId)
     for await (const chunk of stream) {
-      if (chunk.kind === 'text' && chunk.text) send($, 'delta', { turnId: e.turnId, text: chunk.text })
+      feed(chunk)
       yield chunk
     }
     return await stream.result
@@ -4978,6 +5068,7 @@ export const register: Register = (on, options) => {
     if (v.mode === 'host' && w?.byGuest) message = w.waitingFor ? `Waiting for your OK to run ${w.waitingFor}` : `Working for ${w.by}`
     if (v.mode === 'guest') {
       if (w?.waitingFor) message = `Waiting for ${host} to allow ${w.waitingFor}`
+      else if (w?.doing) message = `${doingLine(w.doing)}${w.by === myName ? '' : ` · for ${w.by}`}`
       else if (w) message = w.by === myName ? `Working on your prompt in ${host}'s session` : `Working for ${w.by}`
       else message = `Waiting for ${host}'s session`
     }

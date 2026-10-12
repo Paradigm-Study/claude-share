@@ -44,7 +44,12 @@ export type ShareWorking = {
   tail: string
   /** A tool call waiting for the host's approval, as guests see it. */
   waitingFor: string | null
+  /** What the host's Claude is doing this moment, as guests see it: thinking, writing a tool call, or running one. */
+  doing?: ShareDoing | null
 }
+
+/** A moment of a host's step, live: thinking, writing a call (which tool, what for, how far), or running one. */
+export type ShareDoing = { kind: 'thinking' | 'writing' | 'running'; tool?: string; target?: string; chars?: number }
 
 /** One line of the Room panel's timeline. */
 export type ShareActivity = {
