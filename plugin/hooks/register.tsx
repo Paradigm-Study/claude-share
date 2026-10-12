@@ -96,6 +96,7 @@ const NO_TEAMS: ShareTeams = { server: '', account: null, teams: [], current: nu
 const teamsA = atom({ plugin: 'shared-session', key: 'teams' } as const, NO_TEAMS)
 const invitesA = atom({ plugin: 'shared-session', key: 'invites' } as const, [] as ShareInvite[])
 const invitedA = atom({ plugin: 'shared-session', key: 'invited' } as const, {} as Record<string, number>)
+const pinRefusedA = atom({ plugin: 'shared-session', key: 'pinRefused' } as const, false)
 
 // Context a host app puts into the person's message (Claude Desktop adds a
 // <system-reminder> to a first prompt): not typed, and never shared.
@@ -1317,13 +1318,53 @@ let selfId = ''
 
 // Pins or unpins this session's row, by id and then by "self", and checks it
 // took; a pin that won't stick is said in the transcript, not just the debug log.
-async function setPinned($: $, pinned: boolean) {
+// Desktop's sidebar tools the plugin calls: harmless (a title, a pin, an
+// unread dot), but auto mode's classifier often gives a plugin's own call to
+// them no verdict, which refuses it. Allow rules for exactly these let them
+// through; the Room offers to add them when a pin was refused.
+const DESK_TOOLS = ['mcp__ccd_sidebar__set_pinned', 'mcp__ccd_sidebar__set_unread', 'mcp__ccd_session_mgmt__get_session', 'mcp__ccd_session_mgmt__set_session_title']
+
+// A pin refused (auto mode) is tried again after 20 s and a minute, then
+// said once, with the Room's way to allow it.
+async function setPinned($: $, pinned: boolean, attempt = 0) {
   for (const id of [...new Set([selfId, 'self'].filter(Boolean))]) {
     if ((await desk($, 'ccd_sidebar', 'set_pinned', { session_id: id, pinned })) === null) continue
     const after = await sessionInfo($, selfId || 'self')
-    if (!after || (after.pinned === true) === pinned) return
+    if (!after || (after.pinned === true) === pinned) {
+      if (pinned && (await read($, pinRefusedA))) await update($, pinRefusedA, () => false)
+      return
+    }
   }
-  if (pinned) $.ui.log("Shared session: couldn't pin this session in Claude's sidebar. Pin it by hand to keep it at the top.")
+  if (!pinned) return
+  const retries = [20_000, 60_000]
+  if (attempt < retries.length) {
+    $.clock.after(retries[attempt] ?? 60_000, () => {
+      // Still marked (still sharing or joined): try again.
+      void read($, sidebarA)
+        .then(marked => (marked ? setPinned($, true, attempt + 1) : undefined))
+        .catch(() => {})
+    })
+    return
+  }
+  await update($, pinRefusedA, () => true)
+  $.ui.log("Shared session: Claude Code's auto mode didn't let this plugin pin the session in Claude's sidebar. Room → Allow pinning lets it from now on, or pin it by hand.")
+}
+
+// Adds allow rules for the sidebar tools above to ~/.claude/settings.json
+// (the person pressed Allow pinning), the rest kept; then pins.
+async function allowDeskTools($: $) {
+  const found = await readSettings($)
+  if (!found) return void $.ui.toast("Couldn't read ~/.claude/settings.json, so nothing changed")
+  const permissions = { ...((found.settings.permissions ?? {}) as Record<string, unknown>) }
+  const allow = Array.isArray(permissions.allow) ? (permissions.allow as unknown[]).filter((r): r is string => typeof r === 'string') : []
+  permissions.allow = [...allow, ...DESK_TOOLS.filter(t => !allow.includes(t))]
+  try {
+    await $.fs.write(found.path, `${JSON.stringify({ ...found.settings, permissions }, null, 2)}\n`)
+  } catch {
+    return void $.ui.toast("Couldn't change ~/.claude/settings.json")
+  }
+  $.ui.toast('Pinning allowed: shared sessions pin themselves again')
+  await setPinned($, true, 2)
 }
 
 // Marks this session's row: retitles it (keeping what it was) and pins it.
@@ -2754,6 +2795,8 @@ async function postChat($: $, text: string) {
 async function openRoom($: $) {
   roomOpen = true
   await update($, unreadA, () => 0)
+  // Who can be invited now: someone may have joined the team since.
+  if ((await read($, teamsA)).account) void refreshTeams($).catch(() => {})
   // A dialog in a terminal: it takes the keys (Tab and the arrows walk it,
   // Esc closes it) and opens as tall as the Room is, not a third of the
   // screen. Desktop's side panel just comes forward.
@@ -4934,6 +4977,7 @@ export const register: Register = (on, options) => {
     const teamsNow = isHost ? await read($, teamsA) : null
     const invited = isHost ? await read($, invitedA) : {}
     const mates = (teamsNow?.teammates ?? []).filter(m => !people.some(p => p.online && p.name === m.name))
+    const shownTeam = teamsNow?.teams.find(x => x.id === teamsNow.current) ?? null
     const inviteSection = !isHost ? null : !teamsNow?.account ? (
       <Box flexDirection="row" gap={1} alignItems="center" justifyContent="space-between">
         <Text dimColor wrap="truncate-end">Sign in to invite teammates straight into this session.</Text>
@@ -4967,7 +5011,25 @@ export const register: Register = (on, options) => {
           {mates.length > 8 ? <Text dimColor>{`And ${mates.length - 8} more: /invite <name>`}</Text> : null}
         </Box>,
       )
-    ) : null
+    ) : (
+      // Signed in, nobody to invite yet: say why, and the way to fix it.
+      section(
+        'invite',
+        'Invite teammates',
+        '',
+        <Box flexDirection="column" gap={1}>
+          <Text dimColor>
+            {shownTeam ? `Nobody else is in ${shownTeam.name} yet. Send them its invite link; once they're in, invite them here.` : 'Make a team first, then invite teammates straight into this session.'}
+          </Text>
+          <Box flexDirection="row" gap={1}>
+            {shownTeam && teamsNow ? (
+              <Button key="room-team-invite" label="Copy team invite link" plain onPress={press => void copyText($, inviteUrl(teamsNow, shownTeam), 'Team invite link copied', press.surface)} />
+            ) : null}
+            <Button key="room-open-team" label="Team" plain dimColor onPress={() => void openTeam($)} />
+          </Box>
+        </Box>,
+      )
+    )
     const roles = (p: Face) =>
       [p.note?.includes('host') ? 'Host' : '', p.note?.includes('you') ? 'You' : '', p.online ? '' : 'Away'].filter(Boolean).join(' · ')
 
@@ -5000,6 +5062,14 @@ export const register: Register = (on, options) => {
             </Box>
           ) : null}
           {isHost ? null : <Text dimColor>{rulesLine(v.policy, room.host)}</Text>}
+          {(await read($, pinRefusedA)) ? (
+            <Box flexDirection="row" gap={1} alignItems="center" justifyContent="space-between">
+              <Box flexShrink={1}>
+                <Text dimColor>Claude Code's auto mode didn't let this plugin pin the session in the sidebar.</Text>
+              </Box>
+              <Button key="allow-pin" label="Allow pinning" plain onPress={() => void allowDeskTools($)} />
+            </Box>
+          ) : null}
           {newer ? (
             <Box flexDirection="row" gap={1} alignItems="center" justifyContent="space-between">
               <Text dimColor>{updates ? `Version ${newer} installs by itself; new sessions get it` : `Version ${newer} is out`}</Text>
@@ -5007,6 +5077,8 @@ export const register: Register = (on, options) => {
             </Box>
           ) : null}
         </Box>
+
+        {inviteSection}
 
         {section(
           'people',
@@ -5047,8 +5119,6 @@ export const register: Register = (on, options) => {
             {isHost && people.length <= 1 ? <Text dimColor>No one yet. Send the link to a teammate; it opens in their Claude Code.</Text> : null}
           </Box>,
         )}
-
-        {inviteSection}
 
         {section(
           'chat',
@@ -5307,6 +5377,7 @@ export const register: Register = (on, options) => {
     const roomLabel = v.unread ? `Room · ${v.unread} new` : `Room · ${people.filter(p => p.online).length}`
     const stopping = v.confirming === 'stop'
     const approving = await read($, approvingA)
+    const signedInHere = v.mode === 'host' && Boolean((await read($, teamsA)).account)
 
     return (
       <Box flexDirection="column" paddingRight={e.surface === 'terminal' ? 4 : 0}>
@@ -5334,6 +5405,7 @@ export const register: Register = (on, options) => {
           </Box>
           <Box flexDirection="row" gap={1}>
             <Button key="room" label={roomLabel} plain dimColor={!v.unread} onPress={() => void openRoom($)} />
+            {v.mode === 'host' && !stopping && signedInHere ? <Button key="invite" label="Invite" plain dimColor onPress={() => void openRoom($)} /> : null}
             {v.mode === 'host' && !stopping ? (
               <Button key="copy" label="Copy link" plain dimColor onPress={press => void (v.room ? copyLink($, v.room.url, press.surface) : undefined)} />
             ) : null}

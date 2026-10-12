@@ -176,6 +176,8 @@ declare module 'claude-code' {
       invites: ShareInvite[]
       /** Host: teammates invited to this session, by account id, and when. */
       invited: Record<string, number>
+      /** Claude Code (auto mode) wouldn't let this session be pinned: the Room offers to allow it. */
+      pinRefused: boolean
     }
   }
 }

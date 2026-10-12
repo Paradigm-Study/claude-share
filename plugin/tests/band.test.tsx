@@ -458,12 +458,20 @@ test("sharing marks the session's sidebar row, and stopping puts it back", async
   expect(calls.at(-2)).toBe('set_pinned {"session_id":"local_test","pinned":false}')
 })
 
-test("a pin the app won't take is said in the transcript", async ($, on) => {
-  const asked = world(on)
-  sidebar(on, { title: 'Fix login flow', refuse: true })
+test("a pin the app won't take is tried again, then the Room offers to allow it", async ($, on) => {
+  const asked = world(on, { settings: '{"permissions":{"allow":["Bash(npm test)"]},"model":"opus"}' })
+  const calls = sidebar(on, { title: 'Fix login flow', refuse: true })
   const ui = await $.ui.mount(band('desktop'))
   await ui.press({ key: 'share' })
-  expect(asked.logged.some(line => line.includes("couldn't pin this session"))).toBe(true)
+  await asked.clock.advance(20_100)
+  await asked.clock.advance(60_100)
+  expect(calls.filter(c => c.startsWith('set_pinned')).length).toBeGreaterThanOrEqual(3) // first, after 20 s, after a minute
+  expect(asked.logged.some(line => line.includes("didn't let this plugin pin the session"))).toBe(true)
+  const pane = await $.ui.mount({ plugin: 'shared-session', surface: 'desktop', component: 'Pane', requestId: 'shared-room', props: PANE })
+  await pane.press({ key: 'allow-pin' })
+  const settings = JSON.parse(asked.files.get('/home/scott/.claude/settings.json') ?? '{}')
+  expect(settings.permissions.allow).toEqual(['Bash(npm test)', 'mcp__ccd_sidebar__set_pinned', 'mcp__ccd_sidebar__set_unread', 'mcp__ccd_session_mgmt__get_session', 'mcp__ccd_session_mgmt__set_session_title'])
+  expect(settings.model).toBe('opus') // the rest kept
 })
 
 test("a session that was pinned stays pinned after sharing", async ($, on) => {
@@ -1171,4 +1179,13 @@ test('the host invites a teammate from the Room, as themselves, and sees who was
   // And by name, in a terminal.
   const r = await $.command.run({ command: 'invite', args: 'kim' } as never)
   expect(JSON.stringify(r)).toContain('Invited Kim')
+})
+
+test('a host signed in has Invite in the row, and an empty team says how to fill it', async ($, on) => {
+  const asked = world(on, { team: { signedIn: true } })
+  await $.command.run({ command: 'team', args: 'sessions' } as never)
+  const row = await $.ui.mount(band('desktop'))
+  await row.press({ key: 'share' })
+  await asked.clock.advance(50)
+  expect((await row.find({ key: 'invite' }))?.props.label).toBe('Invite')
 })
