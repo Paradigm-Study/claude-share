@@ -45,10 +45,16 @@ function world(
     invites?: unknown[]
     /** The room's history comes in pages: the join's first, then events after it; `failRest` fails the second. */
     paged?: { failRest?: boolean }
+    /** This session's Claude Code id. */
+    sessionId?: string
+    /** The first this many stream connections are refused (401): the room let the seat go. */
+    streamRefuses?: number
   } = {},
 ) {
   const asked: string[] = []
   const spawned: { argv: readonly string[]; input?: string }[] = []
+  let refusedStreams = 0
+  let joins = 0
   on('process.spawn', async function* ($, e) {
     spawned.push({ argv: e.argv, input: e.input })
     // Shell work: an upload answers with the file's id; anything else succeeds.
@@ -96,6 +102,11 @@ function world(
       return { value: { code: 0, signal: null } }
     }
     if (!opts.stream) throw new Error('spawn curl ENOENT')
+    if ((opts.streamRefuses ?? 0) > refusedStreams) {
+      refusedStreams += 1
+      yield { stream: 'stdout' as const, text: '{"error":"Not a member of this session."}\n\n{"httpStatus":401}\n' }
+      return { value: { code: 0, signal: null } }
+    }
     for (const line of opts.stream) yield { stream: 'stdout' as const, text: `${JSON.stringify(line)}\n` }
     yield { stream: 'stdout' as const, text: '\n{"httpStatus":200}\n' }
     return { value: { code: 0, signal: null } }
@@ -104,7 +115,19 @@ function world(
   // A Claude Desktop session, unless a test says otherwise.
   const desktop = { CLAUDE_CODE_ENTRYPOINT: 'claude-desktop', ...opts.env }
   mock.env(on, opts.server === false ? { USER: 'scott', HOME: '/home/scott', ...desktop } : { USER: 'scott', HOME: '/home/scott', SHARED_SESSION_SERVER: 'http://localhost:8787', ...desktop })
-  mock.store(on, opts.store ?? {})
+  // The plugin's store across sessions, in memory, for tests to read too.
+  const store = new Map<string, unknown>(Object.entries(opts.store ?? {}))
+  on('store.get', ($, e) => ({ value: store.get(e.key) }))
+  on('store.set', ($, e) => {
+    store.set(e.key, e.value)
+    return { value: undefined }
+  })
+  on('store.delete', ($, e) => {
+    store.delete(e.key)
+    return { value: undefined }
+  })
+  on('store.keys', () => ({ value: [...store.keys()] }))
+  on('session.id', () => ({ value: opts.sessionId ?? 'session-test-0001' }))
   // The files the plugin reads: its own manifest, and the person's settings.
   const files = new Map<string, string>()
   if (opts.settings !== undefined) files.set('/home/scott/.claude/settings.json', opts.settings)
@@ -209,7 +232,8 @@ function world(
       const row = (seq: number, text: string) => ({ seq, type: 'row', from: { seat: 'host', name: 'Sam', role: 'host' }, ts: 900, body: { kind: 'user', who: 'Sam', text } })
       body = { seq: 3, events: [row(2, 'second page'), row(3, 'third')], people, ended: false, title: 'demo' }
     } else if (path.endsWith('/join')) {
-      body = { token: 'g', seat: 'seat1', title: 'demo', host: 'Sam', seq: 1, history: [], people, latest: opts.latest }
+      joins += 1
+      body = { token: joins === 1 ? 'g' : `g${joins}`, seat: joins === 1 ? 'seat1' : `seat${joins}1`, title: 'demo', host: 'Sam', seq: 1, history: [], people, latest: opts.latest }
     } else if (path.endsWith('/events') && method === 'GET') {
       body = { seq: 1, events: [], people, ended: false, title: 'demo' }
     } else if (path.endsWith('/previews') && method === 'POST') {
@@ -217,7 +241,7 @@ function world(
     }
     return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify(body) } }
   })
-  return Object.assign(asked, { clock, logged, spawned, posted, versions, written, urls, submitted, sent, opened, files })
+  return Object.assign(asked, { clock, logged, spawned, posted, versions, written, urls, submitted, sent, opened, files, store })
 }
 
 // A press settles before work waiting on the runtime's own promises does (a
@@ -442,7 +466,8 @@ function sidebar(on: On, start: { title: string; pinned?: boolean; refuse?: bool
     const text = e.tool === 'get_session' ? JSON.stringify({ sessionId: 'local_test', title: start.title, ...(pinned ? { pinned: true } : {}) }) : 'ok'
     return { value: { content: [{ type: 'text', text }], isError: false } }
   })
-  return calls
+  // The same pin made through the tool call path (the person's request).
+  return Object.assign(calls, { pin: (value: boolean) => void (pinned = value) })
 }
 
 test("sharing marks the session's sidebar row, and stopping puts it back", async ($, on) => {
@@ -587,6 +612,7 @@ test('a session reopened after a compaction shares its whole history, from the f
   const old = '/home/scott/.claude/projects/-tmp-demo/session-a-0001.jsonl'
   const now = '/home/scott/.claude/projects/-tmp-demo/session-b-0002.jsonl'
   const asked = world(on, {
+    sessionId: 'session-b-0002',
     transcripts: {
       [old]: [
         row({ type: 'user', uuid: 'a1', parentUuid: null, message: { role: 'user', content: 'First prompt, in the old file' } }),
@@ -602,7 +628,6 @@ test('a session reopened after a compaction shares its whole history, from the f
       ].join('\n'),
     },
   })
-  on('session.id', () => ({ value: 'session-b-0002' }))
   const ui = await $.ui.mount(band('desktop'))
   await ui.press({ key: 'share' })
   expect(await ui.find({ type: 'Text', text: 'Share this session?' })).toBeDefined() // it has prompts: asks first
@@ -907,8 +932,7 @@ function savedRoom(id: string, at: number, where: { sidebar?: string; place?: st
 const START = { cwd: '/tmp/demo', surface: 'desktop', isInteractive: true } as const
 
 test('a host session reopened takes its room back, on the same link', async ($, on) => {
-  const asked = world(on, { store: { 'hosting:cli-1': savedRoom('room0000000000000009', 900) } })
-  on('session.id', () => ({ value: 'cli-1' }))
+  const asked = world(on, { store: { 'hosting:cli-1': savedRoom('room0000000000000009', 900) }, sessionId: 'cli-1' })
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   await $.session.start(START)
   await asked.clock.advance(10)
@@ -924,8 +948,8 @@ test('a Desktop session reopened under a new id (a rewind) takes its room back; 
       'hosting:cli-older': savedRoom('room0000000000000008', 500, { sidebar: 'local_0000d351-0000-4000-8000-000000000001' }),
       'hosting:cli-other': savedRoom('room0000000000000007', 950, { place: 'local_0000d352-0000-4000-8000-000000000002' }),
     },
+    sessionId: 'cli-new',
   })
-  on('session.id', () => ({ value: 'cli-new' }))
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   await $.session.start(START)
   await asked.clock.advance(10)
@@ -1036,7 +1060,8 @@ test('/share-session link shares by link alone, even signed in', async ($, on) =
   const r = await $.command.run({ command: 'share-session', args: 'link' } as never)
   await asked.clock.advance(100)
   expect(asked.sent.find(x => x.path === '/api/rooms')?.body.team).toBeUndefined()
-  expect(asked.sent.find(x => x.path === '/api/rooms')?.headers['x-shared-session-account']).toBeUndefined()
+  // No team, but the room knows the host by account: their other sessions are them.
+  expect(asked.sent.find(x => x.path === '/api/rooms')?.headers['x-shared-session-account']).toBe(TEAM_TOKEN)
   expect(JSON.stringify(r)).toContain('Anyone with this link can join')
 })
 
@@ -1256,4 +1281,121 @@ test("a title made from a prompt with a picture leaves Claude Code's note about 
   await asked.clock.advance(10)
   const pane = await $.ui.mount(TEAM_PANE)
   expect(await pane.find({ type: 'Text', text: 'agent-composition-ux-9e06eb: make this match the mock' })).toBeDefined()
+})
+
+test("a pin Desktop refuses from the plugin goes again as the person's own request, and sticks", async ($, on) => {
+  const asked = world(on)
+  const calls = sidebar(on, { title: 'Fix login flow', refuse: true })
+  const made: Record<string, unknown>[] = []
+  on('tool.call', { tool: 'mcp__ccd_sidebar__set_pinned' }, ($, e) => {
+    made.push(e as unknown as Record<string, unknown>)
+    calls.pin(true)
+    return { result: 'ok' } as never
+  })
+  const ui = await $.ui.mount(band('desktop'))
+  await ui.press({ key: 'share' })
+  await asked.clock.advance(100)
+  expect(made).toHaveLength(1)
+  expect(made[0]?.session_id).toBe('local_test')
+  expect(made[0]?.pinned).toBe(true)
+  expect(String(made[0]?.consent)).toContain('The user chose to share this session')
+  // Nothing tried again, nothing said: it took.
+  await asked.clock.advance(90_000)
+  expect(made).toHaveLength(1)
+  expect(asked.logged.some(line => line.includes("didn't let this plugin pin"))).toBe(false)
+})
+
+test('a guest whose seat the room let go (asleep, offline) takes a new one and stays in the session', async ($, on) => {
+  const asked = world(on, { stream: [{ seq: 2, events: [], people: [], ended: false, title: 'demo' }], streamRefuses: 1 })
+  await $.prompt.submit({ text: LINK, origin: { kind: 'composer' }, wait: false })
+  await asked.clock.advance(100)
+  expect(asked.filter(a => a === 'POST /api/rooms/room0000000000000001/join')).toHaveLength(2)
+  expect(asked.logged.some(line => line.includes('no longer shared'))).toBe(false)
+  // The stream goes on with the new seat's token, from where it was.
+  const streams = asked.spawned.filter(s => s.argv[0] === 'curl')
+  expect(streams.at(-1)?.input).toContain('Authorization: Bearer g2')
+  expect(streams.at(-1)?.input).toContain('stream?after=1')
+  const ui = await $.ui.mount(band('desktop'))
+  expect(await ui.find({ key: 'leave' })).toBeDefined()
+  // A prompt then goes out with the new seat.
+  await $.prompt.submit({ text: 'Run the tests', origin: { kind: 'composer' }, wait: false })
+  await asked.clock.advance(100)
+  expect(asked.posted.find(e => e.type === 'prompt')?.body.text).toBe('Run the tests')
+  expect(asked.sent.filter(x => x.path.endsWith('/events') && x.body.events).at(-1)?.headers.authorization).toBe('Bearer g2')
+})
+
+test('the Room counts you once, with every session of yours', async ($, on) => {
+  world(on, {
+    people: [
+      { id: 'host', name: 'Sam', role: 'host', online: true },
+      { id: 'seat9', name: 'scott', role: 'guest', online: true, seats: ['seat9', 'seat1'], account: 'acct0001' } as never,
+      { id: 'seat2', name: 'Alex', role: 'guest', online: true },
+    ],
+  })
+  await $.prompt.submit({ text: LINK, origin: { kind: 'composer' }, wait: false })
+  const ui = await $.ui.mount({ plugin: 'shared-session', surface: 'desktop', component: 'Pane', requestId: 'shared-room', props: PANE })
+  const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text)
+  expect(texts.filter(t => t === 'scott')).toHaveLength(1)
+  expect(texts.some(t => /\byou\b/.test(t))).toBe(true)
+  const footer = await $.ui.mount({ plugin: 'shared-session', surface: 'desktop', component: 'SessionMode', props: { modes: [] } })
+  expect((await footer.find({ type: 'Text' }))?.text).toBe("in Sam's session with Alex")
+})
+
+const HOLD = (room: string, mode: 'host' | 'guest' = 'guest') => ({
+  room,
+  session: 'session-other-0002',
+  place: 'local_0000aaaa-0000-4000-8000-000000000001',
+  mode,
+  title: 'demo: work',
+  host: 'Sam',
+  at: 900,
+})
+
+test("the Team panel opens a session you're already in, and Join all leaves out what's yours", async ($, on) => {
+  const sessions = [teamSession(1), teamSession(2, 'Kim'), { ...teamSession(3, 'Lee'), accounts: ['acct-Lee', ME.id] }, teamSession(4, 'Ana')]
+  const asked = world(on, { team: { signedIn: true, sessions }, store: { 'live:room0000000000000101:session-other-0002': HOLD('room0000000000000101') } })
+  await $.command.run({ command: 'team' } as never)
+  await asked.clock.advance(10)
+  const pane = await $.ui.mount(TEAM_PANE)
+  // In another session here: Open, not Join.
+  expect(await pane.find({ key: 'join-room0000000000000101' })).toBeUndefined()
+  expect((await pane.find({ key: 'open-room0000000000000101' }))?.props.label).toBe('Open')
+  expect(await pane.find({ type: 'Text', text: /you're in it in another session/ })).toBeDefined()
+  // In it on another computer: said, and not in Join all.
+  expect(await pane.find({ type: 'Text', text: /you're in it elsewhere/ })).toBeDefined()
+  await pane.press({ key: 'join-all' })
+  // A fresh session: the first joins here, the next opens; yours never.
+  await eventually(asked.clock, () => asked.spawned.some(s => s.input?.includes('claude://code/new?q=')))
+  expect(asked).toContain('POST /api/rooms/room0000000000000102/join')
+  const opened = asked.spawned.filter(s => s.input?.includes('claude://code/new?q=')).map(s => s.input ?? '')
+  expect(opened.some(i => i.includes('room0000000000000104'))).toBe(true)
+  expect(opened.some(i => /room000000000000010[13]/.test(i))).toBe(false)
+  expect(asked.some(a => /room000000000000010[13]\/join/.test(a))).toBe(false)
+  await pane.press({ key: 'open-room0000000000000101' })
+  await asked.clock.advance(10)
+  expect(asked.spawned.some(s => s.input?.includes("claude://claude.ai/epitaxy/local_0000aaaa-0000-4000-8000-000000000001"))).toBe(true)
+})
+
+test('a link to a room another session here is in opens that one; pasted again, it joins here too', async ($, on) => {
+  const asked = world(on, { store: { 'live:room0000000000000001:session-other-0002': HOLD('room0000000000000001') } })
+  await $.prompt.submit({ text: LINK, origin: { kind: 'composer' }, wait: false })
+  await asked.clock.advance(10)
+  expect(asked.some(a => a.endsWith('/join'))).toBe(false)
+  expect(asked.spawned.some(s => s.input?.includes('claude://claude.ai/epitaxy/local_0000aaaa-0000-4000-8000-000000000001'))).toBe(true)
+  await $.prompt.submit({ text: LINK, origin: { kind: 'composer' }, wait: false })
+  await asked.clock.advance(10)
+  expect(asked).toContain('POST /api/rooms/room0000000000000001/join')
+})
+
+test("a session that shares or joins tells the others here, and stops when it's done", async ($, on) => {
+  const asked = world(on)
+  await $.prompt.submit({ text: LINK, origin: { kind: 'composer' }, wait: false })
+  await asked.clock.advance(10)
+  const held = asked.store.get('live:room0000000000000001:session-test-0001') as { mode: string; host: string } | undefined
+  expect(held?.mode).toBe('guest')
+  expect(held?.host).toBe('Sam')
+  const ui = await $.ui.mount(band('desktop'))
+  await ui.press({ key: 'leave' })
+  await asked.clock.advance(10)
+  expect(asked.store.has('live:room0000000000000001:session-test-0001')).toBe(false)
 })

@@ -216,6 +216,12 @@ export class Directory {
     return { ok: true, account: { id: account.id, name: account.name } }
   }
 
+  // Who a sign-in is, for a room to know a person across their sessions.
+  async whoIs(tokenText) {
+    const account = await this.accountOf(tokenText)
+    return account ? { id: account.id, name: account.name } : null
+  }
+
   // A team's access setting, for a session's page to say who can join.
   async teamAccess(teamId) {
     return (await this.kv.get(`team:${teamId}`))?.access ?? null
@@ -256,7 +262,9 @@ export class Directory {
     const out = []
     for (const [key, invite] of await this.kv.list(`sinv:${account.id}:`)) {
       const info = invite.exp > now ? await this.roomInfo(invite.room.id).catch(() => null) : null
-      if (!info || info.ended) {
+      // Already there (another session of theirs joined): nothing to answer.
+      const there = Array.isArray(info?.people) && info.people.some(p => p.account === account.id && p.online)
+      if (!info || info.ended || there) {
         await this.kv.delete(key)
         continue
       }
@@ -290,6 +298,8 @@ export class Directory {
         hostAccount: entry.hostAccount,
         hostOnline: people.some(p => p.role === 'host' && p.online),
         people: people.filter(p => p.online).map(p => p.name),
+        // Who's in it by account: a person's own sessions are "in it" anywhere.
+        accounts: people.filter(p => p.online && p.account).map(p => p.account),
         createdAt: entry.createdAt,
       })
     }

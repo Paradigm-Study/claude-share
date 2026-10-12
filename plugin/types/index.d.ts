@@ -20,7 +20,18 @@ export type ShareRoom = {
   team?: { id: string; name: string } | null
 }
 
-export type SharePerson = { id: string; name: string; role: 'host' | 'guest'; online: boolean; /** Their plugin's version, as the room heard it. */ version?: string }
+export type SharePerson = {
+  id: string
+  name: string
+  role: 'host' | 'guest'
+  online: boolean
+  /** Their plugin's version, as the room heard it. */
+  version?: string
+  /** Every seat of theirs (a person signed in from several sessions is one entry). */
+  seats?: string[]
+  /** Their account on the share server, when they're signed in. */
+  account?: string
+}
 
 export type ShareWorking = {
   turnId: string
@@ -94,7 +105,7 @@ export type ShareTeam = {
 }
 
 /** A session shared with a team, as the team's list shows it. */
-export type ShareTeamSession = { id: string; url: string; title: string; host: string; hostAccount?: string; hostOnline: boolean; people: string[]; createdAt: number }
+export type ShareTeamSession = { id: string; url: string; title: string; host: string; hostAccount?: string; hostOnline: boolean; people: string[]; /** Who's in it by account. */ accounts?: string[]; createdAt: number }
 
 /** A host's invite to a session, as the invitee's Claude Code shows it. */
 export type ShareInvite = { room: { id: string; url: string; title: string; host: string }; from: { name: string }; at: number }
@@ -124,6 +135,8 @@ export type ShareTeams = {
   error: string | null
   /** The panel's new-team field is open. */
   creating?: boolean
+  /** Rooms another session on this computer is in, and as what. */
+  here?: Record<string, 'host' | 'guest'>
 }
 
 declare module 'claude-code' {

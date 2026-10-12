@@ -129,6 +129,10 @@ export class Room {
     this.seq = data.seq ?? 0
     this.events = data.events ?? []
     this.seats = new Map(Object.entries(data.seats ?? {}))
+    // Seats let go after their grace (a laptop asleep, a network gap), by
+    // token: one that comes back is seated again as it was, so a plugin that
+    // was only away isn't told the session ended. Leaving isn't kept here.
+    this.away = new Map(Object.entries(data.away ?? {}))
     this.live = []
     this.posts = new Windows() // posts this minute, counted exactly here
     this.waiters = new Set()
@@ -156,11 +160,11 @@ export class Room {
     return room
   }
 
-  static create({ id, name, title, now, fromNow, version, team }) {
+  static create({ id, name, title, now, fromNow, version, team, account }) {
     return new Room({
       id,
       title: String(title ?? '').trim().slice(0, 120) || 'Claude Code session',
-      host: { name: clampName(name), token: token(24), lastSeen: now, version: version ?? undefined },
+      host: { name: clampName(name), token: token(24), lastSeen: now, version: version ?? undefined, account: account ?? undefined },
       createdAt: now,
       fromNow: fromNow === true,
       team: team ?? null,
@@ -179,6 +183,7 @@ export class Room {
       seq: this.seq,
       events: this.events,
       seats: Object.fromEntries(this.seats),
+      away: this.away.size ? Object.fromEntries(this.away) : undefined,
       files: Object.fromEntries(this.files),
       previews: Object.fromEntries(this.previews),
       previewSessions: Object.fromEntries(this.previewSessions),
@@ -197,11 +202,24 @@ export class Room {
     return sent
   }
 
-  auth(bearer) {
+  auth(bearer, now = Date.now()) {
     if (!bearer) return null
     if (bearer === this.host.token) return { role: 'host', seat: 'host', name: this.host.name }
-    const seat = this.seats.get(bearer)
+    const seat = this.seats.get(bearer) ?? this.comeBack(bearer, now)
     return seat ? { role: 'guest', seat: seat.id, name: seat.name } : null
+  }
+
+  // A seat let go for being quiet, back: seated again, the same seat.
+  comeBack(bearer, now) {
+    const seat = this.away.get(bearer)
+    if (!seat || this.endedAt || this.seats.size >= ROOM_SEATS_MAX) return null
+    this.away.delete(bearer)
+    const already = this.hasAccount(seat.account)
+    seat.lastSeen = now
+    this.seats.set(bearer, seat)
+    if (!already) this.append({ seat: seat.id, name: seat.name, role: 'guest' }, 'join', {}, now)
+    this.wake()
+    return seat
   }
 
   touch(auth, now) {
@@ -209,14 +227,36 @@ export class Room {
     else for (const seat of this.seats.values()) if (seat.id === auth.seat) seat.lastSeen = now
   }
 
+  // Everyone here, once each: a person signed in from several sessions (two
+  // windows, two machines) is one entry, its `seats` naming them all, here if
+  // any is; the host's own other sessions fold into the host.
   people(now) {
     const online = !this.endedAt && (this.connected('host') || now - this.host.lastSeen < SEAT_TIMEOUT_MS)
     // Each one's plugin version, as their requests say it: who needs to update.
     const v = version => (version ? { version } : {})
-    return [
-      { id: 'host', name: this.host.name, role: 'host', online, ...v(this.host.version) },
-      ...[...this.seats.values()].map(s => ({ id: s.id, name: s.name, role: 'guest', online: true, ...v(s.version) })),
-    ]
+    const a = account => (account ? { account } : {})
+    const host = { id: 'host', name: this.host.name, role: 'host', online, seats: ['host'], ...v(this.host.version), ...a(this.host.account) }
+    const out = [host]
+    const byAccount = new Map(this.host.account ? [[this.host.account, host]] : [])
+    for (const s of this.seats.values()) {
+      const same = s.account ? byAccount.get(s.account) : undefined
+      if (same) {
+        same.seats.push(s.id)
+        continue
+      }
+      const entry = { id: s.id, name: s.name, role: 'guest', online: true, seats: [s.id], ...v(s.version), ...a(s.account) }
+      if (s.account) byAccount.set(s.account, entry)
+      out.push(entry)
+    }
+    return out
+  }
+
+  // Whether this account is here already, by another session (the host's or a seat).
+  hasAccount(account, exceptBearer) {
+    if (!account) return false
+    if (this.host.account === account) return true
+    for (const [bearer, seat] of this.seats) if (bearer !== exceptBearer && seat.account === account) return true
+    return false
   }
 
   append(from, type, body, now) {
@@ -270,11 +310,14 @@ export class Room {
     })
   }
 
-  join(name, now, version = null) {
+  // A person already here by another session (the same account) comes and
+  // goes quietly: no second "joined", no "left" while one session stays.
+  join(name, now, version = null, account = null) {
     const seatToken = token(24)
-    const seat = { id: token(6), name: clampName(name), joinedAt: now, lastSeen: now, ...(version ? { version } : {}) }
+    const seat = { id: token(6), name: clampName(name), joinedAt: now, lastSeen: now, ...(version ? { version } : {}), ...(account ? { account } : {}) }
+    const already = this.hasAccount(account)
     this.seats.set(seatToken, seat)
-    this.append({ seat: seat.id, name: seat.name, role: 'guest' }, 'join', {}, now)
+    if (!already) this.append({ seat: seat.id, name: seat.name, role: 'guest' }, 'join', {}, now)
     this.wake()
     return { token: seatToken, seat }
   }
@@ -282,8 +325,14 @@ export class Room {
   leave(bearer, reason, now) {
     const seat = this.seats.get(bearer)
     if (!seat) return
+    const stays = this.hasAccount(seat.account, bearer)
     this.seats.delete(bearer)
-    this.append({ seat: seat.id, name: seat.name, role: 'guest' }, 'leave', { reason }, now)
+    if (reason === 'timeout') {
+      this.away.set(bearer, seat)
+      // The newest hundred: a room's people come back, strangers don't pile up.
+      for (const old of [...this.away.keys()].slice(0, Math.max(0, this.away.size - 100))) this.away.delete(old)
+    }
+    if (!stays) this.append({ seat: seat.id, name: seat.name, role: 'guest' }, 'leave', { reason }, now)
     this.wake()
   }
 
@@ -431,7 +480,9 @@ export async function createRoom(req, id, now, origin, ctx = {}) {
   const body = await readJson(req)
   const team = body.team ? await teamFor(req, body.team, ctx) : null
   if (team?.error) return { response: team.error }
-  const room = Room.create({ id, name: body.name, title: body.title, now, fromNow: body.fromNow, version: clientVersion(req), team })
+  // Signed in, the host is known by account: their other sessions are them.
+  const account = team?.account ?? (await whoIs(req, ctx))
+  const room = Room.create({ id, name: body.name, title: body.title, now, fromNow: body.fromNow, version: clientVersion(req), team, account })
   if (team) await listWithTeam(room, origin, ctx)
   return {
     room,
@@ -449,6 +500,12 @@ export async function createRoom(req, id, now, origin, ctx = {}) {
 
 // The account a request comes from (the plugin's sign-in), never in a URL.
 const accountOf = req => req.headers.get('x-shared-session-account') ?? ''
+
+// Its account id, when it's signed in to this server; else null.
+async function whoIs(req, ctx) {
+  if (!accountOf(req) || !ctx.directory) return null
+  return (await ctx.directory.whoIs(accountOf(req)).catch(() => null))?.id ?? null
+}
 
 async function teamFor(req, teamId, ctx) {
   if (!ctx.directory) return { error: json({ error: "This share server doesn't have teams." }, 400) }
@@ -479,7 +536,9 @@ const teamOf = room => (room.team ? { id: room.team.id, name: room.team.name } :
 export async function roomRequest(room, req, rest, now, origin, ctx = {}) {
   const swept = room.sweep(now)
   const versions = versionsOf(room)
+  const seated = room.seats.size
   const result = await handleRoom(room, req, rest, now, origin, ctx)
+  if (room.seats.size !== seated) return { ...result, changed: true } // a seat came back, or left
   // Someone on a new plugin version (an update, a restart) is kept, so a room
   // loaded back from storage says the versions that run now, and everyone's
   // Room hears it.
@@ -529,7 +588,7 @@ async function handleRoom(room, req, rest, now, origin, ctx) {
     }
     if (room.seats.size >= ROOM_SEATS_MAX) return { response: json({ error: `This session is full: ${ROOM_SEATS_MAX} people have joined.` }, 403) }
     const body = await readJson(req)
-    const { token: seatToken, seat } = room.join(body.name, now, clientVersion(req))
+    const { token: seatToken, seat } = room.join(body.name, now, clientVersion(req), await whoIs(req, ctx))
     // A long history in pages (see PAGE_BYTES_CAP): the first here, the rest
     // from events?after=historySeq.
     const max = maxOf(url)
@@ -563,7 +622,7 @@ async function handleRoom(room, req, rest, now, origin, ctx) {
     return { changed: true, response: json({ ok: true }) }
   }
 
-  const auth = room.auth(bearerOf(req))
+  const auth = room.auth(bearerOf(req), now)
   if (!auth) return { response: json({ error: 'Not a member of this session.' }, 401) }
   // Which plugin each one runs now (an update and a restart change it): a
   // guest's plugin says what an older host's can't show, and the Room who
@@ -915,7 +974,7 @@ section.more { padding:0 0 72px; }
     <ul>
       <li><b>What passes through:</b> while a session is shared, its prompts and the files people attach to them, Claude's replies, the tools it runs with the first lines of their results and the pictures in them (screenshots, images it opens), the side chat, and any files or local previews the host's Claude shows. Sharing a session that already has history asks first whether to include it.</li>
       <li><b>How long:</b> a room and everything in it is deleted 24 hours after the host stops sharing or was last seen. There are no analytics, and no request logs kept.</li>
-      <li><b>Accounts, only for teams:</b> sharing and joining need none. If you sign in (GitHub or Google) to use teams, the server keeps your name, username, verified email, which GitHub organizations you're in, the teams you're in and their settings, which open sessions are shared with each team, and invites to a session (who invited whom, until it's joined, dismissed, ends, or 12 hours pass). Sign-ins are kept as hashes, never the token itself. They stay until you delete your account (<code>/team delete-account</code>), which removes them at once.</li>
+      <li><b>Accounts, only for teams:</b> sharing and joining need none. If you sign in (GitHub or Google) to use teams, the server keeps your name, username, verified email, which GitHub organizations you're in, the teams you're in and their settings, which open sessions are shared with each team, and invites to a session (who invited whom, until it's joined, dismissed, ends, or 12 hours pass). Sign-ins are kept as hashes, never the token itself. They stay until you delete your account (<code>/team delete-account</code>), which removes them at once. Signed in, a session you share or join also knows your account for as long as it lasts, so your sessions count as one person.</li>
       <li><b>Who can see it:</b> anyone with the room's link, or for a session shared with a team that keeps it to its people, only the people in that team. Links are long and random; forward one only to people you'd hand the session to. Content is encrypted in transit, not end to end: the server can read what passes through it.</li>
       <li><b>What runs where:</b> a teammate's prompt runs on the host's machine. Reads inside the host's project run without asking; everything else asks the host first, by default.</li>
       <li><b>Limits:</b> new rooms and joins are rate-limited per network, rooms hold up to 20 people and 100 MB of files. Rooms that are abused get ended.</li>

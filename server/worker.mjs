@@ -293,8 +293,12 @@ export class RoomObject {
 
   accept(req, url, now) {
     if (req.headers.get('upgrade')?.toLowerCase() !== 'websocket') return json({ error: 'Expected a WebSocket.' }, 426)
-    const auth = this.room.auth((req.headers.get('authorization') ?? '').replace(/^Bearer\s+/i, '').trim())
+    const seated = this.room.seats.size
+    const auth = this.room.auth((req.headers.get('authorization') ?? '').replace(/^Bearer\s+/i, '').trim(), now)
     if (!auth) return json({ error: 'Not a member of this session.' }, 401)
+    // A seat let go for being quiet came back: kept (storage writes finish
+    // before the answer goes out).
+    if (this.room.seats.size !== seated) void this.persist()
     if (this.room.endedAt) return json({ error: 'This session is no longer shared.' }, 410)
     const [client, server] = Object.values(new WebSocketPair())
     this.state.acceptWebSocket(server, [auth.seat])
@@ -502,7 +506,7 @@ const directoryStub = env => env.DIRECTORY.get(env.DIRECTORY.idFromName('directo
 
 // What a room asks the directory, over its stub (paths the Worker never
 // forwards from outside).
-const DIRECTORY_CALLS = ['shareCheck', 'joinCheck', 'register', 'unregister', 'teamAccess', 'sessionInvite']
+const DIRECTORY_CALLS = ['shareCheck', 'joinCheck', 'register', 'unregister', 'teamAccess', 'sessionInvite', 'whoIs']
 function directoryClient(env) {
   if (!env?.DIRECTORY) return null
   const call = name => async (...args) => {

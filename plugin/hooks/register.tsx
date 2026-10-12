@@ -128,6 +128,8 @@ const PERSON = new Set(['composer', 'sdk', 'bridge'])
 
 // A share link: <server origin, with any path prefix>/s/<room id>, alone.
 const LINK = /^\s*(https?:\/\/[^\s]+?)\/s\/([A-Za-z0-9_-]{16,64})\/?\s*$/
+// A link pasted while another session here is in its room: pasted again soon, it joins.
+let pastedAgain: { id: string; at: number } | null = null
 // A team's invite link (`/i/<code>`), pasted as a message.
 const INVITE = /^\s*(https?:\/\/[^\s]+?)\/i\/([A-Za-z0-9_-]{8,40})\/?\s*$/
 
@@ -584,6 +586,52 @@ async function api<T>(
 
 const isGone = (error: unknown) => error instanceof ApiError && [401, 404, 410].includes(error.status)
 
+// Guest: the room let this seat go (a laptop asleep, a network gap past its
+// 45 s grace) though the session is still shared, so the seat's token is
+// refused (401). Take a new seat and go on from where this one was, rather than
+// telling the person the session ended. Only the room's own answer that it is
+// gone (or that this person may no longer join) ends the place here.
+type Reseat = { ok: true } | { ok: false; gone: boolean; why?: string }
+let reseating: Promise<Reseat> | null = null
+function reseat($: $, room: ShareRoom): Promise<Reseat> {
+  reseating ??= (async (): Promise<Reseat> => {
+    try {
+      // The smallest page of history: this seat already has it.
+      const joined = await api<{ token: string; seat: string }>($, room.server, `/api/rooms/${room.id}/join?max=64000`, {
+        method: 'POST',
+        body: { name: await whoami($) },
+        account: (await signInFor($, room.server))?.token,
+      })
+      await update($, roomA, r => (r && r.id === room.id ? { ...r, token: joined.token, seat: joined.seat } : r))
+      $.ui.log('Shared session: the room let this seat go; took a new one', { to: 'debug' })
+      return { ok: true }
+    } catch (error) {
+      const refused = error instanceof ApiError && error.status >= 400 && error.status < 500 && error.status !== 429
+      return { ok: false, gone: refused, why: refused ? (error as ApiError).message : undefined }
+    } finally {
+      reseating = null
+    }
+  })()
+  return reseating
+}
+
+// A seat's token refused: a guest takes a new seat (true), or the place here
+// ends with what the room said.
+async function stillSeated($: $, room: ShareRoom, status: number): Promise<boolean> {
+  if (status === 401 && (await read($, modeA)) === 'guest') {
+    const again = await reseat($, room)
+    if (again.ok) return true
+    if (!again.gone) return true // the server didn't answer: try again later
+    await reset($)
+    $.ui.log(again.why && !/no longer shared/i.test(again.why) ? `Left ${room.host}'s session: ${again.why}` : `${room.host}'s session is no longer shared.`)
+    return false
+  }
+  const mode = await read($, modeA)
+  await reset($)
+  $.ui.log(mode === 'guest' ? `${room.host}'s session is no longer shared.` : 'Sharing ended: the room closed on the server. Press Share to start a new one.')
+  return false
+}
+
 function send($: $, type: string, body: Record<string, unknown>) {
   const last = outbox.at(-1)
   if (type === 'delta' && last?.type === 'delta' && last.body.turnId === body.turnId) {
@@ -685,11 +733,13 @@ async function flush($: $) {
       body: { events: batch },
     })
   } catch (error) {
-    if (isGone(error)) outbox = []
+    const reseated = error instanceof ApiError && error.status === 401 && (await read($, modeA)) === 'guest' && (await reseat($, room)).ok
+    if (isGone(error) && !reseated) outbox = []
     else {
       // Keep what matters and try again; live text is not worth replaying.
       outbox.unshift(...batch.filter(item => item.type !== 'delta'))
-      retry = true
+      retry = !reseated
+      if (reseated) scheduleFlush($, 0)
     }
   } finally {
     flushing = false
@@ -816,10 +866,10 @@ async function runStream($: $, generation: number) {
     if ([401, 404, 410].includes(status)) {
       // A server without streams answers the address itself with "Not found".
       if (status === 404 && refusal === 'Not found') return void startPolls($, generation, 'the server has no stream')
-      const mode = await read($, modeA)
-      await reset($)
-      $.ui.log(mode === 'guest' ? `${room.host}'s session is no longer shared.` : 'Sharing ended: the room closed on the server. Press Share to start a new one.')
-      return
+      // A guest whose seat was let go sits down again and reconnects at once.
+      if (!(await stillSeated($, room, status))) return
+      if (generation !== pollGeneration) return
+      if ((await read($, roomA))?.token !== room.token) continue
     }
     // The server ends every stream after a few minutes: pick it up again at
     // once. One that never got going, or ended soon after, backs off, so a
@@ -918,7 +968,10 @@ async function ridePage($: $, room: ShareRoom, cursor: number): Promise<EventsPa
     const events = after()
     return { seq: Math.max(cursor, ...events.map(e => e.seq)), events, people: await read($, peopleA), ended: streamEnded, title: room.title }
   }
-  return api<EventsPage>($, room.server, `/api/rooms/${room.id}/events?after=${cursor}&wait=${RIDE_WAIT_MS}&max=${PAGE_BYTES}`, { token: room.token })
+  // The seat's token as it is now: the room may have given this guest a new one.
+  const now = await read($, roomA)
+  const token = now?.id === room.id ? now.token : room.token
+  return api<EventsPage>($, room.server, `/api/rooms/${room.id}/events?after=${cursor}&wait=${RIDE_WAIT_MS}&max=${PAGE_BYTES}`, { token })
 }
 
 // Without a stream: poll, fast while something is happening, then less and
@@ -962,9 +1015,9 @@ async function pollOnce($: $, generation: number) {
   } catch (error) {
     if (generation !== pollGeneration) return
     if (isGone(error)) {
-      await reset($)
-      $.ui.log(mode === 'guest' ? `${room.host}'s session is no longer shared.` : 'Sharing ended: the room closed on the server. Press Share to start a new one.')
-      return
+      if (!(await stillSeated($, room, (error as ApiError).status))) return
+      if (generation !== pollGeneration) return
+      if ((await read($, roomA))?.token !== room.token) return void $.clock.after(0, () => void pollOnce($, generation))
     }
     pollFailures += 1
     if (pollFailures >= 2) await setConnection($, 'reconnecting')
@@ -985,10 +1038,13 @@ async function absorb($: $, room: ShareRoom, mode: ShareMode, event: ServerEvent
       await note({ ts: event.ts, who, kind: 'join' })
       if (live && !mine) $.ui.log(`${who} joined`)
       break
-    case 'leave':
-      await note({ ts: event.ts, who, kind: 'leave' })
-      if (live && !mine) $.ui.log(`${who} left`)
+    case 'leave': {
+      // The room let a quiet seat go: they're likely back in a moment.
+      const lost = body.reason === 'timeout'
+      await note({ ts: event.ts, who, kind: 'leave', text: lost ? 'timeout' : undefined })
+      if (live && !mine) $.ui.log(lost ? `${who} lost connection` : `${who} left`)
       break
+    }
     case 'prompt':
       if (typeof body.text === 'string') await note({ ts: event.ts, who, kind: 'prompt', text: body.text })
       if (live && !mine && mode === 'host') nudgeSidebar($)
@@ -1228,6 +1284,7 @@ async function reset($: $, opts: { keepSidebar?: boolean } = {}) {
   pendingGuestPrompts.length = 0
   await update($, modeA, () => 'idle')
   await update($, roomA, () => null)
+  void holdRoom($).catch(() => {})
   await update($, peopleA, () => [])
   await update($, workingA, () => null)
   await update($, activityA, () => [])
@@ -1284,9 +1341,12 @@ type DeskServer = 'ccd_session_mgmt' | 'ccd_sidebar' | 'ccd_view'
 // unanswered while a turn runs (the interactive terminal), holding up every
 // other call this plugin makes, so outside Desktop it isn't made at all.
 let inDesktop: boolean | undefined
-async function desk($: $, server: DeskServer, tool: string, args: Record<string, unknown>) {
+async function isDesktop($: $) {
   if (inDesktop === undefined) inDesktop = (await $.env.get('CLAUDE_CODE_ENTRYPOINT')) === 'claude-desktop'
-  if (!inDesktop) return null
+  return inDesktop
+}
+async function desk($: $, server: DeskServer, tool: string, args: Record<string, unknown>) {
+  if (!(await isDesktop($))) return null
   try {
     const result = await $.mcp.call(server, tool, args)
     const text = result.content.map(block => ('text' in block && typeof block.text === 'string' ? block.text : '')).join('')
@@ -1324,28 +1384,67 @@ let selfId = ''
 // through; the Room offers to add them when a pin was refused.
 const DESK_TOOLS = ['mcp__ccd_sidebar__set_pinned', 'mcp__ccd_sidebar__set_unread', 'mcp__ccd_session_mgmt__get_session', 'mcp__ccd_session_mgmt__set_session_title']
 
-// A pin refused (auto mode) is tried again after 20 s and a minute, then
-// said once, with the Room's way to allow it.
-async function setPinned($: $, pinned: boolean, attempt = 0) {
-  for (const id of [...new Set([selfId, 'self'].filter(Boolean))]) {
+// What the plugin tried when pinning, kept in the store (the last 30, every
+// session's) and the debug log: pins fail on other people's machines.
+const PIN_LOG = 'pinLog'
+async function notePin($: $, line: string) {
+  $.ui.log(`Shared session pin: ${line}`, { to: 'debug' })
+  try {
+    const log = ((await $.store.get(PIN_LOG)) as { at: number; line: string }[] | undefined) ?? []
+    await $.store.set(PIN_LOG, [...log, { at: await $.clock.now(), line: line.slice(0, 300) }].slice(-30))
+  } catch {}
+}
+
+// Desktop asks before its sidebar tools run, and its check that a call is
+// about the caller's own session misreads the id it is given, so in auto mode
+// a plugin's pin goes to the classifier, which often gives it no verdict. The
+// same call made with the person's own words for the press that asked for it
+// (`consent`: Share, a join, Allow pinning) is read as their request.
+async function pinAsAsked($: $, id: string, consent: string): Promise<boolean> {
+  let outcome: string
+  try {
+    const r = await $.tool.call({ tool: 'mcp__ccd_sidebar__set_pinned', session_id: id, pinned: true, consent })
+    outcome = r.deny ? `refused: ${r.deny}` : r.isError ? `error: ${String(r.text ?? '')}` : 'ok'
+  } catch (error) {
+    outcome = `unavailable: ${String((error as Error)?.message ?? error)}`
+  }
+  await notePin($, `as asked, ${id}: ${outcome}`)
+  return outcome === 'ok'
+}
+
+// Whether the row is as asked (or Desktop can't say).
+async function pinTook($: $, pinned: boolean) {
+  const after = await sessionInfo($, selfId || 'self')
+  return !after || (after.pinned === true) === pinned
+}
+
+// A pin refused (auto mode) is made again as the person's request, tried
+// again after 20 s and a minute, then said once, with the Room's way to allow it.
+async function setPinned($: $, pinned: boolean, attempt = 0, consent?: string) {
+  const place = await placeOf($)
+  for (const id of [...new Set([selfId, place, 'self'].filter(Boolean))]) {
     if ((await desk($, 'ccd_sidebar', 'set_pinned', { session_id: id, pinned })) === null) continue
-    const after = await sessionInfo($, selfId || 'self')
-    if (!after || (after.pinned === true) === pinned) {
+    if (await pinTook($, pinned)) {
       if (pinned && (await read($, pinRefusedA))) await update($, pinRefusedA, () => false)
       return
     }
   }
   if (!pinned) return
+  if (consent && (await isDesktop($)) && (await pinAsAsked($, selfId || place || 'self', consent)) && (await pinTook($, true))) {
+    if (await read($, pinRefusedA)) await update($, pinRefusedA, () => false)
+    return
+  }
   const retries = [20_000, 60_000]
   if (attempt < retries.length) {
     $.clock.after(retries[attempt] ?? 60_000, () => {
       // Still marked (still sharing or joined): try again.
       void read($, sidebarA)
-        .then(marked => (marked ? setPinned($, true, attempt + 1) : undefined))
+        .then(marked => (marked ? setPinned($, true, attempt + 1, consent) : undefined))
         .catch(() => {})
     })
     return
   }
+  await notePin($, 'refused after retries')
   await update($, pinRefusedA, () => true)
   $.ui.log("Shared session: Claude Code's auto mode didn't let this plugin pin the session in Claude's sidebar. Room → Allow pinning lets it from now on, or pin it by hand.")
 }
@@ -1364,11 +1463,12 @@ async function allowDeskTools($: $) {
     return void $.ui.toast("Couldn't change ~/.claude/settings.json")
   }
   $.ui.toast('Pinning allowed: shared sessions pin themselves again')
-  await setPinned($, true, 2)
+  await setPinned($, true, 2, 'The user pressed "Allow pinning" in the Shared Sessions Room panel, to pin this shared session in Claude\'s sidebar.')
 }
 
 // Marks this session's row: retitles it (keeping what it was) and pins it.
-async function markSidebar($: $, title: (current: string) => string) {
+// `consent` is the person's press that started it, in their words.
+async function markSidebar($: $, title: (current: string) => string, consent?: string) {
   const info = await sessionInfo($, 'self')
   if (info === null) return
   if (typeof info.sessionId === 'string') selfId = info.sessionId
@@ -1378,7 +1478,7 @@ async function markSidebar($: $, title: (current: string) => string) {
   const pinned = info.pinned === true
   if (!(await read($, sidebarA))) await update($, sidebarA, () => ({ title: current, pinned, id: selfId || undefined }))
   await desk($, 'ccd_session_mgmt', 'set_session_title', { session_id: 'self', title: title(current).slice(0, 120) })
-  if (!pinned) await setPinned($, true)
+  if (!pinned) await setPinned($, true, 0, consent)
 }
 
 // A title without the marks sharing and joining put in front of it.
@@ -1537,14 +1637,16 @@ async function share($: $, surface?: RenderSurface, opts: { history?: boolean; t
   const folder = cwd.split('/').filter(Boolean).at(-1) ?? 'session'
   const said = firstPrompt ? promptWords(firstPrompt) : ''
   const title = said ? `${folder}: ${said.slice(0, 80)}` : folder
-  const signedIn = opts.team === false ? null : await signInFor($, server)
-  const team = signedIn ? await shareTeam($, server) : null
+  // Signed in, the room knows the host by account (their other sessions are
+  // them); the team, unless sharing by link alone.
+  const signedIn = await signInFor($, server)
+  const team = signedIn && opts.team !== false ? await shareTeam($, server) : null
 
   const created = await api<{ id: string; url: string; token: string; seq: number; title: string; latest?: string; team?: { id: string; name: string } }>(
     $,
     server,
     '/api/rooms',
-    { method: 'POST', body: { name, title, fromNow: opts.history === false || undefined, team: team?.id }, account: team ? signedIn?.token : undefined },
+    { method: 'POST', body: { name, title, fromNow: opts.history === false || undefined, team: team?.id }, account: signedIn?.token },
   )
   const room: ShareRoom = {
     server,
@@ -1579,7 +1681,8 @@ async function share($: $, surface?: RenderSurface, opts: { history?: boolean; t
   const access = room.team ? ((await read($, teamsA)).teams.find(x => x.id === room.team?.id) ?? null) : null
   $.ui.log(`Sharing${opts.history === false ? ' from now on' : ''}${room.team ? ` with ${room.team.name}` : ''}. ${whoJoins(room, access)}: ${room.url}`)
   if (room.team) void refreshTeams($).catch(() => {})
-  await markSidebar($, current => `👥 Live · ${current || room.title}`)
+  void holdRoom($).catch(() => {})
+  await markSidebar($, current => `👥 Live · ${current || room.title}`, "The user chose to share this session with the Shared Sessions plugin; a shared session is pinned in Claude's sidebar while it's shared.")
   return room
 }
 
@@ -2018,7 +2121,8 @@ async function join($: $, server: string, id: string) {
       open.set(e.body.pid, e)
     }
     startFeed($)
-    await markSidebar($, () => `👥 ${room.host} · ${room.title}`)
+    void holdRoom($).catch(() => {})
+    await markSidebar($, () => `👥 ${room.host} · ${room.title}`, `The user chose to join ${room.host}'s shared session with the Shared Sessions plugin; a joined session is pinned in Claude's sidebar.`)
     return {
       room,
       history: exchanges(past.map(e => e.body as unknown as Row), joined.host),
@@ -3054,11 +3158,14 @@ async function view($: $): Promise<View> {
 }
 
 // One face per name (a person in two sessions is still one person).
+// This session's own entry: its seat, or one of the seats of the person it is.
+const isMe = (p: SharePerson, me: string) => p.id === me || Boolean(p.seats?.includes(me))
+
 function faces(v: View): Face[] {
   const seen = new Map<string, Face>()
   for (const p of v.everyone) {
     const known = seen.get(p.name)
-    const note = [p.role === 'host' ? 'host' : '', p.id === v.me ? 'you' : '', p.online ? '' : 'away'].filter(Boolean).join(' · ')
+    const note = [p.role === 'host' ? 'host' : '', isMe(p, v.me) ? 'you' : '', p.online ? '' : 'away'].filter(Boolean).join(' · ')
     const face: Face = { name: p.name, online: p.online || Boolean(known?.online), note, active: v.working?.by === p.name, version: p.version ?? known?.version }
     if (!known || (!known.online && p.online)) seen.set(p.name, face)
   }
@@ -3069,7 +3176,7 @@ function faces(v: View): Face[] {
 }
 
 function presence(v: View): string {
-  const others = [...new Set(v.everyone.filter(p => p.online && p.role === 'guest' && p.id !== v.me).map(p => p.name))]
+  const others = [...new Set(v.everyone.filter(p => p.online && p.role === 'guest' && !isMe(p, v.me)).map(p => p.name))]
   // "Sharing with Acme" already says with: the people are just here.
   if (v.mode === 'host' && v.room?.team) return others.length ? `${listNames(others)} here` : 'no one has joined yet'
   if (v.mode === 'host') return others.length ? `with ${listNames(others)}` : 'waiting for people to join'
@@ -3098,7 +3205,7 @@ function describe(a: ShareActivity): string {
     case 'join':
       return `${a.who} joined`
     case 'leave':
-      return `${a.who} left`
+      return a.text === 'timeout' ? `${a.who} lost connection` : `${a.who} left`
     case 'prompt':
       return `${a.who} asked “${(a.text ?? '').replace(/\s+/g, ' ').slice(0, 70)}${(a.text ?? '').length > 70 ? '…' : ''}”`
     case 'allowed':
@@ -3315,6 +3422,7 @@ async function refreshTeams($: $) {
           api<{ members: ShareTeams['members'] }>($, server, `/api/teams/${current}`, { token: saved.token }).then(r => r.members),
         ])
       : [[], []]
+    const here = Object.fromEntries((await holdsElsewhere($).catch(() => [])).map(h => [h.room, h.mode]))
     await update($, teamsA, t => ({
       ...t,
       server,
@@ -3322,6 +3430,7 @@ async function refreshTeams($: $) {
       account: me.account,
       teams: me.teams,
       teammates: me.teammates ?? [],
+      here,
       current,
       byLink: saved.current === null,
       sessions,
@@ -3469,6 +3578,54 @@ async function openTeam($: $) {
   }
 }
 
+// Which sessions on this computer are in which room, so one person isn't in
+// the same room twice: the Team panel, an invite and a pasted link open the
+// session that's already in it instead. Each session writes its entry
+// (`live:<room>:<session>`) when it shares or joins and every minute after;
+// one not written for three minutes went away.
+const LIVE_KEY = 'live:'
+const LIVE_STALE_MS = 3 * 60_000
+type LiveHold = { room: string; session: string; place: string; mode: 'host' | 'guest'; title: string; host: string; at: number }
+
+async function holdRoom($: $) {
+  const session = await $.session.id()
+  const room = await read($, roomA)
+  const mode = await read($, modeA)
+  const mine = room && mode !== 'idle' ? `${LIVE_KEY}${room.id}:${session}` : ''
+  for (const key of await $.store.keys()) if (key.startsWith(LIVE_KEY) && key.endsWith(`:${session}`) && key !== mine) await $.store.delete(key)
+  if (!room || mode === 'idle') return
+  await $.store.set(mine, { room: room.id, session, place: await placeOf($), mode, title: room.title, host: room.host, at: await $.clock.now() } satisfies LiveHold)
+}
+
+// Every room another live session here is in (`only`: just that one).
+async function holdsElsewhere($: $, only?: string): Promise<LiveHold[]> {
+  const session = await $.session.id()
+  const now = await $.clock.now()
+  const found: LiveHold[] = []
+  for (const key of await $.store.keys()) {
+    if (!key.startsWith(only ? `${LIVE_KEY}${only}:` : LIVE_KEY) || key.endsWith(`:${session}`)) continue
+    const hold = (await $.store.get(key)) as LiveHold | undefined
+    if (!hold || now - hold.at > LIVE_STALE_MS) await $.store.delete(key)
+    else found.push(hold)
+  }
+  return found.sort((a, b) => b.at - a.at)
+}
+
+const heldElsewhere = async ($: $, roomId: string) => (await holdsElsewhere($, roomId))[0] ?? null
+
+// Brings up the session that's in it: Claude Desktop opens it by its id. A
+// terminal session can't be brought up from here.
+async function openHeld($: $, hold: LiveHold): Promise<boolean> {
+  if (!hold.place || !(await isDesktop($))) return false
+  return openExternal($, `claude://claude.ai/epitaxy/${hold.place}`)
+}
+
+// What's said when a join finds a session here already in that room.
+function alreadyIn(hold: LiveHold, opened: boolean): string {
+  const where = hold.mode === 'host' ? "That's your own shared session, open in another Claude Code session" : `You're already in ${hold.host}'s session, in another Claude Code session`
+  return `${where}${opened ? ': it just opened' : ` (“${tidyTitle(hold.title)}”)`}.`
+}
+
 // Joins sessions from the Team panel. The first joins here when this
 // session is fresh; otherwise Claude Desktop opens a new session with its
 // link ready (Desktop fills the prompt, the person presses Enter). Desktop
@@ -3482,7 +3639,14 @@ const deepLink = (url: string) => `claude://code/new?q=${encodeURIComponent(url)
 
 async function joinFromTeam($: $, sessions: ShareTeamSession[], surface?: RenderSurface) {
   const room = await read($, roomA)
-  const [first, ...rest] = sessions.filter(s => s.id !== room?.id)
+  // A room a session here is already in opens there; Join all skips it.
+  const list: ShareTeamSession[] = []
+  for (const s of sessions.filter(s => s.id !== room?.id)) {
+    const hold = await heldElsewhere($, s.id)
+    if (!hold) list.push(s)
+    else if (sessions.length === 1) return void $.ui.toast(alreadyIn(hold, await openHeld($, hold)))
+  }
+  const [first, ...rest] = list
   if (!first) return
   const fresh = (await read($, modeA)) === 'idle' && !localTurnActive && (await earlierPrompts($)) === 0
   const desktop = (await $.env.get('CLAUDE_CODE_ENTRYPOINT')) === 'claude-desktop'
@@ -3514,6 +3678,13 @@ async function continueJoins($: $, joined: string) {
   }
   await $.store.set(JOIN_QUEUE, { current: next.id, rest, at: now } satisfies JoinQueue)
   await openExternal($, deepLink(next.url))
+}
+
+// The Team panel's Open: the session here that's in that room.
+async function openHere($: $, roomId: string) {
+  const hold = await heldElsewhere($, roomId)
+  if (!hold) return void $.ui.toast('That session has closed')
+  if (!(await openHeld($, hold))) $.ui.toast(alreadyIn(hold, false))
 }
 
 // In a fresh session: join, and the first turn says so and plays back what
@@ -3873,6 +4044,8 @@ export const register: Register = (on, options) => {
       .then(server => signInFor($, server))
       .then(saved => (saved ? refreshTeams($) : undefined))
       .catch(() => {})
+    // This session's room, for the others here (`holdRoom`): kept fresh.
+    $.clock.every(60_000, () => void holdRoom($).catch(() => {}))
     // Invites teammates sent: a look every 10 s at the machine's shared copy.
     $.clock.after(2_000, () => void pollInvites($).catch(() => {}))
     $.clock.every(10_000, () => void pollInvites($).catch(() => {}))
@@ -3896,6 +4069,7 @@ export const register: Register = (on, options) => {
     if (room && (await read($, modeA)) === 'guest') await readyReplay($)
     if (!room) await resumeHosting($).catch(error => $.ui.log(`Couldn't pick the shared session back up: ${String(error?.message ?? error)}`))
     if (!(await read($, roomA))) await resumeJoined($).catch(error => $.ui.log(`Couldn't get back into the shared session: ${String(error?.message ?? error)}`))
+    void holdRoom($).catch(() => {})
     return started
   })
 
@@ -3911,6 +4085,10 @@ export const register: Register = (on, options) => {
     if (mode === 'guest') {
       if (e.reason === 'clear' || e.reason === 'logout') await leave($).catch(() => {})
       else await keepJoined($, e.sessionId).catch(() => {})
+    }
+    // Closed, it's in no room for the other sessions here (`holdRoom`).
+    for (const key of await $.store.keys().catch(() => [] as string[])) {
+      if (key.startsWith(LIVE_KEY) && key.endsWith(`:${e.sessionId}`)) await $.store.delete(key).catch(() => {})
     }
     return next(e)
   })
@@ -3989,6 +4167,15 @@ export const register: Register = (on, options) => {
       localTurnActive = true // nothing else plays out before this answer
     }
     if (link?.[1] && link[2] && mode !== 'host' && PERSON.has(e.origin.kind)) {
+      // Already in it in another session here: that one opens. Pasted again
+      // soon after, it joins here too.
+      const now = await $.clock.now()
+      const hold = (await read($, roomA))?.id === link[2] ? null : await heldElsewhere($, link[2]).catch(() => null)
+      if (hold && !(pastedAgain?.id === link[2] && now - pastedAgain.at < 2 * 60_000)) {
+        pastedAgain = { id: link[2], at: now }
+        answerWith({ kind: 'note', text: `${alreadyIn(hold, await openHeld($, hold))} Paste the link again to join here as well.`, then: [] })
+        return next(e)
+      }
       // The link stays in the transcript as typed; the reply says what joining
       // did, then what happened before plays back, all without a model call.
       try {
@@ -4759,12 +4946,17 @@ export const register: Register = (on, options) => {
     }
 
     const owner = team.role === 'owner'
-    const joinable = t.sessions.filter(s => s.id !== room?.id && s.hostOnline && !(s.hostAccount === account.id && mode === 'host'))
+    // You're one person across sessions: what you share or are in already
+    // isn't offered again (another session here opens instead).
+    const here = t.here ?? {}
+    const yours = (s: ShareTeamSession) => s.hostAccount === account.id || Boolean(here[s.id]) || Boolean(s.accounts?.includes(account.id))
+    const joinable = t.sessions.filter(s => s.id !== room?.id && s.hostOnline && !yours(s))
     const invite = inviteUrl(t, team)
     const sessionRow = (s: ShareTeamSession) => {
       const mine = s.hostAccount === account.id
       const inIt = room?.id === s.id
-      const others = s.people.filter(n => n !== s.host)
+      const inElsewhere = !inIt && !mine && (Boolean(here[s.id]) || Boolean(s.accounts?.includes(account.id)))
+      const others = s.people.filter(n => n !== s.host && !(inElsewhere && n === account.name))
       const canJoin = joinable.includes(s)
       return (
         <Box key={`ts-${s.id}`} flexDirection="row" gap={1} alignItems="center" justifyContent="space-between">
@@ -4775,13 +4967,15 @@ export const register: Register = (on, options) => {
                 {tidyTitle(s.title)}
               </Text>
               <Text dimColor wrap="truncate-end">
-                {[mine ? 'You' : s.host, s.hostOnline ? `shared ${ago(s.createdAt, now)}` : 'away', others.length ? `with ${listNames(others)}` : ''].filter(Boolean).join(' · ')}
+                {[mine ? 'You' : s.host, s.hostOnline ? `shared ${ago(s.createdAt, now)}` : 'away', others.length ? `with ${listNames(others)}` : '', inElsewhere ? (here[s.id] ? "you're in it in another session" : "you're in it elsewhere") : ''].filter(Boolean).join(' · ')}
               </Text>
             </Box>
           </Box>
           <Box flexShrink={0}>
             {inIt ? (
               <Text dimColor>{mode === 'host' ? 'This session' : "You're in it"}</Text>
+            ) : here[s.id] ? (
+              <Button key={`open-${s.id}`} label="Open" plain onPress={() => void openHere($, s.id)} />
             ) : canJoin ? (
               <Button key={`join-${s.id}`} label="Join" variant={joinable.length === 1 ? 'primary' : undefined} onPress={press => void joinFromTeam($, [s], press.surface)} />
             ) : mine ? null : (
@@ -5416,7 +5610,8 @@ export const register: Register = (on, options) => {
       }
       // Sessions teammates share now, a press from joining in the Team panel.
       const t = await read($, teamsA)
-      const live = t.account ? t.sessions.filter(s => s.hostOnline && s.hostAccount !== t.account?.id).length : 0
+      const me = t.account?.id
+      const live = me ? t.sessions.filter(s => s.hostOnline && s.hostAccount !== me && !t.here?.[s.id] && !s.accounts?.includes(me)).length : 0
       return (
         <Box flexDirection="row" justifyContent="flex-end" gap={1} paddingRight={e.surface === 'terminal' ? 4 : 0}>
           <Button key="team" label={live ? `Team · ${live} live` : 'Team'} plain dimColor={!live} onPress={() => void openTeam($)} />

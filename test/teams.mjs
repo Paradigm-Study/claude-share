@@ -69,8 +69,6 @@ try {
   ok(anon.status === 403 && anon.data.signIn === true, 'no account: refused, asked to sign in')
   const cj = await call(`/api/rooms/${room.id}/join`, { method: 'POST', acct: carol, body: { name: 'Carol' } })
   ok(cj.status === 403 && !cj.data.signIn, `Carol refused: ${cj.data.error}`)
-  const bj = await call(`/api/rooms/${room.id}/join`, { method: 'POST', acct: bob, body: { name: 'Bob' } })
-  ok(bj.status === 200 && bj.data.team?.name === 'Acme', 'Bob joins')
   // Invites to a session, straight to a teammate's Claude Code.
   const bobId = (await call('/api/me', { tok: bob })).data.account.id
   const carolId = (await call('/api/me', { tok: carol })).data.account.id
@@ -80,7 +78,18 @@ try {
   const pending = (await call('/api/me/invites', { tok: bob })).data.invites
   ok(pending.length === 1 && pending[0].room.url === room.url && pending[0].from.name === 'Alice', 'the teammate sees the invite, from whom and to what')
   ok((await call('/api/me/invites', { tok: carol })).data.invites.length === 0, 'nobody else does')
+  const bj = await call(`/api/rooms/${room.id}/join`, { method: 'POST', acct: bob, body: { name: 'Bob' } })
+  ok(bj.status === 200 && bj.data.team?.name === 'Acme', 'Bob joins')
   ok((await call(`/api/rooms/${room.id}/invite`, { method: 'POST', tok: bj.data.token, acct: bob, body: { to: [carolId] } })).status === 403, "a guest can't invite")
+  ok((await call('/api/me/invites', { tok: bob })).data.invites.length === 0, "an invite to a session you're already in isn't shown")
+  // Bob from a second session: one Bob, here if either is, and no second "joined".
+  const bj2 = await call(`/api/rooms/${room.id}/join`, { method: 'POST', acct: bob, body: { name: 'Bob' } })
+  const people = (await call(`/api/rooms/${room.id}`)).data.people
+  ok(bj2.status === 200 && people.filter(p => p.name === 'Bob').length === 1 && people.find(p => p.name === 'Bob').seats.length === 2, 'one person in two sessions is one entry, with both seats')
+  const joins = (await call(`/api/rooms/${room.id}/events?after=0&wait=0`, { tok: room.token })).data.events.filter(e => e.type === 'join' && e.from.name === 'Bob')
+  ok(joins.length === 1, 'and joined once')
+  const listed = (await call(`/api/teams/${team.id}/sessions`, { tok: bob })).data.sessions[0]
+  ok(listed.accounts.includes(bobId), "the team's list says who's in it by account")
   await call(`/api/me/invites/${room.id}`, { method: 'DELETE', tok: bob })
   ok((await call('/api/me/invites', { tok: bob })).data.invites.length === 0, 'a dismissed invite is gone')
   await call(`/api/rooms/${room.id}/invite`, { method: 'POST', tok: room.token, acct: alice, body: { to: [bobId] } })
@@ -117,6 +126,23 @@ try {
   ok((await call('/api/me', { method: 'DELETE', tok: carol2 })).status === 200 && (await call('/api/me', { tok: carol2 })).status === 401, 'Carol deletes her account')
   ok((await call('/api/auth/logout', { method: 'POST', tok: bob })).status === 200 && (await call('/api/me', { tok: bob })).status === 401, 'Bob signs out')
   ok((await call('/auth/github/start?login=' + 'x'.repeat(24))).status === 200, 'unconfigured provider says so')
+
+  // A guest away past the grace (asleep, offline): its token seats it again.
+  const { Room } = await import('../server/core.mjs')
+  const r0 = Room.create({ id: 'r0', name: 'Host', title: 't', now: 0 })
+  const kyle = r0.join('Kyle', 0, '0.11.8')
+  const lee = r0.join('Lee', 0)
+  r0.leave(lee.token, 'left', 1_000)
+  r0.sweep(60_000)
+  ok(!r0.seats.has(kyle.token), 'a quiet seat is let go after its grace')
+  const r1 = new Room(JSON.parse(JSON.stringify(r0))) // as a room loaded back from storage
+  const back = r1.auth(kyle.token, 61_000)
+  ok(back?.seat === kyle.seat.id && r1.people(61_000).some(p => p.name === 'Kyle' && p.online), 'and comes back with its token, the same seat, after a restart too')
+  ok(r1.events.filter(e => e.type === 'join' && e.from.name === 'Kyle').length === 2, "its coming back says it joined")
+  ok(r1.auth(lee.token, 61_000) === null, 'a seat that left stays out')
+  r1.sweep(200_000)
+  r1.end(200_001)
+  ok(r1.auth(kyle.token, 200_002) === null, 'nobody comes back to an ended room')
 } finally {
   srv.kill()
 }
