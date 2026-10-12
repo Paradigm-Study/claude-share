@@ -47,6 +47,7 @@ import {
   previewSocketTarget,
   announceSocket,
   hostSocketAllowed,
+  noteVersion,
   sendableClose,
 } from './core.mjs'
 import { Directory, providersFrom } from './teams.mjs'
@@ -298,7 +299,8 @@ export class RoomObject {
     if (!auth) return json({ error: 'Not a member of this session.' }, 401)
     // A seat let go for being quiet came back: kept (storage writes finish
     // before the answer goes out).
-    if (this.room.seats.size !== seated) void this.persist()
+    // …and which plugin it runs now: a stream says it as any request does.
+    if (noteVersion(this.room, req, auth) || this.room.seats.size !== seated) void this.persist()
     if (this.room.endedAt) return json({ error: 'This session is no longer shared.' }, 410)
     const [client, server] = Object.values(new WebSocketPair())
     this.state.acceptWebSocket(server, [auth.seat])

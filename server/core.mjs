@@ -419,6 +419,20 @@ export function outdatedClient(req) {
 }
 
 // The plugin version a request says it comes from, when it says one plainly.
+// Records which plugin a request's sender runs now, and tells the room when
+// it changed; true when it did. Every request says it, a stream's too: someone
+// only listening is as current in the Room's list as someone posting.
+export function noteVersion(room, req, auth) {
+  const version = clientVersion(req)
+  if (!version) return false
+  const seat = auth.role === 'guest' ? room.seats.get(bearerOf(req)) : null
+  const before = auth.role === 'host' ? room.host.version : seat?.version
+  if (auth.role === 'host') room.host.version = version
+  else if (seat) seat.version = version
+  if (before && version !== before) room.wake()
+  return version !== before
+}
+
 export function clientVersion(req) {
   const v = req.headers.get('x-shared-session-version') ?? ''
   return /^\d{1,4}\.\d{1,4}\.\d{1,6}$/.test(v) ? v : null
@@ -627,12 +641,7 @@ async function handleRoom(room, req, rest, now, origin, ctx) {
   // Which plugin each one runs now (an update and a restart change it): a
   // guest's plugin says what an older host's can't show, and the Room who
   // needs to update.
-  const version = clientVersion(req)
-  const seat = auth.role === 'guest' ? room.seats.get(bearerOf(req)) : null
-  const before = auth.role === 'host' ? room.host.version : seat?.version
-  if (version && auth.role === 'host') room.host.version = version
-  else if (version && seat) seat.version = version
-  if (version && before && version !== before) room.wake()
+  noteVersion(room, req, auth)
 
   const files = await fileRoutes(room, req, rest, auth, now)
   if (files) return files
