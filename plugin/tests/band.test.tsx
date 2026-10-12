@@ -1189,3 +1189,47 @@ test('a host signed in has Invite in the row, and an empty team says how to fill
   await asked.clock.advance(50)
   expect((await row.find({ key: 'invite' }))?.props.label).toBe('Invite')
 })
+
+test('a new invite raises one desktop notification for the machine, not again at the next look', async ($, on) => {
+  const asked = world(on, { team: { signedIn: true }, invites: [INVITE] })
+  on('ui.notify', () => ({ value: { isSent: false as const, reason: 'no-surface' as const } })) // Claude Desktop: no terminal
+  on('session.start', ($, e) => ({ cwd: e.cwd }))
+  await $.session.start(START)
+  await asked.clock.advance(2_100) // the first look, 2 s after start
+  await eventually(asked.clock, () => asked.spawned.some(s => s.input?.includes('display notification')))
+  const raised = asked.spawned.filter(s => s.input?.includes('display notification'))
+  expect(raised.length).toBe(1)
+  expect(raised[0]?.input).toContain('with title "Sam invites you"')
+  expect(raised[0]?.input).toContain('demo: fix the build')
+  await asked.clock.advance(31_000) // the next look at the server: the same invite
+  await asked.clock.advance(10_000)
+  expect(asked.spawned.filter(s => s.input?.includes('display notification')).length).toBe(1)
+})
+
+test("a terminal that notifies gets it on its own channel; turned off, nothing", async ($, on) => {
+  const asked = world(on, { team: { signedIn: true }, invites: [INVITE] })
+  const notified: string[] = []
+  on('ui.notify', ($, e) => {
+    notified.push(`${e.title}: ${e.text}`)
+    return { value: { isSent: true as const, channel: 'iterm2' as const } }
+  })
+  on('session.start', ($, e) => ({ cwd: e.cwd }))
+  await $.session.start(START)
+  await asked.clock.advance(2_100)
+  await eventually(asked.clock, () => notified.length > 0)
+  expect(notified[0]).toContain('Sam invites you')
+  expect(asked.spawned.some(s => s.input?.includes('display notification'))).toBe(false)
+})
+
+test('invites can be just shown, without a notification', async ($, on) => {
+  const asked = world(on, { team: { signedIn: true }, invites: [INVITE], store: { inviteNotify: false } })
+  on('ui.notify', () => ({ value: { isSent: false as const, reason: 'no-surface' as const } }))
+  on('session.start', ($, e) => ({ cwd: e.cwd }))
+  await $.session.start(START)
+  await asked.clock.advance(2_100)
+  await eventually(asked.clock, () => asked.urls.some(u => u.includes('/api/me/invites')))
+  await asked.clock.advance(100)
+  expect(asked.spawned.some(s => s.input?.includes('display notification'))).toBe(false)
+  const row = await $.ui.mount(band('desktop'))
+  expect(await row.find({ type: 'Text', text: 'Sam invites you' })).toBeDefined() // still shown
+})

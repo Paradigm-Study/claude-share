@@ -3681,7 +3681,11 @@ async function teamCommand($: $, args: string): Promise<{ text: string }> {
 
 const INVITES_KEY = 'sessionInvites'
 const INVITES_EVERY_MS = 30_000
-type InviteCache = { at: number; server: string; list: ShareInvite[] }
+// `notified`: the invites this machine already raised a notification for.
+type InviteCache = { at: number; server: string; list: ShareInvite[]; notified?: string[] }
+const inviteKey = (i: ShareInvite) => `${i.room.id}@${i.at}`
+// Whether a new invite raises a desktop notification (machine-wide, on unless turned off).
+const NOTIFY_KEY = 'inviteNotify'
 
 const sameInvites = (a: ShareInvite[], b: ShareInvite[]) =>
   a.length === b.length && a.every((x, i) => x.room.id === b[i]?.room.id && x.at === b[i]?.at && x.room.title === b[i]?.room.title)
@@ -3703,13 +3707,43 @@ async function pollInvites($: $) {
   let list = cache?.server === server ? cache.list : []
   if (!cache || cache.server !== server || now - cache.at >= INVITES_EVERY_MS) {
     // Claimed first, so the machine's other sessions wait for this answer.
-    await $.store.set(INVITES_KEY, { at: now, server, list } satisfies InviteCache).catch(() => {})
+    const notified = cache?.server === server ? (cache.notified ?? []) : []
+    await $.store.set(INVITES_KEY, { at: now, server, list, notified } satisfies InviteCache).catch(() => {})
     try {
       list = (await api<{ invites: ShareInvite[] }>($, server, '/api/me/invites', { token: saved.token })).invites
-      await $.store.set(INVITES_KEY, { at: now, server, list } satisfies InviteCache).catch(() => {})
+      // The session that fetched raises the notifications, once per invite for the machine.
+      const fresh = list.filter(i => !notified.includes(inviteKey(i)))
+      await $.store.set(INVITES_KEY, { at: now, server, list, notified: list.map(inviteKey) } satisfies InviteCache).catch(() => {})
+      if (fresh.length && (await $.store.get(NOTIFY_KEY).catch(() => undefined)) !== false) {
+        for (const invite of fresh.slice(0, 3)) await notifyInvite($, invite).catch(() => {})
+      }
     } catch {}
   }
   if (!sameInvites(await read($, invitesA), list)) await update($, invitesA, () => list)
+}
+
+// A desktop notification for an invite: the terminal's own channel where
+// there is one (iTerm2, kitty, Ghostty); else (Claude Desktop, other
+// terminals) the system's: macOS's notification centre, or notify-send.
+async function notifyInvite($: $, invite: ShareInvite) {
+  const title = `${invite.from.name} invites you`
+  const body = `${invite.room.title} · Join it from Claude Code, above the prompt`
+  const sent = await $.ui.notify(body, { title }).catch(() => null)
+  if (sent?.isSent) return
+  // A test's sessions (SHARED_SESSION_NO_BROWSER=1) open and raise nothing on the machine.
+  if ((await $.env.get('SHARED_SESSION_NO_BROWSER')) === '1') return
+  const as = (text: string) => `"${text.slice(0, 200).replace(/[\\"]/g, c => `\\${c}`)}"`
+  await sh(
+    $,
+    [
+      'if command -v osascript >/dev/null 2>&1; then',
+      `  osascript -e ${sq(`display notification ${as(body)} with title ${as(title)} subtitle "Shared Sessions"`)} >/dev/null 2>&1`,
+      'elif command -v notify-send >/dev/null 2>&1; then',
+      `  notify-send ${sq(title)} ${sq(body)} >/dev/null 2>&1`,
+      'fi',
+      '',
+    ].join('\n'),
+  )
 }
 
 // An invite answered (joined or set aside): gone here, in the machine's other
@@ -4858,6 +4892,20 @@ export const register: Register = (on, options) => {
           'You',
           '',
           <Box flexDirection="column" gap={1}>
+            {Select
+              ? setting(
+                  'Invites to a session',
+                  <Select
+                    key="invite-notify"
+                    value={(await $.store.get(NOTIFY_KEY).catch(() => undefined)) === false ? 'quiet' : 'notify'}
+                    options={[
+                      { value: 'notify', label: 'Notify me' },
+                      { value: 'quiet', label: 'Just show them' },
+                    ]}
+                    onSelect={(value: string) => void $.store.set(NOTIFY_KEY, value !== 'quiet').then(() => $.ui.invalidate('ui.render'))}
+                  />,
+                )
+              : null}
             {accountRow}
             {t.creating ? newTeam(true) : null}
             {t.error ? <Text dimColor>{t.error}</Text> : null}
