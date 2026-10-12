@@ -191,6 +191,10 @@ declare module 'claude-code' {
       invited: Record<string, number>
       /** Claude Code (auto mode) wouldn't let this session be pinned: the Room offers to allow it. */
       pinRefused: boolean
+      /** The Room's page showing: who's here, the chat, what Claude showed, or the settings. */
+      roomTab: 'people' | 'chat' | 'shown' | 'settings'
+      /** The Team panel's page showing: live sessions, the team's people, or the settings. */
+      teamTab: 'live' | 'people' | 'settings'
     }
   }
 }

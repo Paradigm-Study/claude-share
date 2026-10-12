@@ -417,20 +417,28 @@ test("a joined session hears the room through curl's stream, and never polls it"
 
 const PANE = { title: 'Shared session', isFocused: false, bodyColumns: 60, placement: 'dock', scroll: { offset: 0, bodyRows: 40 }, view: {} } as never
 
-test('the Room shows the banner, everyone, activity and the chat', async ($, on) => {
+test('the Room shows the session on top, then its pages: people, chat, settings', async ($, on) => {
   const asked = world(on)
   await $.prompt.submit({ text: LINK, origin: { kind: 'composer' }, wait: false })
   for (const surface of SURFACES) {
     const ui = await $.ui.mount({ plugin: 'shared-session', surface, component: 'Pane', requestId: 'shared-room', props: PANE })
+    await ui.press({ key: 'tab-people' }) // the page last left open is kept
     const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text)
     expect(Boolean(await ui.find({ type: 'Svg' }))).toBe(surface === 'desktop')
+    expect(await ui.find({ type: 'Text', text: /Live/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /Sam's session · 3 here/ })).toBeDefined()
+    // People first: everyone, each in their own color.
     for (const name of ['Sam', 'scott', 'Alex']) expect(texts).toContain(name)
-    expect(texts).toContain('People')
-    expect(texts).toContain('3 here')
-    expect(texts).toContain('Chat')
-    expect(texts).toContain("Claude doesn't read this")
+    const colors = new Set((await ui.findAll({ type: 'Text' })).filter(t => ['Sam', 'scott', 'Alex'].includes(t.text ?? '')).map(t => t.props.color))
+    expect(colors.size).toBe(3)
+    // The chat: its own page, which says Claude doesn't read it.
+    await ui.press({ key: 'tab-chat' })
+    expect((await ui.find({ key: 'chat-input-0' }))?.props.placeholder).toMatch(/Claude doesn't read this/)
+    // Settings: the guest's own, and Leave; the host's are the host's alone.
+    await ui.press({ key: 'tab-settings' })
     expect(await ui.find({ key: 'room-leave' })).toBeDefined()
-    expect(await ui.find({ key: 'policy-prompts' })).toBeUndefined() // the host's alone
+    expect(await ui.find({ key: 'policy-prompts' })).toBeUndefined()
+    await ui.press({ key: 'tab-chat' })
     await ui.input({ key: 'chat-input-0', text: 'hello room' })
     await asked.clock.advance(100) // the send waits a beat to batch
     await ui.unmount()
@@ -443,11 +451,12 @@ test('the host can make the session watch-only from the Room', async ($, on) => 
   const band0 = await $.ui.mount(band('desktop'))
   await band0.press({ key: 'share' })
   const ui = await $.ui.mount({ plugin: 'shared-session', surface: 'desktop', component: 'Pane', requestId: 'shared-room', props: PANE })
+  await ui.press({ key: 'tab-settings' })
   expect(await ui.find({ key: 'room-stop' })).toBeDefined()
   await ui.select({ key: 'policy-prompts', value: 'watch' })
   await asked.clock.advance(100)
   const row = await $.ui.mount(band('desktop'))
-  expect(await row.find({ type: 'Text', text: /Watch-only/ })).toBeDefined()
+  expect(await row.find({ type: 'Text', text: /watch-only/ })).toBeDefined()
   expect(asked).toContain('POST /api/rooms/room0000000000000002/events')
 })
 
@@ -492,8 +501,10 @@ test("a pin the app won't take is tried again, then the Room offers to allow it"
   await asked.clock.advance(20_100)
   await asked.clock.advance(60_100)
   expect(calls.filter(c => c.startsWith('set_pinned')).length).toBeGreaterThanOrEqual(3) // first, after 20 s, after a minute
-  expect(asked.logged.some(line => line.includes("didn't let this plugin pin the session"))).toBe(true)
+  expect(await ui.find({ key: 'band-allow-pin' })).toBeDefined() // said in the row, not the transcript
   const pane = await $.ui.mount({ plugin: 'shared-session', surface: 'desktop', component: 'Pane', requestId: 'shared-room', props: PANE })
+  expect((await pane.find({ key: 'tab-settings' }))?.props.label).toBe('Settings ●') // something to see there
+  await pane.press({ key: 'tab-settings' })
   await pane.press({ key: 'allow-pin' })
   const settings = JSON.parse(asked.files.get('/home/scott/.claude/settings.json') ?? '{}')
   expect(settings.permissions.allow).toEqual(['Bash(npm test)', 'mcp__ccd_sidebar__set_pinned', 'mcp__ccd_sidebar__set_unread', 'mcp__ccd_session_mgmt__get_session', 'mcp__ccd_session_mgmt__set_session_title'])
@@ -556,6 +567,7 @@ test('a host who keeps what Claude shows sends nothing', async ($, on) => {
   const ui = await $.ui.mount(band('desktop'))
   await ui.press({ key: 'share' })
   const pane = await $.ui.mount({ plugin: 'shared-session', surface: 'desktop', component: 'Pane', requestId: 'shared-room', props: PANE })
+  await pane.press({ key: 'tab-settings' })
   await pane.select({ key: 'policy-files', value: 'off' })
   await $.tool.call({ tool: 'SendUserFile', files: ['chart.html'], display: 'render', status: 'normal' } as never)
   await asked.clock.advance(200)
@@ -604,6 +616,8 @@ test('a guest sees what the host showed in the Room, with Open', async ($, on) =
   await $.prompt.submit({ text: LINK, origin: { kind: 'composer' }, wait: false })
   await asked.clock.advance(10)
   const pane = await $.ui.mount({ plugin: 'shared-session', surface: 'desktop', component: 'Pane', requestId: 'shared-room', props: PANE })
+  expect((await pane.find({ key: 'tab-shown' }))?.props.label).toBe('Shown 1')
+  await pane.press({ key: 'tab-shown' })
   expect(await pane.find({ type: 'Text', text: /chart\.html/ })).toBeDefined()
   expect(await pane.find({ key: 'open-seq:2' })).toBeDefined()
 })
@@ -672,6 +686,7 @@ test("a guest saves a page and the files beside it in a folder of its own, and o
   await $.prompt.submit({ text: LINK, origin: { kind: 'composer' }, wait: false })
   await asked.clock.advance(10)
   const pane = await $.ui.mount({ plugin: 'shared-session', surface: 'desktop', component: 'Pane', requestId: 'shared-room', props: PANE })
+  await pane.press({ key: 'tab-shown' })
   expect(await pane.find({ type: 'Text', text: /index\.html \(a page and 1 file\)/ })).toBeDefined()
   await pane.press({ key: 'open-seq:2' })
   await asked.clock.advance(200)
@@ -784,9 +799,11 @@ test('a guest can choose to be asked before what the host shows opens', async ($
   await $.prompt.submit({ text: LINK, origin: { kind: 'composer' }, wait: false })
   await asked.clock.advance(10)
   const pane = await $.ui.mount({ plugin: 'shared-session', surface: 'desktop', component: 'Pane', requestId: 'shared-room', props: PANE })
+  await pane.press({ key: 'tab-settings' })
   expect(await pane.find({ key: 'auto-open' })).toBeDefined()
   await pane.select({ key: 'auto-open', value: 'ask' })
   await pane.unmount()
+  // The Room opens again on the page it was left on.
   const again = await $.ui.mount({ plugin: 'shared-session', surface: 'desktop', component: 'Pane', requestId: 'shared-room', props: PANE })
   expect((await again.find({ key: 'auto-open' }))?.props.value).toBe('ask')
 })
@@ -865,8 +882,8 @@ test("a room this session can't reach says it is reconnecting", async ($, on) =>
   await asked.clock.advance(5_000)
   for (const surface of SURFACES) {
     const ui = await $.ui.mount(band(surface))
-    expect(await ui.find({ type: 'Text', text: /Reconnecting to the room/ })).toBeDefined()
-    if (surface === 'desktop') expect((await ui.find({ type: 'Svg' }))?.props.alt).toMatch(/^Reconnecting/)
+    expect(await ui.find({ type: 'Text', text: /Reconnecting/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /goes out once it's back/ })).toBeDefined()
     await ui.unmount()
   }
 })
@@ -879,6 +896,7 @@ test('every request says the plugin version, and a newer one shows in the Room w
   expect(asked.versions.every(v => v === '0.7.1')).toBe(true)
   expect(asked.logged.some(line => line.includes('9.9.9 is out'))).toBe(true)
   const pane = await $.ui.mount({ plugin: 'shared-session', surface: 'desktop', component: 'Pane', requestId: 'shared-room', props: PANE })
+  await pane.press({ key: 'tab-settings' })
   expect(await pane.find({ type: 'Text', text: /Version 9\.9\.9 is out/ })).toBeDefined()
   expect(await pane.find({ key: 'copy-update' })).toBeDefined()
 })
@@ -888,6 +906,7 @@ test("the Room's Updates setting turns on auto-update in the person's settings, 
   await $.prompt.submit({ text: LINK, origin: { kind: 'composer' }, wait: false })
   await asked.clock.advance(10)
   const pane = await $.ui.mount({ plugin: 'shared-session', surface: 'desktop', component: 'Pane', requestId: 'shared-room', props: PANE })
+  await pane.press({ key: 'tab-settings' })
   expect((await pane.find({ key: 'updates' }))?.props.value).toBe('manual')
   await pane.select({ key: 'updates', value: 'auto' })
   const saved = JSON.parse(asked.written.at(-1)?.text ?? '{}')
@@ -975,6 +994,7 @@ test('in Claude Desktop, a copy installed from a local marketplace folder says h
   const command = 'claude plugin marketplace remove claude-share && claude plugin marketplace add Paradigm-Study/claude-share && claude plugin install shared-session@claude-share'
   expect(asked.logged.some(l => l.includes('9.9.9 is out') && l.includes('local marketplace folder') && l.includes(command))).toBe(true)
   const pane = await $.ui.mount({ plugin: 'shared-session', surface: 'desktop', component: 'Pane', requestId: 'shared-room', props: PANE })
+  await pane.press({ key: 'tab-settings' })
   expect(await pane.find({ type: 'Text', text: /runs the copy installed from your local marketplace folder/ })).toBeDefined()
   expect(await pane.find({ key: 'copy-switch' })).toBeDefined()
 })
@@ -987,6 +1007,7 @@ test('a GitHub marketplace in Claude Desktop shows no such note', async ($, on) 
   await $.prompt.submit({ text: LINK, origin: { kind: 'composer' }, wait: false })
   await asked.clock.advance(10)
   const pane = await $.ui.mount({ plugin: 'shared-session', surface: 'desktop', component: 'Pane', requestId: 'shared-room', props: PANE })
+  await pane.press({ key: 'tab-settings' })
   expect(await pane.find({ key: 'copy-switch' })).toBeUndefined()
   expect(await pane.find({ type: 'Text', text: /next new session on, a release loads in place/ })).toBeDefined()
 })
@@ -1407,7 +1428,7 @@ test('a joined row whose pin never took pins when pinning is allowed, or the plu
   await $.session.start(START)
   await $.prompt.submit({ text: LINK, origin: { kind: 'composer' }, wait: false })
   await asked.clock.advance(100_000) // refused, tried again twice, given up
-  expect(asked.logged.some(line => line.includes("didn't let this plugin pin"))).toBe(true)
+  expect(await (await $.ui.mount(band('desktop'))).find({ key: 'band-allow-pin' })).toBeDefined()
   // Pinning allowed in another session: this one pins within a minute.
   calls.refuse(false)
   asked.files.set('/home/scott/.claude/settings.json', JSON.stringify({ permissions: { allow: ['mcp__ccd_sidebar__set_pinned'] } }))
@@ -1432,4 +1453,53 @@ test('a row a version before this marked, its pin refused, pins when this versio
   await asked.clock.advance(2_100)
   expect(calls.at(-2)).toBe('set_pinned {"session_id":"local_test","pinned":true}')
   expect((asked.store.get('pinLog') as { line: string }[]).some(e => e.line.startsWith('pinning again'))).toBe(true)
+})
+
+test('everyone has a color of their own, the same in the row, the Room and the transcript', async ($, on) => {
+  const people = [
+    { id: 'host', name: 'Sam', role: 'host', online: true },
+    { id: 'seat1', name: 'scott', role: 'guest', online: true },
+    { id: 'seat2', name: 'Alex', role: 'guest', online: true },
+    { id: 'seat3', name: 'Riley', role: 'guest', online: true },
+  ]
+  const asked = world(on, { people })
+  await $.prompt.submit({ text: LINK, origin: { kind: 'composer' }, wait: false })
+  await asked.clock.advance(10)
+  const pane = await $.ui.mount({ plugin: 'shared-session', surface: 'desktop', component: 'Pane', requestId: 'shared-room', props: PANE })
+  const named = async (ui: typeof pane, name: string) => (await ui.findAll({ type: 'Text' })).find(t => t.text === name)?.props.color as string | undefined
+  const colors = await Promise.all(people.map(p => named(pane, p.name)))
+  expect(new Set(colors).size).toBe(4) // four people, four colors
+  const alex = colors[2]!
+  expect(alex).toMatch(/^#[0-9a-f]{6}$/)
+  // The row's faces wear the same colors…
+  const row = await $.ui.mount(band('desktop'))
+  expect(String((await row.find({ type: 'Svg' }))?.props.source)).toContain(alex)
+  // …and so does Alex's prompt in the transcript.
+  const prompt = await $.ui.mount({ ...ROW('Alex: Run the tests', { kind: 'plugin', name: 'shared-session', asUser: true }), surface: 'desktop' })
+  expect((await prompt.find({ type: 'Text', text: 'Alex' }))?.props.color).toBe(alex)
+})
+
+test('a dropped connection and its return stay out of the transcript; the Room keeps them', async ($, on) => {
+  const riley = { seat: 'seat3', name: 'Riley', role: 'guest' }
+  const ev = (seq: number, type: string, body: Record<string, unknown> = {}) => ({ seq, type, from: riley, ts: 900 + seq, body })
+  const asked = world(on, { stream: [{ seq: 4, events: [ev(2, 'join'), ev(3, 'leave', { reason: 'timeout' }), ev(4, 'join')], people: [], ended: false, title: 'demo' }] })
+  await $.prompt.submit({ text: LINK, origin: { kind: 'composer' }, wait: false })
+  await asked.clock.advance(50)
+  expect(asked.logged.filter(l => l === 'Riley joined')).toHaveLength(1)
+  expect(asked.logged.some(l => /lost connection/.test(l))).toBe(false)
+  const pane = await $.ui.mount({ plugin: 'shared-session', surface: 'desktop', component: 'Pane', requestId: 'shared-room', props: PANE })
+  await pane.press({ key: 'tab-chat' })
+  expect(await pane.find({ type: 'Text', text: ' lost connection' })).toBeDefined()
+})
+
+test('the row above the prompt stays one row: a refused pin is a button in it, not a line under it', async ($, on) => {
+  const asked = world(on)
+  sidebar(on, { title: 'Fix login flow', refuse: true })
+  const ui = await $.ui.mount(band('desktop'))
+  await ui.press({ key: 'share' })
+  await asked.clock.advance(81_000)
+  const tree = (await ui.drawn()) as { props: { flexDirection?: string } }
+  expect(tree.props.flexDirection).toBe('row')
+  expect((await ui.find({ key: 'band-allow-pin' }))?.props.label).toBe('Pin')
+  expect(await ui.find({ type: 'Text', text: /Live/ })).toBeDefined()
 })

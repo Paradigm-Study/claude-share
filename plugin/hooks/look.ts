@@ -1,33 +1,66 @@
-// How a shared session looks. People are monochrome dots: ink on a light
-// theme, near-white on a dark one, a person's initial knocked out of theirs;
-// the dot breathes while Claude works for that person, and goes hollow when
-// they are away. The rest borrows Paradigm's landing page: paper and ink, the
-// window frame with its three muted dots, mono eyebrows, a serif title, and
-// Clover on the window's edge.
+// How a shared session looks. Every person has a color of their own, the
+// same wherever they appear: their face, their name in the Room and the chat,
+// their prompts in the transcript, "Claude is working for …". "Live" is
+// Claude's own orange; everything else takes the app's theme colors, so the
+// plugin reads as part of Claude Code rather than a page pasted into it.
 //
-// The Desktop app draws these as images: transparent, animated, and styled
-// for light and dark under `prefers-color-scheme`, which follows the app's
-// theme. (Not `isInteractive`: that sandboxed frame paints an opaque page
-// behind the art, a white box on a dark theme.) Pure: strings in, strings out.
+// The Desktop app draws faces as images: transparent, animated, and styled for
+// light and dark under `prefers-color-scheme`, which follows the app's theme.
+// (Not `isInteractive`: that sandboxed frame paints an opaque page behind the
+// art, a white box on a dark theme.) Pure: strings in, strings out.
 
 import { CLOVER_WEBP } from './brand'
 
 const esc = (s: string) =>
   s.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c] ?? c)
 
-// Paradigm's landing tokens, light and dark (the landing page itself is light).
-export const INK = '#011121'
-export const PAPER = '#faf8f7'
-export const ACCENT = '#6e94cc' // reads on both themes
-export const ROSE = '#dd7f77' // the window's red dot; "live"
-export const SAGE = '#799586'
-export const SAND = '#d2b99f'
-export const GOOD = '#5c9a6a' // allowed, on both themes
-export const BAD = '#d0776b' // declined, on both themes
+export const GOOD = '#3ca146' // allowed, on both themes
+export const BAD = '#d95b56' // declined, on both themes
 
-const FONT = `-apple-system,"Geist","SF Pro Text","Segoe UI",Inter,sans-serif`
-const SERIF = `"Gowun Batang","Iowan Old Style",Georgia,serif`
-const MONO = `"Geist Mono",ui-monospace,SFMono-Regular,Menlo,monospace`
+// People's colors: eight hues spaced around the wheel at one lightness
+// (OKLCH L 0.63), so a white initial reads on each (3.3:1 and up) and so does
+// each as a bold name on Claude's light and dark surfaces (3.3:1 and up).
+// Gold, not orange, so nobody wears the Live chip's color.
+export const PEOPLE = ['#dd555d', '#ad8100', '#6a9a29', '#00a085', '#009abf', '#5983e9', '#a169da', '#d15697'] as const
+
+const hash = (s: string) => {
+  let h = 2166136261
+  for (const c of s.trim().toLowerCase()) h = Math.imul(h ^ c.charCodeAt(0), 16777619)
+  return h >>> 0
+}
+
+/** A person's own color, from their name: the same in every room. */
+export const colorFor = (name: string): string => PEOPLE[hash(name) % PEOPLE.length]!
+
+/**
+ * Colors for everyone shown together, in the order they came (the host
+ * first): each their own color, and when it's taken, the next free one. So
+ * the host always has their own, and someone new never repaints anyone; and
+ * everyone in a room, given the room's order, sees the same colors.
+ */
+export function colorsFor(names: readonly string[]): Map<string, string> {
+  const out = new Map<string, string>()
+  const taken = new Set<number>()
+  const n = PEOPLE.length
+  const apart = (i: number) => Math.min(...[...taken].map(t => Math.min(Math.abs(i - t), n - Math.abs(i - t))))
+  for (const name of new Set(names)) {
+    let pick = hash(name) % n
+    // Taken: the free color farthest round the wheel from those in use, so
+    // two people never look alike; everyone's in use, their own again.
+    if (taken.has(pick) && taken.size < n) {
+      let best = -1
+      for (let k = 0; k < n; k++) {
+        const i = (pick + k) % n
+        if (!taken.has(i) && apart(i) > best) [best, pick] = [apart(i), i]
+      }
+    }
+    taken.add(pick)
+    out.set(name, PEOPLE[pick]!)
+  }
+  return out
+}
+
+const FONT = `-apple-system,"SF Pro Text","Segoe UI",Inter,sans-serif`
 
 /** One letter for one word, two for two: "Sam" → S, "Alex Chen" → AC. */
 export function initials(name: string): string {
@@ -54,104 +87,68 @@ export function labelsFor(names: readonly string[]): Map<string, string> {
   return out
 }
 
-export type Face = { name: string; online: boolean; note?: string; active?: boolean; label?: string; version?: string }
+export type Face = { name: string; online: boolean; note?: string; active?: boolean; label?: string; version?: string; color?: string }
 
-const DOTS = `<style>
-.dot{fill:${INK}}.ini{fill:#fff}.away .dot{fill:none;stroke:${INK}}.away .ini{fill:${INK}}.more{fill:#8a8f96}
-@media (prefers-color-scheme: dark){.dot{fill:#ececec}.ini{fill:${INK}}.away .dot{stroke:#ececec}.away .ini{fill:#ececec}.more{fill:#9aa0a6}}
+const MOTION = `<style>
 .face{transform-box:fill-box;transform-origin:center;transition:transform .22s cubic-bezier(.22,1,.36,1)}
 .face:hover{transform:scale(1.1)}
 .breathe .dot{transform-box:fill-box;transform-origin:center;animation:breathe 1.9s cubic-bezier(.45,0,.55,1) infinite}
-@keyframes breathe{0%,100%{transform:scale(1)}50%{transform:scale(1.14)}}
-.live{transform-box:fill-box;transform-origin:center;animation:live 2s ease-out infinite}
-@keyframes live{0%{transform:scale(.6);opacity:.55}100%{transform:scale(2);opacity:0}}
+@keyframes breathe{0%,100%{transform:scale(1)}50%{transform:scale(1.12)}}
+@media (prefers-reduced-motion: reduce){.breathe .dot{animation:none}}
+.more{fill:#73726c}@media (prefers-color-scheme: dark){.more{fill:#9c9a92}}
 </style>`
 
+// A filled dot in the person's color with their initial knocked out in white;
+// away, a ring in their color around their initial. Breathes while Claude
+// works for them.
 function face(f: Face, cx: number, cy: number, r: number): string {
-  const classes = ['face', f.active ? 'breathe' : '', f.online ? '' : 'away'].filter(Boolean).join(' ')
+  const color = f.color ?? colorFor(f.name)
+  const classes = ['face', f.active ? 'breathe' : ''].filter(Boolean).join(' ')
   const letters = f.label ?? initials(f.name)
-  const size = letters.length > 1 ? r * 0.78 : r * 0.95
-  return `<g class="${classes}"><title>${esc(f.name)}${f.note ? ` · ${esc(f.note)}` : ''}</title><circle class="dot" cx="${cx}" cy="${cy}" r="${f.online ? r : r - 0.8}" stroke-width="1.5"/><text class="ini" x="${cx}" y="${cy}" dy=".36em" text-anchor="middle" font-family='${FONT}' font-size="${size.toFixed(1)}" font-weight="650">${esc(letters)}</text></g>`
+  const size = letters.length > 1 ? r * 0.8 : r * 0.98
+  const dot = f.online
+    ? `<circle class="dot" cx="${cx}" cy="${cy}" r="${r}" fill="${color}"/>`
+    : `<circle class="dot" cx="${cx}" cy="${cy}" r="${r - 0.9}" fill="none" stroke="${color}" stroke-width="1.8"/>`
+  return `<g class="${classes}"><title>${esc(f.name)}${f.note ? ` · ${esc(f.note)}` : ''}</title>${dot}<text x="${cx}" y="${cy}" dy=".36em" text-anchor="middle" font-family='${FONT}' font-size="${size.toFixed(1)}" font-weight="650" fill="${f.online ? '#fff' : color}">${esc(letters)}</text></g>`
 }
 
-/** One person's dot, `size` CSS pixels square. */
+/** One person's face, `size` CSS pixels square. */
 export function avatarSvg(f: Face, size = 22): string {
-  const r = size / 2 - 1.5
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}">${DOTS}${face(f, size / 2, size / 2, r)}</svg>`
+  const r = size / 2 - 1
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}">${MOTION}${face(f, size / 2, size / 2, r)}</svg>`
 }
 
 /**
- * The room at a glance: a live mark, then a row of dots (at most `max`, then
- * "+N"). Returns the markup and its width.
+ * Everyone here at a glance: their faces in a row, slightly overlapping (at
+ * most `max`, then "+N"). Returns the markup and its width.
  */
-export function stackSvg(faces: readonly Face[], opts: { live: boolean; size?: number; max?: number }): { source: string; width: number } {
+export function stackSvg(faces: readonly Face[], opts: { size?: number; max?: number } = {}): { source: string; width: number } {
   const size = opts.size ?? 22
-  const r = size / 2 - 2
-  const gap = 5
+  const r = size / 2 - 1
+  const step = r * 2 - 4
   const shown = faces.slice(0, opts.max ?? 6)
   const extra = faces.length - shown.length
-  const lead = 16
   const cy = size / 2
-  const width = Math.ceil(lead + shown.length * (r * 2 + gap) + (extra > 0 ? 22 : 0))
-  const live = opts.live
-    ? `<g><title>Live</title><circle class="live" cx="5" cy="${cy}" r="4" fill="${ROSE}"/><circle cx="5" cy="${cy}" r="3.2" fill="${ROSE}"/></g>`
-    : `<circle cx="5" cy="${cy}" r="3.2" fill="#9aa0a6"/>`
-  const dots = shown.map((f, i) => face(f, lead + r + i * (r * 2 + gap), cy, r)).join('')
+  const width = Math.ceil(r * 2 + 2 + Math.max(0, shown.length - 1) * step + (extra > 0 ? 24 : 0))
+  // Later faces under earlier ones: the host, first, sits on top.
+  const dots = shown
+    .map((f, i) => face(f, 1 + r + i * step, cy, r))
+    .reverse()
+    .join('')
   const more =
     extra > 0
-      ? `<text class="more" x="${lead + shown.length * (r * 2 + gap) + 1}" y="${cy}" dy=".36em" font-family='${FONT}' font-size="11" font-weight="600"><title>${extra} more</title>+${extra}</text>`
+      ? `<text class="more" x="${r * 2 + 6 + (shown.length - 1) * step}" y="${cy}" dy=".36em" font-family='${FONT}' font-size="11" font-weight="600"><title>${extra} more</title>+${extra}</text>`
       : ''
   return {
-    source: `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${size}" viewBox="0 0 ${width} ${size}">${DOTS}${live}${dots}${more}</svg>`,
+    source: `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${size}" viewBox="0 0 ${width} ${size}">${MOTION}${dots}${more}</svg>`,
     width,
   }
 }
 
-/**
- * The Room panel's banner, as Paradigm's landing window: a paper card with a
- * hairline edge, the three muted dots and a mono label in its bar, the host's
- * dot, a serif title, and Clover perched on the frame. Its surfaces are warm
- * like Claude's own: paper on the light theme, and on the dark one a card a
- * step lighter than the app behind it (navy read as a foreign object there).
- */
-export function bannerSvg(o: { title: string; host: string; live: boolean; detail: string; status?: string; width?: number }): string {
-  const w = o.width ?? 420
-  const top = 30 // room above the frame for Clover
-  const h = top + 108
-  // An average glyph is about half an em in both faces (measured: 0.45 in the
-  // serif title, 0.5 in the text): a guess on the wide side cut titles with a
-  // fifth of the line still free.
-  const fit = (text: string, px: number, em: number) => {
-    const max = Math.floor(px / em)
-    return text.length > max ? `${text.slice(0, Math.max(1, max - 1)).trimEnd()}…` : text
-  }
-  const title = fit(o.title, w - 62 - 18, 16.5 * 0.47)
-  const detail = fit(o.detail, w - 62 - 18, 12 * 0.52)
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">
-<style>
-.card{fill:#fffdfc;stroke:#e6e1d9}.bar{stroke:#e6e1d9}.grid{fill:#1f1e1d;fill-opacity:.05}.title{fill:${INK}}.detail{fill:#5f5d58}.label{fill:#2c4a7b}.wash{fill:#e4ecf7}
-${DOTS.replace(/^<style>|<\/style>$/g, '')}
-@media (prefers-color-scheme: dark){.card{fill:#30302e;stroke:#43423e}.bar{stroke:#43423e}.grid{fill:#ffffff;fill-opacity:.05}.title{fill:#f2f0eb}.detail{fill:#a9a69e}.label{fill:#c3d3ea}.wash{fill:#3a3f47}.cat{filter:url(#night)}}
-</style>
-<defs><filter id="night" color-interpolation-filters="sRGB"><feColorMatrix type="matrix" values="-1 0 0 0 1 0 -1 0 0 1 0 0 -1 0 1 0 0 0 .9 0"/></filter>
-<pattern id="g" width="14" height="14" patternUnits="userSpaceOnUse"><circle class="grid" cx="2" cy="2" r="1"/></pattern>
-<clipPath id="c"><rect x=".5" y="${top + 0.5}" width="${w - 1}" height="${h - top - 1}" rx="7"/></clipPath></defs>
-<rect class="card" x=".5" y="${top + 0.5}" width="${w - 1}" height="${h - top - 1}" rx="7"/>
-<g clip-path="url(#c)"><rect x="0" y="${top + 34}" width="${w}" height="${h}" fill="url(#g)"/></g>
-<line class="bar" x1="1" y1="${top + 34}" x2="${w - 1}" y2="${top + 34}"/>
-<circle cx="18" cy="${top + 17}" r="4.5" fill="${ROSE}"/><circle cx="32" cy="${top + 17}" r="4.5" fill="${SAND}"/><circle cx="46" cy="${top + 17}" r="4.5" fill="${SAGE}"/>
-<rect class="wash" x="62" y="${top + 8}" rx="9" width="132" height="18"/>
-<text class="label" x="72" y="${top + 21}" font-family='${MONO}' font-size="9.5" font-weight="600" letter-spacing="1.2">SHARED SESSION</text>
-${
-  o.live
-    ? `<g><circle class="live" cx="${w - 52}" cy="${top + 17}" r="4" fill="${ROSE}"/><circle cx="${w - 52}" cy="${top + 17}" r="3.2" fill="${ROSE}"/><text x="${w - 43}" y="${top + 21}" font-family='${MONO}' font-size="10" font-weight="700" letter-spacing="1.2" fill="${ROSE}">LIVE</text></g>`
-    : `<text class="detail" x="${w - 16}" y="${top + 21}" text-anchor="end" font-family='${MONO}' font-size="10" font-weight="700" letter-spacing="1.2">${esc(o.status ?? 'ENDED')}</text>`
-}
-${face({ name: o.host, online: true }, 36, top + 71, 15)}
-<text class="title" x="62" y="${top + 67}" font-family='${SERIF}' font-size="16.5">${esc(title)}</text>
-<text class="detail" x="62" y="${top + 87}" font-family='${FONT}' font-size="12">${esc(detail)}</text>
-<image class="cat" href="${CLOVER_WEBP}" x="${w - 118}" y="0" width="92" height="${top + 10}" preserveAspectRatio="xMidYMax meet"/>
-</svg>`
+/** Clover, Paradigm's cat, for the one empty screen it brightens. */
+export function cloverSvg(width = 96): string {
+  const height = Math.round(width * 0.56)
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}"><style>@media (prefers-color-scheme: dark){image{filter:invert(1) hue-rotate(180deg)}}</style><image href="${CLOVER_WEBP}" x="0" y="0" width="${width}" height="${height}" preserveAspectRatio="xMidYMax meet"/></svg>`
 }
 
 /** "3m ago" style ages for activity and chat. */
