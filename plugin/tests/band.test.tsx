@@ -1233,3 +1233,18 @@ test('invites can be just shown, without a notification', async ($, on) => {
   const row = await $.ui.mount(band('desktop'))
   expect(await row.find({ type: 'Text', text: 'Sam invites you' })).toBeDefined() // still shown
 })
+
+test('a long invite title is cut to fit beside Join, its paths shortened, never pushing the buttons out', async ($, on) => {
+  const long = { ...INVITE, room: { ...INVITE.room, title: 'interview-prep-handoff-c305f4: @"/Users/jingjing/Desktop/paradigm-study-web/artifacts/interview-prep-notes.md" read this and take over the prep' } }
+  const asked = world(on, { team: { signedIn: true }, invites: [long] })
+  await $.command.run({ command: 'team', args: 'invites' } as never)
+  void asked
+  const row = await $.ui.mount(band('desktop'))
+  const title = await row.find({ type: 'Text', text: /^interview-prep-handoff-c305f4: interview-prep-notes\.md read this/ })
+  expect(title?.props.wrap).toBe('truncate-end')
+  // The words sit in a column that may shrink to nothing; the buttons keep their width.
+  const tree = JSON.stringify(await row.drawn())
+  expect(tree).toContain('"minWidth":0')
+  expect(await row.find({ key: 'invite-join' })).toBeDefined()
+  expect(await row.find({ key: 'invite-dismiss' })).toBeDefined()
+})

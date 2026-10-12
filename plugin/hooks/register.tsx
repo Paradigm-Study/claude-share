@@ -3684,6 +3684,9 @@ const INVITES_EVERY_MS = 30_000
 // `notified`: the invites this machine already raised a notification for.
 type InviteCache = { at: number; server: string; list: ShareInvite[]; notified?: string[] }
 const inviteKey = (i: ShareInvite) => `${i.room.id}@${i.at}`
+// A session title for a narrow row: an absolute path in it (a file the first
+// prompt @-mentioned) shortened to its last part.
+const tidyTitle = (title: string) => title.replace(/@?["']?(?<![:\w/])\/(?:[^\s"'/]+\/){2,}([^\s"'/]*)["']?/g, '$1')
 // Whether a new invite raises a desktop notification (machine-wide, on unless turned off).
 const NOTIFY_KEY = 'inviteNotify'
 
@@ -4526,7 +4529,7 @@ export const register: Register = (on, options) => {
       return (
         <Box flexDirection="row" gap={1}>
           {avatar}
-          <Box flexDirection="column" flexShrink={1}>
+          <Box flexDirection="column" flexShrink={1} minWidth={0}>
             <Box flexDirection="row" gap={1}>
               <Text bold>{said.who}</Text>
               <Text dimColor>{`relayed a message from ${relayed.from}`}</Text>
@@ -4539,7 +4542,7 @@ export const register: Register = (on, options) => {
     return (
       <Box flexDirection="row" gap={1}>
         {avatar}
-        <Box flexDirection="column" flexShrink={1}>
+        <Box flexDirection="column" flexShrink={1} minWidth={0}>
           <Text bold>{said.who}</Text>
           <Markdown key="said" text={said.text} />
         </Box>
@@ -4692,9 +4695,9 @@ export const register: Register = (on, options) => {
           <Box flexDirection="column" gap={1}>
             {invites.map(invite => (
               <Box key={`inv-${invite.room.id}`} flexDirection="row" gap={1} alignItems="center" justifyContent="space-between">
-                <Box flexDirection="column" flexShrink={1}>
+                <Box flexDirection="column" flexShrink={1} minWidth={0}>
                   <Text bold wrap="truncate-end">
-                    {invite.room.title}
+                    {tidyTitle(invite.room.title)}
                   </Text>
                   <Text dimColor wrap="truncate-end">{`${invite.from.name} invited you · ${ago(invite.at, now)}`}</Text>
                 </Box>
@@ -4751,11 +4754,11 @@ export const register: Register = (on, options) => {
       const canJoin = joinable.includes(s)
       return (
         <Box key={`ts-${s.id}`} flexDirection="row" gap={1} alignItems="center" justifyContent="space-between">
-          <Box flexDirection="row" gap={1} alignItems="center" flexShrink={1}>
+          <Box flexDirection="row" gap={1} alignItems="center" flexShrink={1} minWidth={0}>
             {Svg ? <Svg source={avatarSvg({ name: s.host, online: s.hostOnline }, 24)} alt={s.host} width={24} height={24} /> : <Text dimColor={!s.hostOnline}>{s.hostOnline ? '●' : '○'}</Text>}
-            <Box flexDirection="column" flexShrink={1}>
+            <Box flexDirection="column" flexShrink={1} minWidth={0}>
               <Text bold={s.hostOnline} dimColor={!s.hostOnline} wrap="truncate-end">
-                {s.title}
+                {tidyTitle(s.title)}
               </Text>
               <Text dimColor wrap="truncate-end">
                 {[mine ? 'You' : s.host, s.hostOnline ? `shared ${ago(s.createdAt, now)}` : 'away', others.length ? `with ${listNames(others)}` : ''].filter(Boolean).join(' · ')}
@@ -4833,7 +4836,7 @@ export const register: Register = (on, options) => {
           '',
           <Box flexDirection="column" gap={1}>
             <Box flexDirection="row" alignItems="center" gap={1} borderStyle="round" borderDimColor paddingX={1}>
-              <Box flexGrow={1} flexShrink={1}>
+              <Box flexGrow={1} flexShrink={1} minWidth={0}>
                 <Text dimColor wrap="truncate-middle">
                   {invite.replace(/^https?:\/\//, '')}
                 </Text>
@@ -5008,7 +5011,7 @@ export const register: Register = (on, options) => {
     const switchTo = liveUpdates === 'pinned' ? await switchCommand($) : ''
     const updatesRow = switchTo ? (
       <Box flexDirection="row" gap={1} alignItems="center" justifyContent="space-between">
-        <Box flexShrink={1}>
+        <Box flexShrink={1} minWidth={0}>
           <Text dimColor>
             Claude Desktop runs the copy installed from your local marketplace folder, ahead of the one that updates itself, so a release loads only when you quit and reopen it. Add the marketplace from GitHub to update in place.
           </Text>
@@ -5096,7 +5099,7 @@ export const register: Register = (on, options) => {
             </Box>
           )}
           <Box flexDirection="row" alignItems="center" gap={1} borderStyle="round" borderDimColor paddingX={1}>
-            <Box flexGrow={1} flexShrink={1}>
+            <Box flexGrow={1} flexShrink={1} minWidth={0}>
               <Text dimColor wrap="truncate-middle">
                 {room.url.replace(/^https?:\/\//, '')}
               </Text>
@@ -5112,7 +5115,7 @@ export const register: Register = (on, options) => {
           {isHost ? null : <Text dimColor>{rulesLine(v.policy, room.host)}</Text>}
           {(await read($, pinRefusedA)) ? (
             <Box flexDirection="row" gap={1} alignItems="center" justifyContent="space-between">
-              <Box flexShrink={1}>
+              <Box flexShrink={1} minWidth={0}>
                 <Text dimColor>Claude Code's auto mode didn't let this plugin pin the session in the sidebar.</Text>
               </Box>
               <Button key="allow-pin" label="Allow pinning" plain onPress={() => void allowDeskTools($)} />
@@ -5138,7 +5141,7 @@ export const register: Register = (on, options) => {
               const asked = prompts(p.name)
               return (
                 <Box key={`person-${p.name}`} flexDirection="row" gap={1} alignItems="center" justifyContent="space-between">
-                  <Box flexDirection="row" gap={1} alignItems="center" flexShrink={1}>
+                  <Box flexDirection="row" gap={1} alignItems="center" flexShrink={1} minWidth={0}>
                     {Svg ? (
                       <Svg source={avatarSvg(p, 24)} alt={p.name} width={24} height={24} />
                     ) : (
@@ -5201,7 +5204,7 @@ export const register: Register = (on, options) => {
                   .reverse()
                   .map(item => (
                     <Box key={`shown-${item.key}`} flexDirection="row" gap={1} alignItems="center" justifyContent="space-between">
-                      <Box flexDirection="row" gap={1} flexShrink={1}>
+                      <Box flexDirection="row" gap={1} flexShrink={1} minWidth={0}>
                         <Text dimColor={item.closed}>{shownGlyph(item)}</Text>
                         <Text wrap="truncate-end" dimColor={item.closed}>{`${item.name}${item.closed ? ' · ended' : ''}`}</Text>
                       </Box>
@@ -5231,7 +5234,7 @@ export const register: Register = (on, options) => {
                   .reverse()
                   .map((a, i) => (
                     <Box key={`act-${a.ts}-${i}`} flexDirection="row" gap={1} justifyContent="space-between">
-                      <Box flexDirection="row" gap={1} flexShrink={1}>
+                      <Box flexDirection="row" gap={1} flexShrink={1} minWidth={0}>
                         {a.kind === 'allowed' || a.kind === 'denied' ? (
                           <Text color={a.kind === 'allowed' ? GOOD : BAD}>{a.kind === 'allowed' ? '✓' : '✕'}</Text>
                         ) : (
@@ -5379,13 +5382,15 @@ export const register: Register = (on, options) => {
       const invites = await read($, invitesA)
       const invite = invites[0]
       if (invite) {
+        // Two short lines beside the buttons: who, then what (cut to fit, never
+        // pushing the buttons out).
         return (
-          <Box flexDirection="row" gap={1} alignItems="center" justifyContent="space-between" paddingRight={e.surface === 'terminal' ? 4 : 0}>
-            <Box flexDirection="row" gap={1} alignItems="center" flexShrink={1}>
-              {Svg ? <Svg source={avatarSvg({ name: invite.from.name, online: true }, 24)} alt={invite.from.name} width={24} height={24} /> : <Text color={ROSE}>●</Text>}
-              <Text bold>{`${invite.from.name} invites you`}</Text>
+          <Box flexDirection="row" gap={1} alignItems="center" paddingRight={e.surface === 'terminal' ? 4 : 0}>
+            {Svg ? <Svg source={avatarSvg({ name: invite.from.name, online: true }, 24)} alt={invite.from.name} width={24} height={24} /> : <Text color={ROSE}>●</Text>}
+            <Box flexDirection="column" flexGrow={1} flexShrink={1} minWidth={0}>
+              <Text bold wrap="truncate-end">{`${invite.from.name} invites you`}</Text>
               <Text dimColor wrap="truncate-end">
-                {`${invite.room.title}${invites.length > 1 ? ` · ${invites.length - 1} more in Team` : ''}`}
+                {`${tidyTitle(invite.room.title)}${invites.length > 1 ? ` · ${invites.length - 1} more in Team` : ''}`}
               </Text>
             </Box>
             <Box flexDirection="row" gap={1} flexShrink={0}>
@@ -5430,7 +5435,7 @@ export const register: Register = (on, options) => {
     return (
       <Box flexDirection="column" paddingRight={e.surface === 'terminal' ? 4 : 0}>
         <Box flexDirection="row" gap={1} alignItems="center" justifyContent="space-between">
-          <Box flexDirection="row" gap={1} alignItems="center" flexShrink={1}>
+          <Box flexDirection="row" gap={1} alignItems="center" flexShrink={1} minWidth={0}>
             {Svg ? (
               <Svg
                 source={stack.source}
