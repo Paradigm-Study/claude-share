@@ -1248,3 +1248,12 @@ test('a long invite title is cut to fit beside Join, its paths shortened, never 
   expect(await row.find({ key: 'invite-join' })).toBeDefined()
   expect(await row.find({ key: 'invite-dismiss' })).toBeDefined()
 })
+
+test("a title made from a prompt with a picture leaves Claude Code's note about it out", async ($, on) => {
+  const asked = world(on, { team: { signedIn: true, sessions: [{ ...teamSession(1), title: 'agent-composition-ux-9e06eb: [Image: original 1280x14646, displayed at 175x2000. Multiply coordinates by 7.31 to map to original image.] make this match the mock' }] } })
+  await $.command.run({ command: 'team', args: '' } as never)
+  await eventually(asked.clock, () => asked.sent.some(r => r.path === '/api/teams/team0001/sessions'))
+  await asked.clock.advance(10)
+  const pane = await $.ui.mount(TEAM_PANE)
+  expect(await pane.find({ type: 'Text', text: 'agent-composition-ux-9e06eb: make this match the mock' })).toBeDefined()
+})

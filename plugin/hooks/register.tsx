@@ -1535,7 +1535,8 @@ async function share($: $, surface?: RenderSurface, opts: { history?: boolean; t
   const messages = opts.history === false ? [] : await sessionHistory($)
   const firstPrompt = messages.flatMap(m => rowsFromMessage(m, name, cwd)).find(row => row.kind === 'user')?.text
   const folder = cwd.split('/').filter(Boolean).at(-1) ?? 'session'
-  const title = firstPrompt ? `${folder}: ${(firstPrompt.split('\n')[0] ?? '').slice(0, 80)}` : folder
+  const said = firstPrompt ? promptWords(firstPrompt) : ''
+  const title = said ? `${folder}: ${said.slice(0, 80)}` : folder
   const signedIn = opts.team === false ? null : await signInFor($, server)
   const team = signedIn ? await shareTeam($, server) : null
 
@@ -3684,9 +3685,22 @@ const INVITES_EVERY_MS = 30_000
 // `notified`: the invites this machine already raised a notification for.
 type InviteCache = { at: number; server: string; list: ShareInvite[]; notified?: string[] }
 const inviteKey = (i: ShareInvite) => `${i.room.id}@${i.at}`
-// A session title for a narrow row: an absolute path in it (a file the first
-// prompt @-mentioned) shortened to its last part.
-const tidyTitle = (title: string) => title.replace(/@?["']?(?<![:\w/])\/(?:[^\s"'/]+\/){2,}([^\s"'/]*)["']?/g, '$1')
+// What a prompt says, for a title: its first line of words, without the notes
+// Claude Code writes into a message ("[Image: original 1280x14646, …]",
+// "[Pasted text #1 +40 lines]") or tags.
+function promptWords(text: string): string {
+  const clean = text.replace(/\[(?:Image|Pasted text|image)[^\]]*\]/g, ' ').replace(/<[^>\n]{1,200}>/g, ' ')
+  return (clean.split('\n').map(line => line.replace(/\s+/g, ' ').trim()).find(Boolean) ?? '').trim()
+}
+
+// A session title for a narrow row: such notes left out, and an absolute path
+// in it (a file the first prompt @-mentioned) shortened to its last part.
+const tidyTitle = (title: string) => {
+  const colon = title.indexOf(': ')
+  const words = promptWords(colon > 0 ? title.slice(colon + 2) : title)
+  const shown = colon > 0 ? (words ? `${title.slice(0, colon)}: ${words}` : title.slice(0, colon)) : words || title
+  return shown.replace(/@?["']?(?<![:\w/])\/(?:[^\s"'/]+\/){2,}([^\s"'/]*)["']?/g, '$1')
+}
 // Whether a new invite raises a desktop notification (machine-wide, on unless turned off).
 const NOTIFY_KEY = 'inviteNotify'
 
