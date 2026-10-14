@@ -49,14 +49,51 @@ function world(
     sessionId?: string
     /** The first this many stream connections are refused (401): the room let the seat go. */
     streamRefuses?: number
+    /** The guest's localhost helper, without starting a real listener. */
+    localPreview?: 'wait' | 'busy' | 'missing'
+    localPreviewPort?: number
+    tunnel?: 'unsupported' | 'host-old'
+    tcpRelays?: boolean
   } = {},
 ) {
   const asked: string[] = []
   const spawned: { argv: readonly string[]; input?: string }[] = []
   let refusedStreams = 0
   let joins = 0
-  on('process.spawn', async function* ($, e) {
+  const localHelpers: { send: (message: { state: string; code?: string; port?: number }) => void; exit: () => void; stopped: boolean }[] = []
+  const tcpHelpers: typeof localHelpers = []
+  on('process.spawn', async function* ($, e, next) {
     spawned.push({ argv: e.argv, input: e.input })
+    const local = e.argv.at(-1)?.endsWith('/relay/local-preview.cjs')
+    if (local || (opts.tcpRelays && e.argv.at(-1)?.endsWith('/relay/ws-relay.cjs') && JSON.parse(e.input ?? '{}').tcp)) {
+      if (local && opts.localPreview === 'missing') return { value: { code: 127, signal: null } }
+      if (local && opts.localPreview === 'busy') {
+        yield { stream: 'stdout' as const, text: '{"state":"error","code":"EADDRINUSE"}\n' }
+        return { value: { code: 1, signal: null } }
+      }
+      const queue: string[] = !local || opts.localPreview === 'wait' ? [] : [`${JSON.stringify({ state: 'ready', port: opts.localPreviewPort ?? JSON.parse(e.input!).port })}\n`]
+      let ended = false
+      let wake: (() => void) | undefined
+      const helper = {
+        send: (message: { state: string; code?: string; port?: number }) => { queue.push(`${JSON.stringify(message)}\n`); wake?.() },
+        exit: () => { ended = true; wake?.() },
+        stopped: false,
+      }
+      if (local) localHelpers.push(helper)
+      else tcpHelpers.push(helper)
+      next.signal.addEventListener('abort', helper.exit, { once: true })
+      try {
+        while (!ended && !next.signal.aborted) {
+          const line = queue.shift()
+          if (line) yield { stream: 'stdout' as const, text: line }
+          else await new Promise<void>(done => { wake = done })
+        }
+      } finally {
+        helper.stopped = true
+        next.signal.removeEventListener('abort', helper.exit)
+      }
+      return { value: { code: 0, signal: null } }
+    }
     // Shell work: an upload answers with the file's id; anything else succeeds.
     if (e.argv[0] === '/bin/sh' && opts.transcripts) {
       const files = opts.transcripts
@@ -146,13 +183,15 @@ function world(
     written.push({ path: e.path, text: e.text })
     return { value: undefined }
   })
-  on('ui.toast', () => ({ value: undefined }))
+  const toasted: string[] = []
+  const copied: string[] = []
+  on('ui.toast', ($, e) => { toasted.push(e.text); return { value: undefined } })
   const logged: string[] = []
   on('ui.log', ($, e) => {
     logged.push(e.text)
     return { value: undefined }
   })
-  on('ui.copy', () => ({ value: { isCopied: true } }))
+  on('ui.copy', ($, e) => { copied.push(e.text); return { value: { isCopied: true } } })
   const opened: string[] = []
   on('ui.open', ($, e) => {
     opened.push(e.id)
@@ -236,12 +275,17 @@ function world(
       body = { token: joins === 1 ? 'g' : `g${joins}`, seat: joins === 1 ? 'seat1' : `seat${joins}1`, title: 'demo', host: 'Sam', seq: 1, history: [], people, latest: opts.latest }
     } else if (path.endsWith('/events') && method === 'GET') {
       body = { seq: 1, events: [], people, ended: false, title: 'demo' }
+    } else if (/\/previews\/[^/]+\/ticket$/.test(path) && method === 'POST') {
+      body = { url: `https://preview.test/__share/enter?room=room0000000000000001&ticket=ticket-${asked.filter(a => a.endsWith('/ticket')).length}` }
+    } else if (/\/previews\/[^/]+\/tunnel$/.test(path) && method === 'POST') {
+      if (opts.tunnel) return { value: { status: opts.tunnel === 'unsupported' ? 404 : 503, ok: false, headers: {}, text: '{"error":"unsupported host"}' } }
+      body = { token: 'tcp_cap0000000000000000000001', expiresAt: 43_201_000, port: 3340, protocol: 1 }
     } else if (path.endsWith('/previews') && method === 'POST') {
       body = { pid: 'pv1' }
     }
     return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify(body) } }
   })
-  return Object.assign(asked, { clock, logged, spawned, posted, versions, written, urls, submitted, sent, opened, files, store })
+  return Object.assign(asked, { clock, logged, spawned, posted, versions, written, urls, submitted, sent, opened, files, store, localHelpers, tcpHelpers, toasted, copied })
 }
 
 // A press settles before work waiting on the runtime's own promises does (a
@@ -620,6 +664,311 @@ test('a guest sees what the host showed in the Room, with Open', async ($, on) =
   await pane.press({ key: 'tab-shown' })
   expect(await pane.find({ type: 'Text', text: /chart\.html/ })).toBeDefined()
   expect(await pane.find({ key: 'open-seq:2' })).toBeDefined()
+})
+
+const PREVIEW_PEOPLE = [{ id: 'host', name: 'Sam', role: 'host', online: true }, { id: 'seat1', name: 'scott', role: 'guest', online: true }]
+const LOCAL_SHOWN = { seq: 2, type: 'artifact', ts: 900, from: { seat: 'host', name: 'Sam', role: 'host' }, body: { kind: 'preview', pid: 'pv-local', port: 3340, path: '/login?next=%2Faccount', title: 'Sign in' } }
+
+test('a guest opens localhost only after the helper is ready; Public link is a separate choice', async ($, on) => {
+  const asked = world(on, { localPreview: 'wait', stream: [{ seq: 2, events: [LOCAL_SHOWN], people: PREVIEW_PEOPLE, ended: false, title: 'demo' }] })
+  const urls: string[] = []
+  on('mcp.call', ($, e) => {
+    if (e.server === 'Claude_Browser' && e.tool === 'preview_start') urls.push(String(e.args?.url))
+    return { value: { content: [{ type: 'text', text: 'ok' }], isError: false } } as never
+  })
+  await $.prompt.submit({ text: LINK, origin: { kind: 'composer' }, wait: false })
+  await asked.clock.advance(10)
+  const pane = await $.ui.mount({ plugin: 'shared-session', surface: 'desktop', component: 'Pane', requestId: 'shared-room', props: PANE })
+  await pane.press({ key: 'tab-shown' })
+  await pane.press({ key: 'open-preview:pv-local' })
+  await pane.press({ key: 'open-preview:pv-local' }) // concurrent opens share startup, not the port
+  await eventually(asked.clock, () => asked.localHelpers.length)
+  expect(asked.localHelpers).toHaveLength(1)
+  expect(urls).toHaveLength(0)
+  asked.localHelpers[0]!.send({ state: 'ready', port: 3340 })
+  await eventually(asked.clock, () => urls.length === 2)
+  expect(urls).toEqual(['http://localhost:3340/login?next=%2Faccount', 'http://localhost:3340/login?next=%2Faccount'])
+  expect(asked.filter(a => a.endsWith('/tunnel'))).toHaveLength(1)
+  const spawn = asked.spawned.find(s => s.argv.at(-1)?.endsWith('/relay/local-preview.cjs'))!
+  expect(JSON.parse(spawn.input!).port).toBe(3340)
+  expect(JSON.stringify(spawn.argv)).not.toContain('ticket=')
+  expect(JSON.parse(spawn.input!).token).toBe('tcp_cap0000000000000000000001')
+  expect(JSON.parse(spawn.input!).strict).toBe(false)
+  expect(spawn.input).not.toContain('"token":"g"')
+  await pane.press({ key: 'public-preview:pv-local' })
+  await eventually(asked.clock, () => urls.length === 3)
+  expect(urls[2]).toContain('https://preview.test/__share/enter?')
+  expect(asked.filter(a => a.endsWith('/ticket'))).toHaveLength(1)
+  await $.command.run({ command: 'stop-sharing', args: '' } as never)
+  expect(asked.localHelpers[0]!.stopped).toBe(true)
+})
+
+test('an automatically selected port, not the host port, is opened and shown', async ($, on) => {
+  const asked = world(on, { localPreviewPort: 44321, env: { CLAUDE_CODE_ENTRYPOINT: 'cli' }, stream: [{ seq: 2, events: [LOCAL_SHOWN], people: PREVIEW_PEOPLE, ended: false, title: 'demo' }] })
+  await $.prompt.submit({ text: LINK, origin: { kind: 'composer' }, wait: false })
+  await asked.clock.advance(10)
+  const pane = await $.ui.mount({ plugin: 'shared-session', surface: 'terminal', component: 'Pane', requestId: 'shared-room', props: PANE })
+  await pane.press({ key: 'tab-shown' })
+  await pane.press({ key: 'open-preview:pv-local' })
+  await eventually(asked.clock, () => asked.copied.length)
+  expect(asked.copied).toEqual(['http://localhost:44321/login?next=%2Faccount'])
+  await asked.clock.advance(20)
+  const mapping = await pane.find({ type: 'Text', text: 'localhost:44321 → host localhost:3340' })
+  expect(mapping?.text).toBe('localhost:44321 → host localhost:3340')
+  expect(asked.toasted.some(t => t.includes('Fixed OAuth callbacks'))).toBe(true)
+  expect(asked.filter(a => a.endsWith('/ticket'))).toHaveLength(0)
+  await $.command.run({ command: 'stop-sharing', args: '' } as never)
+})
+
+test('a chosen local port is exact, invalid input changes nothing, and Auto restores allocation', async ($, on) => {
+  const asked = world(on, { env: { CLAUDE_CODE_ENTRYPOINT: 'cli' }, stream: [{ seq: 2, events: [LOCAL_SHOWN], people: PREVIEW_PEOPLE, ended: false, title: 'demo' }] })
+  await $.prompt.submit({ text: LINK, origin: { kind: 'composer' }, wait: false })
+  await asked.clock.advance(10)
+  const pane = await $.ui.mount({ plugin: 'shared-session', surface: 'terminal', component: 'Pane', requestId: 'shared-room', props: PANE })
+  await pane.press({ key: 'tab-shown' })
+  await pane.input({ key: 'port-preview:pv-local-auto', text: '65536' })
+  await eventually(asked.clock, () => asked.toasted.some(t => t.includes('1 to 65535')))
+  expect(asked.localHelpers).toHaveLength(0)
+  await pane.input({ key: 'port-preview:pv-local-auto', text: '4401' })
+  await eventually(asked.clock, () => asked.localHelpers.length)
+  await pane.press({ key: 'open-preview:pv-local' })
+  await eventually(asked.clock, () => asked.copied.length)
+  expect(asked.copied[0]).toBe('http://localhost:4401/login?next=%2Faccount')
+  const first = asked.spawned.find(s => s.argv.at(-1)?.endsWith('/relay/local-preview.cjs'))!
+  expect(JSON.parse(first.input!)).toMatchObject({ port: 4401, strict: true })
+  await pane.press({ key: 'auto-preview:pv-local' })
+  await eventually(asked.clock, () => asked.localHelpers.length === 2)
+  expect(asked.localHelpers[0]!.stopped).toBe(true)
+  await pane.press({ key: 'open-preview:pv-local' })
+  await eventually(asked.clock, () => asked.copied.length === 2)
+  expect(asked.copied[1]).toBe('http://localhost:3340/login?next=%2Faccount')
+  expect(await pane.find({ key: 'auto-preview:pv-local' })).toBeUndefined()
+  await $.command.run({ command: 'stop-sharing', args: '' } as never)
+})
+
+for (const invalid of [0, 65536]) {
+  test(`a helper reporting invalid port ${invalid} never opens a local address`, async ($, on) => {
+    const asked = world(on, { localPreview: 'wait', env: { CLAUDE_CODE_ENTRYPOINT: 'cli' }, stream: [{ seq: 2, events: [LOCAL_SHOWN], people: PREVIEW_PEOPLE, ended: false, title: 'demo' }] })
+    await $.prompt.submit({ text: LINK, origin: { kind: 'composer' }, wait: false })
+    await asked.clock.advance(10)
+    const pane = await $.ui.mount({ plugin: 'shared-session', surface: 'terminal', component: 'Pane', requestId: 'shared-room', props: PANE })
+    await pane.press({ key: 'tab-shown' })
+    await pane.press({ key: 'open-preview:pv-local' })
+    await eventually(asked.clock, () => asked.localHelpers.length)
+    asked.localHelpers[0]!.send({ state: 'ready', port: invalid })
+    await eventually(asked.clock, () => asked.localHelpers[0]!.stopped)
+    expect(asked.copied).toHaveLength(0)
+    expect(asked.toasted.some(t => t.includes('valid listening port'))).toBe(true)
+    await $.command.run({ command: 'stop-sharing', args: '' } as never)
+  })
+}
+
+for (const tunnel of ['unsupported', 'host-old'] as const) {
+  test(`a ${tunnel} TCP endpoint reports the boundary without public fallback`, async ($, on) => {
+    const asked = world(on, { tunnel, env: { CLAUDE_CODE_ENTRYPOINT: 'cli' }, stream: [{ seq: 2, events: [LOCAL_SHOWN], people: PREVIEW_PEOPLE, ended: false, title: 'demo' }] })
+    await $.prompt.submit({ text: LINK, origin: { kind: 'composer' }, wait: false })
+    await asked.clock.advance(10)
+    const pane = await $.ui.mount({ plugin: 'shared-session', surface: 'terminal', component: 'Pane', requestId: 'shared-room', props: PANE })
+    await pane.press({ key: 'tab-shown' })
+    await pane.press({ key: 'open-preview:pv-local' })
+    await eventually(asked.clock, () => asked.toasted.length)
+    expect(asked.toasted.some(t => /TCP forwarding|updated plugin/.test(t))).toBe(true)
+    expect(asked.localHelpers).toHaveLength(0)
+    expect(asked.copied).toHaveLength(0)
+    expect(asked.filter(a => a.endsWith('/ticket'))).toHaveLength(0)
+    await $.command.run({ command: 'stop-sharing', args: '' } as never)
+  })
+}
+
+for (const [failure, message] of [['busy', /localhost:3340 is already in use/], ['missing', /need Node/]] as const) {
+  test(`a ${failure} localhost helper reports the problem without opening a public preview`, async ($, on) => {
+    const asked = world(on, { localPreview: failure, env: { CLAUDE_CODE_ENTRYPOINT: 'cli' }, stream: [{ seq: 2, events: [LOCAL_SHOWN], people: PREVIEW_PEOPLE, ended: false, title: 'demo' }] })
+    await $.prompt.submit({ text: LINK, origin: { kind: 'composer' }, wait: false })
+    await asked.clock.advance(10)
+    const pane = await $.ui.mount({ plugin: 'shared-session', surface: 'terminal', component: 'Pane', requestId: 'shared-room', props: PANE })
+    await pane.press({ key: 'tab-shown' })
+    await pane.press({ key: 'open-preview:pv-local' })
+    await eventually(asked.clock, () => asked.toasted.some(t => message.test(t)))
+    expect(asked.toasted.some(t => message.test(t))).toBe(true)
+    expect(asked.copied).toHaveLength(0)
+    expect(asked.filter(a => a.endsWith('/tunnel'))).toHaveLength(1)
+  })
+}
+
+test('an expired, failed or exited localhost helper redraws and restarts on Open; Leave closes it', async ($, on) => {
+  const asked = world(on, { env: { CLAUDE_CODE_ENTRYPOINT: 'cli' }, stream: [{ seq: 2, events: [LOCAL_SHOWN], people: PREVIEW_PEOPLE, ended: false, title: 'demo' }] })
+  await $.prompt.submit({ text: LINK, origin: { kind: 'composer' }, wait: false })
+  await asked.clock.advance(10)
+  const pane = await $.ui.mount({ plugin: 'shared-session', surface: 'terminal', component: 'Pane', requestId: 'shared-room', props: PANE })
+  await pane.press({ key: 'tab-shown' })
+  await pane.press({ key: 'open-preview:pv-local' })
+  await eventually(asked.clock, () => asked.copied.length)
+  asked.localHelpers[0]!.send({ state: 'expired' })
+  await asked.clock.advance(20)
+  expect((await pane.find({ type: 'Text', text: 'Last: localhost:3340' }))?.text).toBe('Last: localhost:3340 → host localhost:3340')
+  await pane.press({ key: 'open-preview:pv-local' })
+  await eventually(asked.clock, () => asked.copied.length === 2)
+  expect(asked.localHelpers).toHaveLength(2)
+  expect(asked.localHelpers[0]!.stopped).toBe(true)
+  asked.localHelpers[1]!.send({ state: 'error', code: 'AUTH' })
+  await asked.clock.advance(20)
+  expect((await pane.find({ type: 'Text', text: 'Last: localhost:3340' }))?.text).toBe('Last: localhost:3340 → host localhost:3340')
+  await pane.press({ key: 'open-preview:pv-local' })
+  await eventually(asked.clock, () => asked.copied.length === 3)
+  expect(asked.localHelpers[1]!.stopped).toBe(true)
+  asked.localHelpers[2]!.exit()
+  await asked.clock.advance(5)
+  await pane.press({ key: 'open-preview:pv-local' })
+  await eventually(asked.clock, () => asked.copied.length === 4)
+  expect(asked.localHelpers).toHaveLength(4)
+  expect(new Set(asked.copied)).toEqual(new Set(['http://localhost:3340/login?next=%2Faccount']))
+  await $.command.run({ command: 'stop-sharing', args: '' } as never)
+  expect(asked.localHelpers.every(h => h.stopped)).toBe(true)
+})
+
+test('automatic preview replay and a refused viewer both use the same localhost listener', async ($, on) => {
+  const asked = world(on, { stream: [{ seq: 2, events: [LOCAL_SHOWN], people: PREVIEW_PEOPLE, ended: false, title: 'demo' }] })
+  on('tool.list', () => ({ value: [{ name: 'mcp__Claude_Browser__preview_start', description: 'Preview', inputSchema: { type: 'object' } }] }) as never)
+  on('turn.start', ($, e) => ({ turnId: e.turnId }))
+  on('turn.complete', () => ({ text: '' }))
+  on('tool.call', { tool: 'mcp__Claude_Browser__preview_start' } as never, () => ({ deny: 'auto mode: no verdict' }) as never)
+  await $.prompt.submit({ text: LINK, origin: { kind: 'composer' }, wait: false })
+  await asked.clock.advance(10)
+  await $.turn.start({ turnId: 'join-preview', text: LINK })
+  await $.turn.complete({ turnId: 'join-preview', isAborted: false, durationMs: 0, reason: 'answer' } as never)
+  await asked.clock.advance(10)
+  await $.turn.start({ turnId: 'show-preview', text: 'Sam shared Sign in (preview)' })
+  const chunks = []
+  for await (const chunk of $.turn.step({ ...STEP, turnId: 'show-preview' } as never)) chunks.push(chunk)
+  const call = chunks.find(c => c.kind === 'tool')
+  const input = chunks.filter(c => c.kind === 'input').map(c => c.json).join('')
+  expect(call?.name).toBe('mcp__Claude_Browser__preview_start')
+  expect(JSON.parse(input).url).toBe('http://localhost:3340/login?next=%2Faccount')
+  await $.tool.call({ tool: call!.name, tool_use_id: call!.id, ...JSON.parse(input) } as never)
+  const again = []
+  for await (const chunk of $.turn.step({ ...STEP, turnId: 'show-preview', index: 1 } as never)) again.push(chunk)
+  const text = again.filter(c => c.kind === 'text').map(c => c.text).join('')
+  expect(text).toContain('[Open the preview](http://localhost:3340/login?next=%2Faccount)')
+  expect(text).not.toContain('/__share/enter')
+  expect(text).not.toContain('within 10 minutes')
+  expect(asked.localHelpers).toHaveLength(1)
+  expect(asked.filter(a => a.endsWith('/tunnel'))).toHaveLength(1)
+  await $.command.run({ command: 'stop-sharing', args: '' } as never)
+})
+
+for (const ending of ['leave', 'timeout'] as const) {
+  test(`a localhost startup interrupted by ${ending} cannot open a stale link`, async ($, on) => {
+    const asked = world(on, { localPreview: 'wait', env: { CLAUDE_CODE_ENTRYPOINT: 'cli' }, stream: [{ seq: 2, events: [LOCAL_SHOWN], people: PREVIEW_PEOPLE, ended: false, title: 'demo' }] })
+    await $.prompt.submit({ text: LINK, origin: { kind: 'composer' }, wait: false })
+    await asked.clock.advance(10)
+    const pane = await $.ui.mount({ plugin: 'shared-session', surface: 'terminal', component: 'Pane', requestId: 'shared-room', props: PANE })
+    await pane.press({ key: 'tab-shown' })
+    await pane.press({ key: 'open-preview:pv-local' })
+    await eventually(asked.clock, () => asked.localHelpers.length)
+    if (ending === 'leave') await $.command.run({ command: 'stop-sharing', args: '' } as never)
+    else await asked.clock.advance(8_001)
+    expect(asked.localHelpers[0]!.stopped).toBe(true)
+    asked.localHelpers[0]!.send({ state: 'ready', port: 3340 })
+    await asked.clock.advance(10)
+    expect(asked.copied).toHaveLength(0)
+    if (ending === 'timeout') expect(asked.toasted.some(t => t.includes('took too long'))).toBe(true)
+  })
+}
+
+test('saved localhost listeners resume and restore after helper loss without opening a browser', async ($, on) => {
+  const saved = {
+    at: 900,
+    room: { server: 'http://share.test', id: 'room0000000000000001', url: LINK, title: 'demo', host: 'Sam', token: 'g', seat: 'seat1', seq: 2, since: 1 },
+    autoOpen: true, policy: { prompts: 'everyone', approvals: 'edits', files: 'on' },
+    shown: [{ key: 'preview:pv-local', kind: 'preview', name: 'Sign in (preview)', ts: 900, pid: 'pv-local', port: 3340, path: '/login?next=%2Faccount' }],
+    localPreviews: [{ pid: 'pv-local', port: 3340 }], activity: [], chat: [], sidebar: null,
+  }
+  const asked = world(on, { env: { CLAUDE_CODE_ENTRYPOINT: 'cli' }, store: { 'joined:session-test-0001': saved } })
+  on('session.start', ($, e) => ({ cwd: e.cwd }))
+  on('session.end', ($, e) => ({ sessionId: e.sessionId }))
+  await $.session.start(START)
+  await eventually(asked.clock, () => asked.localHelpers.length)
+  expect(asked.localHelpers).toHaveLength(1)
+  expect(asked.copied).toHaveLength(0)
+  asked.localHelpers[0]!.exit() // a reload kills old module children
+  await asked.clock.advance(5)
+  await $.session.start(START)
+  await eventually(asked.clock, () => asked.localHelpers.length === 2)
+  expect(asked.localHelpers).toHaveLength(2)
+  expect(asked.copied).toHaveLength(0)
+  await $.session.end({ reason: 'other', sessionId: 'session-test-0001', resume: {} } as never)
+  const kept = asked.store.get('joined:session-test-0001') as typeof saved
+  expect(kept.localPreviews).toEqual([{ pid: 'pv-local', port: 3340, localPort: 3340 }])
+  expect(JSON.stringify(kept.localPreviews)).not.toContain('tcp_cap')
+  expect(JSON.stringify(kept.localPreviews)).not.toContain('ticket')
+  expect(asked.localHelpers.every(h => h.stopped)).toBe(true)
+})
+
+test('a host stopping a preview closes its guest listener', async ($, on) => {
+  const pages: unknown[] = [{ seq: 2, events: [LOCAL_SHOWN], people: PREVIEW_PEOPLE, ended: false, title: 'demo' }]
+  const asked = world(on, { env: { CLAUDE_CODE_ENTRYPOINT: 'cli' }, stream: pages })
+  await $.prompt.submit({ text: LINK, origin: { kind: 'composer' }, wait: false })
+  await asked.clock.advance(10)
+  const pane = await $.ui.mount({ plugin: 'shared-session', surface: 'terminal', component: 'Pane', requestId: 'shared-room', props: PANE })
+  await pane.press({ key: 'tab-shown' })
+  await pane.press({ key: 'open-preview:pv-local' })
+  await eventually(asked.clock, () => asked.copied.length)
+  pages.push({ seq: 3, events: [{ seq: 3, type: 'preview', ts: 901, from: LOCAL_SHOWN.from, body: { pid: 'pv-local', state: 'closed' } }], people: PREVIEW_PEOPLE, ended: false, title: 'demo' })
+  await asked.clock.advance(20_000)
+  expect(asked.localHelpers[0]!.stopped).toBe(true)
+  expect(await pane.find({ key: 'open-preview:pv-local' })).toBeUndefined()
+})
+
+test('the host advertises TCP, rejects mismatched targets, deduplicates connections and closes owned relays', async ($, on) => {
+  const stream: unknown[] = [{ seq: 1, events: [], people: PREVIEW_PEOPLE, ended: false, title: 'demo' }]
+  const asked = world(on, { stream, tcpRelays: true })
+  const ui = await $.ui.mount(band('terminal'))
+  await ui.press({ key: 'share' })
+  await $.command.run({ command: 'share-preview', args: '3340 App' } as never)
+  stream.push(
+    { tcp: { id: 'connection0001', pid: 'pv1', port: 3341 } },
+    { tcp: { id: 'connection0002', pid: 'not-shared', port: 3340 } },
+    { tcp: { id: 'connection0003', pid: 'pv1', port: 3340 } },
+    { tcp: { id: 'connection0003', pid: 'pv1', port: 3340 } },
+  )
+  await asked.clock.advance(5000)
+  expect(asked.tcpHelpers).toHaveLength(1)
+  expect(asked.spawned.some(s => s.argv[0] === 'curl' && s.input?.includes('&tcp=1'))).toBe(true)
+  const spawn = asked.spawned.find(s => s.argv.at(-1)?.endsWith('/relay/ws-relay.cjs'))!
+  expect(JSON.parse(spawn.input!)).toMatchObject({ tcp: true, port: 3340 })
+  expect(JSON.stringify(spawn.argv)).not.toContain('Bearer')
+  await $.command.run({ command: 'stop-sharing', args: '' } as never)
+  expect(asked.tcpHelpers[0]!.stopped).toBe(true)
+})
+
+test('the host automatically retries an ordinary curl stream exit in the same room and handles new TCP requests', async ($, on) => {
+  const stream: unknown[] = [{ seq: 1, events: [], people: PREVIEW_PEOPLE, ended: false, title: 'demo' }]
+  const asked = world(on, { stream, tcpRelays: true })
+  const ui = await $.ui.mount(band('terminal'))
+  await ui.press({ key: 'share' })
+  await $.command.run({ command: 'share-preview', args: '3340 App' } as never)
+  await asked.clock.advance(10)
+  const first = asked.spawned.filter(s => s.argv[0] === 'curl')
+  expect(first).toHaveLength(1)
+  expect(first[0]!.input).toContain('url = "http://localhost:8787/api/rooms/room0000000000000002/stream?after=0&tcp=1"')
+  expect(asked.tcpHelpers).toHaveLength(0)
+  // The mock curl ended with HTTP 200 and EOF. Only the retry timer reconnects;
+  // these notifications weren't present on its first connection.
+  stream.push(
+    { tcp: { id: 'connection0001', pid: 'pv1', port: 3341 } },
+    { tcp: { id: 'connection0002', pid: 'not-shared', port: 3340 } },
+    { tcp: { id: 'connection0003', pid: 'pv1', port: 3340 } },
+  )
+  await asked.clock.advance(1_000)
+  const streams = asked.spawned.filter(s => s.argv[0] === 'curl')
+  expect(streams).toHaveLength(2)
+  expect(streams[1]!.input).toBe(first[0]!.input) // same room, token and TCP advertisement
+  expect(asked.filter(a => a === 'POST /api/rooms' || /\/(join|tunnel|ticket)$/.test(a))).toEqual(['POST /api/rooms'])
+  expect(asked.tcpHelpers).toHaveLength(1)
+  const relay = asked.spawned.find(s => s.argv.at(-1)?.endsWith('/relay/ws-relay.cjs'))!
+  expect(JSON.parse(relay.input!)).toMatchObject({ tcp: true, port: 3340, room: 'ws://localhost:8787/api/rooms/room0000000000000002/ws/connection0003', token: 't' })
+  await $.command.run({ command: 'stop-sharing', args: '' } as never)
+  expect(asked.tcpHelpers[0]!.stopped).toBe(true)
 })
 
 test('a session reopened after a compaction shares its whole history, from the file before too, and asks first', async ($, on) => {
@@ -1524,7 +1873,7 @@ function model(on: On) {
     return { turnId: e.turnId, index: e.index, answer: 'Writing it now.', toolUses: [{ name: 'Write', input: {} }], stopReason: 'tool_use', usage: null } as never
   })
 }
-const STEP = { turnId: 'turn-1', index: 0, model: 'claude-opus-5-5', messageCount: 1 } as never
+const STEP = { turnId: 'turn-1', index: 0, model: 'claude-opus-5-5', messageCount: 1 }
 
 test("while someone watches, the host's Claude thinking, writing and drafting a call goes out live", async ($, on) => {
   const people = [

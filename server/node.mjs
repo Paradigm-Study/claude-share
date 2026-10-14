@@ -15,7 +15,7 @@ import { createHash } from 'node:crypto'
 import { readFileSync, writeFileSync, renameSync } from 'node:fs'
 
 import { Directory, mapStore, providersFrom } from './teams.mjs'
-import { Room, ROOM_ID, SEAT_TIMEOUT_MS, createRoom, roomRequest, previewRequest, previewRoomOf, notFound, json, publicOrigin, token, missingPage, previewMissing, homePage, outdatedClient, versionInfo, limitOf, limitedResponse, closedResponse, Windows, SOCKET_ID, previewSocketTarget, announceSocket, hostSocketAllowed, sendableClose } from './core.mjs'
+import { Room, ROOM_ID, SEAT_TIMEOUT_MS, createRoom, roomRequest, previewRequest, previewRoomOf, notFound, json, publicOrigin, token, missingPage, previewMissing, homePage, outdatedClient, versionInfo, limitOf, limitedResponse, closedResponse, Windows, SOCKET_ID, previewSocketTarget, announceSocket, hostSocketAllowed, sendableClose, TCP_LIMITS, tcpSocketTarget, announceTCP, tcpState, tcpValid, tcpReserve, tcpFailure, tcpFrame, tcpCheck, tcpControl, tcpRelay } from './core.mjs'
 
 const PORT = Number(process.env.PORT ?? 8787)
 const PUBLIC_URL = process.env.PUBLIC_URL
@@ -37,6 +37,11 @@ const directoryData = new Map() // accounts and teams (server/teams.mjs)
 // When a stream closes, check again once its grace period is over: the seat
 // may not come back, and everyone else should see that.
 function watch(room) {
+  room.onTCPRevoke = filter => {
+    for (const [id, pair] of pairs) {
+      if (pair.scope === 'tcp' && pair.roomId === room.id && (!filter.cap || pair.target.cap === filter.cap) && (!filter.pid || pair.pid === filter.pid) && (!filter.seat || pair.target.ownerSeat === filter.seat)) closePair(id, pair, 1008, 'TCP grant revoked')
+    }
+  }
   room.onDisconnect = () => {
     setTimeout(() => {
       if (room.sweep(Date.now())) save()
@@ -56,14 +61,20 @@ if (DATA_FILE) {
 }
 
 let saveTimer = null
-function save() {
-  if (!DATA_FILE || saveTimer) return
-  saveTimer = setTimeout(() => {
+function save(immediate = false) {
+  if (!DATA_FILE) return
+  const write = () => {
     saveTimer = null
     const tmp = `${DATA_FILE}.tmp`
     writeFileSync(tmp, JSON.stringify({ rooms: [...rooms.values()].map(r => r.toJSON()), directory: Object.fromEntries(directoryData) }))
     renameSync(tmp, DATA_FILE)
-  }, 500)
+  }
+  // TCP reservations and admission counters must be durable before use, not
+  // after the ordinary room snapshot's half-second debounce.
+  if (immediate) {
+    clearTimeout(saveTimer)
+    write()
+  } else if (!saveTimer) saveTimer = setTimeout(write, 500)
 }
 
 // Seats are settled by requests (see roomRequest); this only drops rooms a day
@@ -74,6 +85,7 @@ setInterval(() => {
   for (const room of rooms.values()) {
     const lastActive = !room.endedAt && room.connected('host') ? now : Math.max(room.host.lastSeen, room.endedAt ?? 0)
     if (now - lastActive > ROOM_TTL_MS) {
+      room.revokeTCP()
       rooms.delete(room.id)
       changed = true
     }
@@ -145,7 +157,7 @@ async function route(req) {
 
   const admin = Boolean(process.env.ADMIN_TOKEN) && req.headers.get('authorization') === `Bearer ${process.env.ADMIN_TOKEN}`
   const { response, changed } = await roomRequest(room, req, rest, now, origin, { previewOrigin: previewOrigin(req), admin, directory })
-  if (changed) save()
+  if (changed) save(/^previews\/[^/]+\/tunnel$/.test(rest))
   return response
 }
 
@@ -214,13 +226,56 @@ previews.listen(PREVIEW_PORT, () => console.log(`previews on http://localhost:${
 
 // WebSockets through a preview (see core.mjs): a guest's browser socket on
 // the preview port, the host's relay for it on the main one, paired by id.
-const pairs = new Map() // socket id → { browser, relay, pending }
+const pairs = new Map() // id → room/pid/purpose-bound public or TCP pair
 
-const refuse = (socket, status) => {
-  socket.end(`HTTP/1.1 ${status} ${status === 401 ? 'Unauthorized' : status === 503 ? 'Service Unavailable' : 'Not Found'}\r\nconnection: close\r\ncontent-length: 0\r\n\r\n`)
+const refuse = (socket, status, error = '') => {
+  const body = error ? JSON.stringify({ error }) : ''
+  socket.end(`HTTP/1.1 ${status} Refused\r\nconnection: close\r\ncontent-type: application/json\r\ncontent-length: ${Buffer.byteLength(body)}\r\n\r\n${body}`)
+}
+
+function closePair(id, pair, code = 1011, reason = '') {
+  if (pairs.get(id) !== pair) return
+  pairs.delete(id)
+  clearTimeout(pair.timer)
+  pair.browser?.close(code, reason)
+  pair.relay?.close(code, reason)
+}
+
+function armTCP(id, pair) {
+  clearTimeout(pair.timer)
+  const due = pair.guest.ready ? pair.target.exp : Math.min(pair.target.exp, pair.guest.deadline)
+  pair.timer = setTimeout(() => {
+    const room = rooms.get(pair.roomId)
+    if (room?.sweepTCP(Date.now())) save()
+    closePair(id, pair, 1008, pair.guest.ready ? 'TCP grant expired' : 'TCP relay timeout')
+  }, Math.max(0, due - Date.now())).unref()
+}
+
+function tcpMessage(id, pair, side, message) {
+  if (pairs.get(id) !== pair) return
+  try {
+    const room = rooms.get(pair.roomId)
+    const from = side === 'guest' ? pair.guest : pair.host
+    const to = side === 'guest' ? pair.host : pair.guest
+    if (!room || !tcpValid(room, from, Date.now())) throw tcpFailure('TCP grant revoked.')
+    const frame = tcpFrame(message)
+    const now = Date.now()
+    tcpCheck(from, to, frame, now)
+    if (frame.t === 'data' && from.remaining < frame.n) {
+      if (!tcpReserve(room, from)) throw tcpFailure('TCP room byte budget exhausted.')
+      save(true)
+    }
+    const result = tcpRelay(from, to, frame, now)
+    const peer = side === 'guest' ? pair.relay : pair.browser
+    for (const data of result.messages) if (!peer?.send(data)) throw tcpFailure('TCP socket send failed.', 1011)
+    if (result.done) closePair(id, pair, 1000, 'TCP finished')
+  } catch (error) {
+    closePair(id, pair, error.code ?? 1011, error.message)
+  }
 }
 
 previews.on('upgrade', (nodeReq, socket, head) => {
+  if (!validHandshake(nodeReq)) return refuse(socket, 400)
   const req = new Request(`http://${nodeReq.headers.host ?? 'localhost'}${nodeReq.url}`, { headers: headersOf(nodeReq) })
   const id = previewRoomOf(req)
   const room = id && ROOM_ID.test(id) ? rooms.get(id) : undefined
@@ -228,131 +283,209 @@ previews.on('upgrade', (nodeReq, socket, head) => {
   if (!target.ok) return refuse(socket, target.status)
   const wsId = token(12)
   if (!announceSocket(room, wsId, target)) return refuse(socket, 503)
-  const pair = { browser: null, relay: null, pending: [] }
+  const pair = { roomId: room.id, pid: target.pid, scope: 'public', browser: null, relay: null, pending: [], pendingBytes: 0 }
   pairs.set(wsId, pair)
   pair.browser = acceptSocket(nodeReq, socket, head, target.protocols[0], {
-    message: data => (pair.relay ? pair.relay.send(data) : pair.pending.length < 500 && pair.pending.push(data)),
-    close: code => {
-      pairs.delete(wsId)
-      pair.relay?.close(code)
+    message: data => {
+      if (pair.relay) return pair.relay.send(data)
+      const n = typeof data === 'string' ? Buffer.byteLength(data) : data.byteLength
+      if (pair.pending.length >= 500 || pair.pendingBytes + n > TCP_LIMITS.bufferBytes) return closePair(wsId, pair, 1009, 'Preview queue limit')
+      pair.pending.push(data)
+      pair.pendingBytes += n
     },
+    close: code => closePair(wsId, pair, code),
   })
 })
 
 server.on('upgrade', (nodeReq, socket, head) => {
-  const m = /^\/api\/rooms\/([^/]+)\/ws\/([^/?]+)$/.exec(String(nodeReq.url).split('?')[0])
+  if (!validHandshake(nodeReq)) return refuse(socket, 400)
+  const path = String(nodeReq.url).split('?')[0]
+  const tunnel = /^\/api\/rooms\/([^/]+)\/previews\/([^/]+)\/tunnel$/.exec(path)
+  const req = new Request(`http://localhost${nodeReq.url}`, { headers: headersOf(nodeReq) })
+  if (tunnel) {
+    const room = ROOM_ID.test(tunnel[1]) ? rooms.get(tunnel[1]) : null
+    if (!room) return refuse(socket, 404)
+    const active = [...pairs.values()].filter(p => p.roomId === room.id && p.scope === 'tcp').map(p => p.target)
+    const before = { ...room.tcpStats.opens }
+    const target = tcpSocketTarget(room, req, tunnel[2], Date.now(), active)
+    try {
+      if (before.count !== room.tcpStats.opens.count || before.start !== room.tcpStats.opens.start) save(true)
+    } catch { return refuse(socket, 503, 'TCP admission could not be saved.') }
+    if (!target.ok) return refuse(socket, target.status, target.error)
+    const id = token(12)
+    const pair = { roomId: room.id, pid: target.pid, scope: 'tcp', target, guest: tcpState(id, target, 'guest', Date.now()), host: null, browser: null, relay: null }
+    pairs.set(id, pair)
+    if (!announceTCP(room, id, target)) {
+      pairs.delete(id)
+      return refuse(socket, 503, 'The TCP host disconnected.')
+    }
+    pair.browser = acceptSocket(nodeReq, socket, head, '', { tcp: true,
+      message: data => tcpMessage(id, pair, 'guest', data),
+      close: code => closePair(id, pair, code === 1000 || code === 1006 ? 1011 : sendableClose(code), 'TCP socket closed'),
+    })
+    armTCP(id, pair)
+    return
+  }
+  const m = /^\/api\/rooms\/([^/]+)\/ws\/([^/]+)$/.exec(path)
   const room = m && ROOM_ID.test(m[1]) ? rooms.get(m[1]) : undefined
   const pair = m && SOCKET_ID.test(m[2]) ? pairs.get(m[2]) : undefined
-  if (!room || !hostSocketAllowed(room, new Request('http://localhost/', { headers: headersOf(nodeReq) }))) return refuse(socket, 401)
-  if (!pair) return refuse(socket, 404)
-  pair.relay = acceptSocket(nodeReq, socket, head, '', {
-    message: data => pair.browser?.send(data),
-    close: code => {
-      pairs.delete(m[2])
-      pair.browser?.close(code)
-    },
-  })
-  for (const data of pair.pending.splice(0)) pair.relay.send(data)
+  if (!room || !hostSocketAllowed(room, req)) return refuse(socket, 401)
+  if (!pair || pair.roomId !== room.id) return refuse(socket, 404)
+  if (pair.relay) return refuse(socket, 409, 'That socket already has a host relay.')
+  if (pair.scope === 'tcp') {
+    if (!tcpValid(room, pair.guest, Date.now()) || Date.now() >= pair.guest.deadline) {
+      closePair(m[2], pair, 1008, 'TCP grant expired or relay timed out')
+      return refuse(socket, 410)
+    }
+    pair.host = tcpState(m[2], pair.target, 'host', Date.now())
+    pair.relay = acceptSocket(nodeReq, socket, head, '', { tcp: true,
+      message: data => tcpMessage(m[2], pair, 'host', data),
+      close: code => closePair(m[2], pair, code === 1000 || code === 1006 ? 1011 : sendableClose(code), 'TCP socket closed'),
+    })
+    try {
+      pair.guest.ready = pair.host.ready = true
+      if (!pair.browser.send(tcpControl(pair.guest, { t: 'ready' })) || !pair.relay.send(tcpControl(pair.host, { t: 'ready' }))) throw tcpFailure('TCP ready send failed.', 1011)
+      armTCP(m[2], pair)
+    } catch (error) { closePair(m[2], pair, error.code ?? 1011, error.message) }
+  } else {
+    pair.relay = acceptSocket(nodeReq, socket, head, '', {
+      message: data => pair.browser?.send(data),
+      close: code => closePair(m[2], pair, code),
+    })
+    for (const data of pair.pending.splice(0)) pair.relay.send(data)
+    pair.pendingBytes = 0
+  }
 })
 
-// The server side of a WebSocket, enough to pass messages on: the handshake,
-// frames in (masked, maybe in pieces; pings answered) and out, and a close.
+function validHandshake(req) {
+  const key = req.headers['sec-websocket-key']
+  return req.method === 'GET' && String(req.headers.upgrade ?? '').toLowerCase() === 'websocket' && String(req.headers.connection ?? '').toLowerCase().split(/\s*,\s*/).includes('upgrade') && req.headers['sec-websocket-version'] === '13' && typeof key === 'string' && /^[A-Za-z0-9+/]{22}==$/.test(key) && Buffer.from(key, 'base64').length === 16 && Buffer.from(key, 'base64').toString('base64') === key
+}
+
+// Stdlib RFC 6455 server. Bound fragments/parser/output, reject invalid frames,
+// and drain a bounded queue after write(false); never drop application bytes.
 function acceptSocket(nodeReq, socket, head, protocol, on) {
-  const key = nodeReq.headers['sec-websocket-key']
-  if (!key) return void refuse(socket, 404)
-  const accept = createHash('sha1').update(`${key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`).digest('base64')
+  const accept = createHash('sha1').update(`${nodeReq.headers['sec-websocket-key']}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`).digest('base64')
   socket.write(['HTTP/1.1 101 Switching Protocols', 'upgrade: websocket', 'connection: Upgrade', `sec-websocket-accept: ${accept}`, ...(protocol ? [`sec-websocket-protocol: ${protocol}`] : []), '', ''].join('\r\n'))
   const frame = (op, payload) => {
-    const len = payload.length
-    let headBytes
-    if (len < 126) headBytes = Buffer.from([0x80 | op, len])
-    else if (len < 65536) {
-      headBytes = Buffer.alloc(4)
-      headBytes[0] = 0x80 | op
-      headBytes[1] = 126
-      headBytes.writeUInt16BE(len, 2)
-    } else {
-      headBytes = Buffer.alloc(10)
-      headBytes[0] = 0x80 | op
-      headBytes[1] = 127
-      headBytes.writeBigUInt64BE(BigInt(len), 2)
-    }
-    return Buffer.concat([headBytes, payload])
+    const n = payload.length
+    const h = Buffer.alloc(n < 126 ? 2 : n < 65536 ? 4 : 10)
+    h[0] = 0x80 | op
+    h[1] = n < 126 ? n : n < 65536 ? 126 : 127
+    if (h.length === 4) h.writeUInt16BE(n, 2)
+    if (h.length === 10) h.writeBigUInt64BE(BigInt(n), 2)
+    return Buffer.concat([h, payload])
   }
-  let closed = false
-  const close = code => {
+  let closed = false, blocked = false, queuedBytes = 0
+  const queue = []
+  const enqueue = bytes => {
+    if (socket.destroyed || queuedBytes + socket.writableLength + bytes.length > TCP_LIMITS.bufferBytes) return false
+    if (blocked) {
+      queue.push(bytes)
+      queuedBytes += bytes.length
+    } else blocked = !socket.write(bytes)
+    return true
+  }
+  const close = (code = 1000, reason = '') => {
     if (closed) return
     closed = true
-    const p = Buffer.alloc(2)
+    const why = Buffer.from(String(reason).replace(/[^\x20-\x7e]/g, '?').slice(0, 100))
+    const p = Buffer.alloc(2 + why.length)
     p.writeUInt16BE(sendableClose(code))
-    try {
-      socket.write(frame(8, p))
-    } catch {}
-    socket.end()
+    why.copy(p, 2)
+    if (!enqueue(frame(8, p))) socket.destroy()
+    else if (!queue.length) socket.end()
+    setTimeout(() => socket.destroy(), TCP_LIMITS.closeMs).unref()
     on.close(code)
   }
-  let buf = head?.length ? Buffer.from(head) : Buffer.alloc(0)
-  let parts = []
-  let partOp = 1
-  const read = () => {
-    while (buf.length >= 2) {
-      const fin = buf[0] & 0x80
-      const op = buf[0] & 0x0f
-      const masked = buf[1] & 0x80
-      let len = buf[1] & 0x7f
-      let at = 2
-      if (len === 126) {
-        if (buf.length < 4) return
-        len = buf.readUInt16BE(2)
-        at = 4
-      } else if (len === 127) {
-        if (buf.length < 10) return
-        len = Number(buf.readBigUInt64BE(2))
-        at = 10
-      }
-      const maskAt = at
-      if (masked) at += 4
-      if (buf.length < at + len) return
-      let payload = buf.subarray(at, at + len)
-      if (masked) {
-        const mask = buf.subarray(maskAt, maskAt + 4)
-        payload = Buffer.from(payload)
-        for (let i = 0; i < payload.length; i++) payload[i] ^= mask[i & 3]
-      }
-      buf = buf.subarray(at + len)
-      if (op === 8) return close(payload.length >= 2 ? payload.readUInt16BE(0) : 1000)
-      if (op === 9) {
-        socket.write(frame(10, payload))
-        continue
-      }
-      if (op === 10) continue
-      if (op === 1 || op === 2) {
-        partOp = op
-        parts = [payload]
-      } else if (op === 0) parts.push(payload)
-      if (fin) {
-        const data = Buffer.concat(parts)
-        parts = []
-        on.message(partOp === 1 ? data.toString('utf8') : data)
-      }
+  socket.on('drain', () => {
+    blocked = false
+    while (queue.length && !blocked && !socket.destroyed) {
+      const bytes = queue.shift()
+      queuedBytes -= bytes.length
+      blocked = !socket.write(bytes)
     }
+    if (closed && !queue.length) socket.end()
+  })
+  let buf = Buffer.alloc(0), parts = [], partOp = 0, partBytes = 0, partCount = 0
+  let wire = { start: Date.now(), count: 0 }
+  const utf8 = new TextDecoder('utf-8', { fatal: true })
+  const maxFor = op => on.tcp ? (op === 1 ? TCP_LIMITS.controlBytes : TCP_LIMITS.dataBytes) : TCP_LIMITS.bufferBytes
+  const read = () => {
+    try {
+      while (!closed && buf.length >= 2) {
+        const fin = Boolean(buf[0] & 0x80), op = buf[0] & 15
+        if ((buf[0] & 0x70) || !(buf[1] & 0x80) || ![0, 1, 2, 8, 9, 10].includes(op)) return close(1002, 'Invalid WebSocket frame')
+        let n = buf[1] & 127, at = 2
+        if (op >= 8 && (!fin || n > 125)) return close(1002, 'Invalid WebSocket control')
+        if (n === 126) {
+          if (buf.length < 4) return
+          n = buf.readUInt16BE(2); at = 4
+          if (n < 126) return close(1002, 'Noncanonical WebSocket length')
+        } else if (n === 127) {
+          if (buf.length < 10) return
+          const big = buf.readBigUInt64BE(2)
+          if (big < 65536n || big >> 63n) return close(1002, 'Invalid WebSocket length')
+          if (big > BigInt(TCP_LIMITS.bufferBytes)) return close(1009, 'WebSocket frame too large')
+          n = Number(big); at = 10
+        }
+        if (op < 8) {
+          if ((op === 0 && !partOp) || (op !== 0 && partOp)) return close(1002, 'Invalid WebSocket fragmentation')
+          if (partBytes + n > maxFor(op || partOp)) return close(1009, 'WebSocket message too large')
+        }
+        if (buf.length < at + 4 + n) return
+        const now = Date.now()
+        if (now - wire.start >= TCP_LIMITS.rateWindowMs) wire = { start: now, count: 0 }
+        if (++wire.count > TCP_LIMITS.wireFramesPerWindow) return close(1008, 'WebSocket frame rate exceeded')
+        const mask = buf.subarray(at, at + 4)
+        const payload = Buffer.allocUnsafeSlow(n)
+        buf.copy(payload, 0, at + 4, at + 4 + n)
+        for (let i = 0; i < n; i++) payload[i] ^= mask[i & 3]
+        buf = buf.subarray(at + 4 + n)
+        if (op === 8) {
+          if (n === 1) return close(1002, 'Invalid WebSocket close')
+          const code = n ? payload.readUInt16BE(0) : 1000
+          if (n && !((code >= 1000 && code <= 1014 && ![1004, 1005, 1006].includes(code)) || (code >= 3000 && code < 5000))) return close(1002, 'Invalid WebSocket close code')
+          if (n > 2) utf8.decode(payload.subarray(2))
+          return close(code)
+        }
+        if (op === 9) {
+          if (!enqueue(frame(10, payload))) return close(1009, 'WebSocket output limit')
+          continue
+        }
+        if (op === 10) continue
+        if (op) partOp = op
+        if (++partCount > TCP_LIMITS.messageFragments) return close(1009, 'WebSocket fragment count limit')
+        parts.push(payload); partBytes += n
+        if (fin) {
+          const data = Buffer.concat(parts, partBytes), kind = partOp
+          parts = []; partBytes = 0; partOp = 0; partCount = 0
+          on.message(kind === 1 ? utf8.decode(data) : data)
+        }
+      }
+    } catch { close(1007, 'Invalid WebSocket UTF-8') }
   }
-  socket.on('data', d => {
+  const incoming = d => {
+    if (closed) return
+    if (buf.length + partBytes + d.length > TCP_LIMITS.bufferBytes) return close(1009, 'WebSocket parser limit')
     buf = Buffer.concat([buf, d])
     read()
-  })
+  }
+  socket.on('data', incoming)
+  // Upgraded HTTP sockets allow half-close, but EOF without a WS close is fatal.
+  socket.on('end', () => { if (!closed) socket.destroy() })
   socket.on('close', () => {
-    if (!closed) {
-      closed = true
-      on.close(1006)
-    }
+    if (!closed) { closed = true; on.close(1006) }
   })
   socket.on('error', () => socket.destroy())
-  if (buf.length) read()
+  // Install both pair halves before any data piggybacked on the handshake runs.
+  if (head?.length) queueMicrotask(() => incoming(head))
   return {
     send: data => {
-      if (!closed) socket.write(frame(typeof data === 'string' ? 1 : 2, typeof data === 'string' ? Buffer.from(data, 'utf8') : Buffer.from(data)))
-    },
-    close,
+      if (closed) return false
+      const bytes = typeof data === 'string' ? Buffer.from(data) : Buffer.from(data instanceof ArrayBuffer ? data : data.buffer, data.byteOffset ?? 0, data.byteLength)
+      if (bytes.length > maxFor(typeof data === 'string' ? 1 : 2) || !enqueue(frame(typeof data === 'string' ? 1 : 2, bytes))) { close(1009, 'WebSocket output limit'); return false }
+      return true
+    }, close,
   }
 }
