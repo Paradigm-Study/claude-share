@@ -29,6 +29,11 @@ name = "EVENTS_LIMIT"
 namespace_id = "7103"
 simple = { limit = 900, period = 60 }
 
+[[ratelimits]]
+name = "TUNNEL_LIMIT"
+namespace_id = "7104"
+simple = { limit = 60, period = 60 }
+
 [[durable_objects.bindings]]
 name = "ROOMS"
 class_name = "RoomObject"

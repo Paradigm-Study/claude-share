@@ -93,7 +93,7 @@ const PROXY_RESPONSE_MAX = 20 * 1024 * 1024
 // All resource ceilings live here; both transports enforce the same protocol.
 export const TCP_LIMITS = Object.freeze({
   protocol: 1, capMs: PREVIEW_SESSION_MS, capPairs: 8, roomPairs: 64,
-  seatCaps: 2, roomCaps: 128, opensPerMinute: 120, openWindowMs: 60_000,
+  seatCaps: 2, roomCaps: 128, opensPerMinute: 120, seatOpensPerMinute: 40, openWindowMs: 60_000,
   pairMs: 10_000, roomBytes: 1024 ** 3, reserveBytes: 1024 ** 2,
   dataBytes: 65_536, creditFrames: 4, creditBytes: 256 * 1024,
   controlBytes: 256, bufferBytes: 1024 ** 2, messageFragments: 4096,
@@ -151,7 +151,10 @@ export class Room {
     this.files = new Map(Object.entries(data.files ?? {})) // id → { id, name, type, size, ts }
     this.previews = new Map(Object.entries(data.previews ?? {})) // pid → { pid, port, title, ts }
     this.previewSessions = new Map(Object.entries(data.previewSessions ?? {})) // sid → { pid, exp, scope?, seat? }
-    this.tcpStats = data.tcpStats ?? { used: 0, opens: { start: 0, count: 0 } }
+    this.tcpStats = data.tcpStats ?? { used: 0, refunded: 0, opens: { start: 0, count: 0 } }
+    // Each seat's share of the room's minute of opens (kept in memory only: a
+    // room that slept starts its seats afresh, its room-wide count does not).
+    this.tcpSeatOpens = new Map()
     this.onTCPRevoke = null
     this.tcpSupported = () => [...this.subscribers].some(s => s.seat === 'host' && s.tcpSupport)
     this.tickets = new Map() // ticket → { pid, exp, used }: opens one browser, which may come back
@@ -346,7 +349,12 @@ export class Room {
     if (reason === 'timeout') {
       this.away.set(bearer, seat)
       // The newest hundred: a room's people come back, strangers don't pile up.
-      for (const old of [...this.away.keys()].slice(0, Math.max(0, this.away.size - 100))) this.away.delete(old)
+      // A seat dropped for good takes its TCP grants with it.
+      for (const old of [...this.away.keys()].slice(0, Math.max(0, this.away.size - 100))) {
+        const dropped = this.away.get(old)
+        this.away.delete(old)
+        if (dropped) this.revokeTCP({ seat: dropped.id })
+      }
     } else {
       this.away.delete(bearer)
       this.revokeTCP({ seat: seat.id })
@@ -488,6 +496,7 @@ export const LIMITS = {
   create: { limit: 6, periodMs: 60_000, message: 'Too many new shared sessions from your network. Try again in a minute.' },
   join: { limit: 30, periodMs: 60_000, message: 'Too many joins from your network. Try again in a minute.' },
   events: { limit: 900, periodMs: 60_000, message: 'This session is sending too fast; slowing down.' },
+  tunnel: { limit: 60, periodMs: 60_000, message: 'Too many preview forwarding requests from your network. Try again in a minute.' },
 }
 export const limitedResponse = kind => json({ error: LIMITS[kind].message }, 429)
 // New rooms one network address may make in a day, and the whole server: past
@@ -505,6 +514,7 @@ export function limitOf(req, id, rest, ip) {
   if (rest === 'create') return { kind: 'create', key: `c:${ip}` }
   if (rest === 'join') return { kind: 'join', key: `j:${ip}` }
   if (rest === 'events') return { kind: 'events', key: `e:${id}` }
+  if (/^previews\/[A-Za-z0-9_-]+\/tunnel$/.test(rest)) return { kind: 'tunnel', key: `t:${ip}` }
   return null
 }
 
@@ -912,9 +922,17 @@ async function previewRoutes(room, req, rest, auth, now, ctx) {
     const body = await readJson(req)
     const port = Number(body.port)
     if (!Number.isInteger(port) || port < 1 || port > 65535) return { response: json({ error: 'A port from 1 to 65535.' }, 400) }
+    // Raw TCP forwarding only for a port the host chose to share (`tcp`); one
+    // shared because Claude mentioned it opens through its link alone.
+    const tcp = body.tcp === true
     const existing = [...room.previews.values()].find(p => p.port === port)
-    if (existing) return { response: json({ pid: existing.pid }) }
-    const preview = { pid: token(8), port, title: String(body.title ?? '').slice(0, 120) || `localhost:${port}`, ts: now }
+    if (existing && tcp && !existing.tcp) {
+      existing.tcp = true
+      room.wake()
+      return { changed: true, response: json({ pid: existing.pid, tcp: true }) }
+    }
+    if (existing) return { response: json({ pid: existing.pid, ...(existing.tcp ? { tcp: true } : {}) }) }
+    const preview = { pid: token(8), port, title: String(body.title ?? '').slice(0, 120) || `localhost:${port}`, ts: now, ...(tcp ? { tcp: true } : {}) }
     room.previews.set(preview.pid, preview)
     room.append({ seat: 'host', name: room.host.name, role: 'host' }, 'preview', { ...preview, state: 'open' }, now)
     room.wake()
@@ -935,8 +953,9 @@ async function previewRoutes(room, req, rest, auth, now, ctx) {
     }
     if (match[2] === 'tunnel') {
       if (room.endedAt) return { response: json({ error: 'This session is no longer shared.' }, 410) }
+      if (!preview.tcp) return { response: json({ error: 'This preview opens through its link: the host shared it as a page, not for forwarding.' }, 403) }
       if (!room.tcpSupported()) return { response: json({ error: 'The host is not connected with TCP preview support. Update its plugin and reconnect.' }, 503) }
-      if (!tcpOperation(room, now)) return { changed: true, response: json({ error: 'Too many TCP preview connections or grants. Try again in a minute.' }, 429) }
+      if (!tcpOperation(room, now, auth.seat)) return { changed: true, response: json({ error: 'Too many TCP preview connections or grants. Try again in a minute.' }, 429) }
       const caps = [...room.previewSessions].filter(([, s]) => s.scope === 'tcp')
       const same = caps.filter(([, s]) => s.pid === preview.pid && s.seat === auth.seat).sort((a, b) => a[1].exp - b[1].exp)
       const replace = Math.max(0, same.length - TCP_LIMITS.seatCaps + 1)
@@ -1050,7 +1069,7 @@ section.more { padding:0 0 72px; }
       <li><b>Accounts, only for teams:</b> sharing and joining need none. If you sign in (GitHub or Google) to use teams, the server keeps your name, username, verified email, which GitHub organizations you're in, the teams you're in and their settings, which open sessions are shared with each team, and invites to a session (who invited whom, until it's joined, dismissed, ends, or 12 hours pass). Sign-ins are kept as hashes, never the token itself. They stay until you delete your account (<code>/team delete-account</code>), which removes them at once. Signed in, a session you share or join also knows your account for as long as it lasts, so your sessions count as one person.</li>
       <li><b>Who can see it:</b> anyone with the room's link, or for a session shared with a team that keeps it to its people, only the people in that team. Links are long and random; forward one only to people you'd hand the session to. Content is encrypted in transit, not end to end: the server can read what passes through it.</li>
       <li><b>What runs where:</b> a teammate's prompt runs on the host's machine. Reads inside the host's project run without asking; everything else asks the host first, by default.</li>
-      <li><b>Limits:</b> new rooms and joins are rate-limited per network; rooms hold up to 20 people and 100 MB of files. Public HTTP previews limit request bodies to 1 MB and response bodies to 20 MB. TCP previews instead allow 8 connections per grant, 64 per room, 2 grants per seat and preview, 128 per room, and 120 new connections or grants per minute. A grant lasts 12 hours; unpaired connections close after 10 seconds. A room has a lifetime 1 GiB TCP byte budget, reserved in 1 MiB chunks per direction with unused tails not refunded. Data messages are at most 64 KiB, with at most 4 messages / 256 KiB outstanding per direction; each half also closes at 1 MiB of cumulative control output. Rooms that are abused get ended.</li>
+      <li><b>Limits:</b> new rooms and joins are rate-limited per network; rooms hold up to 20 people and 100 MB of files. Public HTTP previews limit request bodies to 1 MB and response bodies to 20 MB. TCP previews instead allow 8 connections per grant, 64 per room, 2 grants per seat and preview, 128 per room, and 120 new connections or grants per minute (40 for any one guest). Only a port the host chose to forward can be reached this way. A grant lasts 12 hours; unpaired connections close after 10 seconds. A room has a lifetime 1 GiB TCP byte budget, reserved in 1 MiB chunks per direction, unused parts given back when a connection closes. Data messages are at most 64 KiB, with at most 4 messages / 256 KiB outstanding per direction; each half also closes at 1 MiB of cumulative control output. Rooms that are abused get ended.</li>
       <li><b>Your own server:</b> teams that want their sessions on their own infrastructure can run the same server on Cloudflare or Node in a few minutes (<a href="https://github.com/Paradigm-Study/claude-share#host-a-server">how</a>), and set it in the plugin.</li>
     </ul>
     <p>Questions or abuse reports: open an issue on <a href="https://github.com/Paradigm-Study/claude-share/issues">GitHub</a>.</p>
@@ -1241,22 +1260,39 @@ export function hostSocketAllowed(room, req) {
 
 // TCP capabilities are never browser sessions: only an Authorization bearer
 // on the main server can open this single preview's data channel.
-export function tcpOperation(room, now) {
+export function tcpOperation(room, now, seat) {
   let w = room.tcpStats.opens
   if (!w || now - w.start >= TCP_LIMITS.openWindowMs) w = room.tcpStats.opens = { start: now, count: 0 }
+  // One seat's share first: past it, a guest is turned away without spending
+  // the room's minute, so one guest can't use up everyone's.
+  if (seat) {
+    let mine = room.tcpSeatOpens?.get(seat)
+    if (!mine || now - mine.start >= TCP_LIMITS.openWindowMs) room.tcpSeatOpens?.set(seat, (mine = { start: now, count: 0 }))
+    if (mine.count >= TCP_LIMITS.seatOpensPerMinute) return false
+    mine.count += 1
+  }
   w.count = Math.min(w.count + 1, TCP_LIMITS.opensPerMinute + 1)
   return w.count <= TCP_LIMITS.opensPerMinute
+}
+
+// Whether a seat is still this room's: here, or away within its grace list.
+function seatKnown(room, seat) {
+  if (seat === 'host') return true
+  for (const s of room.seats.values()) if (s.id === seat) return true
+  for (const s of room.away.values()) if (s.id === seat) return true
+  return false
 }
 
 export function tcpSocketTarget(room, req, pid, now, active = []) {
   const cap = /^Bearer\s+([A-Za-z0-9_-]+)$/i.exec(req.headers.get('authorization') ?? '')?.[1]
   const grant = cap ? room.previewSessions.get(cap) : null
-  if (!grant || grant.scope !== 'tcp' || grant.pid !== pid || !grant.seat || grant.exp <= now) return { ok: false, status: 401, error: 'Invalid or expired TCP preview grant.' }
+  if (!grant || grant.scope !== 'tcp' || grant.pid !== pid || !grant.seat || grant.exp <= now || !seatKnown(room, grant.seat)) return { ok: false, status: 401, error: 'Invalid or expired TCP preview grant.' }
   const preview = room.previews.get(pid)
   if (!preview || room.endedAt) return { ok: false, status: 410, error: 'This TCP preview has ended.' }
+  if (!preview.tcp) return { ok: false, status: 403, error: 'This preview opens through its link, not for forwarding.' }
   if (!room.tcpSupported()) return { ok: false, status: 503, error: 'The host is not connected with TCP preview support.' }
   if (active.length >= TCP_LIMITS.roomPairs || active.filter(s => s.cap === cap).length >= TCP_LIMITS.capPairs) return { ok: false, status: 429, error: 'Too many active TCP preview connections.' }
-  if (!tcpOperation(room, now)) return { ok: false, status: 429, error: 'Too many TCP preview connections or grants. Try again in a minute.' }
+  if (!tcpOperation(room, now, grant.seat)) return { ok: false, status: 429, error: 'Too many TCP preview connections or grants. Try again in a minute.' }
   return { ok: true, room: room.id, pid, port: preview.port, cap, ownerSeat: grant.seat, exp: grant.exp }
 }
 
@@ -1275,13 +1311,24 @@ export function tcpValid(room, s, now) {
   return !room.endedAt && s.room === room.id && grant?.scope === 'tcp' && grant.pid === s.pid && grant.seat === s.ownerSeat && grant.exp === s.exp && s.exp > now && room.previews.get(s.pid)?.port === s.port
 }
 
-// Reserve once per direction per MiB, persist BEFORE forwarding. Never refund
-// the unused tail: a new cap, reconnection or hibernation cannot reset usage.
+// Reserve once per direction per MiB, persist BEFORE forwarding. Both counters
+// only grow (`used` reserved, `refunded` given back), so a new cap,
+// reconnection or hibernation can't reset usage; what's spent is their difference.
 export function tcpReserve(room, s) {
-  if (room.tcpStats.used + TCP_LIMITS.reserveBytes > TCP_LIMITS.roomBytes) return false
+  if (room.tcpStats.used - (room.tcpStats.refunded ?? 0) + TCP_LIMITS.reserveBytes > TCP_LIMITS.roomBytes) return false
   room.tcpStats.used += TCP_LIMITS.reserveBytes
   s.remaining += TCP_LIMITS.reserveBytes
   return true
+}
+
+// A closing half gives back what it reserved and didn't carry, once: a room's
+// budget pays for bytes, not for connections opened (a browser opens many).
+export function tcpRefund(room, s) {
+  const n = s?.remaining
+  if (!(n > 0)) return 0
+  s.remaining = 0
+  room.tcpStats.refunded = (room.tcpStats.refunded ?? 0) + n
+  return n
 }
 
 export function tcpFailure(message, code = 1008) {

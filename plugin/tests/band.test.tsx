@@ -135,7 +135,7 @@ function world(
       }
       if (e.input?.includes('echo copied')) yield { stream: 'stdout' as const, text: 'copied\n' }
       // A dev server answers on 3340 only.
-      if (e.input?.includes('echo "exit=$?"')) yield { stream: 'stdout' as const, text: e.input.includes('localhost:3340/') ? 'exit=28\n' : 'exit=7\n' }
+      if (e.input?.includes('echo " exit=$?"')) yield { stream: 'stdout' as const, text: e.input.includes('localhost:3340/') ? 'code=000 exit=28\n' : e.input.includes('localhost:5432/') ? 'code=000 exit=52\n' : 'code=000 exit=7\n' }
       return { value: { code: 0, signal: null } }
     }
     if (!opts.stream) throw new Error('spawn curl ENOENT')
@@ -667,7 +667,7 @@ test('a guest sees what the host showed in the Room, with Open', async ($, on) =
 })
 
 const PREVIEW_PEOPLE = [{ id: 'host', name: 'Sam', role: 'host', online: true }, { id: 'seat1', name: 'scott', role: 'guest', online: true }]
-const LOCAL_SHOWN = { seq: 2, type: 'artifact', ts: 900, from: { seat: 'host', name: 'Sam', role: 'host' }, body: { kind: 'preview', pid: 'pv-local', port: 3340, path: '/login?next=%2Faccount', title: 'Sign in' } }
+const LOCAL_SHOWN = { seq: 2, type: 'artifact', ts: 900, from: { seat: 'host', name: 'Sam', role: 'host' }, body: { kind: 'preview', pid: 'pv-local', port: 3340, path: '/login?next=%2Faccount', title: 'Sign in', tcp: true } }
 
 test('a guest opens localhost only after the helper is ready; Public link is a separate choice', async ($, on) => {
   const asked = world(on, { localPreview: 'wait', stream: [{ seq: 2, events: [LOCAL_SHOWN], people: PREVIEW_PEOPLE, ended: false, title: 'demo' }] })
@@ -826,34 +826,53 @@ test('an expired, failed or exited localhost helper redraws and restarts on Open
   expect(asked.localHelpers.every(h => h.stopped)).toBe(true)
 })
 
-test('automatic preview replay and a refused viewer both use the same localhost listener', async ($, on) => {
-  const asked = world(on, { stream: [{ seq: 2, events: [LOCAL_SHOWN], people: PREVIEW_PEOPLE, ended: false, title: 'demo' }] })
+test("a replay never forwards by itself: a forwarded preview waits for Open; one Claude mentioned opens through its link", async ($, on) => {
+  const linkOnly = { ...LOCAL_SHOWN, seq: 3, body: { kind: 'preview', pid: 'pv-link', port: 3341, path: '/', title: 'Docs' } }
+  const asked = world(on, { stream: [{ seq: 3, events: [LOCAL_SHOWN, linkOnly], people: PREVIEW_PEOPLE, ended: false, title: 'demo' }] })
   on('tool.list', () => ({ value: [{ name: 'mcp__Claude_Browser__preview_start', description: 'Preview', inputSchema: { type: 'object' } }] }) as never)
   on('turn.start', ($, e) => ({ turnId: e.turnId }))
   on('turn.complete', () => ({ text: '' }))
-  on('tool.call', { tool: 'mcp__Claude_Browser__preview_start' } as never, () => ({ deny: 'auto mode: no verdict' }) as never)
   await $.prompt.submit({ text: LINK, origin: { kind: 'composer' }, wait: false })
   await asked.clock.advance(10)
   await $.turn.start({ turnId: 'join-preview', text: LINK })
   await $.turn.complete({ turnId: 'join-preview', isAborted: false, durationMs: 0, reason: 'answer' } as never)
   await asked.clock.advance(10)
-  await $.turn.start({ turnId: 'show-preview', text: 'Sam shared Sign in (preview)' })
+  // The host chose to forward it: nothing starts here until this guest says so.
+  await $.turn.start({ turnId: 'show-forwarded', text: 'Sam shared Sign in (preview)' })
   const chunks = []
-  for await (const chunk of $.turn.step({ ...STEP, turnId: 'show-preview' } as never)) chunks.push(chunk)
-  const call = chunks.find(c => c.kind === 'tool')
-  const input = chunks.filter(c => c.kind === 'input').map(c => c.json).join('')
+  for await (const chunk of $.turn.step({ ...STEP, turnId: 'show-forwarded' } as never)) chunks.push(chunk)
+  expect(chunks.some(c => c.kind === 'tool')).toBe(false)
+  expect(chunks.filter(c => c.kind === 'text').map(c => c.text).join('')).toContain('press **Open** in the Room')
+  expect(asked.localHelpers).toHaveLength(0)
+  expect(asked.filter(a => a.endsWith('/tunnel'))).toHaveLength(0)
+  await $.turn.complete({ turnId: 'show-forwarded', isAborted: false, durationMs: 0, reason: 'answer' } as never)
+  await asked.clock.advance(10)
+  // Shared because Claude mentioned it: its link, on the preview's own host name.
+  await $.turn.start({ turnId: 'show-link', text: 'Sam shared Docs (preview)' })
+  const more = []
+  for await (const chunk of $.turn.step({ ...STEP, turnId: 'show-link' } as never)) more.push(chunk)
+  const call = more.find(c => c.kind === 'tool')
   expect(call?.name).toBe('mcp__Claude_Browser__preview_start')
-  expect(JSON.parse(input).url).toBe('http://localhost:3340/login?next=%2Faccount')
-  await $.tool.call({ tool: call!.name, tool_use_id: call!.id, ...JSON.parse(input) } as never)
-  const again = []
-  for await (const chunk of $.turn.step({ ...STEP, turnId: 'show-preview', index: 1 } as never)) again.push(chunk)
-  const text = again.filter(c => c.kind === 'text').map(c => c.text).join('')
-  expect(text).toContain('[Open the preview](http://localhost:3340/login?next=%2Faccount)')
-  expect(text).not.toContain('/__share/enter')
-  expect(text).not.toContain('within 10 minutes')
-  expect(asked.localHelpers).toHaveLength(1)
-  expect(asked.filter(a => a.endsWith('/tunnel'))).toHaveLength(1)
+  expect(JSON.parse(more.filter(c => c.kind === 'input').map(c => c.json).join('')).url).toContain('https://preview.test/__share/enter')
+  expect(asked.localHelpers).toHaveLength(0)
+  // The Room: forwarding controls only for the forwarded one.
+  const pane = await $.ui.mount({ plugin: 'shared-session', surface: 'desktop', component: 'Pane', requestId: 'shared-room', props: PANE })
+  await pane.press({ key: 'tab-shown' })
+  expect(await pane.find({ key: 'public-preview:pv-local' })).toBeDefined()
+  expect(await pane.find({ key: 'public-preview:pv-link' })).toBeUndefined()
   await $.command.run({ command: 'stop-sharing', args: '' } as never)
+})
+
+test("the host's own /share-preview shares a port for forwarding", async ($, on) => {
+  const asked = world(on)
+  const ui = await $.ui.mount(band('desktop'))
+  await ui.press({ key: 'share' })
+  await asked.clock.advance(50)
+  const r = await $.command.run({ command: 'share-preview', args: '3340 App' } as never)
+  expect(JSON.stringify(r)).toContain('Sharing localhost:3340')
+  expect(asked.sent.filter(x => x.path.endsWith('/previews')).at(-1)?.body).toEqual({ port: 3340, title: 'App', tcp: true })
+  await asked.clock.advance(100)
+  expect(asked.posted.find(e => e.type === 'artifact' && e.body.kind === 'preview')?.body.tcp).toBe(true)
 })
 
 for (const ending of ['leave', 'timeout'] as const) {
@@ -880,7 +899,7 @@ test('saved localhost listeners resume and restore after helper loss without ope
     at: 900,
     room: { server: 'http://share.test', id: 'room0000000000000001', url: LINK, title: 'demo', host: 'Sam', token: 'g', seat: 'seat1', seq: 2, since: 1 },
     autoOpen: true, policy: { prompts: 'everyone', approvals: 'edits', files: 'on' },
-    shown: [{ key: 'preview:pv-local', kind: 'preview', name: 'Sign in (preview)', ts: 900, pid: 'pv-local', port: 3340, path: '/login?next=%2Faccount' }],
+    shown: [{ key: 'preview:pv-local', kind: 'preview', name: 'Sign in (preview)', ts: 900, pid: 'pv-local', port: 3340, path: '/login?next=%2Faccount', tcp: true }],
     localPreviews: [{ pid: 'pv-local', port: 3340 }], activity: [], chat: [], sidebar: null,
   }
   const asked = world(on, { env: { CLAUDE_CODE_ENTRYPOINT: 'cli' }, store: { 'joined:session-test-0001': saved } })
@@ -969,6 +988,30 @@ test('the host automatically retries an ordinary curl stream exit in the same ro
   expect(JSON.parse(relay.input!)).toMatchObject({ tcp: true, port: 3340, room: 'ws://localhost:8787/api/rooms/room0000000000000002/ws/connection0003', token: 't' })
   await $.command.run({ command: 'stop-sharing', args: '' } as never)
   expect(asked.tcpHelpers[0]!.stopped).toBe(true)
+})
+
+test('the host relays only a port it chose to forward, and at most twelve at once', async ($, on) => {
+  const stream: unknown[] = [{ seq: 1, events: [], people: PREVIEW_PEOPLE, ended: false, title: 'demo' }]
+  const history = [
+    { role: 'user', content: 'Start the app' },
+    { role: 'assistant', content: [{ type: 'text', text: 'Running at http://localhost:3340/' }] },
+  ]
+  const asked = world(on, { stream, tcpRelays: true, history })
+  const ui = await $.ui.mount(band('terminal'))
+  await ui.press({ key: 'share' })
+  await ui.press({ key: 'share-all' })
+  await asked.clock.advance(200)
+  expect(asked.sent.filter(x => x.path.endsWith('/previews')).map(x => x.body)).toEqual([{ port: 3340, title: 'localhost:3340' }])
+  // Shared because Claude mentioned it: even asked by the room, no relay.
+  stream.push({ tcp: { id: 'connection0001', pid: 'pv1', port: 3340 } })
+  await asked.clock.advance(5000)
+  expect(asked.tcpHelpers).toHaveLength(0)
+  // The host forwards it: relays now, twelve at most at a time.
+  await $.command.run({ command: 'share-preview', args: '3340 App' } as never)
+  for (let i = 0; i < 14; i++) stream.push({ tcp: { id: `connection01${String(i).padStart(2, '0')}`, pid: 'pv1', port: 3340 } })
+  await asked.clock.advance(5000)
+  expect(asked.tcpHelpers).toHaveLength(12)
+  await $.command.run({ command: 'stop-sharing', args: '' } as never)
 })
 
 test('a session reopened after a compaction shares its whole history, from the file before too, and asks first', async ($, on) => {
@@ -1201,7 +1244,7 @@ test('"Share everything" opens the dev servers Claude opened before, still runni
         role: 'assistant',
         content: [
           { type: 'tool_use', id: 'toolu_a', name: 'mcp__Claude_Browser__browser_batch', input: { actions: [{ name: 'navigate', input: { url: 'http://localhost:3340/dev/start' } }] } },
-          { type: 'text', text: 'Built: http://localhost:3340/dev/course-sheet (the old app is at http://localhost:3320/home)' },
+          { type: 'text', text: 'Built: http://localhost:3340/dev/course-sheet (the old app is at http://localhost:3320/home; the database at http://localhost:5432)' },
         ],
       },
     ],
@@ -1211,7 +1254,11 @@ test('"Share everything" opens the dev servers Claude opened before, still runni
   await ui.press({ key: 'share-all' })
   await asked.clock.advance(200)
   const previews = asked.posted.filter(e => e.type === 'artifact' && e.body.kind === 'preview')
-  expect(previews.map(e => [e.body.port, e.body.path])).toEqual([[3340, '/dev/course-sheet']]) // 3320 isn't answering
+  // 3320 isn't answering; 5432 answers, but not as a web server (a database): neither is shared.
+  expect(previews.map(e => [e.body.port, e.body.path])).toEqual([[3340, '/dev/course-sheet']])
+  // Shared because Claude mentioned it: through its link, never forwarded.
+  expect(previews[0]?.body.tcp).toBeUndefined()
+  expect(asked.sent.filter(x => x.path.endsWith('/previews')).map(x => x.body)).toEqual([{ port: 3340, title: 'localhost:3340' }])
 })
 
 test('a page the host\'s Claude opens with browser_batch goes to the room', async ($, on) => {

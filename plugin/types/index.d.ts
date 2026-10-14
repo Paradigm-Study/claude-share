@@ -92,6 +92,8 @@ export type ShareShown = {
   url?: string
   /** A preview the host has stopped. */
   closed?: boolean
+  /** A preview the host chose to share for forwarding to a guest's localhost (raw TCP); else it opens through its link. */
+  tcp?: boolean
 }
 
 /** Guest: a localhost listener to restore, without its process or credentials. */
@@ -169,6 +171,8 @@ declare module 'claude-code' {
       autoOpen: boolean
       /** Host: the previews this session shares, port → preview id. */
       previews: Record<string, string>
+      /** Host: the shared ports the host chose to let guests forward over raw TCP. */
+      forwardPorts: string[]
       /** Guest: previews opened on this machine's localhost, restored after reload/resume. */
       localPreviews: ShareLocalPreview[]
       /** Claude Desktop's sidebar row as it was before sharing marked it, to put back. */

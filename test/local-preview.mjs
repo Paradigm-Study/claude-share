@@ -457,7 +457,7 @@ async function realChain() {
     return { request: req, get closed() { return state.closed } }
   }
   let stream = await subscribe()
-  async function share(port) { return (await api(`${base}/previews`, room.token, { port })).pid }
+  async function share(port) { return (await api(`${base}/previews`, room.token, { port, tcp: true })).pid }
   async function grant(pid, member = guest.token) {
     const result = await api(`${base}/previews/${pid}/tunnel`, member)
     assert.equal(result.protocol, 1, 'server must support the fixed TCP protocol')

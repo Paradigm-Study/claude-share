@@ -55,6 +55,7 @@ import {
   tcpState,
   tcpValid,
   tcpReserve,
+  tcpRefund,
   tcpFailure,
   tcpFrame,
   tcpCheck,
@@ -140,7 +141,7 @@ export default {
     }
     if (!ROOM_ID.test(id)) return notFound()
     const limit = limitOf(req, id, rest, req.headers.get('cf-connecting-ip') ?? 'unknown')
-    const limiter = limit && { create: env.CREATE_LIMIT, join: env.JOIN_LIMIT, events: env.EVENTS_LIMIT }[limit.kind]
+    const limiter = limit && { create: env.CREATE_LIMIT, join: env.JOIN_LIMIT, events: env.EVENTS_LIMIT, tunnel: env.TUNNEL_LIMIT }[limit.kind]
     if (limiter && !(await limiter.limit({ key: limit.key })).success) return limitedResponse(limit.kind)
 
     const stub = env.ROOMS.get(env.ROOMS.idFromName(id))
@@ -212,6 +213,7 @@ export class RoomObject {
       if (!meta) return
       const stored = await state.storage.list({ prefix: 'e:' })
       const tcpStats = (await state.storage.get('tcp:stats')) ?? meta.tcpStats
+      this.tcpSaved = tcpStats ? JSON.stringify(tcpStats) : ''
       this.attach(Room.resume({ ...meta, tcpStats, events: [...stored.values()] }, Date.now()))
       if (this.cleanupTCP(Date.now())) await this.persist()
       await this.schedule()
@@ -313,7 +315,8 @@ export class RoomObject {
     const ctx = { previewOrigin: req.headers.get('x-preview-origin') ?? '', admin, directory: directoryClient(this.env) }
     const { response, changed } = await roomRequest(this.room, req, rest, now, origin, ctx)
     if (changed) await this.persist()
-    if (tunnel || changed) await this.schedule()
+    // A grant made is something to sweep when it expires; a refused one isn't.
+    if (changed) await this.schedule()
     return response
   }
 
@@ -368,9 +371,10 @@ export class RoomObject {
       const current = this.room.tcpStats
       const older = before?.opens
       const opens = older && older.start > current.opens.start ? older : older?.start === current.opens.start ? { start: older.start, count: Math.max(older.count, current.opens.count) } : current.opens
-      const stats = { used: Math.max(before?.used ?? 0, current.used), opens }
+      const stats = { used: Math.max(before?.used ?? 0, current.used), refunded: Math.max(before?.refunded ?? 0, current.refunded ?? 0), opens }
       await storage.put('tcp:stats', stats)
       this.room.tcpStats = stats
+      this.tcpSaved = JSON.stringify(stats)
     })
   }
 
@@ -404,14 +408,18 @@ export class RoomObject {
   }
 
   closeTCP(id, code = 1011, reason = '') {
+    let refunded = false
     for (const ws of this.state.getWebSockets('tcp')) {
       const att = ws.deserializeAttachment()
       if (att?.tcp?.id !== id || att.tcp.closed) continue
       this.closed.add(ws)
+      // What it reserved and didn't carry goes back to the room's budget, once.
+      if (tcpRefund(this.room, att.tcp)) refunded = true
       // A close event can itself hibernate before its peer's close is handled.
       ws.serializeAttachment({ tcp: { ...att.tcp, closed: true } })
       try { ws.close(sendableClose(code), String(reason).replace(/[^\x20-\x7e]/g, '?').slice(0, 100)) } catch {}
     }
+    if (refunded) void this.persistTCPStats().catch(() => {})
   }
 
   cleanupTCP(now) {
@@ -599,7 +607,8 @@ export class RoomObject {
 
   async persist() {
     const room = this.room
-    await this.persistTCPStats()
+    // The counters' own key only when they changed: most rooms never use TCP.
+    if (JSON.stringify(room.tcpStats) !== this.tcpSaved) await this.persistTCPStats()
     const { events, ...meta } = room.toJSON()
     const entries = { meta }
     for (const event of events) if (event.seq > this.savedSeq) entries[`e:${pad(event.seq)}`] = event

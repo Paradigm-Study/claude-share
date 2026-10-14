@@ -15,7 +15,7 @@ import { createHash } from 'node:crypto'
 import { readFileSync, writeFileSync, renameSync } from 'node:fs'
 
 import { Directory, mapStore, providersFrom } from './teams.mjs'
-import { Room, ROOM_ID, SEAT_TIMEOUT_MS, createRoom, roomRequest, previewRequest, previewRoomOf, notFound, json, publicOrigin, token, missingPage, previewMissing, homePage, outdatedClient, versionInfo, limitOf, limitedResponse, closedResponse, Windows, SOCKET_ID, previewSocketTarget, announceSocket, hostSocketAllowed, sendableClose, TCP_LIMITS, tcpSocketTarget, announceTCP, tcpState, tcpValid, tcpReserve, tcpFailure, tcpFrame, tcpCheck, tcpControl, tcpRelay } from './core.mjs'
+import { Room, ROOM_ID, SEAT_TIMEOUT_MS, createRoom, roomRequest, previewRequest, previewRoomOf, notFound, json, publicOrigin, token, missingPage, previewMissing, homePage, outdatedClient, versionInfo, limitOf, limitedResponse, closedResponse, Windows, SOCKET_ID, previewSocketTarget, announceSocket, hostSocketAllowed, sendableClose, TCP_LIMITS, tcpSocketTarget, announceTCP, tcpState, tcpValid, tcpReserve, tcpRefund, tcpFailure, tcpFrame, tcpCheck, tcpControl, tcpRelay } from './core.mjs'
 
 const PORT = Number(process.env.PORT ?? 8787)
 const PUBLIC_URL = process.env.PUBLIC_URL
@@ -237,6 +237,9 @@ function closePair(id, pair, code = 1011, reason = '') {
   if (pairs.get(id) !== pair) return
   pairs.delete(id)
   clearTimeout(pair.timer)
+  // What each half reserved and didn't carry goes back to the room's budget.
+  const room = pair.scope === 'tcp' ? rooms.get(pair.roomId) : null
+  if (room && tcpRefund(room, pair.guest) + tcpRefund(room, pair.host) > 0) save()
   pair.browser?.close(code, reason)
   pair.relay?.close(code, reason)
 }

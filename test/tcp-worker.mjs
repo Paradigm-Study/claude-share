@@ -6,7 +6,7 @@ import { spawn } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
 import { once } from 'node:events'
 import { fileURLToPath } from 'node:url'
-import { Room, PLUGIN_LATEST, TCP_LIMITS, token, tcpOperation, tcpSocketTarget, tcpState, tcpReserve, tcpControl, previewSocketTarget, previewRequest } from '../server/core.mjs'
+import { Room, PLUGIN_LATEST, TCP_LIMITS, token, tcpOperation, tcpSocketTarget, tcpState, tcpReserve, tcpRefund, tcpControl, previewSocketTarget, previewRequest } from '../server/core.mjs'
 import { RoomObject } from '../server/worker.mjs'
 
 const NativeResponse = globalThis.Response, nativeNow = Date.now
@@ -83,7 +83,7 @@ async function world(support = true) {
   w.host = obj.room.host.token
   const joined = await (await obj.fetch(req(w, 'join', null, 'POST', { name: 'Guest' }))).json()
   w.member = joined.token; w.seat = joined.seat
-  w.pid = (await (await obj.fetch(req(w, 'previews', w.host, 'POST', { port: 34567 }))).json()).pid
+  w.pid = (await (await obj.fetch(req(w, 'previews', w.host, 'POST', { port: 34567, tcp: true }))).json()).pid
   assert.equal((await obj.fetch(req(w, `socket?after=0${support ? '&tcp=1' : ''}`, w.host, 'GET', undefined, true))).status, 101)
   w.control = state.getWebSockets('host').at(-1)
   return w
@@ -165,6 +165,53 @@ try {
     console.log('OK capability room/pid/scope isolation, persistence and host support')
   }
 
+  // Forwarding is the host's choice: a preview shared without it (Claude
+  // mentioned the port) gives no grant, and the host's say upgrades it.
+  {
+    const w = await world()
+    const linkOnly = (await (await w.obj.fetch(req(w, 'previews', w.host, 'POST', { port: 5432 }))).json()).pid
+    const refused = await w.obj.fetch(req(w, `previews/${linkOnly}/tunnel`, w.member, 'POST'))
+    assert.equal(refused.status, 403)
+    assert.equal([...w.obj.room.previewSessions.values()].some(s => s.pid === linkOnly), false)
+    const upgraded = await (await w.obj.fetch(req(w, 'previews', w.host, 'POST', { port: 5432, tcp: true }))).json()
+    assert.deepEqual(upgraded, { pid: linkOnly, tcp: true })
+    assert.equal((await w.obj.fetch(req(w, `previews/${linkOnly}/tunnel`, w.member, 'POST'))).status, 200)
+    // A guest can't ask for forwarding: only the host makes previews.
+    assert.equal((await w.obj.fetch(req(w, 'previews', w.member, 'POST', { port: 6379, tcp: true }))).status, 403)
+    console.log('OK forwarding only for previews the host chose to forward')
+  }
+
+  // One guest's opens can't spend the room's minute; a seat dropped for good
+  // takes its grants.
+  {
+    const w = await world()
+    let n = 0
+    while ((await w.obj.fetch(req(w, `previews/${w.pid}/tunnel`, w.member, 'POST'))).status === 200) n++
+    assert.equal(n, TCP_LIMITS.seatOpensPerMinute)
+    const other = (await (await w.obj.fetch(req(w, 'join', null, 'POST', { name: 'Other' }))).json()).token
+    assert.equal((await w.obj.fetch(req(w, `previews/${w.pid}/tunnel`, other, 'POST'))).status, 200)
+    const cap = await grant(w, other)
+    const otherSeat = [...w.obj.room.seats.values()].find(s => s.name === 'Other').id
+    w.obj.room.revokeTCP({ seat: otherSeat })
+    assert.equal(w.obj.room.previewSessions.has(cap.token), false)
+    console.log('OK per-seat admission share and seat revocation')
+  }
+
+  // The budget pays for bytes carried: a browser's thousands of short
+  // connections give back what they reserved and didn't use.
+  {
+    const room = new Room({ id: 'r', title: 't', host: { name: 'H', token: 'h', lastSeen: 0 }, createdAt: 0 })
+    for (let i = 0; i < 5000; i++) {
+      const half = { remaining: 0 }
+      assert(tcpReserve(room, half))
+      half.remaining -= 1000 // carried 1 KB
+      tcpRefund(room, half)
+      assert.equal(tcpRefund(room, half), 0) // once
+    }
+    assert.equal(room.tcpStats.used - room.tcpStats.refunded, 5000 * 1000)
+    console.log('OK refunds: thousands of short connections, a lifetime budget barely touched')
+  }
+
   // Both directions, half-close, challenge restoration, and no payload writes.
   {
     const w = await world(), cap = await grant(w), pair = await open(w, cap)
@@ -197,12 +244,17 @@ try {
     assert.equal(pair.guest.closes.length, 0) // reverse data still outstanding
     await ack(w, pair.guest)
     closed(pair, 1000)
-    assert.equal(w.state.storage.writes.length, writesBefore)
+    // Closed, each half gives back what it reserved and didn't carry: one
+    // write, of the counters alone.
+    await w.state.barrier
+    assert.deepEqual(w.state.storage.writes.slice(writesBefore), ['tcp:stats'])
+    assert.equal(w.obj.room.tcpStats.refunded, 2 * TCP_LIMITS.reserveBytes - 4 - 32_768)
     assert.equal(w.obj.room.seq, resumedSeq) // resume advances seq, data never appends
     assert.equal(w.obj.room.events.some(e => e.type === 'tcp'), false)
-    const used = w.obj.room.tcpStats.used
+    const used = w.obj.room.tcpStats.used, refunded = w.obj.room.tcpStats.refunded
     await reconstruct(w)
     assert.equal(w.obj.room.tcpStats.used, used)
+    assert.equal(w.obj.room.tcpStats.refunded, refunded)
     assert.equal(w.obj.tcpSockets().length, 0) // close markers survive reload
     console.log('OK binary/credit/FIN, hibernation reconstruction and bounded metadata-only writes')
   }
@@ -267,7 +319,7 @@ try {
     const second = await grant(w), p2 = await open(w, second)
     const otherMember = (await (await w.obj.fetch(req(w, 'join', null, 'POST', { name: 'Other' }))).json()).token
     const otherCap = await grant(w, otherMember), otherPair = await open(w, otherCap)
-    const otherPid = (await (await w.obj.fetch(req(w, 'previews', w.host, 'POST', { port: 34568 }))).json()).pid
+    const otherPid = (await (await w.obj.fetch(req(w, 'previews', w.host, 'POST', { port: 34568, tcp: true }))).json()).pid
     const otherPort = { ...w, pid: otherPid }
     const portCap = await (await w.obj.fetch(req(w, `previews/${otherPid}/tunnel`, w.member, 'POST'))).json()
     const portPair = await open(otherPort, portCap)
@@ -441,7 +493,7 @@ async function nodeFrames() {
     assert(ready, logs)
     const room = await api('/api/rooms', null, { name: 'Host' })
     const member = await api(`/api/rooms/${room.id}/join`, null, { name: 'Guest' })
-    const p = await api(`/api/rooms/${room.id}/previews`, room.token, { port: 34567 })
+    const p = await api(`/api/rooms/${room.id}/previews`, room.token, { port: 34567, tcp: true })
     const control = await fetch(`${origin}/api/rooms/${room.id}/stream?tcp=1&after=0`, { headers: { authorization: `Bearer ${room.token}` } })
     reader = control.body.getReader()
     const cap = await api(`/api/rooms/${room.id}/previews/${p.pid}/tunnel`, member.token)
