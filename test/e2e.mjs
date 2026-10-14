@@ -53,7 +53,7 @@ const check = (name, ok, detail = '') => {
 function startServer() {
   const child = spawn(process.execPath, [join(ROOT, 'server/node.mjs')], {
     // AUTH_TEST: a sign-in provider that signs in whoever its link names, for the team checks.
-    env: { ...process.env, PORT: String(PORT), AUTH_TEST: '1' },
+    env: { ...process.env, PORT: String(PORT), PREVIEW_PORT: String(PORT + 1), AUTH_TEST: '1', DATA_FILE: '' },
     stdio: ['ignore', 'pipe', 'pipe'],
   })
   const log = createWriteStream(join(WORK, 'server.log'))
@@ -248,6 +248,42 @@ function transcriptOf(s) {
 
 const UPDATE_LINE = 'claude plugin marketplace update claude-share && claude plugin update shared-session@claude-share'
 const roomInfo = async id => (await fetch(`${SERVER}/api/rooms/${id}`)).json()
+
+function localPreviewAddress(person, from, remotePort, path = '/') {
+  const urls = [...person.text.slice(from).matchAll(/http:\/\/localhost:\d+(?:\/[^\s"'<>\\)\]`]*)?/g)]
+  for (const match of urls.reverse()) {
+    const url = new URL(match[0])
+    if (Number(url.port) !== remotePort && url.pathname === path) return url.href
+  }
+  return null
+}
+
+// Public preview checks explicitly ask as a room member, independently of
+// guests' automatically allocated local TCP listeners.
+async function publicPreview(id, port) {
+  const base = `${SERVER}/api/rooms/${id}`
+  const headers = { 'content-type': 'application/json', 'x-shared-session-version': JSON.parse(readFileSync(join(ROOT, 'plugin/.claude-plugin/plugin.json'), 'utf8')).version }
+  const joined = await fetch(`${base}/join`, { method: 'POST', headers, body: JSON.stringify({ name: 'preview probe' }) })
+  const seat = await joined.json()
+  if (!joined.ok || !seat.token) throw new Error('Preview probe could not join')
+  headers.authorization = `Bearer ${seat.token}`
+  try {
+    let events = seat.history ?? []
+    const shown = await until('shared preview registered', async () => {
+      const found = events.find(e => e.type === 'artifact' && e.body.kind === 'preview' && e.body.port === port)
+      if (found) return found
+      const page = await fetch(`${base}/events?after=${seat.seq}&wait=0`, { headers }).then(r => r.json())
+      events = page.events ?? []
+      return events.find(e => e.type === 'artifact' && e.body.kind === 'preview' && e.body.port === port)
+    }, 60_000)
+    const ticket = await fetch(`${base}/previews/${shown.body.pid}/ticket`, { method: 'POST', headers, body: JSON.stringify({ path: shown.body.path ?? '/' }) })
+    const data = await ticket.json()
+    if (!ticket.ok || !data.url) throw new Error('Public preview ticket was refused')
+    return data.url
+  } finally {
+    await fetch(`${base}/leave`, { method: 'POST', headers }).catch(() => {})
+  }
+}
 
 // Sharing: hosts and guests, everything a shared session carries.
 async function sharing() {
@@ -460,8 +496,8 @@ async function sharing() {
   await until('guest saved the shared file', () => existsSync(saved), 60_000).catch(() => null)
   check("a file the host shares lands in the guest's project", existsSync(saved) && readFileSync(saved, 'utf8') === '<h1>Report 42</h1>\n')
 
-  // A preview of the host's localhost: a stand-in dev app, opened through the
-  // one-time link the guest is given, root-relative paths and all.
+  // The host app occupies its port here. Real guests must select different
+  // local ports; the existing public HTTP/WS path remains an explicit choice.
   const app = createServer((req, res) => {
     if (req.url === '/assets/app.js') return res.writeHead(200, { 'content-type': 'text/javascript' }).end('console.log("app")')
     if (req.url === '/redirect') return res.writeHead(302, { location: `http://localhost:${app.address().port}/` }).end()
@@ -475,8 +511,14 @@ async function sharing() {
   app.on('upgrade', (req, socket) => wsEchoServer(req, socket))
   await new Promise(r => app.listen(0, '127.0.0.1', r))
   children.push({ kill: () => app.close() })
+  const beforePreview = guest.text.length
   host.say(`/share-preview ${app.address().port} Dev app`)
-  const enter = await until('guest got a preview link', () => /https?:\/\/[^\s)`'"]+\/__share\/enter\?room=[\w-]+&ticket=[\w-]+/.exec(guest.text)?.[0], 60_000).catch(() => null)
+  const local = await until('guest received its own local preview', () => localPreviewAddress(guest, beforePreview, app.address().port), 60_000).catch(() => null)
+  const localPage = local ? await fetch(local, { signal: AbortSignal.timeout(15_000) }).then(r => r.text()).catch(() => '') : ''
+  check('a same-machine guest reaches the host on an available local port, without public fallback', localPage.includes('dev server ok') && !guest.text.slice(beforePreview).includes('/__share/enter?'), local || 'no local address')
+  const localEcho = local ? await wsEcho(`${new URL(local).origin.replace(/^http/, 'ws')}/__echo`, 'app=guest', 'ping-through-local').catch(e => `error: ${e.message}`) : 'no local preview'
+  check('an application WebSocket works through the guest TCP listener', localEcho === 'echo:ping-through-local', localEcho)
+  const enter = await publicPreview(id, app.address().port).catch(() => null)
   let previewed = false
   let cookie = ''
   let origin = ''
@@ -504,7 +546,7 @@ async function sharing() {
       back.status === 302 &&
       back.headers.get('location') === '/'
   }
-  check("a teammate opens the host's localhost through a preview (its link lets in one browser, which can come back)", previewed, enter ?? 'no link')
+  check("an explicit public preview opens the host's localhost (one browser, which can come back)", previewed, origin || 'no public ticket')
 
   // A WebSocket through the preview (a dev server's live reload; Next.js 16's
   // dev pages don't start without theirs): the app's echo answers.
@@ -518,8 +560,9 @@ async function sharing() {
   lee.say(link)
   await until('late joiner caught up', () => assistantText(lee).some(t => /kiwi/i.test(t)), 120_000).catch(() => null)
   const leeCaughtUp = Date.now()
-  const late = await until('late joiner got the preview', () => /https?:\/\/[^\s)`'"]+\/__share\/enter\?room=[\w-]+&ticket=[\w-]+/.exec(lee.text)?.[0], 60_000).catch(() => null)
-  check('someone who joins later is handed the open preview', Boolean(late) && late !== enter, late ?? 'no link')
+  const late = await until('late joiner received its own local preview', () => localPreviewAddress(lee, 0, app.address().port), 60_000).catch(() => null)
+  const latePage = late ? await fetch(late, { signal: AbortSignal.timeout(15_000) }).then(r => r.text()).catch(() => '') : ''
+  check('a late joiner gets a different available local port and reaches the same app', latePage.includes('dev server ok') && (!local || new URL(late).port !== new URL(local).port) && !lee.text.includes('/__share/enter?'), late || 'no local address')
   // Each earlier prompt arrives as a turn of its own, as it was for the host,
   // and quickly: one step for its calls, one for its last words.
   check('and sees each earlier prompt as its own turn, with its reply', ['marmalade', 'pineapple', 'kiwi'].every(w => assistantText(lee).some(t => t.toLowerCase().includes(w))) && lee.lines.filter(l => l.type === 'result').length >= 6, `${lee.lines.filter(l => l.type === 'result').length} turns in ${((leeCaughtUp - leeJoined) / 1000).toFixed(1)} s`)
@@ -528,17 +571,18 @@ async function sharing() {
   const dev = createServer((req, res) => res.writeHead(200, { 'content-type': 'text/html' }).end('<h1>mentioned ok</h1>'))
   await new Promise(r => dev.listen(0, '127.0.0.1', r))
   children.push({ kill: () => dev.close() })
-  const enters = () => guest.text.match(/https?:\/\/[^\s)`'"]+\/__share\/enter\?room=[\w-]+&ticket=[\w-]+/g) ?? []
-  const known = new Set(enters())
+  const beforeMention = guest.text.length
   host.say(`Reply with exactly this line and nothing else: The dev server is running at http://localhost:${dev.address().port}/dash`)
-  const mentioned = await until('guest got the mentioned dev server', () => enters().find(u => !known.has(u)), 90_000).catch(() => null)
+  const mentioned = await publicPreview(id, dev.address().port).catch(() => null)
+  const mentionedLocal = await until('guest received the mentioned localhost mapping', () => localPreviewAddress(guest, beforeMention, dev.address().port, '/dash'), 60_000).catch(() => null)
+  const mentionedPage = mentionedLocal ? await fetch(mentionedLocal, { signal: AbortSignal.timeout(15_000) }).then(r => r.text()).catch(() => '') : ''
   let mentionedOk = false
   if (mentioned) {
     const opened = await fetch(mentioned, { redirect: 'manual' })
     const jar = (opened.headers.get('set-cookie') ?? '').split(';')[0]
     mentionedOk = opened.headers.get('location') === '/dash' && (await fetch(`${new URL(mentioned).origin}/`, { headers: { cookie: jar } }).then(r => r.text())).includes('mentioned ok')
   }
-  check("a dev server the host's Claude mentions opens for guests, at the path it gave", mentionedOk, mentioned ?? 'no link')
+  check("a dev server the host's Claude mentions is shared at the path it gave", mentionedOk && mentionedPage.includes('mentioned ok') && !guest.text.slice(beforeMention).includes('/__share/enter?'), mentionedLocal || 'no local address')
 
   // How everyone heard the room: one open stream each, or polls when asked to.
   const polling = process.env.SHARED_SESSION_TRANSPORT === 'poll'

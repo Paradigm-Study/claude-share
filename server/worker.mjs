@@ -49,6 +49,17 @@ import {
   hostSocketAllowed,
   noteVersion,
   sendableClose,
+  TCP_LIMITS,
+  tcpSocketTarget,
+  announceTCP,
+  tcpState,
+  tcpValid,
+  tcpReserve,
+  tcpFailure,
+  tcpFrame,
+  tcpCheck,
+  tcpControl,
+  tcpRelay,
 } from './core.mjs'
 import { Directory, providersFrom } from './teams.mjs'
 
@@ -194,13 +205,16 @@ export class RoomObject {
     this.savedSeq = 0
     // A socket stays in getWebSockets() while its close is being handled.
     this.closed = new WeakSet()
-    // A preview socket's messages from the browser before the host's relay is there.
+    // Legacy public previews only. TCP never queues pre-ready payload.
     this.pending = new Map()
     state.blockConcurrencyWhile(async () => {
       const meta = await state.storage.get('meta')
       if (!meta) return
       const stored = await state.storage.list({ prefix: 'e:' })
-      this.attach(Room.resume({ ...meta, events: [...stored.values()] }, Date.now()))
+      const tcpStats = (await state.storage.get('tcp:stats')) ?? meta.tcpStats
+      this.attach(Room.resume({ ...meta, tcpStats, events: [...stored.values()] }, Date.now()))
+      if (this.cleanupTCP(Date.now())) await this.persist()
+      await this.schedule()
     })
   }
 
@@ -211,10 +225,17 @@ export class RoomObject {
     this.savedSeq = room.seq
     room.connected = seat => this.state.getWebSockets(seat).some(ws => !this.closed.has(ws))
     room.onChange = () => this.broadcast()
+    room.tcpSupported = () => this.state.getWebSockets('host').some(ws => !this.closed.has(ws) && ws.deserializeAttachment()?.tcpSupport === true)
+    room.onTCPRevoke = filter => {
+      for (const ws of this.tcpSockets()) {
+        const s = ws.deserializeAttachment().tcp
+        if ((!filter.cap || s.cap === filter.cap) && (!filter.pid || s.pid === filter.pid) && (!filter.seat || s.ownerSeat === filter.seat)) this.closeTCP(s.id, 1008, 'TCP grant revoked')
+      }
+    }
     room.toHost = message => {
       let sent = false
       for (const ws of this.state.getWebSockets('host')) {
-        if (this.closed.has(ws)) continue
+        if (this.closed.has(ws) || (message.tcp && ws.deserializeAttachment()?.tcpSupport !== true)) continue
         try {
           ws.send(JSON.stringify(message))
           sent = true
@@ -271,11 +292,14 @@ export class RoomObject {
         : json({ error: 'This shared session does not exist.' }, 404)
     }
 
+    if (this.cleanupTCP(now)) await this.persist()
     if (rest === 'socket') return this.accept(req, url, now)
 
     const upgrade = req.headers.get('upgrade')?.toLowerCase() === 'websocket'
+    const tunnel = /^previews\/([A-Za-z0-9_-]+)\/tunnel$/.exec(rest)
+    if (upgrade && tunnel) return this.tunnelSocket(req, tunnel[1], now)
     if (upgrade && (rest === '__preview' || rest.startsWith('__preview/'))) return this.previewSocket(req, url, id, now)
-    if (upgrade && rest.startsWith('ws/')) return this.relaySocket(req, rest.slice(3))
+    if (upgrade && rest.startsWith('ws/')) return this.relaySocket(req, rest.slice(3), now)
 
     if (rest === '__preview' || rest.startsWith('__preview/')) {
       const path = url.pathname.slice(`/${id}/__preview`.length) || '/'
@@ -289,10 +313,11 @@ export class RoomObject {
     const ctx = { previewOrigin: req.headers.get('x-preview-origin') ?? '', admin, directory: directoryClient(this.env) }
     const { response, changed } = await roomRequest(this.room, req, rest, now, origin, ctx)
     if (changed) await this.persist()
+    if (tunnel || changed) await this.schedule()
     return response
   }
 
-  accept(req, url, now) {
+  async accept(req, url, now) {
     if (req.headers.get('upgrade')?.toLowerCase() !== 'websocket') return json({ error: 'Expected a WebSocket.' }, 426)
     const seated = this.room.seats.size
     const auth = this.room.auth((req.headers.get('authorization') ?? '').replace(/^Bearer\s+/i, '').trim(), now)
@@ -300,14 +325,15 @@ export class RoomObject {
     // A seat let go for being quiet came back: kept (storage writes finish
     // before the answer goes out).
     // …and which plugin it runs now: a stream says it as any request does.
-    if (noteVersion(this.room, req, auth) || this.room.seats.size !== seated) void this.persist()
+    if (noteVersion(this.room, req, auth) || this.room.seats.size !== seated) await this.persist()
     if (this.room.endedAt) return json({ error: 'This session is no longer shared.' }, 410)
     const [client, server] = Object.values(new WebSocketPair())
     this.state.acceptWebSocket(server, [auth.seat])
-    server.serializeAttachment({ seat: auth.seat, role: auth.role, after: Number(url.searchParams.get('after') ?? 0) || 0 })
+    server.serializeAttachment({ seat: auth.seat, role: auth.role, after: Number(url.searchParams.get('after') ?? 0) || 0, tcpSupport: auth.role === 'host' && url.searchParams.get('tcp') === '1' })
     this.room.touch(auth, now)
     this.send(server, now)
     if (auth.role === 'host') this.broadcast() // the host is back: everyone sees it
+    await this.schedule()
     return new Response(null, { status: 101, webSocket: client })
   }
 
@@ -326,17 +352,154 @@ export class RoomObject {
     return new Response(null, { status: 101, webSocket: client, headers: target.protocols[0] ? { 'sec-websocket-protocol': target.protocols[0] } : undefined })
   }
 
-  // The host's relay for one browser socket.
-  relaySocket(req, wsId) {
-    if (!SOCKET_ID.test(wsId) || !hostSocketAllowed(this.room, req)) return json({ error: 'Only the host relays a preview.' }, 401)
+  tcpSockets() {
+    return this.state.getWebSockets('tcp').filter(ws => !this.closed.has(ws) && !ws.deserializeAttachment()?.tcp?.closed)
+  }
+
+  tcpPeer(s) {
+    return this.state.getWebSockets(`${s.side === 'guest' ? 'th' : 'tg'}:${s.id}`).find(ws => !this.closed.has(ws) && !ws.deserializeAttachment()?.tcp?.closed)
+  }
+
+  // Admission and MiB reservations are small durable counters, independent of
+  // the transcript snapshot. Monotonic merge also protects overlapping writes.
+  async persistTCPStats() {
+    await this.state.storage.transaction(async storage => {
+      const before = await storage.get('tcp:stats')
+      const current = this.room.tcpStats
+      const older = before?.opens
+      const opens = older && older.start > current.opens.start ? older : older?.start === current.opens.start ? { start: older.start, count: Math.max(older.count, current.opens.count) } : current.opens
+      const stats = { used: Math.max(before?.used ?? 0, current.used), opens }
+      await storage.put('tcp:stats', stats)
+      this.room.tcpStats = stats
+    })
+  }
+
+  async tunnelSocket(req, pid, now) {
+    if (req.method !== 'GET') return json({ error: 'Expected a WebSocket GET.' }, 405)
+    // Block only admission/storage, not established channels. No process-local
+    // pending queue, HTTP stream or timer survives this short upgrade request.
+    return this.state.blockConcurrencyWhile(async () => {
+      const active = this.tcpSockets().map(ws => ws.deserializeAttachment().tcp).filter(s => s.side === 'guest')
+      const count = this.room.tcpStats.opens.count, start = this.room.tcpStats.opens.start
+      const target = tcpSocketTarget(this.room, req, pid, now, active)
+      if (count !== this.room.tcpStats.opens.count || start !== this.room.tcpStats.opens.start) await this.persistTCPStats()
+      if (!target.ok) return json({ error: target.error }, target.status)
+      const id = token(12)
+      const [client, server] = Object.values(new WebSocketPair())
+      this.state.acceptWebSocket(server, ['tcp', `tg:${id}`])
+      server.serializeAttachment({ tcp: tcpState(id, target, 'guest', now) })
+      if (!announceTCP(this.room, id, target)) {
+        this.closeTCP(id, 1011, 'TCP host disconnected')
+        return json({ error: 'The TCP host disconnected.' }, 503)
+      }
+      await this.schedule()
+      return new Response(null, { status: 101, webSocket: client })
+    })
+  }
+
+  sendTCP(ws, data) {
+    const n = typeof data === 'string' ? new TextEncoder().encode(data).byteLength : data.byteLength
+    if (typeof ws.bufferedAmount === 'number' && ws.bufferedAmount + n > TCP_LIMITS.bufferBytes) throw tcpFailure('TCP socket output limit exceeded.', 1009)
+    ws.send(data)
+  }
+
+  closeTCP(id, code = 1011, reason = '') {
+    for (const ws of this.state.getWebSockets('tcp')) {
+      const att = ws.deserializeAttachment()
+      if (att?.tcp?.id !== id || att.tcp.closed) continue
+      this.closed.add(ws)
+      // A close event can itself hibernate before its peer's close is handled.
+      ws.serializeAttachment({ tcp: { ...att.tcp, closed: true } })
+      try { ws.close(sendableClose(code), String(reason).replace(/[^\x20-\x7e]/g, '?').slice(0, 100)) } catch {}
+    }
+  }
+
+  cleanupTCP(now) {
+    const changed = this.room.sweepTCP(now)
+    for (const ws of this.tcpSockets()) {
+      const s = ws.deserializeAttachment().tcp
+      if (!tcpValid(this.room, s, now)) this.closeTCP(s.id, 1008, 'TCP grant revoked or expired')
+      else if (!s.ready && s.deadline <= now) this.closeTCP(s.id, 1008, 'TCP relay timeout')
+    }
+    return changed
+  }
+
+  forwardTCP(ws, peer, frame, now) {
+    const from = ws.deserializeAttachment().tcp, to = peer.deserializeAttachment().tcp
+    if (this.closed.has(ws) || this.closed.has(peer) || from.closed || to.closed || !tcpValid(this.room, from, now)) throw tcpFailure('TCP grant revoked.')
+    const result = tcpRelay(from, to, frame, now)
+    ws.serializeAttachment({ tcp: from })
+    peer.serializeAttachment({ tcp: to })
+    for (const data of result.messages) this.sendTCP(peer, data)
+    if (result.done) this.closeTCP(from.id, 1000, 'TCP finished')
+    return result.done
+  }
+
+  async tcpMessage(ws, message) {
+    const s = ws.deserializeAttachment()?.tcp
+    if (!s || s.closed || this.closed.has(ws)) return
+    try {
+      const frame = tcpFrame(message), peer = this.tcpPeer(s), now = Date.now()
+      if (!tcpValid(this.room, s, now)) throw tcpFailure('TCP grant revoked or expired.')
+      tcpCheck(s, peer?.deserializeAttachment()?.tcp, frame, now)
+      if (frame.t === 'data' && s.remaining < frame.n) {
+        // Only a refill awaits I/O. Input gating prevents another frame from
+        // spending the same attachment remainder while its reservation commits.
+        const failure = await this.state.blockConcurrencyWhile(async () => {
+          // Throwing out of blockConcurrencyWhile resets the entire object.
+          // Protocol/budget failures close just this pair, not everyone's room.
+          try {
+            const from = ws.deserializeAttachment().tcp
+            if (from.closed || !tcpValid(this.room, from, Date.now())) throw tcpFailure('TCP grant revoked.')
+            tcpCheck(from, peer.deserializeAttachment().tcp, frame, Date.now())
+            if (!tcpReserve(this.room, from)) throw tcpFailure('TCP room byte budget exhausted.')
+            await this.persistTCPStats()
+            ws.serializeAttachment({ tcp: from })
+            this.forwardTCP(ws, peer, frame, Date.now())
+            return null
+          } catch (error) { return error }
+        })
+        if (failure) throw failure
+      } else if (this.forwardTCP(ws, peer, frame, now)) await this.schedule()
+    } catch (error) {
+      this.closeTCP(s.id, error.code ?? 1011, error.message)
+      await this.schedule()
+    }
+  }
+
+  // The same host-only endpoint pairs TCP and legacy public previews. Tags
+  // distinguish their purposes, and a second host half is always refused.
+  async relaySocket(req, wsId, now = Date.now()) {
+    if (req.method !== 'GET' || !SOCKET_ID.test(wsId) || !hostSocketAllowed(this.room, req)) return json({ error: 'Only the host relays a preview.' }, 401)
+    const guest = this.state.getWebSockets(`tg:${wsId}`).find(ws => !this.closed.has(ws) && !ws.deserializeAttachment()?.tcp?.closed)
+    if (guest) {
+      const s = guest.deserializeAttachment().tcp
+      if (this.tcpPeer(s)) return json({ error: 'That socket already has a host relay.' }, 409)
+      if (!tcpValid(this.room, s, now) || s.ready || s.deadline <= now) {
+        this.closeTCP(wsId, 1008, 'TCP grant expired or relay timed out')
+        return json({ error: 'That TCP channel has ended.' }, 410)
+      }
+      const [client, server] = Object.values(new WebSocketPair())
+      this.state.acceptWebSocket(server, ['tcp', `th:${wsId}`])
+      const host = tcpState(wsId, s, 'host', now)
+      try {
+        s.ready = host.ready = true
+        const guestReady = tcpControl(s, { t: 'ready' }), hostReady = tcpControl(host, { t: 'ready' })
+        guest.serializeAttachment({ tcp: s })
+        server.serializeAttachment({ tcp: host })
+        this.sendTCP(guest, guestReady)
+        this.sendTCP(server, hostReady)
+      } catch (error) { this.closeTCP(wsId, error.code ?? 1011, error.message) }
+      await this.schedule()
+      return new Response(null, { status: 101, webSocket: client })
+    }
     if (!this.state.getWebSockets(`pb:${wsId}`).some(ws => !this.closed.has(ws))) return json({ error: 'That socket has closed.' }, 410)
+    if (this.state.getWebSockets(`ph:${wsId}`).some(ws => !this.closed.has(ws))) return json({ error: 'That socket already has a host relay.' }, 409)
     const [client, server] = Object.values(new WebSocketPair())
     this.state.acceptWebSocket(server, [`ph:${wsId}`])
     server.serializeAttachment({ ph: wsId })
-    for (const message of this.pending.get(wsId) ?? []) {
-      try {
-        server.send(message)
-      } catch {}
+    for (const message of this.pending.get(wsId)?.messages ?? []) {
+      try { server.send(message) } catch { this.unpair(server, { ph: wsId }, 1011, '') }
     }
     this.pending.delete(wsId)
     return new Response(null, { status: 101, webSocket: client })
@@ -359,33 +522,46 @@ export class RoomObject {
     for (const ws of this.state.getWebSockets()) if (!this.closed.has(ws)) this.send(ws, now)
   }
 
-  // Streams send nothing; a preview socket's message goes to its other half.
-  webSocketMessage(ws, message) {
+  // Streams send nothing; data channels never receive room JSON.
+  async webSocketMessage(ws, message) {
     const att = ws.deserializeAttachment()
+    if (att?.tcp) return this.tcpMessage(ws, message)
     const id = att?.pb ?? att?.ph
-    if (!id) return
+    if (!id || this.closed.has(ws)) return
+    const n = typeof message === 'string' ? new TextEncoder().encode(message).byteLength : message.byteLength
+    if (n > TCP_LIMITS.bufferBytes) return this.unpair(ws, att, 1009, 'Preview message limit')
     const peers = this.state.getWebSockets(att.pb ? `ph:${id}` : `pb:${id}`).filter(p => !this.closed.has(p))
     if (!peers.length && att.pb) {
-      const queue = this.pending.get(id) ?? []
-      if (queue.length < 500) queue.push(message)
+      const queue = this.pending.get(id) ?? { messages: [], bytes: 0 }
+      if (queue.messages.length >= 500 || queue.bytes + n > TCP_LIMITS.bufferBytes) return this.unpair(ws, att, 1009, 'Preview queue limit')
+      queue.messages.push(message)
+      queue.bytes += n
       this.pending.set(id, queue)
       return
     }
     for (const peer of peers) {
-      try {
-        peer.send(message)
-      } catch {}
+      try { peer.send(message) } catch { this.unpair(ws, att, 1011, '') }
     }
   }
 
   async webSocketClose(ws, code, reason) {
     const att = ws.deserializeAttachment()
+    if (att?.tcp) {
+      this.closeTCP(att.tcp.id, code === 1000 || code === 1006 ? 1011 : sendableClose(code), 'TCP socket closed')
+      await this.schedule()
+      return
+    }
     if (att?.pb || att?.ph) return this.unpair(ws, att, code, reason)
     await this.disconnected(ws)
   }
 
   async webSocketError(ws) {
     const att = ws.deserializeAttachment()
+    if (att?.tcp) {
+      this.closeTCP(att.tcp.id, 1011, 'TCP socket failed')
+      await this.schedule()
+      return
+    }
     if (att?.pb || att?.ph) return this.unpair(ws, att, 1011, '')
     await this.disconnected(ws)
   }
@@ -423,6 +599,7 @@ export class RoomObject {
 
   async persist() {
     const room = this.room
+    await this.persistTCPStats()
     const { events, ...meta } = room.toJSON()
     const entries = { meta }
     for (const event of events) if (event.seq > this.savedSeq) entries[`e:${pad(event.seq)}`] = event
@@ -450,7 +627,13 @@ export class RoomObject {
         due.push(seat.lastSeen + SEAT_TIMEOUT_MS + 1000)
       }
     }
-    await this.state.storage.setAlarm(Math.min(...due))
+    for (const grant of room.previewSessions.values()) if (grant.scope === 'tcp' && grant.exp > now) due.push(grant.exp)
+    for (const ws of this.tcpSockets()) {
+      const s = ws.deserializeAttachment().tcp
+      due.push(s.exp)
+      if (!s.ready) due.push(s.deadline)
+    }
+    await this.state.storage.setAlarm(Math.max(now + 1, Math.min(...due)))
   }
 
   // A host with a stream open is active now, however long ago it last spoke.
@@ -464,12 +647,14 @@ export class RoomObject {
     if (!this.room) return
     const now = Date.now()
     if (now - this.lastActive(now) > ROOM_TTL_MS) {
+      this.room.revokeTCP()
       for (const ws of this.state.getWebSockets()) ws.close(1000, 'expired')
       await this.state.storage.deleteAll()
       this.room = null
       return
     }
-    if (this.room.sweep(now)) await this.persist()
+    const expired = this.cleanupTCP(now)
+    if (this.room.sweep(now) || expired) await this.persist()
     this.broadcast() // seats that left, and the host coming and going
     await this.schedule()
   }

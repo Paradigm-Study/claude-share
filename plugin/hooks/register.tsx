@@ -18,7 +18,7 @@
 import { atom, memberOf, read, update } from 'claude-code'
 import type { Elements, EngineInterface, HookStream, ProcessSpawnChunk, ProcessSpawnResult, Register, RenderChildren, RenderSurface, Timer, TurnStepChunk } from 'claude-code'
 
-import type { ShareAccount, ShareActivity, ShareChat, ShareDoing, ShareFileMeta, ShareInvite, ShareMode, SharePerson, SharePolicy, ShareRoom, ShareShown, ShareTeam, ShareTeams, ShareTeamSession, ShareWorking } from '../types'
+import type { ShareAccount, ShareActivity, ShareChat, ShareDoing, ShareFileMeta, ShareInvite, ShareLocalPreview, ShareMode, SharePerson, SharePolicy, ShareRoom, ShareShown, ShareTeam, ShareTeams, ShareTeamSession, ShareWorking } from '../types'
 import { BAD, GOOD, ago, avatarSvg, cloverSvg, colorFor, colorsFor, labelsFor, stackSvg, toolGlyph } from './look'
 import type { Face } from './look'
 import { attachmentsOf, delivered, rowsFromMessage, rowsToMarkdown, splitSpeaker, summarizeTool } from './rows'
@@ -85,6 +85,7 @@ const approvingA = atom({ plugin: 'shared-session', key: 'approving' } as const,
 const sidebarA = atom({ plugin: 'shared-session', key: 'sidebar' } as const, null as { title: string; pinned: boolean; id?: string; pinOk?: boolean } | null)
 const shownA = atom({ plugin: 'shared-session', key: 'shown' } as const, [] as ShareShown[])
 const previewsA = atom({ plugin: 'shared-session', key: 'previews' } as const, {} as Record<string, string>)
+const localPreviewsA = atom({ plugin: 'shared-session', key: 'localPreviews' } as const, [] as ShareLocalPreview[])
 const autoOpenA = atom({ plugin: 'shared-session', key: 'autoOpen' } as const, true)
 const askingA = atom({ plugin: 'shared-session', key: 'asking' } as const, null as { prompts: number } | null)
 const connectionA = atom({ plugin: 'shared-session', key: 'connection' } as const, 'live' as 'live' | 'reconnecting')
@@ -519,6 +520,26 @@ const streamed: ServerEvent[] = []
 const feedWaiters = new Set<() => void>()
 let roomOpen = false
 
+type LocalPreviewRun = {
+  room: string
+  port: number
+  preferredPort: number
+  requestedPort?: number
+  localPort?: number
+  generation: number
+  child?: HookStream<ProcessSpawnChunk, ProcessSpawnResult>
+  timer?: Timer
+  ready: Promise<boolean>
+  settle: (ready: boolean) => void
+  started: boolean
+  expired: boolean
+  error: string
+  stopping?: Promise<void>
+}
+const localPreviewRuns = new Map<string, LocalPreviewRun>()
+let localPreviewGeneration = 0
+const tcpRelays = new Map<string, { pid: string; child?: HookStream<ProcessSpawnChunk, ProcessSpawnResult> }>()
+
 // Host: guest prompts submitted and not yet started, oldest first.
 const pendingGuestPrompts: { who: string; framed: string; text: string; pid: string; attached?: string[] }[] = []
 // Guest: a prompt with attachments, held until its stored message hands over
@@ -834,7 +855,7 @@ async function runStream($: $, generation: number) {
     if (!room || (await read($, modeA)) === 'idle') return
     if ((await $.env.get('SHARED_SESSION_TRANSPORT')) === 'poll') return void startPolls($, generation, 'SHARED_SESSION_TRANSPORT=poll')
     const config = [
-      `url = "${room.server}/api/rooms/${room.id}/stream?after=${room.seq}"`,
+      `url = "${room.server}/api/rooms/${room.id}/stream?after=${room.seq}${(await read($, modeA)) === 'host' ? '&tcp=1' : ''}"`,
       `header = "Authorization: Bearer ${room.token}"`,
       'header = "Accept: application/x-ndjson"',
       // Which plugin this is, so the room knows who needs to update.
@@ -891,6 +912,8 @@ async function runStream($: $, generation: number) {
           } else if (message.ws && typeof message.ws === 'object') {
             // …or opening a WebSocket on it (live reload, a dev page's debug data).
             void relaySocket($, room, message.ws as Record<string, unknown>)
+          } else if (message.tcp && typeof message.tcp === 'object') {
+            void relayTcp($, room, message.tcp as Record<string, unknown>)
           }
           else if (Array.isArray(message.events)) {
             if (!streamUp && !delivered) $.ui.log('Shared session: listening on a stream', { to: 'debug' })
@@ -1148,6 +1171,7 @@ async function absorb($: $, room: ShareRoom, mode: ShareMode, event: ServerEvent
     case 'preview':
       if (body.state === 'closed' && typeof body.pid === 'string') {
         const pid = body.pid
+        await stopLocalPreview($, pid)
         await update($, shownA, list => list.map(s => (s.pid === pid ? { ...s, closed: true } : s)))
       }
       break
@@ -1352,6 +1376,10 @@ async function reset($: $, opts: { keepSidebar?: boolean } = {}) {
   const wasMode = await read($, modeA)
   if (!opts.keepSidebar) await unmarkSidebar($, wasMode === 'guest' && was ? `${was.host}'s session · ${was.title}`.slice(0, 120) : undefined)
   pollGeneration += 1
+  localPreviewGeneration += 1
+  await update($, modeA, () => 'idle')
+  await stopLocalPreviews($)
+  await stopTcpRelays()
   stopStream()
   outbox = []
   hostTurns.length = 0
@@ -1365,7 +1393,6 @@ async function reset($: $, opts: { keepSidebar?: boolean } = {}) {
   openRuns.clear()
   mentionedPorts.clear()
   pendingGuestPrompts.length = 0
-  await update($, modeA, () => 'idle')
   await update($, roomA, () => null)
   void holdRoom($).catch(() => {})
   await update($, peopleA, () => [])
@@ -1891,6 +1918,7 @@ type Joined = {
   autoOpen: boolean
   policy: SharePolicy
   shown: ShareShown[]
+  localPreviews?: ShareLocalPreview[]
   activity: ShareActivity[]
   chat: ShareChat[]
   sidebar: { title: string; pinned: boolean; id?: string } | null
@@ -1906,6 +1934,7 @@ async function keepJoined($: $, sessionId: string) {
     autoOpen: await read($, autoOpenA),
     policy: await read($, policyA),
     shown: (await read($, shownA)).slice(-20),
+    localPreviews: await read($, localPreviewsA),
     activity: (await read($, activityA)).slice(-40),
     chat: (await read($, chatA)).slice(-40),
     sidebar: await read($, sidebarA),
@@ -1968,6 +1997,7 @@ async function resumeJoined($: $) {
   await update($, policyA, () => ({ ...DEFAULT_POLICY, ...saved.policy }))
   await update($, autoOpenA, () => saved.autoOpen !== false)
   await update($, shownA, () => saved.shown ?? [])
+  await update($, localPreviewsA, () => saved.localPreviews ?? [])
   await update($, activityA, () => saved.activity ?? [])
   await update($, chatA, () => saved.chat ?? [])
   await update($, sidebarA, () => saved.sidebar ?? null)
@@ -2457,6 +2487,7 @@ async function stopPreview($: $, pid: string) {
   const room = await read($, roomA)
   if (!room) return
   await update($, previewsA, map => Object.fromEntries(Object.entries(map).filter(([, p]) => p !== pid)))
+  await stopTcpRelays(pid)
   await api($, room.server, `/api/rooms/${room.id}/previews/${pid}/end`, { method: 'POST', token: room.token }).catch(() => {})
 }
 
@@ -2698,10 +2729,10 @@ async function replayOf($: $, room: ShareRoom, event: ServerEvent): Promise<Repl
       return { label, call: { name: 'mcp__Claude_Browser__preview_start', input: { url: `file://${paths[0]}` } } }
     case 'preview': {
       if (!shown.pid) return null
-      const url = await previewTicket($, room, shown.pid, shown.path)
-      if (!url) return { label, note: 'the preview could not be opened' }
-      if (!(await hasTool($, 'mcp__Claude_Browser__preview_start'))) return { label, note: `open it in a browser within 10 minutes (the link opens in one browser): ${url}` }
-      return { label, call: { name: 'mcp__Claude_Browser__preview_start', input: { url } } }
+      const opened = await ensureLocalPreview($, room, shown)
+      if (!opened.url) return { label, note: opened.error ?? 'the preview could not be opened' }
+      if (!(await hasTool($, 'mcp__Claude_Browser__preview_start'))) return { label, note: `open it in your browser: ${opened.url}` }
+      return { label, call: { name: 'mcp__Claude_Browser__preview_start', input: { url: opened.url } } }
     }
     case 'link':
       if (!shown.url || !(await hasTool($, 'mcp__Claude_Browser__preview_start'))) return { label, note: shown.url ?? '' }
@@ -2710,14 +2741,15 @@ async function replayOf($: $, room: ShareRoom, event: ServerEvent): Promise<Repl
 }
 
 // Guest: what to do when this Claude Code wouldn't open what was shown (auto
-// mode refuses a plugin's step to the browser pane): a fresh link for a
-// preview, where the file is for anything else, and the Room's Open.
+// mode refuses a plugin's step to the browser pane): the localhost link for
+// a preview, where the file is for anything else, and the Room's Open.
 async function refusedNote($: $, room: ShareRoom, event: ServerEvent, reason: string): Promise<string> {
   const shown = shownOf(event)
   const why = /auto mode/i.test(reason) ? 'auto mode only opens what you asked for' : 'it was not allowed'
   if (shown?.kind === 'preview' && shown.pid) {
-    const url = await previewTicket($, room, shown.pid, shown.path)
-    if (url) return `\n\n> This session didn't open it in the browser pane (${why}). [Open the preview](${url}) in your browser within 10 minutes (the link opens in one browser), or press **Open** in the Room panel.\n\n`
+    const opened = await ensureLocalPreview($, room, shown)
+    if (opened.url) return `\n\n> This session didn't open it in the browser pane (${why}). [Open the preview](${opened.url}) in your browser, or press **Open** in the Room panel.\n\n`
+    if (opened.error) return `\n\n> ${opened.error}\n\n`
   }
   return `\n\n> This session didn't open it (${why}). Press **Open** in the Room panel${shown?.files?.length ? `, or find it in \`.shared-session/\`` : ''}.\n\n`
 }
@@ -2731,6 +2763,190 @@ async function previewTicket($: $, room: ShareRoom, pid: string, path?: string):
   }
 }
 
+// Guest: local and remote ports are independent. A chosen local port stays
+// exact; automatic allocation may move, and only the actual address is opened.
+async function ensureLocalPreview($: $, room: ShareRoom, shown: ShareShown): Promise<{ url?: string; error?: string }> {
+  const generation = localPreviewGeneration
+  const current = await read($, roomA)
+  const port = shown.port
+  const path = shown.path ?? '/'
+  if (!current || current.id !== room.id || current.server !== room.server || (await read($, modeA)) !== 'guest' || generation !== localPreviewGeneration) return { error: 'This shared session is no longer open.' }
+  if (!shown.pid || !/^[A-Za-z0-9_-]{1,64}$/.test(shown.pid) || shown.closed || !validPort(port) || !path.startsWith('/') || /[\x00-\x20\\]/.test(path)) return { error: 'That preview has ended or has no valid localhost address.' }
+  const pid = shown.pid
+  const key = `${current.server}/${current.id}`
+  const saved = (await read($, localPreviewsA)).find(p => p.pid === pid && p.port === port)
+  const requestedPort = validPort(saved?.requestedPort) ? saved.requestedPort : undefined
+  let run = localPreviewRuns.get(pid)
+  while (run && (run.stopping || run.expired || run.room !== key || run.port !== port || run.requestedPort !== requestedPort)) {
+    await stopLocalPreview($, pid, false)
+    if (generation !== localPreviewGeneration) return { error: 'This shared session is no longer open.' }
+    run = localPreviewRuns.get(pid)
+  }
+  if (!run) {
+    let settle!: (ready: boolean) => void
+    const ready = new Promise<boolean>(done => { settle = done })
+    const preferredPort = requestedPort ?? (validPort(saved?.localPort) ? saved.localPort : port)
+    run = { room: key, port, preferredPort, requestedPort, generation, ready, settle, started: false, expired: false, error: `Couldn't forward localhost:${port}. Press Open in the Room to retry, or choose Public link.` }
+    localPreviewRuns.set(pid, run)
+    void startLocalPreview($, current, pid, run)
+  }
+  const ready = await run.ready
+  const choice = (await read($, localPreviewsA)).find(p => p.pid === pid)
+  if (!ready || !run.localPort || choice?.requestedPort !== run.requestedPort || localPreviewRuns.get(pid) !== run || run.stopping || run.expired || run.generation !== localPreviewGeneration) return { error: run.error }
+  return { url: `http://localhost:${run.localPort}${path}` }
+}
+
+function validPort(port: unknown): port is number {
+  return typeof port === 'number' && Number.isInteger(port) && port > 0 && port <= 65535
+}
+
+async function changeLocalPort($: $, shown: ShareShown, value: string) {
+  const room = await read($, roomA)
+  const generation = localPreviewGeneration
+  if (!room || (await read($, modeA)) !== 'guest' || !shown.pid || shown.closed || !validPort(shown.port)) return
+  const words = value.trim()
+  const requestedPort = !words || /^auto$/i.test(words) ? undefined : /^\d{1,5}$/.test(words) ? Number(words) : NaN
+  if (requestedPort !== undefined && !validPort(requestedPort)) return void $.ui.toast('Choose a local port from 1 to 65535, or Auto.')
+  await update($, localPreviewsA, list => [...list.filter(p => p.pid !== shown.pid), { pid: shown.pid!, port: shown.port!, requestedPort }])
+  await stopLocalPreview($, shown.pid, false)
+  if (generation !== localPreviewGeneration) return
+  const opened = await ensureLocalPreview($, room, shown)
+  $.ui.toast(opened.error ?? `Forwarded ${opened.url} to the host's localhost:${shown.port}. Press Open to use it.`)
+}
+
+async function startLocalPreview($: $, room: ShareRoom, pid: string, run: LocalPreviewRun) {
+  let child: HookStream<ProcessSpawnChunk, ProcessSpawnResult> | undefined
+  try {
+    const url = `${room.server}/api/rooms/${room.id}/previews/${pid}/tunnel`
+    const grant = await api<{ token: string; expiresAt: number; port: number; protocol: number }>($, room.server, `/api/rooms/${room.id}/previews/${pid}/tunnel`, { method: 'POST', token: room.token })
+    if (grant.protocol !== 1 || grant.port !== run.port || typeof grant.token !== 'string' || !/^[A-Za-z0-9_-]{16,128}$/.test(grant.token) || !Number.isSafeInteger(grant.expiresAt) || grant.expiresAt <= await $.clock.now()) {
+      run.error = 'This server does not support local TCP forwarding. Update the server and host plugin, or choose Public link.'
+      return
+    }
+    if (localPreviewRuns.get(pid) !== run || run.stopping || run.generation !== localPreviewGeneration) return
+    child = $.process.spawn({ argv: ['/bin/sh', '-c', FIND_NODE, 'sh', `${$.plugin.root}/relay/local-preview.cjs`], input: JSON.stringify({ port: run.preferredPort, strict: run.requestedPort !== undefined, url, token: grant.token, expiresAt: grant.expiresAt }) })
+    run.child = child
+    // Don't let an unresponsive child consume a riding step's ten-second budget.
+    run.timer = $.clock.after(8_000, () => {
+      if (localPreviewRuns.get(pid) === run && !run.started) {
+        run.error = `Local preview on localhost:${run.port} took too long to start. Press Open in the Room to retry.`
+        void stopLocalPreview($, pid, false)
+      }
+    })
+    let buffer = ''
+    const result = child.result.catch(() => null)
+    for await (const chunk of child) {
+      if (localPreviewRuns.get(pid) !== run || run.stopping || run.generation !== localPreviewGeneration) break
+      // No child diagnostics or credentials go into the transcript or logs.
+      if (chunk.stream !== 'stdout') continue
+      buffer += chunk.text
+      if (buffer.length > 8192) break
+      let i: number
+      while ((i = buffer.indexOf('\n')) >= 0) {
+        const line = buffer.slice(0, i)
+        buffer = buffer.slice(i + 1)
+        let message: { state?: string; code?: string; port?: number }
+        try { message = JSON.parse(line) } catch { continue }
+        if (message.state === 'ready') {
+          if (run.started || !validPort(message.port) || (run.requestedPort !== undefined && message.port !== run.requestedPort)) {
+            run.error = 'The local preview did not report a valid listening port. Press Open in the Room to retry.'
+            void stopLocalPreview($, pid, false)
+            break
+          }
+          run.localPort = message.port
+          run.started = true
+          run.timer?.cancel()
+          await update($, localPreviewsA, list => localPreviewRuns.get(pid) === run && !run.stopping && run.generation === localPreviewGeneration && list.find(p => p.pid === pid)?.requestedPort === run.requestedPort ? [...list.filter(p => p.pid !== pid), { pid, port: run.port, localPort: run.localPort, requestedPort: run.requestedPort }] : list)
+          if (run.localPort !== run.port) $.ui.toast(`Forwarded localhost:${run.localPort} to the host's localhost:${run.port}. Fixed OAuth callbacks must match the local address.`)
+          run.settle(true)
+        } else if (message.state === 'expired') {
+          run.expired = true
+          run.error = 'Local preview authorization expired. Press Open in the Room to reconnect.'
+          $.ui.toast(run.error)
+          await $.ui.invalidate('ui.render')
+        } else if (message.state === 'error') {
+          run.error = message.code === 'EADDRINUSE'
+            ? `localhost:${run.preferredPort} is already in use on this computer. Choose another Local port or Auto in the Room, then press Open.`
+            : message.code === 'AUTH'
+              ? 'The preview could not be authenticated. Press Open in the Room to retry, or choose Public link.'
+              : `Couldn't forward the host's localhost:${run.port}. Check the host is connected, then press Open in the Room to retry.`
+          if (run.started) {
+            run.expired = true
+            $.ui.toast(run.error)
+            await $.ui.invalidate('ui.render')
+          }
+        }
+      }
+    }
+    const ended = await result
+    if (ended?.code === 127) run.error = 'Local previews need Node on this computer. Install Node and press Open in the Room, or choose Public link.'
+  } catch (error) {
+    if (error instanceof ApiError) run.error = [404, 426, 501].includes(error.status)
+      ? 'This server does not support local TCP forwarding. Update the server and host plugin, or choose Public link.'
+      : 'Local forwarding is unavailable. Check the host has an updated plugin, Node and a live stream, then press Open, or choose Public link.'
+    // Never echo child diagnostics, credentials or a server's untrusted text.
+  } finally {
+    run.timer?.cancel()
+    run.settle(false)
+    if (localPreviewRuns.get(pid) === run && !run.stopping) {
+      localPreviewRuns.delete(pid)
+      if (run.started && !run.expired && run.generation === localPreviewGeneration) $.ui.toast(`Local preview on localhost:${run.localPort} stopped. Press Open in the Room to reconnect.`)
+      await $.ui.invalidate('ui.render')
+    }
+  }
+}
+
+async function finishLocalPreview(pid: string, run: LocalPreviewRun) {
+  run.timer?.cancel()
+  run.settle(false)
+  try { await run.child?.return(undefined as never) } catch {}
+  if (localPreviewRuns.get(pid) === run) localPreviewRuns.delete(pid)
+}
+
+async function stopLocalPreview($: $, pid: string, forget = true) {
+  const run = localPreviewRuns.get(pid)
+  if (run) {
+    run.stopping ??= finishLocalPreview(pid, run)
+    await run.stopping
+  }
+  if (forget) await update($, localPreviewsA, list => localPreviewRuns.has(pid) ? list : list.filter(p => p.pid !== pid))
+}
+
+async function stopLocalPreviews($: $) {
+  await Promise.all([...localPreviewRuns.keys()].map(pid => stopLocalPreview($, pid)))
+  await update($, localPreviewsA, () => [])
+}
+
+async function restoreLocalPreviews($: $) {
+  if ((await read($, modeA)) !== 'guest') return
+  const room = await read($, roomA)
+  if (!room) return
+  const shown = await read($, shownA)
+  for (const preview of await read($, localPreviewsA)) {
+    const item = shown.find(s => s.pid === preview.pid) ?? { ...preview, key: preview.pid, kind: 'preview' as const, name: `localhost:${preview.port}`, ts: 0 }
+    if (item.closed) await stopLocalPreview($, preview.pid)
+    else {
+      const opened = await ensureLocalPreview($, room, item)
+      if (opened.error) $.ui.toast(opened.error)
+    }
+  }
+}
+
+// The public origin is an explicit alternative, never an automatic fallback
+// that changes an OAuth callback's origin after a failed localhost bind.
+async function openPublicPreview($: $, shown: ShareShown, surface?: RenderSurface) {
+  const room = await read($, roomA)
+  if (!room || !shown.pid || shown.closed) return
+  const url = await previewTicket($, room, shown.pid, shown.path)
+  if (!url) return void $.ui.toast('That preview has ended or is not reachable')
+  if (inDesktop === undefined) inDesktop = (await $.env.get('CLAUDE_CODE_ENTRYPOINT')) === 'claude-desktop'
+  const opened = inDesktop ? await $.mcp.call('Claude_Browser', 'preview_start', { url }).catch(() => null) : null
+  if (!opened || opened.isError) {
+    await $.ui.copy({ text: url, surface }).catch(() => {})
+    $.ui.toast('Public preview link copied: open it within 10 minutes')
+  }
+}
+
 // Guest: the Room panel's Open, outside any turn. The Files pane opens from
 // a plugin's own call; the browser pane may ask first, or (in auto mode)
 // refuse, and then the link is copied instead.
@@ -2738,13 +2954,13 @@ async function openShown($: $, shown: ShareShown, surface?: RenderSurface) {
   const room = await read($, roomA)
   if (!room) return
   if (shown.kind === 'preview' && shown.pid) {
-    const url = await previewTicket($, room, shown.pid, shown.path)
-    if (!url) return void $.ui.toast('That preview has ended')
+    const preview = await ensureLocalPreview($, room, shown)
+    if (!preview.url) return void $.ui.toast(preview.error ?? 'That preview could not be opened')
     if (inDesktop === undefined) inDesktop = (await $.env.get('CLAUDE_CODE_ENTRYPOINT')) === 'claude-desktop'
-    const opened = inDesktop ? await $.mcp.call('Claude_Browser', 'preview_start', { url }).catch(() => null) : null
+    const opened = inDesktop ? await $.mcp.call('Claude_Browser', 'preview_start', { url: preview.url }).catch(() => null) : null
     if (!opened || opened.isError) {
-      await $.ui.copy({ text: url, surface }).catch(() => {})
-      $.ui.toast('Preview link copied: open it within 10 minutes')
+      await $.ui.copy({ text: preview.url, surface }).catch(() => {})
+      $.ui.toast('Local preview link copied: open it in your browser')
     }
     return
   }
@@ -2818,7 +3034,7 @@ async function relaySocket($: $, room: ShareRoom, ask: Record<string, unknown>) 
   const port = Number(ask.port)
   const path = typeof ask.path === 'string' && ask.path.startsWith('/') ? ask.path : '/'
   const protocols = (Array.isArray(ask.protocols) ? ask.protocols : []).filter((p): p is string => typeof p === 'string' && /^[\w.-]{1,64}$/.test(p)).slice(0, 4)
-  if (!id || !Number.isInteger(port) || !Object.values(await read($, previewsA)).includes(String(ask.pid ?? ''))) return
+  if (!id || !validPort(port) || (await read($, previewsA))[String(port)] !== ask.pid) return
   const config = {
     local: `ws://localhost:${port}${path}`,
     origin: `http://localhost:${port}`,
@@ -2831,6 +3047,38 @@ async function relaySocket($: $, room: ShareRoom, ask: Record<string, unknown>) 
     const child = $.process.spawn({ argv: ['/bin/sh', '-c', FIND_NODE, 'sh', `${$.plugin.root}/relay/ws-relay.cjs`], input: JSON.stringify(config) })
     for await (const chunk of child) if (chunk.stream === 'stderr') $.ui.log(chunk.text.trim(), { to: 'debug' })
   } catch {}
+}
+
+// Host: one TCP connection, only to the port paired with this preview id.
+async function relayTcp($: $, room: ShareRoom, ask: Record<string, unknown>) {
+  const id = typeof ask.id === 'string' && /^[A-Za-z0-9_-]{8,40}$/.test(ask.id) ? ask.id : ''
+  const port = ask.port
+  const key = `${room.server}/${room.id}/${id}`
+  const generation = localPreviewGeneration
+  if (!id || !validPort(port) || (await read($, previewsA))[String(port)] !== ask.pid || tcpRelays.has(key)) return
+  const current = await read($, roomA)
+  if ((await read($, modeA)) !== 'host' || current?.id !== room.id || current.server !== room.server || generation !== localPreviewGeneration || tcpRelays.has(key)) return
+  const run: { pid: string; child?: HookStream<ProcessSpawnChunk, ProcessSpawnResult> } = { pid: String(ask.pid) }
+  tcpRelays.set(key, run)
+  try {
+    const version = await ownVersion($)
+    if (tcpRelays.get(key) !== run || generation !== localPreviewGeneration) return
+    const config = { tcp: true, port, room: `${room.server.replace(/^http/, 'ws')}/api/rooms/${room.id}/ws/${id}`, token: room.token, version }
+    const child = $.process.spawn({ argv: ['/bin/sh', '-c', FIND_NODE, 'sh', `${$.plugin.root}/relay/ws-relay.cjs`], input: JSON.stringify(config) })
+    run.child = child
+    for await (const _chunk of child) { /* Drain without logging credentials or application data. */ }
+  } catch {
+    // The guest's socket fails; no application bytes or requests are retried.
+  } finally {
+    if (tcpRelays.get(key) === run) tcpRelays.delete(key)
+  }
+}
+
+async function stopTcpRelays(pid?: string) {
+  await Promise.all([...tcpRelays.entries()].filter(([, run]) => !pid || run.pid === pid).map(async ([key, run]) => {
+    tcpRelays.delete(key)
+    try { await run.child?.return(undefined as never) } catch {}
+  }))
 }
 
 // Host: what started a turn nobody typed (a background task finishing), as
@@ -4332,6 +4580,7 @@ export const register: Register = (on, options) => {
     if (room && (await read($, modeA)) === 'guest') await readyReplay($)
     if (!room) await resumeHosting($).catch(error => $.ui.log(`Couldn't pick the shared session back up: ${String(error?.message ?? error)}`))
     if (!(await read($, roomA))) await resumeJoined($).catch(error => $.ui.log(`Couldn't get back into the shared session: ${String(error?.message ?? error)}`))
+    void restoreLocalPreviews($).catch(() => {})
     void holdRoom($).catch(() => {})
     $.clock.after(2_000, () => void repinMarked($).catch(() => {}))
     return started
@@ -5480,6 +5729,7 @@ export const register: Register = (on, options) => {
     const chat = await read($, chatA)
     const trusted = await read($, trustedA)
     const shown = await read($, shownA)
+    const localPreviews = await read($, localPreviewsA)
     const newer = await read($, newerA)
     const updates = await read($, updatesA)
     const colors = roomColors(v.everyone, [...chat.map(c => c.who), ...activity.map(a => a.who)])
@@ -5688,21 +5938,38 @@ export const register: Register = (on, options) => {
         {shown
           .slice(-12)
           .reverse()
-          .map(item => (
-            <Box key={`shown-${item.key}`} flexDirection="row" gap={1} alignItems="center" justifyContent="space-between">
-              <Box flexDirection="row" gap={1} flexShrink={1} minWidth={0}>
-                <Text color={item.closed ? undefined : 'claude'} dimColor={item.closed}>
-                  {shownGlyph(item)}
-                </Text>
-                <Text wrap="truncate-end" dimColor={item.closed}>{`${item.name}${item.closed ? ' · ended' : ''}`}</Text>
+          .map(item => {
+            const local = localPreviews.find(p => p.pid === item.pid)
+            const run = item.pid ? localPreviewRuns.get(item.pid) : undefined
+            const active = run?.started && !run.expired && !run.stopping
+            const preview = !isHost && item.kind === 'preview' && item.pid && !item.closed
+            return (
+              <Box key={`shown-${item.key}`} flexDirection="column" gap={1}>
+                <Box flexDirection="row" gap={1} alignItems="center" justifyContent="space-between">
+                  <Box flexDirection="row" gap={1} flexShrink={1} minWidth={0}>
+                    <Text color={item.closed ? undefined : 'claude'} dimColor={item.closed}>{shownGlyph(item)}</Text>
+                    <Text wrap="truncate-end" dimColor={item.closed}>{`${item.name}${item.closed ? ' · ended' : ''}`}</Text>
+                  </Box>
+                  <Box flexDirection="row" gap={1} alignItems="center" flexShrink={0}>
+                    <Text dimColor>{ago(item.ts, now)}</Text>
+                    {!isHost && !item.closed && item.kind !== 'widget' && item.kind !== 'link' ? <Button key={`open-${item.key}`} label="Open" plain onPress={press => void openShown($, item, press.surface)} /> : null}
+                    {preview ? <Button key={`public-${item.key}`} label="Public link" plain onPress={press => void openPublicPreview($, item, press.surface)} /> : null}
+                    {isHost && item.kind === 'preview' && item.pid && !item.closed ? <Button key={`stop-${item.key}`} label="Stop" plain onPress={() => void stopPreview($, item.pid as string)} /> : null}
+                  </Box>
+                </Box>
+                {preview && local?.localPort ? <Text key={`mapping-${item.key}`} dimColor>{`${active ? '' : 'Last: '}localhost:${local.localPort} → host localhost:${item.port}`}</Text> : null}
+                {preview && Input ? (
+                  <Box flexDirection="row" gap={1} alignItems="center">
+                    <Text dimColor>Local port</Text>
+                    <Box flexGrow={1} minWidth={0}>
+                      <Input key={`port-${item.key}-${local?.requestedPort ?? 'auto'}`} value={local?.requestedPort ? String(local.requestedPort) : ''} placeholder="Auto" submitLabel="Set" onSubmit={(value: string) => void changeLocalPort($, item, value)} />
+                    </Box>
+                    {local?.requestedPort ? <Button key={`auto-${item.key}`} label="Auto" plain onPress={() => void changeLocalPort($, item, 'auto')} /> : null}
+                  </Box>
+                ) : null}
               </Box>
-              <Box flexDirection="row" gap={1} alignItems="center" flexShrink={0}>
-                <Text dimColor>{ago(item.ts, now)}</Text>
-                {!isHost && !item.closed && item.kind !== 'widget' && item.kind !== 'link' ? <Button key={`open-${item.key}`} label="Open" plain onPress={press => void openShown($, item, press.surface)} /> : null}
-                {isHost && item.kind === 'preview' && item.pid && !item.closed ? <Button key={`stop-${item.key}`} label="Stop" plain onPress={() => void stopPreview($, item.pid as string)} /> : null}
-              </Box>
-            </Box>
-          ))}
+            )
+          })}
       </Box>
     )
 

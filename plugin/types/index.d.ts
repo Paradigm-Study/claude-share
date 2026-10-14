@@ -94,6 +94,9 @@ export type ShareShown = {
   closed?: boolean
 }
 
+/** Guest: a localhost listener to restore, without its process or credentials. */
+export type ShareLocalPreview = { pid: string; /** Host's target port. */ port: number; /** Last actual local port. */ localPort?: number; /** Chosen explicitly; absent means automatic. */ requestedPort?: number }
+
 /** The person signed in to the share server (GitHub or Google). */
 export type ShareAccount = { id: string; name: string; login?: string; email?: string; provider: string }
 
@@ -166,6 +169,8 @@ declare module 'claude-code' {
       autoOpen: boolean
       /** Host: the previews this session shares, port → preview id. */
       previews: Record<string, string>
+      /** Guest: previews opened on this machine's localhost, restored after reload/resume. */
+      localPreviews: ShareLocalPreview[]
       /** Claude Desktop's sidebar row as it was before sharing marked it, to put back. */
       sidebar: { title: string; pinned: boolean; id?: string; /** The pin sharing or joining made took. */ pinOk?: boolean } | null
       /** Share was pressed in a session with history: the row asks whether to include it. */
