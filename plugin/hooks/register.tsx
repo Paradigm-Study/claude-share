@@ -260,6 +260,12 @@ async function readSettings($: $): Promise<{ path: string; settings: Record<stri
 
 // Names (or stops naming) the live folder in the settings' env, the rest kept.
 async function nameLiveDir($: $, on: boolean): Promise<boolean> {
+  // Changing the loader changes $.store's identity. Preserve its room
+  // checkpoints before either direction of that transition is enabled.
+  try { await migrateRoomCheckpoints($) } catch (error) {
+    $.ui.log(`Couldn't preserve saved shared sessions, so the plugin loader was not changed: ${String((error as Error)?.message ?? error)}`)
+    return false
+  }
   const dir = await liveDirOf($)
   const read0 = await readSettings($)
   if (!dir || !read0) return false
@@ -1890,6 +1896,99 @@ type Hosting = {
   place?: string
 }
 
+// Installed marketplace and inline-folder copies have different $.store
+// identities. Room checkpoints belong to the person's Claude configuration,
+// outside the live plugin folder that updates replace. Each session has its
+// own file, so saving another room cannot overwrite this one's checkpoint.
+type RoomCheckpoint = Hosting | Joined
+type RoomCheckpointFile = { version: 1; value: RoomCheckpoint | null }
+
+async function roomCheckpointDir($: $): Promise<string> {
+  const config = (await $.env.get('CLAUDE_CONFIG_DIR'))?.trim()
+  const home = await $.env.get('HOME')
+  if (!config && !home) throw new Error('No Claude configuration directory is available')
+  return `${(config || `${home}/.claude`).replace(/\/+$/, '')}/shared-session/rooms`
+}
+
+function isRoomCheckpointKey(key: string): boolean {
+  return key.startsWith(HOSTING_KEY) || key.startsWith(JOINED_KEY)
+}
+
+function isRoomCheckpoint(value: unknown): value is RoomCheckpoint {
+  const saved = value as Partial<RoomCheckpoint> | null
+  return Boolean(saved && typeof saved.at === 'number' && Number.isFinite(saved.at) && saved.room && typeof saved.room.token === 'string' && typeof saved.room.seat === 'string')
+}
+
+async function readRoomCheckpointFile($: $, key: string): Promise<RoomCheckpointFile | undefined> {
+  const path = `${await roomCheckpointDir($)}/${encodeURIComponent(key)}.json`
+  if (!(await $.fs.exists(path))) return undefined
+  const text = await $.fs.read(path)
+  let record: RoomCheckpointFile
+  try { record = JSON.parse(text) as RoomCheckpointFile } catch {
+    // JSON's syntax error may quote the damaged payload, which holds tokens.
+    throw new Error('A saved room checkpoint is invalid; it was left untouched')
+  }
+  if (record?.version !== 1 || (record.value !== null && !isRoomCheckpoint(record.value))) throw new Error('A saved room checkpoint is invalid; it was left untouched')
+  return record
+}
+
+async function readRoomCheckpoint($: $, key: string): Promise<RoomCheckpoint | undefined> {
+  return (await readRoomCheckpointFile($, key))?.value ?? undefined
+}
+
+async function writeRoomCheckpoint($: $, key: string, value: RoomCheckpoint | null, migrate = false) {
+  const dir = await roomCheckpointDir($)
+  const path = `${dir}/${encodeURIComponent(key)}.json`
+  const tmp = `${dir}/.checkpoint-${randomSecret()}.tmp`
+  const body = JSON.stringify({ version: 1, value })
+  const tag = fence(body)
+  // A migration never replaces an existing canonical file, even a tombstone.
+  // ln publishes atomically only if absent: a concurrent save/consume wins.
+  // Unique private temp files keep unrelated sessions independent. Credentials
+  // travel on stdin, never argv, and failed writes leave the old file intact.
+  const publish = migrate
+    ? `if ln ${sq(tmp)} ${sq(path)} 2>/dev/null; then :; elif [ -f ${sq(path)} ]; then :; else exit 1; fi`
+    : `mv ${sq(tmp)} ${sq(path)}`
+  const result = await sh($, `umask 077\nset -e\nmkdir -p ${sq(dir)}\nchmod 700 ${sq(dir)}\ntmp=${sq(tmp)}\ntrap 'rm -f "$tmp"' 0\ncat > ${sq(tmp)} <<'${tag}'\n${body}\n${tag}\nchmod 600 ${sq(tmp)}\n${publish}\n`)
+  if (result.code !== 0) throw new Error('Could not write the private saved room checkpoint')
+}
+
+async function deleteRoomCheckpoint($: $, key: string) {
+  // Retain a small receipt without credentials. An old store encountered
+  // after switching back must not resurrect a consumed or stopped room.
+  await writeRoomCheckpoint($, key, null)
+}
+
+async function roomCheckpointKeys($: $): Promise<string[]> {
+  const dir = await roomCheckpointDir($)
+  if (!(await $.fs.exists(dir))) return []
+  const keys: string[] = []
+  for (const entry of await $.fs.list(dir)) {
+    if (entry.kind !== 'file' || !entry.name.endsWith('.json')) continue
+    let key: string
+    try { key = decodeURIComponent(entry.name.slice(0, -5)) } catch { continue }
+    if (isRoomCheckpointKey(key) && (await readRoomCheckpoint($, key))) keys.push(key)
+  }
+  return keys
+}
+
+async function migrateRoomCheckpoints($: $) {
+  for (const key of await $.store.keys()) {
+    if (!isRoomCheckpointKey(key)) continue
+    const value = await $.store.get(key)
+    if (value === undefined) continue
+    // Once present, canonical state is authoritative. In particular, no
+    // timestamp on a legacy value can override an intentional tombstone.
+    if (!(await readRoomCheckpointFile($, key))) {
+      if (!isRoomCheckpoint(value)) throw new Error('A legacy saved room checkpoint is invalid; it was left untouched')
+      await writeRoomCheckpoint($, key, value, true)
+    }
+    // A lost ln race is safe only when the winning file is valid and readable.
+    if (!(await readRoomCheckpointFile($, key))) throw new Error('The saved room checkpoint could not be verified')
+    await $.store.delete(key)
+  }
+}
+
 // Claude Desktop's own id for a session (`local_<uuid>`, the shape Claude Code
 // itself accepts). It stays when Desktop reopens the session under a new
 // Claude Code id (a rewind, or going on from an earlier message), so a place
@@ -1903,13 +2002,13 @@ async function placeOf($: $): Promise<string> {
 // Desktop session's (the newest; older ones are places it never took back).
 async function savedKey($: $, prefix: string): Promise<{ key: string | null; older: string[] }> {
   const own = `${prefix}${await $.session.id()}`
-  if ((await $.store.get(own)) !== undefined) return { key: own, older: [] }
+  if ((await readRoomCheckpoint($, own)) !== undefined) return { key: own, older: [] }
   const place = await placeOf($)
   if (!place) return { key: null, older: [] }
   const mine: { key: string; at: number }[] = []
-  for (const key of await $.store.keys()) {
+  for (const key of await roomCheckpointKeys($)) {
     if (!key.startsWith(prefix)) continue
-    const saved = (await $.store.get(key)) as { at?: unknown; place?: unknown; sidebar?: { id?: unknown } | null } | undefined
+    const saved = await readRoomCheckpoint($, key)
     // Places saved before `place` was: the sidebar row's id is the same one.
     if (typeof saved?.at === 'number' && (saved.place ?? saved.sidebar?.id) === place) mine.push({ key, at: saved.at })
   }
@@ -1934,7 +2033,7 @@ async function keepHosting($: $, sessionId: string) {
     sidebar: await read($, sidebarA),
     place: (await placeOf($)) || undefined,
   }
-  await $.store.set(`${HOSTING_KEY}${sessionId}`, saved)
+  await writeRoomCheckpoint($, `${HOSTING_KEY}${sessionId}`, saved)
   stopStream()
   await flush($) // what Claude said last, if the exit gives it time
   // This process may go on as another session (a /resume): that one isn't sharing.
@@ -1975,7 +2074,7 @@ async function keepJoined($: $, sessionId: string) {
     sidebar: await read($, sidebarA),
     place: (await placeOf($)) || undefined,
   }
-  await $.store.set(`${JOINED_KEY}${sessionId}`, saved)
+  await writeRoomCheckpoint($, `${JOINED_KEY}${sessionId}`, saved)
   stopStream()
   // This process may go on as another session (a /resume): that one isn't in the room.
   await reset($, { keepSidebar: true })
@@ -1983,11 +2082,11 @@ async function keepJoined($: $, sessionId: string) {
 
 async function resumeJoined($: $) {
   const { key, older } = await savedKey($, JOINED_KEY)
-  for (const stale of older) await $.store.delete(stale)
+  for (const stale of older) await deleteRoomCheckpoint($, stale)
   if (!key) return
-  const saved = (await $.store.get(key)) as Joined | undefined
+  const saved = (await readRoomCheckpoint($, key)) as Joined | undefined
   if (!saved?.room?.token || saved.room.seat === 'host') return
-  await $.store.delete(key)
+  await deleteRoomCheckpoint($, key)
   if ((await $.clock.now()) - saved.at > HOSTING_KEEP_MS) return
   // Over while this was closed: only now does the sidebar row go back.
   const over = async () => {
@@ -2054,7 +2153,7 @@ async function resumeJoined($: $) {
 
 async function forgetHosting($: $) {
   try {
-    await $.store.delete(`${HOSTING_KEY}${await $.session.id()}`)
+    await deleteRoomCheckpoint($, `${HOSTING_KEY}${await $.session.id()}`)
   } catch {}
 }
 
@@ -2062,22 +2161,22 @@ async function resumeHosting($: $) {
   const id = await $.session.id()
   const now = await $.clock.now()
   // Places saved by sessions that never came back, past any room's life.
-  for (const other of await $.store.keys()) {
+  for (const other of await roomCheckpointKeys($)) {
     if (!(other.startsWith(HOSTING_KEY) || other.startsWith(JOINED_KEY)) || other.endsWith(`:${id}`)) continue
-    const at = ((await $.store.get(other)) as Partial<Hosting> | undefined)?.at
-    if (typeof at !== 'number' || now - at > HOSTING_KEEP_MS) await $.store.delete(other)
+    const at = (await readRoomCheckpoint($, other))?.at
+    if (typeof at !== 'number' || now - at > HOSTING_KEEP_MS) await deleteRoomCheckpoint($, other)
   }
   const found = await savedKey($, HOSTING_KEY)
   // Rooms this Desktop session left before and never took back: over.
   for (const stale of found.older) {
-    const left = (await $.store.get(stale)) as Hosting | undefined
-    await $.store.delete(stale)
+    const left = (await readRoomCheckpoint($, stale)) as Hosting | undefined
+    await deleteRoomCheckpoint($, stale)
     if (left?.room?.token && left.room.seat === 'host') void api($, left.room.server, `/api/rooms/${left.room.id}/end`, { method: 'POST', token: left.room.token }).catch(() => {})
   }
   if (!found.key) return
-  const saved = (await $.store.get(found.key)) as Hosting | undefined
+  const saved = (await readRoomCheckpoint($, found.key)) as Hosting | undefined
   if (!saved?.room?.token || saved.room.seat !== 'host') return
-  await $.store.delete(found.key)
+  await deleteRoomCheckpoint($, found.key)
   if (now - saved.at > HOSTING_KEEP_MS) return
   let page: EventsPage | null = null
   try {
@@ -3462,7 +3561,7 @@ function scheduleRides($: $) {
 async function leave($: $) {
   const room = await read($, roomA)
   try {
-    await $.store.delete(`${JOINED_KEY}${await $.session.id()}`)
+    await deleteRoomCheckpoint($, `${JOINED_KEY}${await $.session.id()}`)
   } catch {}
   await reset($)
   if (room) {
@@ -4778,6 +4877,8 @@ export const register: Register = (on, options) => {
     await $.command.register({ name: 'room', description: 'Open the Room: who is here, activity, side chat' })
     await $.command.register({ name: 'share-file', description: 'Show a file to everyone in the shared session: /share-file <path>' })
     await $.command.register({ name: 'share-preview', description: "Let teammates open this machine's localhost: /share-preview <port> [title]" })
+    // Do this before readUpdates can move the next load to another identity.
+    await migrateRoomCheckpoints($).catch(error => $.ui.log(`Couldn't preserve saved shared sessions: ${String((error as Error)?.message ?? error)}`))
     void readUpdates($)
     // Signed in: the team and what's shared with it, for Share and the Team button.
     void serverOf($)
@@ -4825,12 +4926,12 @@ export const register: Register = (on, options) => {
     // its room for when it comes back; /clear and a logout end it.
     if (mode === 'host') {
       if (e.reason === 'clear' || e.reason === 'logout') await stopSharing($).catch(() => {})
-      else await keepHosting($, e.sessionId).catch(() => {})
+      else await keepHosting($, e.sessionId).catch(error => $.ui.log(`Couldn't save the shared session for reopening: ${String((error as Error)?.message ?? error)}`))
     }
     // A guest's too: still pinned and named, back in the room when reopened.
     if (mode === 'guest') {
       if (e.reason === 'clear' || e.reason === 'logout') await leave($).catch(() => {})
-      else await keepJoined($, e.sessionId).catch(() => {})
+      else await keepJoined($, e.sessionId).catch(error => $.ui.log(`Couldn't save the joined session for reopening: ${String((error as Error)?.message ?? error)}`))
     }
     // Closed, it's in no room for the other sessions here (`holdRoom`).
     for (const key of await $.store.keys().catch(() => [] as string[])) {

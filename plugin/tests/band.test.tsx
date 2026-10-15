@@ -36,6 +36,7 @@ function world(
     env?: Record<string, string>
     store?: Record<string, unknown>
     files?: Record<string, string>
+    checkpointWriteFail?: boolean
     people?: { id: string; name: string; role: string; online: boolean; version?: string }[]
     /** Transcript files by path: the shell's ls, cat/head | tac | grep, and grep -l over them. */
     transcripts?: Record<string, string>
@@ -60,6 +61,7 @@ function world(
 ) {
   const asked: string[] = []
   const spawned: { argv: readonly string[]; input?: string }[] = []
+  const checkpointWrites = { fail: opts.checkpointWriteFail ?? false }
   let refusedStreams = 0
   let joins = 0
   const localHelpers: { send: (message: { state: string; code?: string; port?: number; id?: string }) => void; output: (text: string) => void; exit: () => void; stopped: boolean }[] = []
@@ -137,10 +139,14 @@ function world(
       }
     }
     if (e.argv[0] === '/bin/sh' && e.input?.startsWith('umask 077')) {
-      // The sign-in file: written from the here-document, then moved in place.
+      // Private files: normal writes rename, checkpoint migration links only
+      // if absent. Both use the same stdin-only here-document as production.
       const body = /cat > '[^']+' <<'(\w+)'\n([\s\S]*?)\n\1\n/.exec(e.input)
       const to = /mv '[^']+' '([^']+)'/.exec(e.input)
+      const migration = /if ln '[^']+' '([^']+)'/.exec(e.input)
+      if (e.input.includes('/shared-session/rooms/') && checkpointWrites.fail) return { value: { code: 1, signal: null } }
       if (body && to) files.set(to[1]!, body[2]!)
+      if (body && migration && !files.has(migration[1]!)) files.set(migration[1]!, body[2]!)
       return { value: { code: 0, signal: null } }
     }
     if (e.argv[0] === '/bin/sh') {
@@ -193,7 +199,8 @@ function world(
     if (text === undefined) throw new Error(`ENOENT: ${e.path}`)
     return { value: text }
   })
-  on('fs.exists', ($, e) => ({ value: files.has(e.path) }))
+  on('fs.exists', ($, e) => ({ value: files.has(e.path) || [...files.keys()].some(path => path.startsWith(`${e.path}/`)) }))
+  on('fs.list', ($, e) => ({ value: [...files].filter(([path]) => path.startsWith(`${e.path}/`) && !path.slice(e.path!.length + 1).includes('/')).map(([path, text]) => ({ name: path.slice(e.path!.length + 1), kind: 'file' as const, size: text.length, mtimeMs: 1000, isLink: false })) }))
   on('fs.write', ($, e) => {
     files.set(e.path, e.text)
     written.push({ path: e.path, text: e.text })
@@ -323,7 +330,7 @@ function world(
     }
     return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify(body) } }
   })
-  return Object.assign(asked, { clock, logged, spawned, posted, versions, written, urls, submitted, sent, opened, files, store, localHelpers, tcpHelpers, blockedControls, toasted, copied })
+  return Object.assign(asked, { clock, logged, spawned, posted, versions, written, urls, submitted, sent, opened, files, store, localHelpers, tcpHelpers, blockedControls, toasted, copied, checkpointWrites })
 }
 
 // A press settles before work waiting on the runtime's own promises does (a
@@ -1016,7 +1023,7 @@ test('saved localhost listeners resume and restore after helper loss without ope
   expect(asked.localHelpers).toHaveLength(2)
   expect(asked.copied).toHaveLength(0)
   await $.session.end({ reason: 'other', sessionId: 'session-test-0001', resume: {} } as never)
-  const kept = asked.store.get('joined:session-test-0001') as typeof saved
+  const kept = JSON.parse(asked.files.get(checkpointPath('joined:session-test-0001'))!).value as typeof saved
   expect(kept.localPreviews).toEqual([{ pid: 'pv-local', port: 3340, localPort: 3340 }])
   expect(JSON.stringify(kept.localPreviews)).not.toContain('tcp_cap')
   expect(JSON.stringify(kept.localPreviews)).not.toContain('ticket')
@@ -1652,6 +1659,100 @@ function savedRoom(id: string, at: number, where: { sidebar?: string; place?: st
   }
 }
 const START = { cwd: '/tmp/demo', surface: 'desktop', isInteractive: true } as const
+
+function checkpointPath(key: string, config = '/home/scott/.claude') {
+  return `${config}/shared-session/rooms/${encodeURIComponent(key)}.json`
+}
+
+for (const role of ['host', 'guest'] as const) {
+  test(`${role} checkpoint survives a loader store change and cannot return after Stop or Leave`, async ($, on) => {
+    const asked = world(on)
+    on('session.start', ($, e) => ({ cwd: e.cwd }))
+    on('session.end', ($, e) => ({ sessionId: e.sessionId }))
+    await $.session.start(START)
+    if (role === 'host') await $.command.run({ command: 'share-session', args: 'new' } as never)
+    else await $.prompt.submit({ text: LINK, origin: { kind: 'composer' }, wait: false })
+    await $.session.end({ reason: 'other', sessionId: 'session-test-0001', resume: {} } as never)
+    const key = `${role === 'host' ? 'hosting' : 'joined'}:session-test-0001`
+    const saved = JSON.parse(asked.files.get(checkpointPath(key))!).value
+    expect(saved.room.seat === 'host').toBe(role === 'host')
+    // The next loader identity has none of this identity's plugin store.
+    asked.store.clear()
+    await $.session.start(START)
+    const ui = await $.ui.mount(band('desktop'))
+    expect(await ui.find({ key: role === 'host' ? 'stop-sharing' : 'leave' })).toBeDefined()
+    await $.command.run({ command: 'stop-sharing', args: '' } as never)
+    expect(JSON.parse(asked.files.get(checkpointPath(key))!).value).toBe(null)
+    // Switching back may encounter an unmigrated old snapshot. A consumed
+    // canonical file is still authoritative, so it cannot resurrect a room.
+    asked.store.set(key, saved)
+    await $.session.start(START)
+    expect(await ui.find({ key: 'share' })).toBeDefined()
+    expect(asked.store.has(key)).toBe(false)
+    expect(JSON.parse(asked.files.get(checkpointPath(key))!).value).toBe(null)
+    expect(asked.spawned.filter(s => s.input?.includes('/shared-session/rooms/')).every(s => JSON.stringify(s.argv) === '["/bin/sh","-s"]')).toBe(true)
+  })
+}
+
+test('migration respects canonical state and keeps unrelated sessions in a custom configuration', async ($, on) => {
+  const config = '/home/scott/claude-work'
+  const newest = savedRoom('room0000000000000009', 950)
+  const other = savedRoom('room0000000000000007', 900)
+  const asked = world(on, {
+    env: { CLAUDE_CONFIG_DIR: config }, sessionId: 'mine',
+    store: { 'hosting:mine': savedRoom('room0000000000000008', 500), 'hosting:other': other, unrelated: 'keep' },
+    files: { [checkpointPath('hosting:mine', config)]: JSON.stringify({ version: 1, value: newest }) },
+  })
+  on('session.start', ($, e) => ({ cwd: e.cwd }))
+  await $.session.start(START)
+  expect(asked.logged).toContain(`Still sharing this session: ${newest.room.url}`)
+  expect(JSON.parse(asked.files.get(checkpointPath('hosting:other', config))!).value).toEqual(other)
+  expect(asked.store.get('unrelated')).toBe('keep')
+  expect(asked.store.has('hosting:other')).toBe(false)
+  expect([...asked.files.keys()].some(path => path.startsWith('/home/scott/.claude/shared-session/rooms/'))).toBe(false)
+})
+
+test('failed checkpoint migration preserves its source and defers the loader change', async ($, on) => {
+  const saved = savedRoom('room0000000000000009', 900)
+  const asked = world(on, {
+    sessionId: 'mine', store: { 'hosting:mine': saved }, checkpointWriteFail: true,
+    settings: JSON.stringify({ extraKnownMarketplaces: { 'claude-share': { autoUpdate: true } } }),
+  })
+  on('session.start', ($, e) => ({ cwd: e.cwd }))
+  await $.session.start(START)
+  await asked.clock.advance(20)
+  expect(asked.store.get('hosting:mine')).toEqual(saved)
+  expect(asked.files.has(checkpointPath('hosting:mine'))).toBe(false)
+  expect(asked.written.some(write => write.text.includes('CLAUDE_CODE_PLUGIN_DIRS'))).toBe(false)
+  expect(asked.logged.some(line => line.includes("Couldn't preserve saved shared sessions"))).toBe(true)
+})
+
+test('an unreadable canonical checkpoint does not discard the legacy source', async ($, on) => {
+  const saved = savedRoom('room0000000000000009', 900)
+  const corrupt = 'private-checkpoint-token is not JSON'
+  const asked = world(on, {
+    sessionId: 'mine', store: { 'hosting:mine': saved },
+    files: { [checkpointPath('hosting:mine')]: corrupt },
+  })
+  on('session.start', ($, e) => ({ cwd: e.cwd }))
+  await $.session.start(START)
+  expect(asked.store.get('hosting:mine')).toEqual(saved)
+  expect(asked.files.get(checkpointPath('hosting:mine'))).toBe(corrupt)
+  expect(asked.logged.join('\n')).not.toContain('private-checkpoint-token')
+})
+
+test('a failed new checkpoint write leaves the previous file intact and reports the failure', async ($, on) => {
+  const asked = world(on)
+  on('session.end', ($, e) => ({ sessionId: e.sessionId }))
+  await $.command.run({ command: 'share-session', args: 'new' } as never)
+  const path = checkpointPath('hosting:session-test-0001')
+  const previous = JSON.stringify({ version: 1, value: savedRoom('room0000000000000009', 900) })
+  asked.files.set(path, previous)
+  asked.checkpointWrites.fail = true
+  await $.session.end({ reason: 'other', sessionId: 'session-test-0001', resume: {} } as never)
+  expect(asked.files.get(path)).toBe(previous)
+  expect(asked.logged.some(line => line.includes("Couldn't save the shared session for reopening"))).toBe(true)
+})
 
 test('a host session reopened takes its room back, on the same link', async ($, on) => {
   const asked = world(on, { store: { 'hosting:cli-1': savedRoom('room0000000000000009', 900) }, sessionId: 'cli-1' })
