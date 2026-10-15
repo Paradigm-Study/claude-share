@@ -593,9 +593,14 @@ async function sharing() {
   guest.type(desktopPrompt('Say the word ember and nothing else.'))
   await until('guest told the host is closed', () => /Claude Code is closed right now/.test(guest.text), 30_000).catch(() => null)
   check("a guest's prompt while the host is closed is answered there, not sent", /Claude Code is closed right now/.test(guest.text))
+  const guestBeforeResume = guest.lines.length
   host = session('Scott', hostDir, [...hostFlags, '--resume', hostSession, '--fork-session'], 'Scott-reopened', hostPlace)
   await until('host back', async () => (await roomInfo(id)).people?.some(p => p.role === 'host' && p.online), 60_000).catch(() => null)
   check('the reopened session shares the same room again', (await roomInfo(id)).people?.some(p => p.role === 'host' && p.online) === true)
+  // The server sees the host before the guest's stream updates its Room.
+  // Wait for the guest-visible return; a prompt sent while its own Room still
+  // says away is deliberately refused, even if the server has just changed.
+  await until('guest sees the host return', () => guest.lines.slice(guestBeforeResume).some(l => l.type === 'system' && l.subtype === 'ui_toast' && l.text === 'Scott is back'), 60_000)
   guest.type(desktopPrompt('What is 9 times 4? Reply with just the number.'))
   await until('reopened host ran a guest prompt', () => host.lines.some(l => l.type === 'result' && /\b36\b/.test(l.result ?? '')), 120_000).catch(() => null)
   check("and runs a guest's prompt there", host.lines.some(l => l.type === 'result' && /\b36\b/.test(l.result ?? '')))

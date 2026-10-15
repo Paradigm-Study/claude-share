@@ -148,17 +148,45 @@ function needClaude() {
 }
 
 function validServer(url) {
-  if (typeof url !== 'string' || !/^https?:\/\/[^\s/]+/.test(url)) return null
-  return url.replace(/\/+$/, '')
+  if (typeof url !== 'string') return null
+  const value = url.trim().replace(/\/+$/, '')
+  try {
+    const parsed = new URL(value)
+    return /^https?:$/.test(parsed.protocol) && parsed.hostname && !parsed.username && !parsed.password && !parsed.search && !parsed.hash ? value : null
+  } catch {
+    return null
+  }
+}
+
+function installedPlugins(claude) {
+  const listed = run(claude, ['plugin', 'list', '--json'])
+  if (listed.code !== 0) {
+    fail(`listing plugins: ${listed.out.trim().split('\n').pop()}`)
+    return null
+  }
+  try {
+    const plugins = JSON.parse(listed.out)
+    if (Array.isArray(plugins)) return plugins
+  } catch {}
+  fail('listing plugins: Claude Code returned an unexpected response')
+  return null
 }
 
 function installPlugin(claude, server) {
   const added = run(claude, ['plugin', 'marketplace', 'add', MARKETPLACE])
   if (added.code !== 0 && !/already/i.test(added.out)) return fail(`adding the marketplace: ${added.out.trim().split('\n').pop()}`)
-  run(claude, ['plugin', 'marketplace', 'update', 'claude-share'])
-  const listed = run(claude, ['plugin', 'list'])
-  if (listed.out.includes(PLUGIN)) {
+  const marketplace = run(claude, ['plugin', 'marketplace', 'update', 'claude-share'])
+  if (marketplace.code !== 0) return fail(`updating the marketplace: ${marketplace.out.trim().split('\n').pop()}`)
+  const listed = installedPlugins(claude)
+  if (!listed) return
+  const existing = listed.find(p => p.id === PLUGIN)
+  if (existing) {
     const updated = run(claude, ['plugin', 'update', PLUGIN])
+    if (updated.code !== 0) return fail(`updating the plugin: ${updated.out.trim().split('\n').pop()}`)
+    if (!existing.enabled) {
+      const enabled = run(claude, ['plugin', 'enable', PLUGIN])
+      if (enabled.code !== 0) return fail(`enabling the plugin: ${enabled.out.trim().split('\n').pop()}`)
+    }
     ok(`plugin installed (${(/updated from \S+ to (\S+)/.exec(updated.out) ?? [, 'already current'])[1]})`)
   } else {
     const args = ['plugin', 'install', PLUGIN]
@@ -167,7 +195,7 @@ function installPlugin(claude, server) {
     if (installed.code !== 0) return fail(`installing the plugin: ${installed.out.trim().split('\n').pop()}`)
     ok('plugin installed')
   }
-  if (server) configureServer(claude, server)
+  if (server && !configureServer(claude, server)) return
   enableAutoUpdate()
   ok('new Claude Code sessions load it; quit and reopen Claude Desktop so open sessions do too (a session keeps the plugin copy it started with)')
 }
@@ -196,6 +224,7 @@ function configureServer(claude, server) {
   const r = run(claude, ['plugin', 'configure', PLUGIN, '--values-stdin'], { input: JSON.stringify({ server }) })
   if (r.code !== 0) return fail(`setting the share server: ${r.out.trim().split('\n').pop()}`)
   ok(`share server set to ${server}`)
+  return true
 }
 
 async function health(server, { waitMs = 0 } = {}) {
@@ -276,14 +305,43 @@ async function firstStreamLine(url, token) {
   }
 }
 
-function configuredServer(claude) {
-  const r = run(claude, ['plugin', 'configure', PLUGIN, '--json'])
+function configuredServer(claude, plugins) {
+  let settings = {}
   try {
-    const parsed = JSON.parse(r.out.slice(r.out.indexOf('{')))
-    const found = JSON.stringify(parsed).match(/https?:\/\/[^"\s]+/)
-    if (found) return found[0]
+    settings = JSON.parse(readFileSync(join(homedir(), '.claude', 'settings.json'), 'utf8'))
+  } catch (error) {
+    if (error.code !== 'ENOENT') {
+      fail('could not read the saved server settings from ~/.claude/settings.json')
+      return null
+    }
+  }
+  let r = run(claude, ['plugin', 'configure', PLUGIN, '--json'])
+  // The automatic-update folder can shadow the installed plugin in the CLI,
+  // just as it does in a session. Its option wins; an unset option falls back
+  // to the installed copy's saved option (see the plugin's serverOf).
+  const inline = plugins.find(p => p.id === 'shared-session@inline' && p.enabled)
+  let saved = ''
+  if (r.code !== 0 && inline) {
+    r = run(claude, ['plugin', 'configure', inline.id, '--json'])
+    saved = settings.pluginConfigs?.[PLUGIN]?.options?.server ?? ''
+  }
+  if (r.code !== 0) {
+    fail(`reading the share server: ${r.out.trim().split('\n').pop()}`)
+    return null
+  }
+  try {
+    const parsed = JSON.parse(r.out)
+    if (parsed.inputs && typeof parsed.inputs === 'object') return { value: parsed.inputs.server || saved, environment: settings.env?.SHARED_SESSION_SERVER }
   } catch {}
-  return process.env.SHARED_SESSION_SERVER || null
+  fail('reading the share server: Claude Code returned an unexpected response')
+  return null
+}
+
+function defaultServer() {
+  // Read the same build default as the plugin, including forks changed by
+  // set-server.mjs, without needing a TypeScript loader for this Node script.
+  const source = readFileSync(new URL('../plugin/hooks/server.ts', import.meta.url), 'utf8')
+  return /export const SERVER_URL = ['"]([^'"]*)['"]/.exec(source)?.[1]
 }
 
 async function deploy(claude) {
@@ -294,6 +352,7 @@ async function deploy(claude) {
     human('Cloudflare sign-in: run `npx wrangler login` in this folder. It opens a browser where a person approves access; then run `node scripts/setup.mjs deploy` again.')
     return
   }
+  if (who.code !== 0) return fail(`checking Cloudflare sign-in: ${who.out.trim().split('\n').pop()}`)
   ok('signed in to Cloudflare')
   const out = run(npx, ['-y', 'wrangler@4', 'deploy'], { env, timeout: 300_000 }).out
   const account = /accounts\/([0-9a-f]{32})/.exec(out)?.[1]
@@ -330,18 +389,29 @@ function forgetSessions(dir) {
 }
 
 async function check(claude) {
-  const listed = run(claude, ['plugin', 'list'])
-  const block = listed.out.slice(listed.out.indexOf(PLUGIN), listed.out.indexOf(PLUGIN) + 200)
-  if (!listed.out.includes(PLUGIN)) fail('the plugin is not installed: run `node scripts/setup.mjs join`')
-  else ok(`plugin installed${/Version: (\S+)/.exec(block) ? ` (${/Version: (\S+)/.exec(block)[1]})` : ''}${/enabled/.test(block) ? ', enabled' : ''}`)
+  const listed = installedPlugins(claude)
+  if (!listed) return
+  const plugin = listed.find(p => p.id === PLUGIN)
+  if (!plugin) return fail('the plugin is not installed: run `node scripts/setup.mjs join`')
+  if (!plugin.enabled) return fail(`the plugin is disabled: run \`claude plugin enable ${PLUGIN}\`, then start a new session`)
+  ok(`plugin installed (${plugin.version}), enabled`)
 
-  const saved = validServer(configuredServer(claude))
-  const server = validServer(flag('server')) ?? saved
+  const config = configuredServer(claude, listed)
+  if (!config) return
+  const saved = config.value
+  const supplied = flag('server')
+  if (supplied !== undefined && !validServer(supplied)) return fail('check --server needs a valid http:// or https:// server address')
+  const environment = config.environment || process.env.SHARED_SESSION_SERVER
+  const effective = saved || environment || defaultServer()
+  const server = validServer(supplied ?? effective)
   if (!server) {
-    ok('no share server set: this machine can join links but not share. To share, run `node scripts/setup.mjs host --server <url>` (or `deploy`)')
-    return
+    return fail('the share server is not a valid http:// or https:// address; run `node scripts/setup.mjs host --server <url>`')
   }
-  if (!saved) note(`no share server is saved on this machine; checking ${server} as given`)
+  const savedSetting = saved || config.environment
+  if (flag('live') && supplied && savedSetting && validServer(savedSetting) !== server) {
+    return fail('the saved server setting overrides --server in a real session; run `node scripts/setup.mjs check --live` to check the saved server, or configure the intended server first with `node scripts/setup.mjs host --server <url>`')
+  }
+  note(`checking ${server}${supplied ? ' as given' : saved ? ' from the saved plugin setting' : environment ? ' from SHARED_SESSION_SERVER' : ' (the plugin\'s default server)'}`)
   const up = await health(server)
   if (up !== true) return fail(`share server ${server} is not answering (${up})`)
   ok(`share server ${server} is up`)
@@ -407,8 +477,11 @@ switch (command) {
     }
     const claude = needClaude()
     const up = await health(server)
-    if (up !== true) fail(`share server ${server} is not answering (${up})`)
-    else ok(`share server ${server} is up`)
+    if (up !== true) {
+      fail(`share server ${server} is not answering (${up})`)
+      break
+    }
+    ok(`share server ${server} is up`)
     installPlugin(claude, server)
     break
   }

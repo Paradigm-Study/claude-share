@@ -1,0 +1,50 @@
+name: Bug report
+description: Report a problem with installing, sharing, joining, or using a room.
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Include the smallest example that reproduces the problem. Remove room links, tokens, private prompts, and personal information from logs and screenshots.
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include versions for both host and guest when relevant. Find the Claude Code version with `claude --version` and plugin version in the Room panel or `claude plugin list`.
+      placeholder: |
+        OS:
+        Claude Desktop or terminal:
+        Claude Code version:
+        Shared Sessions plugin version:
+        Public server or self-hosted (Node / Cloudflare):
+        Node version, if using local previews:
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Say which actions the host and guest take, including whether this is a fresh or resumed session.
+      placeholder: |
+        1. The host ...
+        2. The guest ...
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected result
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual result
+      description: Include the exact error, what each person sees, and whether it happens every time.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Logs or screenshots
+      description: Optional. Redact secrets and private session content before posting.
