@@ -13,9 +13,10 @@
 import { createServer } from 'node:http'
 import { createHash } from 'node:crypto'
 import { readFileSync, writeFileSync, renameSync } from 'node:fs'
+import { Readable } from 'node:stream'
 
 import { Directory, mapStore, providersFrom } from './teams.mjs'
-import { Room, ROOM_ID, SEAT_TIMEOUT_MS, createRoom, roomRequest, previewRequest, previewRoomOf, notFound, json, publicOrigin, token, missingPage, previewMissing, homePage, outdatedClient, versionInfo, limitOf, limitedResponse, closedResponse, Windows, SOCKET_ID, previewSocketTarget, announceSocket, hostSocketAllowed, sendableClose, TCP_LIMITS, tcpSocketTarget, announceTCP, tcpState, tcpValid, tcpReserve, tcpRefund, tcpFailure, tcpFrame, tcpCheck, tcpControl, tcpRelay } from './core.mjs'
+import { Room, ROOM_ID, SEAT_TIMEOUT_MS, createRoom, roomRequest, previewRequest, previewRoomOf, notFound, json, publicOrigin, token, missingPage, previewMissing, homePage, outdatedClient, versionInfo, limitOf, limitedResponse, closedResponse, Windows, SOCKET_ID, previewSocketTarget, announceSocket, hostSocketAllowed, tcpRejectCode, sendableClose, TCP_LIMITS, tcpSocketTarget, announceTCP, tcpState, tcpValid, tcpReserve, tcpRefund, tcpFailure, tcpFrame, tcpCheck, tcpControl, tcpRelay } from './core.mjs'
 
 const PORT = Number(process.env.PORT ?? 8787)
 const PUBLIC_URL = process.env.PUBLIC_URL
@@ -155,6 +156,9 @@ async function route(req) {
       : json({ error: 'This shared session does not exist.' }, 404)
   }
 
+  const reject = /^ws\/([^/]+)\/reject$/.exec(rest)
+  if (req.method === 'POST' && reject) return rejectTCP(room, req, reject[1])
+
   const admin = Boolean(process.env.ADMIN_TOKEN) && req.headers.get('authorization') === `Bearer ${process.env.ADMIN_TOKEN}`
   const { response, changed } = await roomRequest(room, req, rest, now, origin, { previewOrigin: previewOrigin(req), admin, directory })
   if (changed) save(/^previews\/[^/]+\/tunnel$/.test(rest))
@@ -179,23 +183,29 @@ function headersOf(nodeReq) {
   return headers
 }
 
-const serve = route => async (nodeReq, nodeRes) => {
+const serve = handle => async (nodeReq, nodeRes) => {
   try {
+    const url = `http://${nodeReq.headers.host ?? 'localhost'}${nodeReq.url}`
+    const parts = new URL(url).pathname.split('/').filter(Boolean)
+    const rejecting = handle === route && nodeReq.method === 'POST' && parts.length === 6 && parts[0] === 'api' && parts[1] === 'rooms' && parts[3] === 'ws' && parts[5] === 'reject'
     const chunks = []
-    for await (const chunk of nodeReq) chunks.push(chunk)
-    const body = Buffer.concat(chunks)
+    if (!rejecting) for await (const chunk of nodeReq) chunks.push(chunk)
+    // This one host-only route authenticates before reading a bounded body.
+    const body = rejecting ? Readable.toWeb(nodeReq, { strategy: { highWaterMark: 0 } }) : Buffer.concat(chunks)
     const headers = headersOf(nodeReq)
     // Who asked, for the limits: the socket's address (behind a proxy, set
     // TRUST_PROXY=1 to use its X-Forwarded-For).
     const forwarded = process.env.TRUST_PROXY === '1' ? String(nodeReq.headers['x-forwarded-for'] ?? '').split(',')[0].trim() : ''
     headers.set('x-client-ip', forwarded || nodeReq.socket.remoteAddress || 'unknown')
-    const req = new Request(`http://${nodeReq.headers.host ?? 'localhost'}${nodeReq.url}`, {
+    const req = new Request(url, {
       method: nodeReq.method,
       headers,
       body: nodeReq.method === 'GET' || nodeReq.method === 'HEAD' ? undefined : body,
+      ...(rejecting ? { duplex: 'half' } : {}),
     })
-    const res = await route(req)
+    const res = await handle(req)
     const out = Object.fromEntries([...res.headers].filter(([k]) => k !== 'set-cookie'))
+    if (rejecting) out.connection = 'close' // don't drain an unauthorized/oversized body
     const cookies = res.headers.getSetCookie?.() ?? []
     if (cookies.length) out['set-cookie'] = cookies
     nodeRes.writeHead(res.status, out)
@@ -242,6 +252,26 @@ function closePair(id, pair, code = 1011, reason = '') {
   if (room && tcpRefund(room, pair.guest) + tcpRefund(room, pair.host) > 0) save()
   pair.browser?.close(code, reason)
   pair.relay?.close(code, reason)
+}
+
+async function rejectTCP(room, req, id) {
+  const pair = SOCKET_ID.test(id) ? pairs.get(id) : null
+  const check = () => {
+    if (rooms.get(room.id) !== room) return notFound()
+    if (!hostSocketAllowed(room, req)) return json({ error: 'Only the host rejects a TCP relay.' }, 401)
+    if (!pair || pairs.get(id) !== pair || pair.roomId !== room.id || pair.scope !== 'tcp') return notFound()
+    if (pair.host || pair.relay || pair.guest.ready) return json({ error: 'That socket already has a host relay.' }, 409)
+    return null
+  }
+  const before = check()
+  if (before) return before
+  const code = await tcpRejectCode(req)
+  // Pairing can win while the body arrives. No await between this check/close.
+  const after = check()
+  if (after) return after
+  if (!code) return json({ error: 'Expected exactly a BUSY or CONNECT code.' }, 400)
+  closePair(id, pair, code, code === 1013 ? 'TCP host busy' : 'TCP local connect failed')
+  return json({ ok: true })
 }
 
 function armTCP(id, pair) {

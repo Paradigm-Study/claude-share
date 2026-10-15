@@ -92,8 +92,8 @@ const PROXY_RESPONSE_MAX = 20 * 1024 * 1024
 // TCP previews use raw binary messages and a receiver-proven credit window.
 // All resource ceilings live here; both transports enforce the same protocol.
 export const TCP_LIMITS = Object.freeze({
-  protocol: 1, capMs: PREVIEW_SESSION_MS, capPairs: 8, roomPairs: 64,
-  seatCaps: 2, roomCaps: 128, opensPerMinute: 120, seatOpensPerMinute: 40, openWindowMs: 60_000,
+  protocol: 1, capMs: PREVIEW_SESSION_MS, seatPairs: 32, roomPairs: 64,
+  seatCaps: 2, roomCaps: 128, opensPerMinute: 1200, seatOpensPerMinute: 240, openWindowMs: 60_000,
   pairMs: 10_000, roomBytes: 1024 ** 3, reserveBytes: 1024 ** 2,
   dataBytes: 65_536, creditFrames: 4, creditBytes: 256 * 1024,
   controlBytes: 256, bufferBytes: 1024 ** 2, messageFragments: 4096,
@@ -1069,7 +1069,7 @@ section.more { padding:0 0 72px; }
       <li><b>Accounts, only for teams:</b> sharing and joining need none. If you sign in (GitHub or Google) to use teams, the server keeps your name, username, verified email, which GitHub organizations you're in, the teams you're in and their settings, which open sessions are shared with each team, and invites to a session (who invited whom, until it's joined, dismissed, ends, or 12 hours pass). Sign-ins are kept as hashes, never the token itself. They stay until you delete your account (<code>/team delete-account</code>), which removes them at once. Signed in, a session you share or join also knows your account for as long as it lasts, so your sessions count as one person.</li>
       <li><b>Who can see it:</b> anyone with the room's link, or for a session shared with a team that keeps it to its people, only the people in that team. Links are long and random; forward one only to people you'd hand the session to. Content is encrypted in transit, not end to end: the server can read what passes through it.</li>
       <li><b>What runs where:</b> a teammate's prompt runs on the host's machine. Reads inside the host's project run without asking; everything else asks the host first, by default.</li>
-      <li><b>Limits:</b> new rooms and joins are rate-limited per network; rooms hold up to 20 people and 100 MB of files. Public HTTP previews limit request bodies to 1 MB and response bodies to 20 MB. TCP previews instead allow 8 connections per grant, 64 per room, 2 grants per seat and preview, 128 per room, and 120 new connections or grants per minute (40 for any one guest). Only a port the host chose to forward can be reached this way. A grant lasts 12 hours; unpaired connections close after 10 seconds. A room has a lifetime 1 GiB TCP byte budget, reserved in 1 MiB chunks per direction, unused parts given back when a connection closes. Data messages are at most 64 KiB, with at most 4 messages / 256 KiB outstanding per direction; each half also closes at 1 MiB of cumulative control output. Rooms that are abused get ended.</li>
+      <li><b>Limits:</b> new rooms and joins are rate-limited per network; rooms hold up to 20 people and 100 MB of files. Public HTTP previews limit request bodies to 1 MB and response bodies to 20 MB. TCP previews instead allow 32 connections per seat across all grants and previews, 64 per room, 2 grants per seat and preview, 128 per room, and 1200 new connections or grants per minute (240 for any one seat). Only a port the host chose to forward can be reached this way. A grant lasts 12 hours; unpaired connections close after 10 seconds. A room has a lifetime 1 GiB TCP byte budget, reserved in 1 MiB chunks per direction, unused parts given back when a connection closes. Data messages are at most 64 KiB, with at most 4 messages / 256 KiB outstanding per direction; each half also closes at 1 MiB of cumulative control output. Rooms that are abused get ended.</li>
       <li><b>Your own server:</b> teams that want their sessions on their own infrastructure can run the same server on Cloudflare or Node in a few minutes (<a href="https://github.com/Paradigm-Study/claude-share#host-a-server">how</a>), and set it in the plugin.</li>
     </ul>
     <p>Questions or abuse reports: open an issue on <a href="https://github.com/Paradigm-Study/claude-share/issues">GitHub</a>.</p>
@@ -1258,6 +1258,27 @@ export function hostSocketAllowed(room, req) {
   return Boolean(auth && auth.role === 'host' && !room.endedAt)
 }
 
+// Called only after host authentication. Bound bytes while reading, not after
+// buffering the body; rejection carries one code, never a relay's error text.
+export async function tcpRejectCode(req) {
+  const reader = req.body?.getReader()
+  if (!reader) return 0
+  const decoder = new TextDecoder('utf-8', { fatal: true })
+  let text = '', size = 0
+  try {
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      if ((size += value.byteLength) > TCP_LIMITS.controlBytes) return 0
+      text += decoder.decode(value, { stream: true })
+    }
+    const body = JSON.parse(text + decoder.decode())
+    if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).join(',') !== 'code') return 0
+    return body.code === 'BUSY' ? 1013 : body.code === 'CONNECT' ? 1011 : 0
+  } catch { return 0 }
+  finally { reader.releaseLock() }
+}
+
 // TCP capabilities are never browser sessions: only an Authorization bearer
 // on the main server can open this single preview's data channel.
 export function tcpOperation(room, now, seat) {
@@ -1291,7 +1312,9 @@ export function tcpSocketTarget(room, req, pid, now, active = []) {
   if (!preview || room.endedAt) return { ok: false, status: 410, error: 'This TCP preview has ended.' }
   if (!preview.tcp) return { ok: false, status: 403, error: 'This preview opens through its link, not for forwarding.' }
   if (!room.tcpSupported()) return { ok: false, status: 503, error: 'The host is not connected with TCP preview support.' }
-  if (active.length >= TCP_LIMITS.roomPairs || active.filter(s => s.cap === cap).length >= TCP_LIMITS.capPairs) return { ok: false, status: 429, error: 'Too many active TCP preview connections.' }
+  // Both adapters supply one live guest half per pending or paired channel.
+  // Grants and previews share the seat's ceiling, so rotation cannot bypass it.
+  if (active.length >= TCP_LIMITS.roomPairs || active.filter(s => s.ownerSeat === grant.seat).length >= TCP_LIMITS.seatPairs) return { ok: false, status: 429, error: 'Too many active TCP preview connections.' }
   if (!tcpOperation(room, now, grant.seat)) return { ok: false, status: 429, error: 'Too many TCP preview connections or grants. Try again in a minute.' }
   return { ok: true, room: room.id, pid, port: preview.port, cap, ownerSeat: grant.seat, exp: grant.exp }
 }

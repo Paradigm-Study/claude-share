@@ -249,17 +249,8 @@ function transcriptOf(s) {
 const UPDATE_LINE = 'claude plugin marketplace update claude-share && claude plugin update shared-session@claude-share'
 const roomInfo = async id => (await fetch(`${SERVER}/api/rooms/${id}`)).json()
 
-function localPreviewAddress(person, from, remotePort, path = '/') {
-  const urls = [...person.text.slice(from).matchAll(/http:\/\/localhost:\d+(?:\/[^\s"'<>\\)\]`]*)?/g)]
-  for (const match of urls.reverse()) {
-    const url = new URL(match[0])
-    if (Number(url.port) !== remotePort && url.pathname === path) return url.href
-  }
-  return null
-}
-
 // Public preview checks explicitly ask as a room member, independently of
-// guests' automatically allocated local TCP listeners.
+// whether a guest has pressed Open to start a local TCP listener.
 async function publicPreview(id, port) {
   const base = `${SERVER}/api/rooms/${id}`
   const headers = { 'content-type': 'application/json', 'x-shared-session-version': JSON.parse(readFileSync(join(ROOT, 'plugin/.claude-plugin/plugin.json'), 'utf8')).version }
@@ -480,13 +471,13 @@ async function sharing() {
   check('Esc in a guest stops the host turn', stoppedAfter < 15_000 && words < 1200, `${words} words, stopped ${stoppedAfter}ms after Esc`)
 
   // A guest asking for a write is gated even in bypass mode (nobody can approve headless).
+  const writeAt = host.lines.length
   guest.say('Use the Write tool to create a file named pwned.txt containing "hi". Do not use Bash.')
   await until(
     'write attempt settled',
-    () => host.lines.filter(l => l.type === 'result').length >= 8,
+    () => host.lines.slice(writeAt).some(l => l.type === 'result'),
     90_000,
   )
-  await new Promise(r => setTimeout(r, 1500))
   check('a guest cannot write on the host without approval', !existsSync(join(hostDir, 'pwned.txt')))
 
   // What the host shows reaches guests: a file, saved in the guest's project.
@@ -496,8 +487,9 @@ async function sharing() {
   await until('guest saved the shared file', () => existsSync(saved), 60_000).catch(() => null)
   check("a file the host shares lands in the guest's project", existsSync(saved) && readFileSync(saved, 'utf8') === '<h1>Report 42</h1>\n')
 
-  // The host app occupies its port here. Real guests must select different
-  // local ports; the existing public HTTP/WS path remains an explicit choice.
+  // A forwarded preview needs the guest's explicit Open. This headless run
+  // checks replay's instruction; band UI tests exercise Open and local-preview.mjs
+  // exercises TCP. Public HTTP/WS is probed separately, by an explicit ticket.
   const app = createServer((req, res) => {
     if (req.url === '/assets/app.js') return res.writeHead(200, { 'content-type': 'text/javascript' }).end('console.log("app")')
     if (req.url === '/redirect') return res.writeHead(302, { location: `http://localhost:${app.address().port}/` }).end()
@@ -512,12 +504,10 @@ async function sharing() {
   await new Promise(r => app.listen(0, '127.0.0.1', r))
   children.push({ kill: () => app.close() })
   const beforePreview = guest.text.length
+  const openInstruction = `press **Open** in the Room to forward it to your own localhost:${app.address().port}`
   host.say(`/share-preview ${app.address().port} Dev app`)
-  const local = await until('guest received its own local preview', () => localPreviewAddress(guest, beforePreview, app.address().port), 60_000).catch(() => null)
-  const localPage = local ? await fetch(local, { signal: AbortSignal.timeout(15_000) }).then(r => r.text()).catch(() => '') : ''
-  check('a same-machine guest reaches the host on an available local port, without public fallback', localPage.includes('dev server ok') && !guest.text.slice(beforePreview).includes('/__share/enter?'), local || 'no local address')
-  const localEcho = local ? await wsEcho(`${new URL(local).origin.replace(/^http/, 'ws')}/__echo`, 'app=guest', 'ping-through-local').catch(e => `error: ${e.message}`) : 'no local preview'
-  check('an application WebSocket works through the guest TCP listener', localEcho === 'echo:ping-through-local', localEcho)
+  await until('live guest told to press Open for forwarding', () => guest.text.slice(beforePreview).includes(openInstruction), 60_000).catch(() => null)
+  check('a live guest is told to press Open before forwarding, without public fallback', guest.text.slice(beforePreview).includes(openInstruction) && !guest.text.slice(beforePreview).includes('/__share/enter?'))
   const enter = await publicPreview(id, app.address().port).catch(() => null)
   let previewed = false
   let cookie = ''
@@ -553,36 +543,33 @@ async function sharing() {
   const echoed = origin ? await wsEcho(`${origin.replace(/^http/, 'ws')}/__echo`, cookie, 'ping-through-preview').catch(e => `error: ${e.message}`) : 'no preview'
   check("a WebSocket opened on a preview reaches the host's dev server and back", echoed === 'echo:ping-through-preview', echoed)
 
-  // Someone who joins while the preview is open is handed it too, after the history.
+  // A late joiner's replay also asks them to press Open; joining grants no listener.
   mkdirSync(join(WORK, 'lee'), { recursive: true })
   const lee = session('Lee', join(WORK, 'lee'))
   const leeJoined = Date.now()
   lee.say(link)
   await until('late joiner caught up', () => assistantText(lee).some(t => /kiwi/i.test(t)), 120_000).catch(() => null)
   const leeCaughtUp = Date.now()
-  const late = await until('late joiner received its own local preview', () => localPreviewAddress(lee, 0, app.address().port), 60_000).catch(() => null)
-  const latePage = late ? await fetch(late, { signal: AbortSignal.timeout(15_000) }).then(r => r.text()).catch(() => '') : ''
-  check('a late joiner gets a different available local port and reaches the same app', latePage.includes('dev server ok') && (!local || new URL(late).port !== new URL(local).port) && !lee.text.includes('/__share/enter?'), late || 'no local address')
+  await until('late guest told to press Open for forwarding', () => lee.text.includes(openInstruction), 60_000).catch(() => null)
+  check('a late guest is also told to press Open before forwarding, without public fallback', lee.text.includes(openInstruction) && !lee.text.includes('/__share/enter?'))
   // Each earlier prompt arrives as a turn of its own, as it was for the host,
   // and quickly: one step for its calls, one for its last words.
   check('and sees each earlier prompt as its own turn, with its reply', ['marmalade', 'pineapple', 'kiwi'].every(w => assistantText(lee).some(t => t.toLowerCase().includes(w))) && lee.lines.filter(l => l.type === 'result').length >= 6, `${lee.lines.filter(l => l.type === 'result').length} turns in ${((leeCaughtUp - leeJoined) / 1000).toFixed(1)} s`)
 
-  // A dev server the host's Claude gives the address of is shared too.
-  const dev = createServer((req, res) => res.writeHead(200, { 'content-type': 'text/html' }).end('<h1>mentioned ok</h1>'))
+  // A mentioned web page is shared through its public link, not TCP forwarding.
+  const dev = createServer((req, res) => res.writeHead(req.url === '/dash' ? 200 : 404, { 'content-type': 'text/html' }).end(req.url === '/dash' ? '<h1>mentioned ok</h1>' : 'wrong page'))
   await new Promise(r => dev.listen(0, '127.0.0.1', r))
   children.push({ kill: () => dev.close() })
-  const beforeMention = guest.text.length
   host.say(`Reply with exactly this line and nothing else: The dev server is running at http://localhost:${dev.address().port}/dash`)
   const mentioned = await publicPreview(id, dev.address().port).catch(() => null)
-  const mentionedLocal = await until('guest received the mentioned localhost mapping', () => localPreviewAddress(guest, beforeMention, dev.address().port, '/dash'), 60_000).catch(() => null)
-  const mentionedPage = mentionedLocal ? await fetch(mentionedLocal, { signal: AbortSignal.timeout(15_000) }).then(r => r.text()).catch(() => '') : ''
   let mentionedOk = false
   if (mentioned) {
     const opened = await fetch(mentioned, { redirect: 'manual' })
     const jar = (opened.headers.get('set-cookie') ?? '').split(';')[0]
-    mentionedOk = opened.headers.get('location') === '/dash' && (await fetch(`${new URL(mentioned).origin}/`, { headers: { cookie: jar } }).then(r => r.text())).includes('mentioned ok')
+    const page = await fetch(`${new URL(mentioned).origin}/dash`, { headers: { cookie: jar } })
+    mentionedOk = opened.status === 302 && opened.headers.get('location') === '/dash' && page.ok && (await page.text()).includes('mentioned ok')
   }
-  check("a dev server the host's Claude mentions is shared at the path it gave", mentionedOk && mentionedPage.includes('mentioned ok') && !guest.text.slice(beforeMention).includes('/__share/enter?'), mentionedLocal || 'no local address')
+  check("a dev server the host's Claude mentions opens at its path through an explicit public ticket", mentionedOk, mentioned ? `${new URL(mentioned).origin}/dash` : 'no public ticket')
 
   // How everyone heard the room: one open stream each, or polls when asked to.
   const polling = process.env.SHARED_SESSION_TRANSPORT === 'poll'

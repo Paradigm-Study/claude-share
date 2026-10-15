@@ -535,12 +535,35 @@ type LocalPreviewRun = {
   started: boolean
   expired: boolean
   error: string
+  channelError?: string
   stopping?: Promise<void>
 }
 const localPreviewRuns = new Map<string, LocalPreviewRun>()
 let localPreviewGeneration = 0
-const tcpRelays = new Map<string, { pid: string; child?: HookStream<ProcessSpawnChunk, ProcessSpawnResult> }>()
-const TCP_RELAYS = 12
+
+type TcpRelayRun = { id: string; pid: string; port: number; generation: number; worker: TcpWorkerRun }
+type TcpWorkerRun = {
+  room: ShareRoom
+  generation: number
+  controlToken: string
+  ready: Promise<boolean>
+  settle: (ready: boolean) => void
+  queue: Promise<void>
+  started: boolean
+  stopped: boolean
+  port?: number
+  child?: HookStream<ProcessSpawnChunk, ProcessSpawnResult>
+  timer?: Timer
+  stopping?: Promise<void>
+}
+const tcpRelays = new Map<string, TcpRelayRun>()
+const tcpRevoking = new Set<string>()
+const tcpRejecting = new Set<string>()
+let tcpWorker: TcpWorkerRun | null = null
+let tcpAccepting = true
+const TCP_RELAYS = 64
+const TCP_BUSY = 'Preview connection or request limit reached. Close unused preview tabs or wait a minute, then retry.'
+const TCP_AUTH = 'Preview authorization was refused. Press Open in the Room to reconnect.'
 
 // Host: guest prompts submitted and not yet started, oldest first.
 const pendingGuestPrompts: { who: string; framed: string; text: string; pid: string; attached?: string[] }[] = []
@@ -1173,6 +1196,7 @@ async function absorb($: $, room: ShareRoom, mode: ShareMode, event: ServerEvent
     case 'preview':
       if (body.state === 'closed' && typeof body.pid === 'string') {
         const pid = body.pid
+        if (mode === 'host') await revokeTcpPreview($, pid)
         await stopLocalPreview($, pid)
         await update($, shownA, list => list.map(s => (s.pid === pid ? { ...s, closed: true } : s)))
       }
@@ -1360,12 +1384,9 @@ async function receive($: $, mode: ShareMode, room: ShareRoom, page: EventsPage)
         }
         break
       case 'ended':
-        if (mode === 'guest') {
-          await reset($)
-          $.ui.log(`${room.host} stopped sharing this session.`)
-          return
-        }
-        break
+        await reset($)
+        $.ui.log(mode === 'guest' ? `${room.host} stopped sharing this session.` : 'This shared session ended.')
+        return
     }
   }
   await update($, roomA, r => (r && r.id === room.id ? { ...r, seq: Math.max(r.seq, seq) } : r))
@@ -1373,17 +1394,18 @@ async function receive($: $, mode: ShareMode, room: ShareRoom, page: EventsPage)
 }
 
 async function reset($: $, opts: { keepSidebar?: boolean } = {}) {
-  // The sidebar row first, while the room is still known: the host's title
-  // comes back; a guest's says whose session it was.
-  const was = await read($, roomA)
-  const wasMode = await read($, modeA)
-  if (!opts.keepSidebar) await unmarkSidebar($, wasMode === 'guest' && was ? `${was.host}'s session · ${was.title}`.slice(0, 120) : undefined)
+  // Revoke local work before slow sidebar or network cleanup. The room is
+  // still known when its old sidebar title is restored below.
   pollGeneration += 1
   localPreviewGeneration += 1
+  const stopped = stopTcpRelays($)
+  stopStream()
+  const was = await read($, roomA)
+  const wasMode = await read($, modeA)
   await update($, modeA, () => 'idle')
   await stopLocalPreviews($)
-  await stopTcpRelays()
-  stopStream()
+  await stopped
+  if (!opts.keepSidebar) await unmarkSidebar($, wasMode === 'guest' && was ? `${was.host}'s session · ${was.title}`.slice(0, 120) : undefined)
   outbox = []
   hostTurns.length = 0
   ownPending.clear()
@@ -1793,6 +1815,7 @@ async function share($: $, surface?: RenderSurface, opts: { history?: boolean; t
   }
   await update($, roomA, () => room)
   await update($, modeA, () => 'host')
+  tcpAccepting = true
   await update($, invitedA, () => ({}))
   void readUpdates($).then(() => noteLatest($, created.latest))
   await update($, peopleA, () => [{ id: 'host', name, role: 'host', online: true }])
@@ -1890,6 +1913,7 @@ async function savedKey($: $, prefix: string): Promise<{ key: string | null; old
 }
 
 async function keepHosting($: $, sessionId: string) {
+  await stopTcpRelays($)
   const room = await read($, roomA)
   if (!room) return
   const saved: Hosting = {
@@ -2069,6 +2093,7 @@ async function resumeHosting($: $) {
   await update($, chatA, () => saved.chat ?? [])
   await update($, sidebarA, () => saved.sidebar ?? null)
   await update($, modeA, () => 'host')
+  tcpAccepting = true
   if (page) {
     await update($, peopleA, () => page.people)
     // What happened while it was closed: the chat and comings and goings are
@@ -2089,9 +2114,9 @@ async function resumeHosting($: $) {
 }
 
 async function stopSharing($: $) {
+  await stopTcpRelays($)
   const room = await read($, roomA)
-  await forgetHosting($)
-  await reset($)
+  try { await forgetHosting($) } finally { await reset($) }
   if (room) {
     await api($, room.server, `/api/rooms/${room.id}/end`, { method: 'POST', token: room.token }).catch(() => {})
     $.ui.log('Stopped sharing. The link no longer works.')
@@ -2509,10 +2534,7 @@ async function allowForwarding($: $, item: ShareShown) {
 async function stopPreview($: $, pid: string) {
   const room = await read($, roomA)
   if (!room) return
-  const port = Object.entries(await read($, previewsA)).find(([, p]) => p === pid)?.[0]
-  if (port) await update($, forwardPortsA, list => list.filter(p => p !== port))
-  await update($, previewsA, map => Object.fromEntries(Object.entries(map).filter(([, p]) => p !== pid)))
-  await stopTcpRelays(pid)
+  await revokeTcpPreview($, pid)
   await api($, room.server, `/api/rooms/${room.id}/previews/${pid}/end`, { method: 'POST', token: room.token }).catch(() => {})
 }
 
@@ -2870,9 +2892,9 @@ async function startLocalPreview($: $, room: ShareRoom, pid: string, run: LocalP
       // No child diagnostics or credentials go into the transcript or logs.
       if (chunk.stream !== 'stdout') continue
       buffer += chunk.text
-      if (buffer.length > 8192) break
       let i: number
       while ((i = buffer.indexOf('\n')) >= 0) {
+        if (i > 8192) throw new Error('Invalid local preview output')
         const line = buffer.slice(0, i)
         buffer = buffer.slice(i + 1)
         let message: { state?: string; code?: string; port?: number }
@@ -2894,6 +2916,20 @@ async function startLocalPreview($: $, room: ShareRoom, pid: string, run: LocalP
           run.error = 'Local preview authorization expired. Press Open in the Room to reconnect.'
           $.ui.toast(run.error)
           await $.ui.invalidate('ui.render')
+        } else if (message.state === 'channel-ready') {
+          if (run.channelError) {
+            run.channelError = undefined
+            await $.ui.invalidate('ui.render')
+          }
+        } else if (message.state === 'channel-error') {
+          const error = message.code === 'BUSY' ? TCP_BUSY : message.code === 'AUTH' ? TCP_AUTH : ''
+          // Browsers cancel individual sockets during navigation. A failed
+          // channel doesn't stop this listener or any of its other channels.
+          if (error && run.channelError !== error) {
+            run.channelError = error
+            $.ui.toast(error)
+            await $.ui.invalidate('ui.render')
+          }
         } else if (message.state === 'error') {
           run.error = message.code === 'EADDRINUSE'
             ? `localhost:${run.preferredPort} is already in use on this computer. Choose another Local port or Auto in the Room, then press Open.`
@@ -2907,13 +2943,16 @@ async function startLocalPreview($: $, room: ShareRoom, pid: string, run: LocalP
           }
         }
       }
+      if (buffer.length > 8192) throw new Error('Invalid local preview output')
     }
     const ended = await result
     if (ended?.code === 127) run.error = 'Local previews need Node on this computer. Install Node and press Open in the Room, or choose Public link.'
   } catch (error) {
-    if (error instanceof ApiError) run.error = [404, 426, 501].includes(error.status)
-      ? 'This server does not support local TCP forwarding. Update the server and host plugin, or choose Public link.'
-      : 'Local forwarding is unavailable. Check the host has an updated plugin, Node and a live stream, then press Open, or choose Public link.'
+    if (error instanceof ApiError) run.error = error.status === 429
+      ? TCP_BUSY
+      : [404, 426, 501].includes(error.status)
+        ? 'This server does not support local TCP forwarding. Update the server and host plugin, or choose Public link.'
+        : 'Local forwarding is unavailable. Check the host has an updated plugin, Node and a live stream, then press Open, or choose Public link.'
     // Never echo child diagnostics, credentials or a server's untrusted text.
   } finally {
     run.timer?.cancel()
@@ -2986,6 +3025,7 @@ async function openShown($: $, shown: ShareShown, surface?: RenderSurface) {
   if (!room) return
   if (shown.kind === 'preview' && shown.pid && !shown.tcp) return openPublicPreview($, shown, surface)
   if (shown.kind === 'preview' && shown.pid) {
+    if (localPreviewRuns.get(shown.pid)?.channelError === TCP_AUTH) await stopLocalPreview($, shown.pid, false)
     const preview = await ensureLocalPreview($, room, shown)
     if (!preview.url) return void $.ui.toast(preview.error ?? 'That preview could not be opened')
     if (inDesktop === undefined) inDesktop = (await $.env.get('CLAUDE_CODE_ENTRYPOINT')) === 'claude-desktop'
@@ -3081,40 +3121,191 @@ async function relaySocket($: $, room: ShareRoom, ask: Record<string, unknown>) 
   } catch {}
 }
 
-// Host: one TCP connection, only to the port paired with this preview id.
-async function relayTcp($: $, room: ShareRoom, ask: Record<string, unknown>) {
-  const id = typeof ask.id === 'string' && /^[A-Za-z0-9_-]{8,40}$/.test(ask.id) ? ask.id : ''
-  const port = ask.port
-  const key = `${room.server}/${room.id}/${id}`
-  const generation = localPreviewGeneration
-  if (!id || !validPort(port) || (await read($, previewsA))[String(port)] !== ask.pid || tcpRelays.has(key)) return
-  // Only a port the host chose to forward (the room checks too), and at most
-  // TCP_RELAYS at once on this machine: each is a Node process. One past it
-  // isn't answered; the room closes it after its ten seconds.
-  if (!(await read($, forwardPortsA)).includes(String(port)) || tcpRelays.size >= TCP_RELAYS) return
+// Host: all raw TCP connections share one supervised Node process. Control
+// requests finish at admission; neither a plugin HTTP request nor its stdin
+// stays open for the lifetime of an application connection.
+function tcpKey(room: ShareRoom, id: string): string {
+  return `${room.server}/${room.id}/${id}`
+}
+
+function tcpCurrent(run: TcpRelayRun): boolean {
+  return tcpAccepting && !run.worker.stopped && tcpWorker === run.worker && run.generation === localPreviewGeneration && !tcpRevoking.has(`${run.generation}/${run.pid}`) && tcpRelays.get(tcpKey(run.worker.room, run.id)) === run
+}
+
+async function tcpAllowed($: $, run: TcpRelayRun): Promise<boolean> {
+  const room = run.worker.room
   const current = await read($, roomA)
-  if ((await read($, modeA)) !== 'host' || current?.id !== room.id || current.server !== room.server || generation !== localPreviewGeneration || tcpRelays.has(key)) return
-  const run: { pid: string; child?: HookStream<ProcessSpawnChunk, ProcessSpawnResult> } = { pid: String(ask.pid) }
-  tcpRelays.set(key, run)
+  const previews = await read($, previewsA)
+  const ports = await read($, forwardPortsA)
+  const mode = await read($, modeA)
+  return tcpCurrent(run) && mode === 'host' && current?.id === room.id && current.server === room.server && current.token === room.token && previews[String(run.port)] === run.pid && ports.includes(String(run.port))
+}
+
+function finishTcpWorker(worker: TcpWorkerRun): Promise<void> {
+  if (worker.stopping) return worker.stopping
+  worker.stopped = true
+  worker.timer?.cancel()
+  worker.settle(false)
+  for (const [key, run] of tcpRelays) if (run.worker === worker) tcpRelays.delete(key)
+  worker.stopping = (async () => {
+    try { await worker.child?.return(undefined as never) } catch {}
+    if (tcpWorker === worker) tcpWorker = null
+  })()
+  return worker.stopping
+}
+
+async function runTcpWorker($: $, worker: TcpWorkerRun) {
   try {
     const version = await ownVersion($)
-    if (tcpRelays.get(key) !== run || generation !== localPreviewGeneration) return
-    const config = { tcp: true, port, room: `${room.server.replace(/^http/, 'ws')}/api/rooms/${room.id}/ws/${id}`, token: room.token, version }
-    const child = $.process.spawn({ argv: ['/bin/sh', '-c', FIND_NODE, 'sh', `${$.plugin.root}/relay/ws-relay.cjs`], input: JSON.stringify(config) })
-    run.child = child
-    for await (const _chunk of child) { /* Drain without logging credentials or application data. */ }
+    if (worker.stopped || tcpWorker !== worker || !tcpAccepting || worker.generation !== localPreviewGeneration) return
+    const config = { room: `${worker.room.server}/api/rooms/${worker.room.id}`, token: worker.room.token, controlToken: worker.controlToken, version }
+    const child = $.process.spawn({ argv: ['/bin/sh', '-c', FIND_NODE, 'sh', `${$.plugin.root}/relay/tcp-worker.cjs`], input: JSON.stringify(config) })
+    worker.child = child
+    const result = child.result.catch(() => null)
+    let buffer = ''
+    for await (const chunk of child) {
+      if (worker.stopped || tcpWorker !== worker || worker.generation !== localPreviewGeneration) break
+      if (chunk.stream !== 'stdout') continue
+      buffer += chunk.text
+      let i: number
+      while ((i = buffer.indexOf('\n')) >= 0) {
+        if (i > 8192) throw new Error('Invalid TCP worker output')
+        const line = buffer.slice(0, i)
+        buffer = buffer.slice(i + 1)
+        let message: { state?: string; port?: number; id?: string }
+        try { message = JSON.parse(line) } catch { continue }
+        if (message?.state === 'ready') {
+          if (worker.port || !validPort(message.port)) throw new Error('Invalid TCP worker readiness')
+          worker.port = message.port
+          worker.timer?.cancel()
+          worker.settle(true)
+        } else if (message?.state === 'closed' && typeof message.id === 'string' && /^[A-Za-z0-9_-]{8,40}$/.test(message.id)) {
+          const key = tcpKey(worker.room, message.id)
+          if (tcpRelays.get(key)?.worker === worker) tcpRelays.delete(key)
+        }
+      }
+      if (buffer.length > 8192) throw new Error('Invalid TCP worker output')
+    }
+    await result
   } catch {
-    // The guest's socket fails; no application bytes or requests are retried.
+    // Owned sockets fail. Only a new independent request may start another
+    // worker; no open command or application bytes are replayed.
   } finally {
-    if (tcpRelays.get(key) === run) tcpRelays.delete(key)
+    await finishTcpWorker(worker)
   }
 }
 
-async function stopTcpRelays(pid?: string) {
-  await Promise.all([...tcpRelays.entries()].filter(([, run]) => !pid || run.pid === pid).map(async ([key, run]) => {
-    tcpRelays.delete(key)
-    try { await run.child?.return(undefined as never) } catch {}
-  }))
+async function tcpControl($: $, worker: TcpWorkerRun, body: Record<string, unknown>, run?: TcpRelayRun): Promise<number> {
+  const task = worker.queue.then(async () => {
+    if (!(await worker.ready) || worker.stopped || tcpWorker !== worker) return 0
+    if (run && (!(await tcpAllowed($, run)) || !tcpCurrent(run))) return 0
+    let timeout!: () => void
+    const expired = new Promise<null>(done => { timeout = () => done(null) })
+    const timer = $.clock.after(2_000, () => {
+      void finishTcpWorker(worker)
+      timeout()
+    })
+    try {
+      const response = await Promise.race([
+        $.http.fetch(`http://127.0.0.1:${worker.port}/`, { method: 'POST', headers: { authorization: `Bearer ${worker.controlToken}`, 'content-type': 'application/json' }, body: JSON.stringify(body) }).catch(() => null),
+        expired,
+      ])
+      if (!response || ![200, 429].includes(response.status)) void finishTcpWorker(worker)
+      return !worker.stopped && tcpWorker === worker ? response?.status ?? 0 : 0
+    } finally {
+      timer.cancel()
+    }
+  })
+  worker.queue = task.then(() => {}, () => {})
+  return task
+}
+
+// Failures before a worker is ready still get a bounded refusal. Curl is
+// already required for the Host's TCP feed; credentials stay on stdin here too.
+async function rejectTcp($: $, room: ShareRoom, id: string, code: 'BUSY' | 'CONNECT') {
+  const key = tcpKey(room, id)
+  if (tcpRejecting.has(key) || tcpRejecting.size >= TCP_RELAYS) return
+  tcpRejecting.add(key)
+  try {
+    const worker = tcpWorker
+    if (worker?.port && !worker.stopped && worker.room.id === room.id && worker.room.server === room.server && worker.room.token === room.token) {
+      if (await tcpControl($, worker, { op: 'reject', id, code }) === 200) return
+    }
+    const input = `${roomConfig(room, `ws/${id}/reject`)}\nrequest = "POST"\nheader = "content-type: application/json"\ndata = ${cfg(JSON.stringify({ code }))}\n`
+    const child = $.process.spawn({ argv: ['curl', '--silent', '--max-time', '2', '--output', '/dev/null', '--config', '-'], input })
+    for await (const _chunk of child) { /* Never log credentials or a server's answer. */ }
+  } catch {} finally {
+    tcpRejecting.delete(key)
+  }
+}
+
+async function relayTcp($: $, room: ShareRoom, ask: Record<string, unknown>) {
+  const id = typeof ask.id === 'string' && /^[A-Za-z0-9_-]{8,40}$/.test(ask.id) ? ask.id : ''
+  const pid = typeof ask.pid === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(ask.pid) ? ask.pid : ''
+  const port = ask.port
+  if (!id || !pid || !validPort(port) || !tcpAccepting) return
+  // A drained old stream can still have a notification in its current chunk.
+  // Never let it install an unstarted worker for the room that replaced it.
+  const generation = localPreviewGeneration
+  const current = await read($, roomA)
+  const mode = await read($, modeA)
+  if (!tcpAccepting || generation !== localPreviewGeneration || mode !== 'host' || current?.id !== room.id || current.server !== room.server || current.token !== room.token) return
+  const key = tcpKey(room, id)
+  if (tcpRelays.has(key)) return
+  if (tcpRelays.size >= TCP_RELAYS) return void rejectTcp($, room, id, 'BUSY')
+  let worker = tcpWorker
+  if (!worker) {
+    let settle!: (ready: boolean) => void
+    const ready = new Promise<boolean>(done => { settle = done })
+    worker = { room, generation: localPreviewGeneration, controlToken: randomSecret(), ready, settle, queue: Promise.resolve(), started: false, stopped: false }
+    tcpWorker = worker
+  }
+  if (worker.stopped || worker.generation !== localPreviewGeneration || worker.room.id !== room.id || worker.room.server !== room.server || worker.room.token !== room.token) return
+  const run: TcpRelayRun = { id, pid, port, generation: localPreviewGeneration, worker }
+  tcpRelays.set(key, run) // No await since the capacity check: queued + connecting + active.
+  let accepted = false, refused = false
+  try {
+    if (!(await tcpAllowed($, run)) || !tcpCurrent(run)) return
+    if (!worker.started) {
+      worker.started = true
+      worker.timer = $.clock.after(5_000, () => void finishTcpWorker(worker!))
+      void runTcpWorker($, worker)
+    }
+    const status = await tcpControl($, worker, { op: 'open', id, pid, port }, run)
+    accepted = status === 200
+    refused = status === 429 // The worker already sent BUSY, not CONNECT.
+  } catch {} finally {
+    if (!accepted) {
+      if (tcpRelays.get(key) === run) tcpRelays.delete(key)
+      if (!worker.started && tcpWorker === worker && ![...tcpRelays.values()].some(r => r.worker === worker)) await finishTcpWorker(worker)
+      if (!refused && tcpAccepting && run.generation === localPreviewGeneration) void rejectTcp($, room, id, 'CONNECT')
+    }
+  }
+}
+
+async function stopTcpRelays($: $, pid?: string) {
+  if (!pid) tcpAccepting = false
+  for (const [key, run] of tcpRelays) if (!pid || run.pid === pid) tcpRelays.delete(key)
+  const worker = tcpWorker
+  if (!worker) return
+  if (!pid) return finishTcpWorker(worker)
+  if (!worker.started) return
+  if (await tcpControl($, worker, { op: 'close-preview', pid }) !== 200) await finishTcpWorker(worker)
+}
+
+async function revokeTcpPreview($: $, pid: string) {
+  const generation = localPreviewGeneration
+  const key = `${generation}/${pid}`
+  tcpRevoking.add(key)
+  const stopped = stopTcpRelays($, pid)
+  try {
+    const ports = Object.entries(await read($, previewsA)).filter(([, p]) => p === pid).map(([port]) => port)
+    await update($, forwardPortsA, list => generation === localPreviewGeneration ? list.filter(p => !ports.includes(p)) : list)
+    await update($, previewsA, map => generation === localPreviewGeneration ? Object.fromEntries(Object.entries(map).filter(([, p]) => p !== pid)) : map)
+    await stopped
+  } finally {
+    tcpRevoking.delete(key)
+  }
 }
 
 // Host: what started a turn nobody typed (a background task finishing), as
@@ -4623,6 +4814,7 @@ export const register: Register = (on, options) => {
   })
 
   on('session.end', async ($, e, next) => {
+    await stopTcpRelays($)
     const mode = await read($, modeA)
     // A host session that closes (the app quits, a restart to update) keeps
     // its room for when it comes back; /clear and a logout end it.
@@ -5995,6 +6187,7 @@ export const register: Register = (on, options) => {
                   </Box>
                 </Box>
                 {preview && local?.localPort ? <Text key={`mapping-${item.key}`} dimColor>{`${active ? '' : 'Last: '}localhost:${local.localPort} → host localhost:${item.port}`}</Text> : null}
+                {preview && active && run?.channelError ? <Text key={`connection-${item.key}`} color="warning">{run.channelError}</Text> : null}
                 {preview && Input ? (
                   <Box flexDirection="row" gap={1} alignItems="center">
                     <Text dimColor>Local port</Text>

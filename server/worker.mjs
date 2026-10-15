@@ -47,6 +47,7 @@ import {
   previewSocketTarget,
   announceSocket,
   hostSocketAllowed,
+  tcpRejectCode,
   noteVersion,
   sendableClose,
   TCP_LIMITS,
@@ -149,11 +150,14 @@ export default {
     headers.set('x-share-origin', origin)
     headers.set('x-preview-origin', previewOriginOf(req, env))
     if (rest === 'stream' && req.method === 'GET') return bridge(stub, id, url, headers)
+    // The room authenticates this host-only request before reading its small body.
+    const rejecting = req.method === 'POST' && /^ws\/[^/]+\/reject$/.test(rest)
     return stub.fetch(
       new Request(`https://room.internal/${id}/${rest}${url.search}`, {
         method: req.method,
         headers,
-        body: req.method === 'GET' || req.method === 'HEAD' ? undefined : await req.arrayBuffer(),
+        body: req.method === 'GET' || req.method === 'HEAD' ? undefined : rejecting ? req.body : await req.arrayBuffer(),
+        ...(rejecting ? { duplex: 'half' } : {}),
       }),
     )
   },
@@ -294,7 +298,10 @@ export class RoomObject {
         : json({ error: 'This shared session does not exist.' }, 404)
     }
 
+    const reject = req.method === 'POST' && /^ws\/([^/]+)\/reject$/.exec(rest)
+    if (reject && id !== this.room.id) return notFound()
     if (this.cleanupTCP(now)) await this.persist()
+    if (reject) return this.rejectTCP(req, reject[1])
     if (rest === 'socket') return this.accept(req, url, now)
 
     const upgrade = req.headers.get('upgrade')?.toLowerCase() === 'websocket'
@@ -420,6 +427,34 @@ export class RoomObject {
       try { ws.close(sendableClose(code), String(reason).replace(/[^\x20-\x7e]/g, '?').slice(0, 100)) } catch {}
     }
     if (refunded) void this.persistTCPStats().catch(() => {})
+  }
+
+  async rejectTCP(req, id) {
+    const room = this.room
+    const guest = SOCKET_ID.test(id) ? this.tcpSockets().find(ws => {
+      const s = ws.deserializeAttachment().tcp
+      return s.id === id && s.room === room.id && s.side === 'guest'
+    }) : null
+    const check = () => {
+      if (this.room !== room) return notFound()
+      if (!hostSocketAllowed(room, req)) return json({ error: 'Only the host rejects a TCP relay.' }, 401)
+      if (!guest || !this.tcpSockets().includes(guest)) return notFound()
+      const s = guest.deserializeAttachment().tcp
+      if (s.id !== id || s.room !== room.id || s.side !== 'guest') return notFound()
+      if (s.ready || this.tcpPeer(s)) return json({ error: 'That socket already has a host relay.' }, 409)
+      return null
+    }
+    const before = check()
+    if (before) return before
+    const code = await tcpRejectCode(req)
+    return this.state.blockConcurrencyWhile(async () => {
+      const after = check()
+      if (after) return after
+      if (!code) return json({ error: 'Expected exactly a BUSY or CONNECT code.' }, 400)
+      this.closeTCP(id, code, code === 1013 ? 'TCP host busy' : 'TCP local connect failed')
+      await this.schedule()
+      return json({ ok: true })
+    })
   }
 
   cleanupTCP(now) {

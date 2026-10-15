@@ -6,7 +6,7 @@ const { connect, BUFFER_MAX } = require('./ws-relay.cjs')
 const DATA_MAX = 65536, WINDOW_FRAMES = 4, WINDOW_BYTES = DATA_MAX * WINDOW_FRAMES
 const notify = row => process.stdout.write(JSON.stringify(row) + '\n')
 const failure = code => Object.assign(new Error('Local preview relay failed'), { code })
-const safeCode = error => ['INVALID_CONFIG', 'EADDRINUSE', 'EXPIRED', 'AUTH', 'CONNECT', 'TIMEOUT', 'PROTOCOL', 'BUFFER_LIMIT'].includes(error?.code) ? error.code : 'STARTUP'
+const safeCode = error => ['INVALID_CONFIG', 'EADDRINUSE', 'EXPIRED', 'AUTH', 'BUSY', 'CONNECT', 'TIMEOUT', 'PROTOCOL', 'BUFFER_LIMIT'].includes(error?.code) ? error.code : 'STARTUP'
 const portOK = port => Number.isInteger(port) && port >= 1 && port <= 65535
 const tokenOK = token => typeof token === 'string' && /^[A-Za-z0-9_.-]{16,512}$/.test(token)
 const loopback = hostname => hostname === 'localhost' || hostname === '[::1]' || (net.isIP(hostname) === 4 && hostname.startsWith('127.'))
@@ -141,15 +141,15 @@ function bridge(socket, url, headers, { emit = notify, timeoutMs = 10_000, onRea
   socket.on('error', () => fail('CONNECT'))
   socket.on('close', () => { if (!done && !(sentFin && receivedFin)) fail('CONNECT') })
   try {
-    ws = connect(url, headers, [], { message, drain: () => { blocked = false; pump() }, close: code => {
-      if (!done && !normalClose(code)) emit({ state: 'error', code: code === 1008 ? 'AUTH' : code === 1009 ? 'BUFFER_LIMIT' : [1002, 1007].includes(code) ? 'PROTOCOL' : 'CONNECT' })
+    ws = connect(url, headers, [], { message, drain: () => { blocked = false; pump() }, close: (code, status) => {
+      if (!done && !normalClose(code)) emit({ state: 'error', code: status === 401 || status === 403 ? 'AUTH' : code === 1013 ? 'BUSY' : code === 1009 ? 'BUFFER_LIMIT' : [1002, 1007].includes(code) ? 'PROTOCOL' : 'CONNECT' })
       finish(code)
     } }, { maxMessage: DATA_MAX, timeoutMs })
   } catch { fail('CONNECT') }
   return { close: () => { finish(1001); ws?.close(1001) }, closed }
 }
 
-function startHost(cfg, { emit = notify, signal, timeoutMs = 10_000 } = {}) {
+function startHost(cfg, { emit = notify, signal, timeoutMs = 10_000, onReady = () => {} } = {}) {
   if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg) || Object.keys(cfg).some(k => !['tcp', 'port', 'room', 'token', 'version'].includes(k)) || cfg.tcp !== true || !portOK(cfg.port) || !tokenOK(cfg.token) || typeof cfg.version !== 'string' || !/^[\w.-]{0,64}$/.test(cfg.version)) throw failure('INVALID_CONFIG')
   const url = endpoint(cfg.room, true), began = Date.now()
   let socket, relay, done = false, resolveClosed
@@ -178,7 +178,7 @@ function startHost(cfg, { emit = notify, signal, timeoutMs = 10_000 } = {}) {
     s.once('connect', () => {
       s.removeListener('error', failed)
       if (done) return s.destroy()
-      relay = bridge(s, url, { authorization: `Bearer ${cfg.token}`, 'x-shared-session-version': cfg.version }, { emit, timeoutMs: Math.max(1, timeoutMs - (Date.now() - began)), onReady: () => clearTimeout(timer) })
+      relay = bridge(s, url, { authorization: `Bearer ${cfg.token}`, 'x-shared-session-version': cfg.version }, { emit, timeoutMs: Math.max(1, timeoutMs - (Date.now() - began)), onReady: () => { clearTimeout(timer); onReady() } })
       relay.closed.then(finish)
     })
   }
