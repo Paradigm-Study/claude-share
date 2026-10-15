@@ -1,0 +1,22 @@
+name: Feature request
+description: Describe a collaboration workflow you want to improve.
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do?
+      description: Describe a concrete host or guest workflow and where it gets difficult.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What would help?
+      description: Describe the behavior you would like to see.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Current workaround or alternatives
+      description: Optional. What do you do today, and why does it fall short?

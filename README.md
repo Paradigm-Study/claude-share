@@ -1,204 +1,95 @@
 # Shared Sessions for Claude Code
 
-Share a Claude Code session with a link. Teammates open it, land in a Claude Code session of their own that is attached to yours, and talk to it. Everyone sees every prompt and every reply, live, as normal transcript rows.
+Work in the same Claude session with your team. Share a link, let a teammate join from their own Claude Code, and see each other's prompts, streamed replies and tool results. The host's machine does the work.
 
-- **One machine does the work.** The session that shared is the host. Every turn and every tool runs there, in its folder, under its login.
-- **Everyone else is a guest.** A guest's prompt goes to the host and runs in turn. Every host turn plays out in each guest's own transcript as a prompt and a streamed reply. A guest's own model is never called.
-- **The host stays in charge.** When a guest's prompt makes Claude write a file, run a command or reach the network, the host is asked first, whatever the host's permission mode. The question shows the exact command or diff. The host can also make the session watch-only.
-- **It lives in Claude's own UI.** In Claude Desktop and the terminal:
-  - a teammate's prompts carry their dot avatar and name;
-  - the footer and working line say who's here and whose turn it is;
-  - a Room panel has the session on top (Live, who's here, the link), then its pages: **People**, **Chat** (a side chat Claude never reads, with who came and went), **Shown** (what Claude showed) and **Settings**;
-  - everyone has a color of their own, the same on their face, their name in the Room and the chat, and their prompts in your transcript;
-  - in Desktop, the session list marks and pins shared sessions.
-- **What Claude shows, everyone sees.** When the host's Claude opens a file in the side panel or the Files pane, draws a widget, or opens a page or a local dev server in the browser pane, each guest's own Claude Code opens the same thing. A dev server it only gives the address of (`http://localhost:3000/…`) is shared too, at that page, once something answers there; so are the ones it opened or gave out before you pressed **Share everything**, if they're still running. Files are saved in the guest's project under `.shared-session/` (kept out of git). A dev server opens through its preview link unless the host explicitly allows forwarding; then each guest presses **Open** in the Room to use their own `http://localhost:<local-port>`, TCP-forwarded through the room server. The host's port is preferred; if busy, an available local port is used instead. Screenshots the host's Claude takes (the browser pane's, a computer's) and images it opens show in the guest's tool cards as they do in the host's. A page it publishes (an Artifact) arrives with its pictures and other files beside it, and opens whole in the guest's browser pane, again whenever it's opened again; nobody needs the private claude.ai link. The Room shows anyone whose plugin is out of date, and a guest who types the update command into the session has it run on their own computer. A guest's message can carry attachments (images, PDFs): they're saved in the host's project and the host's Claude opens them.
+[Install](#install) · [Try a first session](#use-it) · [Full guide](docs/guide.md) · [Contribute](CONTRIBUTING.md)
 
-- **Teams.** Sign in with GitHub or Google, make a team, and what you share goes to it: everyone in the team sees your live sessions in their **Team** panel and joins with one press (**Join all** for every one). Teammates come in by invite link, by their email's domain or by their GitHub organization; each team says whether its sessions are for its people only or for anyone with the link.
+[![A teammate's invitation above the composer in Claude Desktop](docs/assets/invitation-demo.png)](https://x.com/thescottfan/status/2109815791441072416)
 
-Built as a Claude Code plugin of function hooks (a "mod"), plus a small room server that runs on Cloudflare or as a single Node process. **It works right after install:** sharing goes through a public server this project runs ([what it sees and keeps](#privacy-and-the-public-server)), and teams can point it at their own.
+[Watch the 90-second demo on X](https://x.com/thescottfan/status/2109815791441072416) or [download the 8-second invitation clip](docs/assets/invitation-demo.mp4). The clip shows an invitation arriving in Claude Desktop. Recorded with fictional teammates; [demo details and music credit](docs/assets/README.md).
+
+- **Pair on a real task.** A teammate joins your ongoing session with its shared history, then asks Claude to investigate the same code.
+- **Review the result together.** See the host's replies, tool cards, files and supported previews in your own session.
+- **Keep control of your machine.** By default, a guest's request to edit, run commands or use the network asks the host first. Watch-only mode is available.
+- **Find your team.** Optional teams add sign-in, live session lists and invitations inside Claude Code.
+
+Works in Claude Desktop and the terminal. A public room server is included, or you can [run your own](#host-a-server).
 
 ## Install
 
-One line in a terminal:
+Both people need a working Claude Code installation and this plugin. Requires **Claude Code 2.1.286+**. Check with `claude --version`; if your terminal copy is older, use `claude update` or the setup option below. Your normal Claude authentication still applies; sharing by link needs no separate Shared Sessions account.
+
+In a terminal with a supported Claude Code version:
 
 ```bash
-claude plugin marketplace add Paradigm-Study/claude-share && claude plugin install shared-session@claude-share
+claude plugin marketplace add Paradigm-Study/claude-share
+claude plugin install shared-session@claude-share
 ```
 
-Works in Claude Desktop and in the terminal. Requires Claude Code 2.1.286 or later: `claude update` (or `npm install -g @anthropic-ai/claude-code@latest` for an npm install); Claude Desktop includes it. On 2.1.285 (the "stable" channel today) it works with `"env": { "CLAUDE_CODE_ENABLE_FUNCTION_HOOKS": "1" }` in `~/.claude/settings.json`, which the setup script sets for you. An older Claude Code answers `/share-session` with how to update. The installer mentions one optional setting (the share server); leave it, and sharing uses the public server. New sessions pick it up; quit and reopen Claude Desktop for sessions already open. (Claude Code installs third-party plugins from a marketplace it knows, hence the two steps in one line.)
+Leave the optional share-server setting empty to use the public server. Start a new session after installing. Quit and reopen Claude Desktop to load the plugin into sessions already open.
 
-**Updates.** Turn them on once: **Room → Settings → Updates → Install by themselves** (the setup script does it for you). From your next new session on, a release loads into every open session by itself, with nothing to restart: the plugin keeps a copy of itself in `~/.claude/shared-session/plugin`, named in your settings' `CLAUDE_CODE_PLUGIN_DIRS` with `CLAUDE_CODE_PLUGIN_DIR_WATCH=1`, and that copy replaces its own files with each release from this repository (Claude Code reloads a watched plugin folder when its files change). It also turns on the marketplace's auto-update. **Only when I update** stops naming the folder; new sessions then run the installed copy. One exception: if you added the marketplace from a local folder (a clone, by path), Claude Desktop runs the installed copy ahead of the self-updating one, so there a release loads only when you quit and reopen it. The Room says so and copies the command that adds the marketplace from GitHub instead. A share server also turns away versions too old to work right, and says the one command that updates them:
-
-```bash
-claude plugin marketplace update claude-share && claude plugin update shared-session@claude-share
-```
-
-**Or let the setup script do it.** It works for a person or an agent; see [AGENTS.md](AGENTS.md). From a clone of this repo:
+**Have Desktop but an older terminal CLI?** With Git and Node 20+ installed, the setup script can find the newer Claude Code bundled with Desktop on macOS:
 
 ```bash
+git clone https://github.com/Paradigm-Study/claude-share.git
+cd claude-share
 node scripts/setup.mjs join
 ```
 
-It also handles three more cases:
-- `host --server <url>` installs too, then shares through your team's server.
-- `deploy` makes a server on Cloudflare.
-- `check --live` has real throwaway sessions share and join, then removes them.
-
-It stops with a `NEEDS HUMAN` line at the one or two steps that need a person. Set `CLAUDE_BIN=/path/to/claude` to use a particular Claude Code binary.
-
-**For a whole team, nothing to type:** in your organization's managed settings (or a project's checked-in `.claude/settings.json`), add:
-
-```json
-{
-  "extraKnownMarketplaces": { "claude-share": { "source": { "source": "github", "repo": "Paradigm-Study/claude-share" }, "autoUpdate": true } },
-  "enabledPlugins": { "shared-session@claude-share": true }
-}
-```
+Despite the command name, `join` installs the plugin for both sharing and joining. It also enables automatic marketplace updates and the function-hooks switch needed on 2.1.285. Read its `NOTE` lines; if it prints `NEEDS HUMAN`, complete that step and rerun the command. [More setup and update options](docs/guide.md#install).
 
 ## Use it
 
-- **Join:** open a share link. Its page opens Claude Desktop with the link in a new session's prompt box, so you press Enter. Pasting a link into any Claude Code session works too. Joining needs only the plugin: no server, account or sign-in (except for a session shared with a team that keeps its sessions to its people).
-- **Team:** press **Team** above the prompt, or type `/team`. Sign in with GitHub or Google (your browser opens; Claude Code picks the sign-in up), then make a team and send people its invite link (they paste it as a message, or open it). The panel lists the sessions shared with your team right now: **Join** joins one in the session you're in if it's fresh, or opens a new Claude Desktop session with its link ready (press Enter); **Join all** does that for every one, one after another: each session that joins opens the next. You count once, however many sessions you're in: a session you're already in (here or on another computer) isn't offered again, **Open** brings up the one on this computer, and pasting a link to a room another of your sessions is in opens that one (paste it again to join here as well). Once you're in a team, **Share** goes to it (the button says **Share with Acme**); `/share-session link`, or **What you share goes → By link alone**, shares by link only. Owners choose who joins the team's sessions (**Only people in the team**, the default, or **Anyone with the link**) and who joins the team by themselves: a verified email at a domain (`acme.com`), or a GitHub organization. An owner can add only their own email's domain (never a public one like gmail.com) and organizations they're in, so nobody can pull strangers in. **Invite someone straight into a session:** while you share (signed in), press **Invite** above the prompt: the Room opens on your teammates, each with **Invite** (or type `/invite <name>`), and **Invite again** until they've joined: it shows up for them anew, even if they'd dismissed it. Nobody in your team yet? The Room says so and copies your team's invite link. It shows up in their Claude Code within about half a minute, above the prompt ("Scott invites you" with **Join**; in a session that's itself shared or joined, a button in its row that opens the Team panel) and in their Team panel, with a desktop notification (their terminal's own where it has one, else macOS's notification centre or `notify-send`; **Team → Invites to a session → Just show them** turns it off); no link to send. In a terminal: `/team signin`, `/team create <name>`, `/team invite`, `/team invites`, `/team sessions`, `/team join <n|all>`, `/team use <name|link>`, `/team access members|link`, `/team domains …`, `/team orgs …`, `/team leave`, `/team signout`, `/team delete-account`.
-- **Share:** press **Share** above the prompt, or type `/share-session`. In a session that already has prompts, it asks first whether teammates may see them: **Share everything**, or **Only from now on** (`/share-session all` or `/share-session new`). The link is copied. It goes through the public server unless you set your own (below).
-- **Room:** press **Room** above the prompt, or type `/room`, for:
-  - who's here and who Claude is working for;
-  - the side chat, what was shown, and the activity;
-  - settings: the host's rules for everyone, and each guest's own.
-- **Show:** what the host's Claude shows reaches everyone by itself. The host can also type `/share-file <path>` to show a file, or `/share-preview <port>` to let teammates open a local dev server forwarded to their own localhost. Both are listed in the Room, where guests reopen them and the host stops previews. Someone who joins later gets everything so far as it was: each earlier prompt its own turn with its reply and tool cards, a few seconds for a long session, then any preview still open.
-- **Local previews:** a dev server the host shares with `/share-preview` (or **Allow forwarding** in the Room's Shown page) is forwarded to each guest's own localhost, once they press **Open**: they open `http://localhost:<local-port>/<path>` on their own computer. One shared because Claude mentioned or opened it opens through its link, never forwarded, so a guest can't reach other services on the host (a database) by getting Claude to name their port. A small Node listener on each guest forwards TCP bytes through the room; one long-lived Node worker on the host manages all of that room's forwarded connections, rather than starting a process per connection. It tries the host's port first, then allocates an available local port without stopping another program. **Room → Shown** shows the mapping; **Local port** chooses an exact port, and **Auto** restores automatic allocation. A chosen port that is busy reports an error. Node 20+ and POSIX `sh` are needed on both machines, and the host needs its live `curl` stream. Both plugins and the server must support TCP forwarding; older ones report an error rather than silently changing origin. **Public link** explicitly opens the existing public preview instead. Leave or Stop closes the listener; resume restores previously opened mappings without reopening the browser. A different local port changes the origin: fixed OAuth callbacks must match the actual local address.
-- **In a terminal:** the same, by keyboard. Type `/share-session` (in a session with history, `/share-session all` shares everything so far, `/share-session new` only what comes next), `/room` and `/stop-sharing`; paste a link as a prompt to join. `/room` opens the Room as a dialog: its pages are a digit away (1 People, 2 Chat, …), Tab and the arrows walk a page, Enter picks, Esc closes. The row above the prompt says who's here and whose turn it is, and its buttons take focus like the rest of the prompt area. A guest's transcript draws the host's tool calls the terminal's way: runs of reads, searches and commands fold into one line ("Searched for 2 patterns, read 3 files"), edits and the rest get their own `Update(notes.txt)` rows, and the Room's **Tool calls: Each shown** draws every call with its result; the host's prompts show as `Name: …` under the terminal's own "Prompt from the shared-session plugin" line. What the host's Claude shows reaches a terminal guest as a saved file or a link to open in a browser.
-- **Stop:** press **Leave**, or **Stop sharing** twice (it ends the room for everyone), or type `/stop-sharing`. Esc in a guest stops the shared turn.
-- **Restarting is fine.** If the host quits Claude Code (to update, say), the room stays open: guests see the host away, and what they type meanwhile is answered there, not run. Reopening the same session (Claude Desktop does it after a restart, and also when you go on from an earlier message; `claude --resume` in a terminal) picks the room back up on the same link. `/clear` ends it, as Stop sharing does. A guest who restarts is back in the room when their session reopens, still pinned, with what they missed played in; **Leave** leaves for good. A guest whose laptop slept or lost its network for a while comes back by themselves too: the room shows them as having lost connection, then back.
-- **Connection:** if the room can't be reached, the row above the prompt says it is reconnecting; anything sent meanwhile goes out once it's back.
+Try this with a new session in a scratch project:
+
+1. **Host:** press **Share** above the prompt, or type `/share-session`. Copy the link.
+2. **Teammate:** paste the link into a fresh Claude Code session and send it. Opening the link in a browser can open a Desktop session with the link prefilled; press Enter there.
+3. **Either person:** ask Claude to read the project's README. Both sessions should show the prompt, reply and tool results. Guest prompts run on the host in turn; the guest's model is not called.
+4. **Host:** type `/stop-sharing` when done. The room ends for everyone.
+
+Sharing a session with existing history asks whether to include it. Choose **Only from now on** or `/share-session new` to leave earlier messages out. Anything you share passes through the room server; [read what it sees and keeps](#privacy-and-the-public-server).
+
+Use `/room` for people, side chat and host controls. Use `/team` for optional teams. For an explicitly shared local dev server, run `/share-preview <port>` on the host; guests press **Open** in the Room. Local TCP previews require Node 20+, POSIX `sh` and the host's live `curl` stream. [Commands and supported previews](docs/guide.md#use-it).
 
 ## Privacy and the public server
 
-Out of the box, Share uses `https://claude-share.proud-limit-da0a.workers.dev`, run by this project ([its page](https://claude-share.proud-limit-da0a.workers.dev/)). Joining a link always uses the server in that link.
+The default server is [claude-share.proud-limit-da0a.workers.dev](https://claude-share.proud-limit-da0a.workers.dev/), run by this project. It receives the shared transcript, tool results, side chat and shared files. Traffic is encrypted in transit, **not end to end**. Anyone with a room link can join unless access is restricted to a team.
 
-- **What it sees:** while a session is shared, its prompts and the files people attach to them, Claude's replies and, while someone else is in the room, its thinking as it happens (passed along, never kept), the tools it runs with the first lines of their results and the pictures in them (screenshots, images Claude opens), the side chat, and files or local previews the host's Claude shows. **What Claude shows → Stays with me** keeps the pictures and files on the host's machine. Sharing a session that already has history asks first whether to include it; everything means everything the session stored, from before any compaction too (its newest 4,000 rows).
-- **How long:** a room and everything in it is deleted 24 hours after the host stops sharing or was last seen. TCP previews also keep scoped authorization metadata and coarse connection/traffic-budget counters with the room; application bytes are relayed, not recorded. No analytics, no request logs.
-- **Accounts, only for teams:** sharing and joining need none. Sign in to use teams, and the server keeps your name, username, verified email, the GitHub organizations you're in, your teams and their settings, which open sessions are shared with each team, and invites to a session (who invited whom to which, kept until joined, dismissed, the session ends, or 12 hours). Sign-ins are kept as hashes, never the token. All of it stays until you delete your account (`/team delete-account`), which removes it at once. Signed in, a session you share or join also knows your account for as long as it lasts, so your sessions count as one person. On your machine, the sign-in is in `~/.claude/shared-session/account.json`, readable only by you.
-- **Who can see it:** anyone with the room's link; for a session shared with a team that keeps its sessions to its people, only people in that team. It's encrypted in transit, not end to end: the server can read what passes through it.
-- **Limits:** per network, 6 new rooms and 30 joins a minute; per room, 20 people, 100 MB of files and 900 posts a minute. Abused rooms get ended.
-
-To keep sessions on your own infrastructure, run your own server (below) and set it in the plugin's `server` option or `SHARED_SESSION_SERVER`.
+Rooms and their files are deleted 24 hours after the host stops sharing or was last seen. Team accounts and settings persist until account deletion. The public service has limits, including 20 people and 100 MB of files per room. [Full data, retention and access details](docs/guide.md#privacy-and-the-public-server).
 
 ## Host a server
 
-Teams can run their own room server instead of the public one. Rooms are short-lived: they expire 24 hours after the host was last seen, and nothing is kept after that.
-
-**Cloudflare (recommended):** a Worker with one Durable Object per room. A quiet room costs nothing: open streams end at the Worker, and the room sleeps between changes. It fits the free plan for a small team. From a clone of this repo:
+Sharing by link works with the public server. Teams that want their own infrastructure can use a Cloudflare Worker or the Node server:
 
 ```bash
 node scripts/setup.mjs deploy
 ```
 
-That signs you in (`npx wrangler login` in a browser), deploys and waits for the server. It then points this machine at it and prints the one-line install for teammates. By hand, it's `npx wrangler login`, `npx wrangler deploy`, then `npx wrangler deploy -c wrangler.preview.toml`. The second Worker serves previews of a host's localhost on a host name of its own.
-
-**Anywhere else:** any machine with Node 20 behind HTTPS.
-
-```bash
-PORT=8787 PUBLIC_URL=https://share.example.com DATA_FILE=./rooms.json node server/node.mjs
-```
-
-Previews are served on a second port (`PREVIEW_PORT`, default `PORT` + 1); set `PREVIEW_URL` to how people reach it, such as `https://preview.example.com`.
-
-**Teams on your own server** need sign-in, from GitHub, Google or both. Make an OAuth app and give the server its id and secret:
-
-- **GitHub:** Settings → Developer settings → OAuth Apps → New OAuth App. Homepage URL: your server. Authorization callback URL: `https://<your server>/auth/github/callback`. It asks for `read:user user:email read:org` (the organizations are for teams that let a GitHub organization in; an organization that restricts third-party apps lists only once an owner approves the app).
-- **Google:** Google Cloud console → APIs & Services → Credentials → Create credentials → OAuth client ID → Web application. Authorized redirect URI: `https://<your server>/auth/google/callback`. Scopes: `openid email profile`.
-
-On Cloudflare, `npx wrangler secret put GITHUB_CLIENT_ID` (and `GITHUB_CLIENT_SECRET`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`). On Node, the same names as environment variables; accounts and teams are kept in `DATA_FILE` with the rooms. A server with neither has no sign-in, and teams aren't offered on it.
-
-**Then point Claude Code at it.** Use any one of these:
-
-- run `/plugin configure shared-session` and enter the address;
-- set `SHARED_SESSION_SERVER` in the `env` block of `~/.claude/settings.json`, or in your organization's managed settings so a whole team gets it;
-- in your own fork, bake the address in with `node scripts/set-server.mjs https://your-server`.
+Run that from a clone with Node 20+; Cloudflare account setup and browser authorization need a person. For an existing server, use `node scripts/setup.mjs host --server https://your-server`. [Cloudflare, Node and team sign-in setup](docs/guide.md#host-a-server).
 
 ## Troubleshooting
 
-| You see | What it means |
-| --- | --- |
-| No Share button, or `Unknown command: /share-session` | The session started before the plugin was installed. Start a new session, or quit and reopen Claude Desktop. |
-| An old error after updating the plugin | Same cause: a session keeps the plugin copy it started with, and `/reload-plugins` re-reads that copy. Restart Desktop or use a new session. |
-| `Couldn't share: Sharing needs a share server…` | No server is set. Run `node scripts/setup.mjs host --server <url>`, or `deploy` to make one. |
-| `ECONNREFUSED` when sharing | The server address points at a machine that isn't running a server. Run `node scripts/setup.mjs check` to see which address is set. |
-| `hooks: Invalid input` from `claude plugin …` | That `claude` is older than 2.1.286. Run `claude update`. `setup.mjs` uses Claude Desktop's bundled one instead on a Mac, or whatever you set in `CLAUDE_BIN`; it then notes that your terminal `claude` still needs `claude update`. |
-| `You need a workers.dev subdomain` on deploy | One-time Cloudflare setup: open Workers & Pages in the dashboard once, then deploy again. |
-| TLS handshake errors right after the first deploy | The new certificate takes a minute or so. |
-| A pasted link goes to Claude as a normal prompt | The plugin isn't loaded in that session (see the first row), or the link was edited. |
-| `Preview connection or request limit reached` | A connection or minute-rate budget is full. Close unused preview tabs or wait a minute, then retry. The existing localhost listener and its other connections remain available. |
-| `Preview authorization was refused` | That connection was not authorized. Other connections and the listener are left alone; press **Open** in the Room to explicitly renew authorization, keeping the saved local port when available. |
-| A preview's connection fails but its localhost mapping stays active | Only that TCP connection failed; it is not proof that the host is offline. Check the host's app and connection. A later successful connection clears the transient warning. |
+- **No Share button or unknown command:** start a new session, or quit and reopen Desktop. The session may have started before installation.
+- **`hooks: Invalid input`:** check `claude --version`. Use the setup script above if Desktop has a newer copy than your terminal.
+- **A pasted link gets an ordinary Claude reply:** the plugin is not loaded in that session. Restart after installing and paste the link into a fresh session.
+- **Check the installation:** from a clone, run `node scripts/setup.mjs check`. Add `--live` to test sharing, resuming, stopping and joining with temporary sessions through the selected server.
+
+[More troubleshooting](docs/guide.md#troubleshooting) · [Report a reproducible bug](https://github.com/Paradigm-Study/claude-share/issues/new/choose)
 
 ## Security model
 
-- **The link is the key.** Room ids are 128-bit random values; anyone holding a link can join while the host shares. Names are self-declared: `git config user.name`, else the computer's username.
-- **A team can keep its sessions to its people.** A session shared with a team whose setting is **Only people in the team** lets in only people signed in with an account in that team, checked against the team as it is at each join. Sign-in uses the provider's verified email for domains, and GitHub's own membership list for organizations. Claude Code opens the sign-in page with only a hash of a secret it keeps, and collects the sign-in with that secret, so a sign-in link seen elsewhere can't be used to take it.
-- **The server relays plaintext.** It sees the shared transcript: prompts, replies, tool calls and results. Run it somewhere you trust.
-- **Guests can't act on the host's machine without the host.** By default, only reads inside the host's project run without asking; a guest's request to read anywhere else, edit, run commands or use the web asks the host first. "Always allow" trusts one person for the session. The host can require approval for every tool, or none. The question comes up in Claude Code's own dialog; where that can't show (a settings hook that takes AskUserQuestion, say), it's asked in the row above the prompt instead, never answered for the host.
-- **What Claude shows travels too, unless the host keeps it.** Files Claude shows, and the pictures in its tool results (screenshots, images it opens; the newest 60 results' worth from a shared history), go through the server (10 MB each, 100 MB a room, deleted with the room). The host can keep them in Room → Host controls.
-- **Previews are for the room only.** A localhost listener gets a short-lived capability for one shared preview, not the room's bearer. It stays in helper memory and its outer WebSocket authorization header, never browser URLs, process arguments, saved mappings or application bytes. Both IP families bind only loopback; the server and host verify the exact shared preview/target port, never a guest-selected network destination. Stop, Leave, room end or authorization expiry closes its connections. This is transparent TCP forwarding, not an HTTP firewall: the application must still validate Host/Origin and protect against CSRF/DNS rebinding. An explicit **Public link** lasts ten minutes and lets in only the first browser that uses it; public previews share one host name and browser cookie, so opening another switches it.
-- **Application cookies stay in each guest's browser.** The helper forwards that request's cookies, not a shared application login jar. Browser profiles remain separate, but localhost cookies are **not isolated by port**: an app using the same cookie names can collide with other localhost apps. Use a separate browser profile when needed.
-- **Previews carry WebSockets.** Local TCP previews preserve the application's complete WebSocket handshake, including its Cookie, Authorization and Origin headers, and stream SSE or HMR without HTTP buffering. The explicit public gateway still uses its existing Node WebSocket relay, which does not forward application Cookie or Authorization headers; without Node on the host, that public gateway can serve HTTP but not its sockets.
-- **Only what a person types travels.** Desktop's hidden context notes are stripped from prompts before they leave a machine. A link relayed by another session, a channel or a task never joins anything.
+The host executes the work. Guests see replayed tool cards; those cards do not run the host's commands on their machines. Host approval rules govern guest requests. Room links grant access, and the relay server can read shared content. [Permissions, files and preview boundaries](docs/guide.md#security-model).
 
 ## Limits
 
-- **Guests' tool cards are replays.** The host's tool calls show in a guest's transcript as tool cards (Bash, Read, Edit…) with the host's results, drawn by the plugin's own `replay` tool, which runs nothing. Each result is cut to its first 40 lines; its pictures come whole. A guest's session lists that tool while joined.
-- **Not mirrored:** subagents' inner steps and pasted images.
-- **No "Alex is typing…".** The engine doesn't see keystrokes in Claude Desktop's composer.
-- **Needs `curl` for live updates.** Each shared session keeps one `curl` process reading the room's stream, so a quiet room makes no requests. Without `curl`, or against a server too old to stream, the plugin polls instead, from every 0.4 s while busy down to every 15 s when quiet.
-- **Failed host turns:** guests see a note in the reply when the host's turn errors or is refused.
-- **Local TCP previews have bounded resources.** The host plugin, dev server and guest session must stay open. Each seat has at most 32 pending or active TCP connections across all its grants and previews; each room and its single host worker have at most 64, and each guest listener accepts at most 32 sockets. Per seat/preview, only the newest 2 grants remain valid; a room holds at most 128 grants. New connections and grant requests share a minute budget of 240 operations per seat and 1,200 per room; grant requests also have a 60/minute network limit. Renewing a grant cannot bypass the seat's connection limit. A room has a 1 GiB lifetime traffic budget, reserved in 1 MiB blocks per direction; closing a connection gives back its unused reservation. Each direction allows at most four outstanding 64 KiB chunks; parser/send queues and lifetime control output remain bounded to 1 MiB. Legitimate half-closed TCP connections stay open until both directions and their credits finish; reaching a limit refuses or closes that connection rather than dropping bytes or expiring the whole guest listener. Authorization lasts at most twelve hours, then closes the listener; press **Open** to reconnect. A broken TCP stream is never restored or replayed, including OAuth callback POSTs. The explicit public HTTP gateway retains its 1 MB request, 20 MB response and 25-second host-request limits.
-- **Update both ends and the server for the full TCP fix.** The protocol remains version 1, so mixed versions still connect, but an older server retains its older budgets and an older plugin retains its per-connection processes or error handling. The capacity feedback and shared host worker require the updated server, host and guest plugins together.
-- **OAuth still needs the app's configuration.** Its redirect URI and provider registration must match the actual localhost port. Choosing a free port does not fix a callback hard-coded to an occupied one. There is no browser-session or system proxy keeping the original URL behind the scenes. Browser SameSite/Secure rules, test-user allowlists and account permissions still apply. Absolute redirects, fixed HMR URLs and hard-coded HTML/JavaScript URLs are not rewritten.
-- **What's shown opens by itself when allowed, except forwarded previews.** Those always wait for the guest's **Open** in the Room. A guest can choose in the Room to be asked first for other shared items, and a shared external link always asks. Auto mode can refuse the browser pane; the Room's **Open** still offers the local preview address or a precise startup error, never an automatic public fallback. A terminal guest gets a saved file or a browser link instead of a viewer.
-- **Session list changes are Desktop-only.** The 👥 title and the pin use Claude Desktop's own sidebar tools. Elsewhere they're skipped. In auto mode (Desktop's default for new sessions), Claude Code refuses a plugin's pin unless an allow rule covers it; after a refusal, a **Pin** button shows in the row above the prompt (and **Allow pinning** in the Room's Settings), and pressing it once adds allow rules for exactly those sidebar tools to `~/.claude/settings.json`. Shared sessions pin themselves from then on, and ones left unpinned pin within a minute.
+Guests see the first 40 lines of each tool result. Subagents' inner steps are not mirrored. Some viewers and session-list features are Desktop-only; terminal guests receive files or links. Local previews need the host's session and dev server to stay open. [Compatibility and resource limits](docs/guide.md#limits).
 
 ## Develop
 
-| Path | What it is |
-| --- | --- |
-| `plugin/` | The plugin: `hooks/register.tsx` (hooks), `hooks/rows.ts` (transcript rows), `hooks/look.ts` (drawings), `tests/` |
-| `server/core.mjs` | Room logic and the link page, shared by both servers |
-| `server/worker.mjs`, `wrangler.toml` | Cloudflare Worker + Durable Object |
-| `server/node.mjs` | Zero-dependency Node server |
-| `test/e2e.mjs` | End to end: a real host and guests through a server |
+The plugin is in `plugin/`; shared room logic is in `server/core.mjs`. [CONTRIBUTING.md](CONTRIBUTING.md) covers local development and tests. [AGENTS.md](AGENTS.md) records the engine contracts and release procedure.
 
-```bash
-node server/node.mjs
-```
-```bash
-claude --plugin-dir ./plugin
-```
-```bash
-node test/local-preview.mjs
-node test/tcp-worker.mjs
-node test/teams.mjs
-claude plugin test plugin
-```
-```bash
-CLAUDE_BIN=$(which claude) node test/e2e.mjs
-```
-
-Add `EXTERNAL_SERVER=1 SHARE_SERVER=https://your-server` to run it against a deployed server instead of a local one, or `SHARED_SESSION_TRANSPORT=poll` to test the polling fallback. The no-model TCP checks also accept an external server: with `wrangler dev --local` running, use `EXTERNAL_SERVER=1 SHARE_SERVER=http://127.0.0.1:8787 node test/local-preview.mjs` to exercise the actual Worker runtime.
-
-The end-to-end run starts a host (in bypass mode, on purpose) and two guests, then checks:
-- sharing and joining;
-- history and attribution;
-- live replies, and that guests never call a model;
-- ordering;
-- Esc from a guest;
-- that everyone hears the room over one open stream;
-- that a file the host shares lands in the guest's project, that explicit public preview tickets carry HTTP and WebSockets, and that a dev server Claude mentions is shared at that page;
-- that forwarded previews tell live and late guests to press **Open**, without starting a listener or falling back to a public link automatically;
-- that a guest's write is refused without approval;
-- that sharing ends cleanly.
-
-`claude plugin test plugin` drives the Room's **Open**, port selection, per-channel warnings and host worker lifecycle. `node test/local-preview.mjs` uses the production helpers and host worker to check real TCP forwarding, alternate local ports, concurrent guests/previews, half-closes, overload recovery, backpressure and disconnects without replaying POSTs. `node test/tcp-worker.mjs` checks Worker hibernation/admission and Node rejection races without a model.
+If you use Shared Sessions, a star helps other developers find it. Bug reports with the versions and steps to reproduce help us improve it.
 
 ## License
 
-MIT, see [LICENSE](LICENSE). The Paradigm name, logo and the Clover character used in the link page and Room banner are trademarks of Paradigm Study and are not covered by the license; see [TRADEMARKS.md](TRADEMARKS.md).
+[MIT](LICENSE). The Paradigm name, logo and Clover character remain [trademarks of Paradigm Study](TRADEMARKS.md). Demo music has [separate attribution terms](docs/assets/README.md).
