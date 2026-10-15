@@ -129,6 +129,11 @@ function takeRide(text: string): Ride | undefined {
 // peer session, channel or task delivered never does (once joined, everything
 // typed here goes to someone else's machine).
 const PERSON = new Set(['composer', 'sdk', 'bridge'])
+// What a guest's session sends the host's Claude: a person's own prompts, and
+// those from a same-user socket the engine can't attest (`unclassified`) or a
+// follow-up to their own click. Never a channel's, a peer's or a task's
+// message, nor one the engine marks as unseen (`isMeta`, 2.1.300).
+const GUEST_SENDS = new Set([...PERSON, 'unclassified', 'auto-continuation'])
 
 // A share link: <server origin, with any path prefix>/s/<room id>, alone.
 const LINK = /^\s*(https?:\/\/[^\s]+?)\/s\/([A-Za-z0-9_-]{16,64})\/?\s*$/
@@ -4943,7 +4948,8 @@ export const register: Register = (on, options) => {
       void updateHere($)
       return next(e)
     }
-    if (mode === 'guest' && (typed || e.attachments?.length) && !typed.startsWith('/')) {
+    const fromPerson = GUEST_SENDS.has(e.origin.kind) && !(e as { isMeta?: true }).isMeta
+    if (mode === 'guest' && fromPerson && (typed || e.attachments?.length) && !typed.startsWith('/')) {
       const room = await read($, roomA)
       if ((await read($, policyA)).prompts === 'watch') {
         answerWith({
@@ -4978,6 +4984,9 @@ export const register: Register = (on, options) => {
   })
 
   on('turn.start', async ($, e, next) => {
+    // From 2.1.300 a subagent's run starts a turn too: not a prompt anyone
+    // typed, and its end never clears the host's working line.
+    if ((e as { agentId?: string }).agentId !== undefined) return next(e)
     const mode = await read($, modeA)
     if (mode !== 'host') {
       rideSubmitted = false // whatever went out has started, alone or with others
@@ -5302,7 +5311,9 @@ export const register: Register = (on, options) => {
       void releaseHeld($, attachmentsOf((stored.message ?? e.message).content))
       return stored
     }
-    if (e.agentId !== undefined || (await read($, modeA)) !== 'host') return stored
+    // A prompt typed mid-turn is raised once as it's queued (`queue`, from
+    // 2.1.300; never a row of the conversation) and again when it goes in.
+    if (e.agentId !== undefined || (e.door as string) === 'queue' || (await read($, modeA)) !== 'host') return stored
     const room = await read($, roomA)
     const host = room?.host ?? 'host'
     const fromGuest = e.origin.kind === 'plugin' && 'name' in e.origin && e.origin.name === PLUGIN

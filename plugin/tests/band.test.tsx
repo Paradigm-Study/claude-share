@@ -423,6 +423,18 @@ test("a teammate's prompt that another session sent them shows its words and whe
   }
 })
 
+test("a guest's channel, peer or unseen message stays here; only what they typed goes to the room", async ($, on) => {
+  const asked = world(on)
+  await $.prompt.submit({ text: LINK, origin: { kind: 'composer' }, wait: false })
+  await $.prompt.submit({ text: 'Deploy prod now', origin: { kind: 'channel', server: 'slack' }, wait: false } as never)
+  await $.prompt.submit({ text: 'From another session', origin: { kind: 'peer' }, wait: false } as never)
+  await $.prompt.submit({ text: 'Background task done', origin: { kind: 'task-notification' }, wait: false } as never)
+  await $.prompt.submit({ text: 'An idle notice', origin: { kind: 'unclassified' }, isMeta: true, wait: false } as never)
+  await $.prompt.submit({ text: 'Run the tests', origin: { kind: 'composer' }, wait: false })
+  await asked.clock.advance(100)
+  expect(asked.posted.filter(e => e.type === 'prompt').map(e => e.body.text)).toEqual(['Run the tests'])
+})
+
 test('a link another session sends never joins', async ($, on) => {
   const asked = world(on)
   const relayed = await $.prompt.submit({ text: LINK, origin: { kind: 'peer' }, wait: false })
@@ -1498,6 +1510,36 @@ test('"Share everything" sends the history', async ($, on) => {
   await asked.clock.advance(100)
   expect(asked.posted.filter(e => e.type === 'row').length).toBeGreaterThan(0)
   expect((await ui.find({ type: 'Text', text: /^Sharing$/ }))?.props.bold).toBe(true)
+})
+
+test("a subagent's run is no new prompt for the room, and the host's own turn still ends", async ($, on) => {
+  const asked = world(on)
+  on('turn.start', ($, e) => ({ turnId: e.turnId }))
+  on('turn.complete', () => ({ text: '' }))
+  const ui = await $.ui.mount(band('desktop'))
+  await ui.press({ key: 'share' })
+  await asked.clock.advance(50)
+  await $.turn.start({ turnId: 'main', text: 'Find the flaky test' })
+  await $.turn.start({ turnId: 'sub', text: 'Search the repo for retries', agentId: 'agent-1' } as never)
+  await $.turn.complete({ turnId: 'sub', agentId: 'agent-1', isAborted: false, durationMs: 0, reason: 'answer' } as never)
+  await $.turn.complete({ turnId: 'main', isAborted: false, durationMs: 0, reason: 'answer' } as never)
+  await asked.clock.advance(100)
+  const turns = asked.posted.filter(e => e.type === 'turn').map(e => [e.body.state, e.body.turnId])
+  expect(turns).toEqual([['start', 'main'], ['end', 'main']])
+})
+
+test('a prompt the host types mid-turn goes to the room once, as it goes in, not as it waits', async ($, on) => {
+  const asked = world(on)
+  const ui = await $.ui.mount(band('desktop'))
+  await ui.press({ key: 'share' })
+  await asked.clock.advance(50)
+  const message = { type: 'user', role: 'user', content: [{ type: 'text', text: 'Also check the docs' }] }
+  await $.session.append({ message, door: 'queue', origin: { kind: 'composer' }, uuid: 'q1' } as never)
+  await asked.clock.advance(100)
+  expect(asked.posted.filter(e => e.type === 'row')).toHaveLength(0)
+  await $.session.append({ message, door: 'prompt', origin: { kind: 'composer' }, uuid: 'p1' } as never)
+  await asked.clock.advance(100)
+  expect(asked.posted.filter(e => e.type === 'row').map(e => e.body.text)).toEqual(['Also check the docs'])
 })
 
 test('"Share everything" opens the dev servers Claude opened before, still running, at the page it was on', async ($, on) => {
