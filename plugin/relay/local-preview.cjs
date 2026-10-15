@@ -6,7 +6,7 @@
 const net = require('net')
 const { bridge, run, endpoint, portOK, tokenOK, notify, failure, safeCode, DATA_MAX } = require('./tcp-relay.cjs')
 const UNSUPPORTED_V6 = new Set(['EAFNOSUPPORT', 'EADDRNOTAVAIL', 'EPROTONOSUPPORT'])
-const BIND_TRIES = 8
+const BIND_TRIES = 8, SOCKETS_MAX = 32
 
 function configOf(cfg) {
   if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg) || Object.keys(cfg).some(k => !['port', 'strict', 'url', 'token', 'expiresAt'].includes(k)) || !portOK(cfg.port) || typeof cfg.strict !== 'boolean' || !tokenOK(cfg.token) || !Number.isSafeInteger(cfg.expiresAt)) throw failure('INVALID_CONFIG')
@@ -47,12 +47,16 @@ async function start(cfg, { emit = notify, signal, createServer = net.createServ
   }
   async function bind(host, askedPort) {
     const server = createServer({ allowHalfOpen: true, highWaterMark: DATA_MAX }, socket => {
-      sockets.add(socket)
       socket.on('error', () => {})
-      socket.on('close', () => sockets.delete(socket))
       socket.pause()
       if (!ready || stopped || Date.now() >= settings.expiresAt) { socket.destroy(); if (Date.now() >= settings.expiresAt) expire(); return }
-      const relay = bridge(socket, settings.url, { authorization: `Bearer ${settings.token}` }, { emit })
+      if (sockets.size >= SOCKETS_MAX) { emit({ state: 'channel-error', code: 'BUSY' }); socket.destroy(); return }
+      sockets.add(socket)
+      socket.on('close', () => sockets.delete(socket))
+      const relay = bridge(socket, settings.url, { authorization: `Bearer ${settings.token}` }, {
+        emit: row => emit({ state: 'channel-error', code: safeCode(row) }),
+        onReady: () => emit({ state: 'channel-ready' }),
+      })
       relays.add(relay)
       relay.closed.then(() => relays.delete(relay))
     })

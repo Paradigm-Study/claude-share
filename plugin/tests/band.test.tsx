@@ -54,33 +54,47 @@ function world(
     localPreviewPort?: number
     tunnel?: 'unsupported' | 'host-old'
     tcpRelays?: boolean
+    tcpWorker?: 'wait'
+    tcpControl?: 'wait' | 'busy'
   } = {},
 ) {
   const asked: string[] = []
   const spawned: { argv: readonly string[]; input?: string }[] = []
   let refusedStreams = 0
   let joins = 0
-  const localHelpers: { send: (message: { state: string; code?: string; port?: number }) => void; exit: () => void; stopped: boolean }[] = []
+  const localHelpers: { send: (message: { state: string; code?: string; port?: number; id?: string }) => void; output: (text: string) => void; exit: () => void; stopped: boolean }[] = []
   const tcpHelpers: typeof localHelpers = []
+  const tcpControls = new Map<string, { helper: (typeof localHelpers)[number]; peers: Map<string, string> }>()
+  const blockedControls: { token: string; release: (status?: number) => void }[] = []
   on('process.spawn', async function* ($, e, next) {
     spawned.push({ argv: e.argv, input: e.input })
     const local = e.argv.at(-1)?.endsWith('/relay/local-preview.cjs')
-    if (local || (opts.tcpRelays && e.argv.at(-1)?.endsWith('/relay/ws-relay.cjs') && JSON.parse(e.input ?? '{}').tcp)) {
+    if (local || (opts.tcpRelays && e.argv.at(-1)?.endsWith('/relay/tcp-worker.cjs'))) {
       if (local && opts.localPreview === 'missing') return { value: { code: 127, signal: null } }
       if (local && opts.localPreview === 'busy') {
         yield { stream: 'stdout' as const, text: '{"state":"error","code":"EADDRINUSE"}\n' }
         return { value: { code: 1, signal: null } }
       }
-      const queue: string[] = !local || opts.localPreview === 'wait' ? [] : [`${JSON.stringify({ state: 'ready', port: opts.localPreviewPort ?? JSON.parse(e.input!).port })}\n`]
+      const config = JSON.parse(e.input!)
+      const waiting = local ? opts.localPreview === 'wait' : opts.tcpWorker === 'wait'
+      const queue = waiting ? [] : [`${JSON.stringify({ state: 'ready', port: local ? opts.localPreviewPort ?? config.port : 43333 })}\n`]
       let ended = false
       let wake: (() => void) | undefined
       const helper = {
-        send: (message: { state: string; code?: string; port?: number }) => { queue.push(`${JSON.stringify(message)}\n`); wake?.() },
-        exit: () => { ended = true; wake?.() },
+        send: (message: { state: string; code?: string; port?: number; id?: string }) => { queue.push(`${JSON.stringify(message)}\n`); wake?.() },
+        output: (text: string) => { queue.push(text); wake?.() },
+        exit: () => {
+          ended = true
+          for (const pending of blockedControls) if (pending.token === config.controlToken) pending.release(503)
+          wake?.()
+        },
         stopped: false,
       }
       if (local) localHelpers.push(helper)
-      else tcpHelpers.push(helper)
+      else {
+        tcpHelpers.push(helper)
+        tcpControls.set(config.controlToken, { helper, peers: new Map() })
+      }
       next.signal.addEventListener('abort', helper.exit, { once: true })
       try {
         while (!ended && !next.signal.aborted) {
@@ -90,6 +104,7 @@ function world(
         }
       } finally {
         helper.stopped = true
+        if (!local) tcpControls.delete(config.controlToken)
         next.signal.removeEventListener('abort', helper.exit)
       }
       return { value: { code: 0, signal: null } }
@@ -138,6 +153,7 @@ function world(
       if (e.input?.includes('echo " exit=$?"')) yield { stream: 'stdout' as const, text: e.input.includes('localhost:3340/') ? 'code=000 exit=28\n' : e.input.includes('localhost:5432/') ? 'code=000 exit=52\n' : 'code=000 exit=7\n' }
       return { value: { code: 0, signal: null } }
     }
+    if (e.argv[0] === 'curl' && e.argv.includes('--output')) return { value: { code: 0, signal: null } }
     if (!opts.stream) throw new Error('spawn curl ENOENT')
     if ((opts.streamRefuses ?? 0) > refusedStreams) {
       refusedStreams += 1
@@ -224,13 +240,34 @@ function world(
   const versions: string[] = []
   const urls: string[] = []
   const sent: { path: string; headers: Record<string, string>; body: Record<string, unknown> }[] = []
-  on('http.fetch', ($, e) => {
+  const previews = new Map<number, string>()
+  on('http.fetch', async ($, e) => {
     urls.push(e.url)
     const headers = (e.init?.headers ?? {}) as Record<string, string>
-    sent.push({ path: e.url.replace(/^https?:\/\/[^/]+/, ''), headers, body: e.init?.body ? JSON.parse(e.init.body) : {} })
+    const data = e.init?.body ? JSON.parse(e.init.body) : {}
+    sent.push({ path: e.url.replace(/^https?:\/\/[^/]+/, ''), headers, body: data })
     const method = e.init?.method ?? 'GET'
     const path = e.url.replace(/^https?:\/\/[^/]+/, '').replace(/\?.*$/, '')
     asked.push(`${method} ${path}`)
+    if (e.url === 'http://127.0.0.1:43333/') {
+      const token = headers.authorization?.replace(/^Bearer /, '') ?? ''
+      const control = tcpControls.get(token)
+      const reply = (status: number) => ({ value: { status, ok: status === 200, headers: {}, text: '{"ok":true}' } })
+      if (!control) return reply(401)
+      if (data.op === 'open') {
+        if (opts.tcpControl === 'busy') return reply(429)
+        control.peers.set(data.id, data.pid)
+        if (opts.tcpControl === 'wait') return new Promise<ReturnType<typeof reply>>(done => {
+          blockedControls.push({ token, release: (status = 200) => done(reply(status)) })
+        })
+      } else if (data.op === 'close-preview') {
+        for (const [id, pid] of control.peers) if (pid === data.pid) {
+          control.peers.delete(id)
+          control.helper.send({ state: 'closed', id })
+        }
+      }
+      return reply(200)
+    }
     versions.push(String((e.init?.headers as Record<string, string> | undefined)?.['x-shared-session-version'] ?? ''))
     if (opts.down && path.endsWith('/events') && method === 'GET') return { value: { status: 503, ok: false, headers: {}, text: '{"error":"unavailable"}' } }
     if (method === 'POST' && path.endsWith('/events') && e.init?.body) posted.push(...(JSON.parse(e.init.body).events ?? []))
@@ -281,11 +318,12 @@ function world(
       if (opts.tunnel) return { value: { status: opts.tunnel === 'unsupported' ? 404 : 503, ok: false, headers: {}, text: '{"error":"unsupported host"}' } }
       body = { token: 'tcp_cap0000000000000000000001', expiresAt: 43_201_000, port: 3340, protocol: 1 }
     } else if (path.endsWith('/previews') && method === 'POST') {
-      body = { pid: 'pv1' }
+      if (!previews.has(data.port)) previews.set(data.port, `pv${previews.size + 1}`)
+      body = { pid: previews.get(data.port) }
     }
     return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify(body) } }
   })
-  return Object.assign(asked, { clock, logged, spawned, posted, versions, written, urls, submitted, sent, opened, files, store, localHelpers, tcpHelpers, toasted, copied })
+  return Object.assign(asked, { clock, logged, spawned, posted, versions, written, urls, submitted, sent, opened, files, store, localHelpers, tcpHelpers, blockedControls, toasted, copied })
 }
 
 // A press settles before work waiting on the runtime's own promises does (a
@@ -795,6 +833,56 @@ for (const [failure, message] of [['busy', /localhost:3340 is already in use/], 
   })
 }
 
+test('a channel failure keeps the listener, grant and port; success clears its transient warning', async ($, on) => {
+  const asked = world(on, { env: { CLAUDE_CODE_ENTRYPOINT: 'cli' }, stream: [{ seq: 2, events: [LOCAL_SHOWN], people: PREVIEW_PEOPLE, ended: false, title: 'demo' }] })
+  await $.prompt.submit({ text: LINK, origin: { kind: 'composer' }, wait: false })
+  await asked.clock.advance(10)
+  const pane = await $.ui.mount({ plugin: 'shared-session', surface: 'terminal', component: 'Pane', requestId: 'shared-room', props: PANE })
+  await pane.press({ key: 'tab-shown' })
+  await pane.press({ key: 'open-preview:pv-local' })
+  await eventually(asked.clock, () => asked.copied.length)
+  const helper = asked.localHelpers[0]!
+  const output = Array.from({ length: 200 }, () => JSON.stringify({ state: 'channel-error', code: 'CONNECT' })).join('\n') + '\n'
+  expect(output.length > 8192).toBe(true)
+  helper.output(output)
+  helper.send({ state: 'channel-error', code: 'TIMEOUT' })
+  await asked.clock.advance(20)
+  expect(helper.stopped).toBe(false)
+  expect(await pane.find({ type: 'Text', text: /connection or request limit reached|Preview authorization was refused/ })).toBeUndefined()
+  helper.send({ state: 'channel-error', code: 'BUSY' })
+  helper.send({ state: 'channel-error', code: 'BUSY' })
+  await asked.clock.advance(20)
+  expect(asked.toasted.filter(t => t.includes('connection or request limit reached'))).toHaveLength(1)
+  expect((await pane.find({ type: 'Text', text: /connection or request limit reached|Preview authorization was refused/ }))?.text).toContain('connection or request limit reached')
+  expect((await pane.find({ type: 'Text', text: 'localhost:3340 → host localhost:3340' }))?.text).toBe('localhost:3340 → host localhost:3340')
+  await pane.press({ key: 'open-preview:pv-local' })
+  await eventually(asked.clock, () => asked.copied.length === 2)
+  expect(asked.localHelpers).toHaveLength(1)
+  expect(helper.stopped).toBe(false)
+  expect(asked.filter(a => a.endsWith('/tunnel'))).toHaveLength(1)
+  helper.send({ state: 'channel-ready' })
+  await asked.clock.advance(20)
+  expect(await pane.find({ type: 'Text', text: /connection or request limit reached|Preview authorization was refused/ })).toBeUndefined()
+  helper.send({ state: 'channel-error', code: 'AUTH' })
+  await asked.clock.advance(20)
+  expect((await pane.find({ type: 'Text', text: /Preview authorization was refused/ }))?.text).toContain('Press Open')
+  expect(asked.localHelpers).toHaveLength(1)
+  expect(helper.stopped).toBe(false)
+  expect(asked.filter(a => a.endsWith('/tunnel'))).toHaveLength(1)
+  // Only this person's explicit retry replaces a refused authorization.
+  await pane.press({ key: 'open-preview:pv-local' })
+  await eventually(asked.clock, () => asked.copied.length === 3)
+  expect(asked.localHelpers).toHaveLength(2)
+  expect(helper.stopped).toBe(true)
+  expect(asked.localHelpers[1]!.stopped).toBe(false)
+  expect(asked.filter(a => a.endsWith('/tunnel'))).toHaveLength(2)
+  expect(asked.filter(a => a.endsWith('/ticket'))).toHaveLength(0)
+  expect(new Set(asked.copied)).toEqual(new Set(['http://localhost:3340/login?next=%2Faccount']))
+  expect(await pane.find({ type: 'Text', text: /connection or request limit reached|Preview authorization was refused/ })).toBeUndefined()
+  await $.command.run({ command: 'stop-sharing', args: '' } as never)
+  expect(asked.localHelpers.every(h => h.stopped)).toBe(true)
+})
+
 test('an expired, failed or exited localhost helper redraws and restarts on Open; Leave closes it', async ($, on) => {
   const asked = world(on, { env: { CLAUDE_CODE_ENTRYPOINT: 'cli' }, stream: [{ seq: 2, events: [LOCAL_SHOWN], people: PREVIEW_PEOPLE, ended: false, title: 'demo' }] })
   await $.prompt.submit({ text: LINK, origin: { kind: 'composer' }, wait: false })
@@ -810,7 +898,7 @@ test('an expired, failed or exited localhost helper redraws and restarts on Open
   await eventually(asked.clock, () => asked.copied.length === 2)
   expect(asked.localHelpers).toHaveLength(2)
   expect(asked.localHelpers[0]!.stopped).toBe(true)
-  asked.localHelpers[1]!.send({ state: 'error', code: 'AUTH' })
+  asked.localHelpers[1]!.send({ state: 'error', code: 'STARTUP' })
   await asked.clock.advance(20)
   expect((await pane.find({ type: 'Text', text: 'Last: localhost:3340' }))?.text).toBe('Last: localhost:3340 → host localhost:3340')
   await pane.press({ key: 'open-preview:pv-local' })
@@ -953,9 +1041,13 @@ test('the host advertises TCP, rejects mismatched targets, deduplicates connecti
   await asked.clock.advance(5000)
   expect(asked.tcpHelpers).toHaveLength(1)
   expect(asked.spawned.some(s => s.argv[0] === 'curl' && s.input?.includes('&tcp=1'))).toBe(true)
-  const spawn = asked.spawned.find(s => s.argv.at(-1)?.endsWith('/relay/ws-relay.cjs'))!
-  expect(JSON.parse(spawn.input!)).toMatchObject({ tcp: true, port: 3340 })
-  expect(JSON.stringify(spawn.argv)).not.toContain('Bearer')
+  const spawn = asked.spawned.find(s => s.argv.at(-1)?.endsWith('/relay/tcp-worker.cjs'))!
+  const config = JSON.parse(spawn.input!)
+  expect(config).toMatchObject({ room: 'http://localhost:8787/api/rooms/room0000000000000002', token: 't', version: '0.7.1' })
+  expect(config.controlToken).toMatch(/^[a-f0-9]{64}$/)
+  expect(Object.keys(config).sort()).toEqual(['controlToken', 'room', 'token', 'version'])
+  expect(JSON.stringify(spawn.argv)).not.toContain(config.controlToken)
+  expect(asked.sent.filter(x => x.body.op === 'open').map(x => x.body)).toEqual([{ op: 'open', id: 'connection0003', pid: 'pv1', port: 3340 }])
   await $.command.run({ command: 'stop-sharing', args: '' } as never)
   expect(asked.tcpHelpers[0]!.stopped).toBe(true)
 })
@@ -967,7 +1059,7 @@ test('the host automatically retries an ordinary curl stream exit in the same ro
   await ui.press({ key: 'share' })
   await $.command.run({ command: 'share-preview', args: '3340 App' } as never)
   await asked.clock.advance(10)
-  const first = asked.spawned.filter(s => s.argv[0] === 'curl')
+  const first = asked.spawned.filter(s => s.argv[0] === 'curl' && s.argv.includes('-K'))
   expect(first).toHaveLength(1)
   expect(first[0]!.input).toContain('url = "http://localhost:8787/api/rooms/room0000000000000002/stream?after=0&tcp=1"')
   expect(asked.tcpHelpers).toHaveLength(0)
@@ -979,18 +1071,19 @@ test('the host automatically retries an ordinary curl stream exit in the same ro
     { tcp: { id: 'connection0003', pid: 'pv1', port: 3340 } },
   )
   await asked.clock.advance(1_000)
-  const streams = asked.spawned.filter(s => s.argv[0] === 'curl')
+  const streams = asked.spawned.filter(s => s.argv[0] === 'curl' && s.argv.includes('-K'))
   expect(streams).toHaveLength(2)
   expect(streams[1]!.input).toBe(first[0]!.input) // same room, token and TCP advertisement
   expect(asked.filter(a => a === 'POST /api/rooms' || /\/(join|tunnel|ticket)$/.test(a))).toEqual(['POST /api/rooms'])
   expect(asked.tcpHelpers).toHaveLength(1)
-  const relay = asked.spawned.find(s => s.argv.at(-1)?.endsWith('/relay/ws-relay.cjs'))!
-  expect(JSON.parse(relay.input!)).toMatchObject({ tcp: true, port: 3340, room: 'ws://localhost:8787/api/rooms/room0000000000000002/ws/connection0003', token: 't' })
+  const relay = asked.spawned.find(s => s.argv.at(-1)?.endsWith('/relay/tcp-worker.cjs'))!
+  expect(JSON.parse(relay.input!)).toMatchObject({ room: 'http://localhost:8787/api/rooms/room0000000000000002', token: 't' })
+  expect(asked.sent.filter(x => x.body.op === 'open').map(x => x.body)).toEqual([{ op: 'open', id: 'connection0003', pid: 'pv1', port: 3340 }])
   await $.command.run({ command: 'stop-sharing', args: '' } as never)
   expect(asked.tcpHelpers[0]!.stopped).toBe(true)
 })
 
-test('the host relays only a port it chose to forward, and at most twelve at once', async ($, on) => {
+test('the host relays only a port it chose, with 64 reservations in one worker', async ($, on) => {
   const stream: unknown[] = [{ seq: 1, events: [], people: PREVIEW_PEOPLE, ended: false, title: 'demo' }]
   const history = [
     { role: 'user', content: 'Start the app' },
@@ -1006,11 +1099,182 @@ test('the host relays only a port it chose to forward, and at most twelve at onc
   stream.push({ tcp: { id: 'connection0001', pid: 'pv1', port: 3340 } })
   await asked.clock.advance(5000)
   expect(asked.tcpHelpers).toHaveLength(0)
-  // The host forwards it: relays now, twelve at most at a time.
+  // Queued, connecting and active all count, not just spawned processes.
+  stream.length = 0
   await $.command.run({ command: 'share-preview', args: '3340 App' } as never)
-  for (let i = 0; i < 14; i++) stream.push({ tcp: { id: `connection01${String(i).padStart(2, '0')}`, pid: 'pv1', port: 3340 } })
+  for (let i = 0; i < 66; i++) stream.push({ tcp: { id: `connection01${String(i).padStart(2, '0')}`, pid: 'pv1', port: 3340 } })
   await asked.clock.advance(5000)
-  expect(asked.tcpHelpers).toHaveLength(12)
+  await eventually(asked.clock, () => asked.sent.filter(x => x.body.op === 'open').length === 64, 1000)
+  expect(asked.tcpHelpers).toHaveLength(1)
+  expect(asked.sent.filter(x => x.body.op === 'open')).toHaveLength(64)
+  expect(asked.sent.filter(x => x.body.op === 'reject' && x.body.code === 'BUSY').length > 0 || asked.spawned.some(s => s.input?.includes('BUSY'))).toBe(true)
+  stream.length = 0
+  asked.tcpHelpers[0]!.send({ state: 'closed', id: 'connection0100' })
+  await asked.clock.advance(10)
+  stream.push({ tcp: { id: 'connection0200', pid: 'pv1', port: 3340 } })
+  await asked.clock.advance(5000)
+  await eventually(asked.clock, () => asked.sent.some(x => x.body.op === 'open' && x.body.id === 'connection0200'))
+  expect(asked.sent.some(x => x.body.op === 'open' && x.body.id === 'connection0200')).toBe(true)
+  expect(asked.tcpHelpers).toHaveLength(1)
+  await $.command.run({ command: 'stop-sharing', args: '' } as never)
+  expect(asked.tcpHelpers[0]!.stopped).toBe(true)
+})
+
+test('coalesced worker status lines are bounded per line, not per process chunk', async ($, on) => {
+  const stream: unknown[] = [{ seq: 1, events: [], people: PREVIEW_PEOPLE, ended: false, title: 'demo' }]
+  const asked = world(on, { stream, tcpRelays: true })
+  const ui = await $.ui.mount(band('terminal'))
+  await ui.press({ key: 'share' })
+  await $.command.run({ command: 'share-preview', args: '3340 App' } as never)
+  stream.push({ tcp: { id: 'connection0001', pid: 'pv1', port: 3340 } })
+  await asked.clock.advance(1000)
+  await eventually(asked.clock, () => asked.sent.some(x => x.body.op === 'open'))
+  stream.length = 0
+  const output = Array.from({ length: 200 }, (_, i) => JSON.stringify({ state: 'closed', id: `earlierconnection${String(i).padStart(4, '0')}` })).join('\n') + '\n'
+  expect(output.length > 8192).toBe(true)
+  asked.tcpHelpers[0]!.output(output)
+  await asked.clock.advance(20)
+  expect(asked.tcpHelpers[0]!.stopped).toBe(false)
+  stream.push({ tcp: { id: 'connection0002', pid: 'pv1', port: 3340 } })
+  await asked.clock.advance(5000)
+  expect(asked.tcpHelpers).toHaveLength(1)
+  expect(asked.sent.some(x => x.body.op === 'open' && x.body.id === 'connection0002')).toBe(true)
+  await $.command.run({ command: 'stop-sharing', args: '' } as never)
+})
+
+test('concurrent TCP asks wait for one worker; Stop cancels its startup and all queued opens', async ($, on) => {
+  const stream: unknown[] = [{ seq: 1, events: [], people: PREVIEW_PEOPLE, ended: false, title: 'demo' }]
+  const asked = world(on, { stream, tcpRelays: true, tcpWorker: 'wait' })
+  const ui = await $.ui.mount(band('terminal'))
+  await ui.press({ key: 'share' })
+  await $.command.run({ command: 'share-preview', args: '3340 App' } as never)
+  for (let i = 0; i < 20; i++) stream.push({ tcp: { id: `connection${String(i).padStart(4, '0')}`, pid: 'pv1', port: 3340 } })
+  await asked.clock.advance(1000)
+  await eventually(asked.clock, () => asked.tcpHelpers.length)
+  expect(asked.tcpHelpers).toHaveLength(1)
+  expect(asked.sent.filter(x => x.body.op === 'open')).toHaveLength(0)
+  await $.command.run({ command: 'stop-sharing', args: '' } as never)
+  asked.tcpHelpers[0]!.send({ state: 'ready', port: 43333 })
+  await asked.clock.advance(10)
+  expect(asked.tcpHelpers[0]!.stopped).toBe(true)
+  expect(asked.sent.filter(x => x.body.op === 'open')).toHaveLength(0)
+})
+
+for (const failure of ['startup', 'control', 'exit'] as const) {
+  test(`a TCP worker ${failure} failure ends it; only a new connection starts a replacement`, async ($, on) => {
+    const stream: unknown[] = [{ seq: 1, events: [], people: PREVIEW_PEOPLE, ended: false, title: 'demo' }]
+    const opts = { stream, tcpRelays: true, tcpWorker: failure === 'startup' ? 'wait' as const : undefined, tcpControl: failure === 'control' ? 'wait' as const : undefined }
+    const asked = world(on, opts)
+    const ui = await $.ui.mount(band('terminal'))
+    await ui.press({ key: 'share' })
+    await $.command.run({ command: 'share-preview', args: '3340 App' } as never)
+    stream.push({ tcp: { id: 'connection0001', pid: 'pv1', port: 3340 } }, { tcp: { id: 'connection0002', pid: 'pv1', port: 3340 } })
+    await asked.clock.advance(1000)
+    await eventually(asked.clock, () => asked.tcpHelpers.length)
+    stream.length = 0
+    if (failure === 'exit') asked.tcpHelpers[0]!.exit()
+    await asked.clock.advance(failure === 'startup' ? 5001 : failure === 'control' ? 2001 : 20)
+    await eventually(asked.clock, () => asked.tcpHelpers[0]!.stopped)
+    expect(asked.tcpHelpers[0]!.stopped).toBe(true)
+    expect(asked.tcpHelpers).toHaveLength(1)
+    expect(asked.sent.filter(x => x.body.op === 'open')).toHaveLength(failure === 'startup' ? 0 : failure === 'control' ? 1 : 2)
+    opts.tcpWorker = undefined
+    opts.tcpControl = undefined
+    stream.push({ tcp: { id: 'connection0003', pid: 'pv1', port: 3340 } })
+    await asked.clock.advance(5000)
+    await eventually(asked.clock, () => asked.tcpHelpers.length === 2)
+    expect(asked.tcpHelpers).toHaveLength(2)
+    const workers = asked.spawned.filter(s => s.argv.at(-1)?.endsWith('/relay/tcp-worker.cjs'))
+    const before = JSON.parse(workers[0]!.input!)
+    const after = JSON.parse(workers[1]!.input!)
+    expect(after.controlToken).not.toBe(before.controlToken)
+    expect(asked.sent.filter(x => x.headers.authorization === `Bearer ${after.controlToken}` && x.body.op === 'open').map(x => x.body.id)).toEqual(['connection0003'])
+    expect(asked.filter(a => a === 'POST /api/rooms')).toHaveLength(1)
+    await $.command.run({ command: 'stop-sharing', args: '' } as never)
+    expect(asked.tcpHelpers.every(h => h.stopped)).toBe(true)
+  })
+}
+
+test('stopping one preview cancels queued opens before IPC without disturbing another preview', async ($, on) => {
+  const stream: unknown[] = [{ seq: 1, events: [], people: PREVIEW_PEOPLE, ended: false, title: 'demo' }]
+  const opts = { stream, tcpRelays: true, tcpControl: 'wait' as 'wait' | undefined }
+  const asked = world(on, opts)
+  const ui = await $.ui.mount(band('terminal'))
+  await ui.press({ key: 'share' })
+  await $.command.run({ command: 'share-preview', args: '3340 App' } as never)
+  await $.command.run({ command: 'share-preview', args: '3341 Docs' } as never)
+  stream.push(
+    { seq: 3, events: [
+      { ...LOCAL_SHOWN, seq: 2, body: { kind: 'preview', pid: 'pv1', port: 3340, title: 'App', tcp: true } },
+      { ...LOCAL_SHOWN, seq: 3, body: { kind: 'preview', pid: 'pv2', port: 3341, title: 'Docs', tcp: true } },
+    ], people: PREVIEW_PEOPLE, ended: false, title: 'demo' },
+    { tcp: { id: 'connection0001', pid: 'pv1', port: 3340 } },
+    { tcp: { id: 'connection0002', pid: 'pv1', port: 3340 } },
+    { tcp: { id: 'connection0003', pid: 'pv2', port: 3341 } },
+  )
+  await asked.clock.advance(1000)
+  await eventually(asked.clock, () => asked.blockedControls.length)
+  expect(asked.blockedControls).toHaveLength(1)
+  stream.length = 0
+  const pane = await $.ui.mount({ plugin: 'shared-session', surface: 'terminal', component: 'Pane', requestId: 'shared-room', props: PANE })
+  await pane.press({ key: 'tab-shown' })
+  await pane.press({ key: 'stop-preview:pv1' })
+  await asked.clock.advance(5)
+  opts.tcpControl = undefined
+  asked.blockedControls[0]!.release()
+  await eventually(asked.clock, () => asked.some(x => x.endsWith('/pv1/end')))
+  expect(asked.sent.filter(x => x.body.op === 'open').map(x => x.body.id)).toEqual(['connection0001', 'connection0003'])
+  expect(asked.sent.filter(x => x.body.op === 'close-preview').map(x => x.body.pid)).toEqual(['pv1'])
+  expect(asked.tcpHelpers).toHaveLength(1)
+  expect(asked.tcpHelpers[0]!.stopped).toBe(false)
+  stream.push({ tcp: { id: 'connection0004', pid: 'pv1', port: 3340 } }, { tcp: { id: 'connection0005', pid: 'pv2', port: 3341 } })
+  await asked.clock.advance(5000)
+  expect(asked.sent.some(x => x.body.op === 'open' && x.body.id === 'connection0004')).toBe(false)
+  expect(asked.sent.some(x => x.body.op === 'open' && x.body.id === 'connection0005')).toBe(true)
+  await $.command.run({ command: 'stop-sharing', args: '' } as never)
+})
+
+for (const closed of ['preview', 'room'] as const) {
+  test(`a server-side ${closed} close revokes owned TCP work immediately`, async ($, on) => {
+    const stream: unknown[] = [{ seq: 1, events: [], people: PREVIEW_PEOPLE, ended: false, title: 'demo' }]
+    const asked = world(on, { stream, tcpRelays: true })
+    const ui = await $.ui.mount(band('terminal'))
+    await ui.press({ key: 'share' })
+    await $.command.run({ command: 'share-preview', args: '3340 App' } as never)
+    stream.push({ tcp: { id: 'connection0001', pid: 'pv1', port: 3340 } })
+    await asked.clock.advance(1000)
+    await eventually(asked.clock, () => asked.sent.some(x => x.body.op === 'open'))
+    stream.length = 0
+    stream.push({ seq: 2, events: [{ seq: 2, ts: 901, from: LOCAL_SHOWN.from, type: closed === 'room' ? 'ended' : 'preview', body: closed === 'room' ? {} : { pid: 'pv1', state: 'closed' } }], people: PREVIEW_PEOPLE, ended: closed === 'room', title: 'demo' })
+    await asked.clock.advance(5000)
+    if (closed === 'room') {
+      expect(asked.tcpHelpers[0]!.stopped).toBe(true)
+      expect(await ui.find({ key: 'share' })).toBeDefined()
+    } else {
+      expect(asked.sent.some(x => x.body.op === 'close-preview' && x.body.pid === 'pv1')).toBe(true)
+      stream.push({ tcp: { id: 'connection0002', pid: 'pv1', port: 3340 } })
+      await asked.clock.advance(5000)
+      expect(asked.sent.some(x => x.body.op === 'open' && x.body.id === 'connection0002')).toBe(false)
+      await $.command.run({ command: 'stop-sharing', args: '' } as never)
+    }
+  })
+}
+
+test('a worker BUSY response is not replaced by a competing CONNECT rejection', async ($, on) => {
+  const stream: unknown[] = [{ seq: 1, events: [], people: PREVIEW_PEOPLE, ended: false, title: 'demo' }]
+  const asked = world(on, { stream, tcpRelays: true, tcpControl: 'busy' })
+  const ui = await $.ui.mount(band('terminal'))
+  await ui.press({ key: 'share' })
+  await $.command.run({ command: 'share-preview', args: '3340 App' } as never)
+  stream.push({ tcp: { id: 'connection0001', pid: 'pv1', port: 3340 } })
+  await asked.clock.advance(1000)
+  await eventually(asked.clock, () => asked.sent.some(x => x.body.op === 'open'))
+  stream.length = 0
+  await asked.clock.advance(20)
+  expect(asked.sent.filter(x => x.body.op === 'reject')).toHaveLength(0)
+  expect(asked.spawned.some(s => s.argv[0] === 'curl' && s.input?.includes('/reject'))).toBe(false)
+  expect(asked.tcpHelpers).toHaveLength(1)
+  expect(asked.tcpHelpers[0]!.stopped).toBe(false)
   await $.command.run({ command: 'stop-sharing', args: '' } as never)
 })
 

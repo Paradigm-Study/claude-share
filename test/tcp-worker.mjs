@@ -2,12 +2,13 @@
 // with stdlib storage/hibernatable-socket stubs, including reconstruction.
 import assert from 'node:assert/strict'
 import { createServer, createConnection } from 'node:net'
+import { request as httpRequest } from 'node:http'
 import { spawn } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
 import { once } from 'node:events'
 import { fileURLToPath } from 'node:url'
-import { Room, PLUGIN_LATEST, TCP_LIMITS, token, tcpOperation, tcpSocketTarget, tcpState, tcpReserve, tcpRefund, tcpControl, previewSocketTarget, previewRequest } from '../server/core.mjs'
-import { RoomObject } from '../server/worker.mjs'
+import { Room, PLUGIN_LATEST, TCP_LIMITS, LIMITS, Windows, limitOf, token, tcpOperation, tcpState, tcpReserve, tcpRefund, tcpControl, previewSocketTarget, previewRequest } from '../server/core.mjs'
+import worker, { RoomObject } from '../server/worker.mjs'
 
 const NativeResponse = globalThis.Response, nativeNow = Date.now
 const NativePair = globalThis.WebSocketPair
@@ -71,6 +72,16 @@ function req(w, path, bearer, method = 'GET', body, upgrade = false) {
   if (bearer) headers.authorization = `Bearer ${bearer}`
   if (upgrade) headers.upgrade = 'websocket'
   return new Request(`https://room.internal/${w.id}/${path}`, { method, headers, ...(body === undefined ? {} : { body: JSON.stringify(body) }) })
+}
+function heldReject(w, id, bearer = w.host) {
+  let release, read = false, started
+  const reading = new Promise(resolve => (started = resolve))
+  const body = new ReadableStream({ pull(controller) {
+    read = true; started()
+    return new Promise(resolve => (release = text => { controller.enqueue(new TextEncoder().encode(text)); controller.close(); resolve() }))
+  } }, { highWaterMark: 0 })
+  return { request: new Request(`https://room.internal/${w.id}/ws/${id}/reject`, { method: 'POST', headers: { authorization: `Bearer ${bearer}` }, body, duplex: 'half' }),
+    reading, get read() { return read }, release: (text = '{"code":"BUSY"}') => release(text) }
 }
 const jsonControl = ws => ws.sent.filter(x => typeof x === 'string').map(x => JSON.parse(x))
 const tcp = ws => ws.deserializeAttachment().tcp
@@ -181,20 +192,38 @@ try {
     console.log('OK forwarding only for previews the host chose to forward')
   }
 
-  // One guest's opens can't spend the room's minute; a seat dropped for good
-  // takes its grants.
+  // Grants and WS opens share the exact minute counters; one seat cannot
+  // spend everyone else's minute. The per-IP limit still covers only POSTs.
   {
-    const w = await world()
-    let n = 0
+    assert.equal(TCP_LIMITS.seatOpensPerMinute, 240); assert.equal(TCP_LIMITS.opensPerMinute, 1200)
+    assert.equal(TCP_LIMITS.seatPairs, 32); assert.equal(TCP_LIMITS.roomPairs, 64)
+    const w = await world(), first = await grant(w), p = await open(w, first, false)
+    await w.obj.webSocketError(p.guest)
+    let n = 2 // the first grant and its WS open
     while ((await w.obj.fetch(req(w, `previews/${w.pid}/tunnel`, w.member, 'POST'))).status === 200) n++
-    assert.equal(n, TCP_LIMITS.seatOpensPerMinute)
+    assert.equal(n, 240); assert.equal(w.obj.room.tcpStats.opens.count, 240)
+    const last = [...w.obj.room.previewSessions.keys()].at(-1)
+    assert.equal((await w.obj.fetch(req(w, `previews/${w.pid}/tunnel`, last, 'GET', undefined, true))).status, 429)
+    assert.equal(w.obj.room.tcpStats.opens.count, 240) // the seat's refusal doesn't charge the room
     const other = (await (await w.obj.fetch(req(w, 'join', null, 'POST', { name: 'Other' }))).json()).token
-    assert.equal((await w.obj.fetch(req(w, `previews/${w.pid}/tunnel`, other, 'POST'))).status, 200)
     const cap = await grant(w, other)
+    assert.equal(w.obj.room.tcpStats.opens.count, 241)
     const otherSeat = [...w.obj.room.seats.values()].find(s => s.name === 'Other').id
     w.obj.room.revokeTCP({ seat: otherSeat })
     assert.equal(w.obj.room.previewSessions.has(cap.token), false)
-    console.log('OK per-seat admission share and seat revocation')
+    now += 59_999
+    assert.equal((await w.obj.fetch(req(w, `previews/${w.pid}/tunnel`, w.member, 'POST'))).status, 429)
+    now++
+    await grant(w)
+    assert.equal(w.obj.room.tcpStats.opens.count, 1)
+    const windows = new Windows()
+    assert.equal(LIMITS.tunnel.limit, 60)
+    for (let i = 0; i < 60; i++) assert(windows.hit('tunnel', 'ip', now))
+    assert.equal(windows.hit('tunnel', 'ip', now), false)
+    assert.equal(limitOf(req(w, '', w.member, 'POST'), w.id, `previews/${w.pid}/tunnel`, 'ip').kind, 'tunnel')
+    assert.equal(limitOf(req(w, '', last), w.id, `previews/${w.pid}/tunnel`, 'ip'), null)
+    assert.equal(limitOf(req(w, '', w.host, 'POST'), w.id, `ws/${p.id}/reject`, 'ip'), null)
+    console.log('OK exact shared POST/WS seat240/room1200 admission and POST-only IP60 limits')
   }
 
   // The budget pays for bytes carried: a browser's thousands of short
@@ -234,6 +263,9 @@ try {
     assert.equal(w.obj.room.tcpStats.used, 2 * TCP_LIMITS.reserveBytes)
     assert.deepEqual(tcp(pair.host), saved); assert.deepEqual(tcp(pair.guest), guestSaved)
     assert.equal(w.obj.pending.size, 0)
+    now += TCP_LIMITS.pairMs + 1
+    await w.obj.alarm()
+    assert.equal(pair.guest.closes.length, 0); assert.equal(pair.host.closes.length, 0) // ready/half-closed has no idle timeout
     const sentBefore = pair.guest.sent.length
     w.obj.broadcast()
     assert.equal(pair.guest.sent.length, sentBefore) // no room JSON on tcp
@@ -341,15 +373,133 @@ try {
     console.log('OK rolling two-grant renewal, replaced-cap revocation and seat/preview isolation')
   }
 
-  // Capability/concurrency/admission/budget ceilings do not reset on new caps.
+  // Host rejection is purpose-bound, bounded before parsing, and atomic with
+  // pairing. Unauthorized requests (including through the outer Worker) never
+  // read the body; duplicate/late rejections cannot damage a ready neighbor.
+  {
+    const w = await world(), cap = await grant(w), ready = await open(w, cap), pending = await open(w, cap, false)
+    const path = `ws/${pending.id}/reject`, seq = w.obj.room.seq, opens = { ...w.obj.room.tcpStats.opens }
+    for (const bearer of [null, w.member, cap.token, 'invalid']) {
+      const held = heldReject(w, pending.id, bearer)
+      assert.equal((await w.obj.fetch(held.request)).status, 401); assert.equal(held.read, false)
+    }
+    const cookie = heldReject(w, pending.id, '')
+    cookie.request.headers.delete('authorization'); cookie.request.headers.set('cookie', `cs_pv=${w.id}.${cap.token}`)
+    assert.equal((await w.obj.fetch(cookie.request)).status, 401); assert.equal(cookie.read, false)
+    const outer = heldReject(w, pending.id, w.member)
+    const external = new Request(`https://share.test/api/rooms/${w.id}/${path}`, outer.request)
+    assert.equal((await worker.fetch(external, { ROOMS: { idFromName: id => id, get: () => w.obj } })).status, 401)
+    assert.equal(outer.read, false)
+    for (const bad of [null, [], {}, { code: 'busy' }, { code: 'TIMEOUT' }, { code: 1013 }, { code: 'BUSY', extra: 1 }]) {
+      assert.equal((await w.obj.fetch(req(w, path, w.host, 'POST', bad))).status, 400)
+    }
+    for (const body of ['{', ' '.repeat(257), `${' '.repeat(242)}{"code":"BUSY"}`, new Uint8Array([255])]) {
+      assert.equal((await w.obj.fetch(new Request(`https://room.internal/${w.id}/${path}`, { method: 'POST', headers: { authorization: `Bearer ${w.host}` }, body }))).status, 400)
+    }
+    for (const id of ['short', token(12)]) assert.equal((await w.obj.fetch(req(w, `ws/${id}/reject`, w.host, 'POST', { code: 'BUSY' }))).status, 404)
+    const wrong = await world()
+    assert.equal((await wrong.obj.fetch(req(wrong, path, wrong.host, 'POST', { code: 'BUSY' }))).status, 404)
+    assert.equal((await w.obj.fetch(req({ ...w, id: wrong.id }, path, w.host, 'POST', { code: 'BUSY' }))).status, 404)
+    w.obj.room.previewSessions.set('public-cookie', { pid: w.pid, exp: now + 60_000 })
+    assert.equal((await w.obj.fetch(new Request(`https://room.internal/${w.id}/__preview/live`, { headers: { upgrade: 'websocket', cookie: `cs_pv=${w.id}.public-cookie` } }))).status, 101)
+    const publicId = jsonControl(w.control).at(-1).ws.id, publicSocket = w.state.getWebSockets(`pb:${publicId}`)[0]
+    assert.equal((await w.obj.fetch(req(w, `ws/${publicId}/reject`, w.host, 'POST', { code: 'BUSY' }))).status, 404)
+    assert.equal(publicSocket.closes.length, 0)
+    assert.equal(pending.guest.closes.length, 0)
+    const half = tcp(pending.guest)
+    assert(tcpReserve(w.obj.room, half)); pending.guest.serializeAttachment({ tcp: half })
+    await w.obj.persistTCPStats()
+    assert.deepEqual(await (await w.obj.fetch(req(w, path, w.host, 'POST', { code: 'BUSY' }))).json(), { ok: true })
+    closed(pending, 1013)
+    assert.equal(w.obj.room.tcpStats.refunded, TCP_LIMITS.reserveBytes)
+    assert.equal((await w.obj.fetch(req(w, path, w.host, 'POST', { code: 'CONNECT' }))).status, 404)
+    await w.obj.webSocketClose(pending.guest, 1013, '')
+    await reconstruct(w)
+    const resumedSeq = w.obj.room.seq
+    assert.equal(w.obj.room.tcpStats.refunded, TCP_LIMITS.reserveBytes)
+    assert.equal(pending.guest.closes.length, 1)
+    const connect = await open(w, cap, false)
+    assert.equal((await w.obj.fetch(new Request(`https://room.internal/${w.id}/ws/${connect.id}/reject`, { method: 'POST', headers: { authorization: `Bearer ${w.host}` }, body: JSON.stringify({ code: 'CONNECT' }).padStart(256, ' ') }))).status, 200)
+    closed(connect, 1011)
+    assert.deepEqual(w.obj.room.tcpStats.opens, { ...opens, count: opens.count + 1 }) // only the new WS counts
+    assert.equal((await w.obj.fetch(req(w, `ws/${ready.id}/reject`, w.host, 'POST', { code: 'BUSY' }))).status, 409)
+    w.state.sockets = w.state.sockets.filter(ws => ws !== ready.host)
+    assert.equal((await w.obj.fetch(req(w, `ws/${ready.id}/reject`, w.host, 'POST', { code: 'BUSY' }))).status, 409)
+    assert.equal(ready.guest.closes.length, 0)
+    assert.equal(w.obj.room.events.some(e => e.type === 'tcp'), false)
+    assert.equal(w.obj.room.seq, resumedSeq); assert(resumedSeq > seq) // only reconstruction advances it
+    const raced = await open(w, cap, false), held = heldReject(w, raced.id)
+    const rejecting = w.obj.fetch(held.request)
+    await held.reading
+    assert.equal((await w.obj.fetch(req(w, `ws/${raced.id}`, w.host, 'GET', undefined, true))).status, 101)
+    held.release()
+    assert.equal((await rejecting).status, 409); assert.equal(raced.guest.closes.length, 0)
+    const duplicate = await open(w, cap, false)
+    const answers = await Promise.all(['BUSY', 'CONNECT'].map(code => w.obj.fetch(req(w, `ws/${duplicate.id}/reject`, w.host, 'POST', { code }))))
+    assert.deepEqual(answers.map(r => r.status).sort(), [200, 404]); assert.equal(duplicate.guest.closes.length, 1)
+    assert.equal((await w.obj.fetch(req(w, `ws/${duplicate.id}`, w.host, 'GET', undefined, true))).status, 410)
+    const lost = await open(w, cap, false), delayed = heldReject(w, lost.id), losing = w.obj.fetch(delayed.request)
+    await delayed.reading; await w.obj.webSocketError(lost.guest); delayed.release()
+    assert.equal((await losing).status, 404); assert.equal(lost.guest.closes.length, 1)
+    const changed = await open(w, cap, false), revoked = heldReject(w, changed.id), unauthorized = w.obj.fetch(revoked.request)
+    await revoked.reading
+    w.obj.room.host.token = token(24); revoked.release()
+    assert.equal((await unauthorized).status, 401); assert.equal(changed.guest.closes.length, 0)
+    console.log('OK host-only bounded rejection, purpose/room/identity checks, races and once-only refunds')
+  }
+
+  // Count pending + paired once per seat across grants/ports, including after
+  // hibernation. Rotation frees only revoked pairs; two racing opens cannot
+  // exceed the seat or room ceiling, and closed attachments don't occupy slots.
+  {
+    const w = await world(), first = await grant(w), second = await grant(w)
+    const pid = (await (await w.obj.fetch(req(w, 'previews', w.host, 'POST', { port: 34568, tcp: true }))).json()).pid
+    const port = { ...w, pid }, response = await w.obj.fetch(req(w, `previews/${pid}/tunnel`, w.member, 'POST'))
+    assert.equal(response.status, 200)
+    const portCap = await response.json(), lanes = [[w, first], [w, second], [port, portCap]], pairs = []
+    for (let i = 0; i < 32; i++) {
+      const [where, cap] = lanes[i % lanes.length]
+      pairs.push({ ...await open(where, cap, i % 2 === 0), cap: cap.token })
+    }
+    assert.equal(w.obj.tcpSockets().length, 48) // 32 channels, not 48 halves
+    for (const [where, cap] of lanes) assert.equal((await w.obj.fetch(req(where, `previews/${where.pid}/tunnel`, cap.token, 'GET', undefined, true))).status, 429)
+    await reconstruct(w); port.obj = w.obj
+    assert.equal(w.obj.tcpSockets().length, 48)
+    assert.equal((await w.obj.fetch(req(port, `previews/${pid}/tunnel`, portCap.token, 'GET', undefined, true))).status, 429)
+    const rotated = await grant(w)
+    const revoked = pairs.filter(p => p.cap === first.token)
+    for (const p of revoked) closed(p, 1008)
+    for (let i = 0; i < revoked.length; i++) await open(w, rotated, false)
+    assert.equal((await w.obj.fetch(req(w, `previews/${w.pid}/tunnel`, second.token, 'GET', undefined, true))).status, 429)
+    await reconstruct(w)
+    const vacancy = w.obj.tcpSockets().find(ws => tcp(ws).ownerSeat === w.seat && !tcp(ws).ready)
+    await w.obj.webSocketError(vacancy)
+    const seatRace = await Promise.all([0, 1].map(() => w.obj.fetch(req(w, `previews/${w.pid}/tunnel`, rotated.token, 'GET', undefined, true))))
+    assert.deepEqual(seatRace.map(r => r.status).sort(), [101, 429])
+    assert.equal(w.obj.tcpSockets().filter(ws => tcp(ws).side === 'guest').length, 32)
+    const other = (await (await w.obj.fetch(req(w, 'join', null, 'POST', { name: 'Other' }))).json()).token
+    const otherCap = await grant(w, other)
+    for (let i = 0; i < 31; i++) await open(w, otherCap, false)
+    const raced = await Promise.all([0, 1].map(() => w.obj.fetch(req(w, `previews/${w.pid}/tunnel`, otherCap.token, 'GET', undefined, true))))
+    assert.deepEqual(raced.map(r => r.status).sort(), [101, 429])
+    assert.equal(w.obj.tcpSockets().filter(ws => tcp(ws).side === 'guest').length, 64)
+    const third = (await (await w.obj.fetch(req(w, 'join', null, 'POST', { name: 'Third' }))).json()).token
+    const thirdCap = await grant(w, third)
+    assert.equal((await w.obj.fetch(req(w, `previews/${w.pid}/tunnel`, thirdCap.token, 'GET', undefined, true))).status, 429)
+    const waiting = w.obj.tcpSockets().find(ws => tcp(ws).ownerSeat === w.seat && !tcp(ws).ready)
+    assert.equal((await w.obj.fetch(req(w, `ws/${tcp(waiting).id}/reject`, w.host, 'POST', { code: 'BUSY' }))).status, 200)
+    assert.equal(waiting.closes.at(-1).code, 1013)
+    const freed = await open(w, thirdCap, false)
+    assert.equal(w.obj.tcpSockets().filter(ws => tcp(ws).side === 'guest').length, 64)
+    await w.obj.webSocketError(freed.guest)
+    await open(w, rotated, false)
+    assert.equal((await w.obj.fetch(req(w, `previews/${w.pid}/tunnel`, rotated.token, 'GET', undefined, true))).status, 429)
+    console.log('OK seat32 across grants/ports, room64, concurrent admission, rotation/release and reconstruction')
+  }
+
+  // Admission and byte-budget ceilings do not reset on caps or reconstruction.
   {
     const w = await world(), cap = await grant(w)
-    await grant(w)
-    const pairs = []
-    for (let i = 0; i < TCP_LIMITS.capPairs; i++) pairs.push(await open(w, cap, false))
-    assert.equal((await w.obj.fetch(req(w, `previews/${w.pid}/tunnel`, cap.token, 'GET', undefined, true))).status, 429)
-    assert.equal(tcpSocketTarget(w.obj.room, req(w, '', cap.token), w.pid, now, Array.from({ length: TCP_LIMITS.roomPairs }, () => ({ cap: 'other' }))).status, 429)
-    for (const p of pairs) await w.obj.webSocketError(p.guest)
     w.obj.room.tcpStats.opens = { start: now, count: 0 }
     for (let i = 0; i < TCP_LIMITS.opensPerMinute; i++) assert.equal(tcpOperation(w.obj.room, now), true)
     assert.equal(tcpOperation(w.obj.room, now), false)
@@ -436,7 +586,7 @@ function masked(op, payload = Buffer.alloc(0), fin = true) {
   if (h.length === 10) h.writeBigUInt64BE(BigInt(n), 2)
   return Buffer.concat([h, Buffer.alloc(4), payload]) // deterministic test mask
 }
-async function rawSocket(port, path, bearer) {
+async function rawSocket(port, path, bearer, cookie) {
   const socket = createConnection({ port, host: '127.0.0.1' })
   let buf = Buffer.alloc(0), status = 0, resolveHeaders, rejectHeaders
   const headers = new Promise((resolve, reject) => { resolveHeaders = resolve; rejectHeaders = reject })
@@ -469,7 +619,7 @@ async function rawSocket(port, path, bearer) {
   }
   socket.on('error', ended); socket.on('close', () => ended(new Error('wire socket closed')))
   await once(socket, 'connect')
-  socket.write(`GET ${path} HTTP/1.1\r\nHost: localhost:${port}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: ${randomBytes(16).toString('base64')}\r\nAuthorization: Bearer ${bearer}\r\n\r\n`)
+  socket.write(`GET ${path} HTTP/1.1\r\nHost: localhost:${port}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: ${randomBytes(16).toString('base64')}\r\nAuthorization: Bearer ${bearer}\r\n${cookie ? `Cookie: ${cookie}\r\n` : ''}\r\n`)
   await headers
   return { socket, status, next: () => messages.length ? Promise.resolve(messages.shift()) : new Promise((resolve, reject) => {
     const waiter = { resolve, reject, timer: setTimeout(() => { const at = waiters.indexOf(waiter); if (at >= 0) waiters.splice(at, 1); reject(new Error('wire frame timeout')) }, 5000) }
@@ -482,7 +632,19 @@ async function nodeFrames() {
   let logs = '', reader
   child.stdout.on('data', b => { logs += b }); child.stderr.on('data', b => { logs += b })
   const origin = `http://127.0.0.1:${port}`
-  const api = (path, bearer, body = {}) => fetch(`${origin}${path}`, { method: 'POST', headers: { authorization: bearer ? `Bearer ${bearer}` : '', 'x-shared-session-version': PLUGIN_LATEST }, body: JSON.stringify(body) }).then(async r => { assert.equal(r.status, 200, await r.clone().text()); return r.json() })
+  const post = (path, bearer, body = {}) => fetch(`${origin}${path}`, { method: 'POST', headers: { authorization: bearer ? `Bearer ${bearer}` : '', 'x-shared-session-version': PLUGIN_LATEST }, body: typeof body === 'string' ? body : JSON.stringify(body) })
+  const api = (path, bearer, body = {}) => post(path, bearer, body).then(async r => { assert.equal(r.status, 200, await r.clone().text()); return r.json() })
+  const heldPost = (path, bearer, length) => {
+    let request, timer
+    const answer = new Promise((resolve, reject) => {
+      request = httpRequest(`${origin}${path}`, { method: 'POST', headers: { authorization: `Bearer ${bearer}`, 'content-length': length } }, res => { res.resume(); resolve(res.statusCode) })
+      request.on('error', reject)
+      timer = setTimeout(() => request.destroy(new Error('HTTP rejection timeout')), 5000)
+      request.flushHeaders()
+    })
+    answer.finally(() => clearTimeout(timer)).catch(() => {})
+    return { request, answer }
+  }
   try {
     let ready = false
     for (let i = 0; i < 100; i++) {
@@ -498,23 +660,69 @@ async function nodeFrames() {
     reader = control.body.getReader()
     const cap = await api(`/api/rooms/${room.id}/previews/${p.pid}/tunnel`, member.token)
     let lines = ''
-    const notice = async () => {
+    const notice = async (kind = 'tcp') => {
       for (;;) {
         const end = lines.indexOf('\n')
-        if (end >= 0) { const line = lines.slice(0, end); lines = lines.slice(end + 1); const data = JSON.parse(line); if (data.tcp) return data.tcp; continue }
+        if (end >= 0) { const line = lines.slice(0, end); lines = lines.slice(end + 1); const data = JSON.parse(line); if (data[kind]) return data[kind]; continue }
         const chunk = await reader.read(); assert(!chunk.done)
         lines += new TextDecoder().decode(chunk.value)
       }
     }
-    const pair = async () => {
-      const guest = await rawSocket(port, `/api/rooms/${room.id}/previews/${p.pid}/tunnel`, cap.token)
+    const pending = async (grant = cap, pid = p.pid) => {
+      const guest = await rawSocket(port, `/api/rooms/${room.id}/previews/${pid}/tunnel`, grant.token)
       assert.equal(guest.status, 101)
-      const target = await notice(), host = await rawSocket(port, `/api/rooms/${room.id}/ws/${target.id}`, room.token)
-      assert.equal(host.status, 101)
-      assert.deepEqual(JSON.parse((await guest.next()).data), { t: 'ready' })
-      assert.deepEqual(JSON.parse((await host.next()).data), { t: 'ready' })
-      return { guest, host, id: target.id }
+      return { guest, id: (await notice()).id }
     }
+    const pair = async (grant = cap, pid = p.pid) => {
+      const waiting = await pending(grant, pid), host = await rawSocket(port, `/api/rooms/${room.id}/ws/${waiting.id}`, room.token)
+      assert.equal(host.status, 101)
+      assert.deepEqual(JSON.parse((await waiting.guest.next()).data), { t: 'ready' })
+      assert.deepEqual(JSON.parse((await host.next()).data), { t: 'ready' })
+      return { ...waiting, host }
+    }
+    const rejection = await pending(), rejectPath = id => `/api/rooms/${room.id}/ws/${id}/reject`
+    for (const bearer of [null, member.token, cap.token]) assert.equal((await post(rejectPath(rejection.id), bearer, { code: 'BUSY' })).status, 401)
+    const unauthorized = heldPost(rejectPath(rejection.id), member.token, 1_000_000)
+    assert.equal(await unauthorized.answer, 401); unauthorized.request.destroy() // no body sent
+    const oversized = heldPost(rejectPath(rejection.id), room.token, 1_000_000)
+    oversized.request.write(' '.repeat(257))
+    assert.equal(await oversized.answer, 400); oversized.request.destroy() // no EOF required
+    for (const body of ['{', {}, [], { code: 'busy' }, { code: 'BUSY', extra: 1 }]) assert.equal((await post(rejectPath(rejection.id), room.token, body)).status, 400)
+    assert.equal((await post(rejectPath('short'), room.token, { code: 'BUSY' })).status, 404)
+    assert.equal((await post(rejectPath(token(12)), room.token, { code: 'BUSY' })).status, 404)
+    const other = await api('/api/rooms', null, { name: 'Other room' })
+    assert.equal((await post(`/api/rooms/${other.id}/ws/${rejection.id}/reject`, other.token, { code: 'BUSY' })).status, 404)
+    const ticket = await api(`/api/rooms/${room.id}/previews/${p.pid}/ticket`, member.token)
+    const entered = await fetch(ticket.url, { redirect: 'manual' }), cookie = entered.headers.get('set-cookie').split(';')[0]
+    const publicSocket = await rawSocket(preview, '/live', '', cookie)
+    assert.equal(publicSocket.status, 101)
+    const publicId = (await notice('ws')).id
+    assert.equal((await post(rejectPath(publicId), room.token, { code: 'BUSY' })).status, 404)
+    publicSocket.socket.destroy()
+    assert.deepEqual(await (await post(rejectPath(rejection.id), room.token, { code: 'BUSY' })).json(), { ok: true })
+    assert.equal((await rejection.guest.next()).data.readUInt16BE(), 1013)
+    assert.equal((await post(rejectPath(rejection.id), room.token, { code: 'CONNECT' })).status, 404)
+    const lateHost = await rawSocket(port, `/api/rooms/${room.id}/ws/${rejection.id}`, room.token)
+    assert.equal(lateHost.status, 404); lateHost.socket.destroy(); rejection.guest.socket.destroy()
+    const connectFailure = await pending()
+    assert.equal((await post(rejectPath(connectFailure.id), room.token, JSON.stringify({ code: 'CONNECT' }).padStart(256, ' '))).status, 200)
+    assert.equal((await connectFailure.guest.next()).data.readUInt16BE(), 1011); connectFailure.guest.socket.destroy()
+    const raced = await pending(), delayed = heldPost(rejectPath(raced.id), room.token, 15)
+    delayed.request.write('{"code":')
+    const pairedHost = await rawSocket(port, `/api/rooms/${room.id}/ws/${raced.id}`, room.token)
+    assert.equal(pairedHost.status, 101)
+    delayed.request.end('"BUSY"}')
+    assert.equal(await delayed.answer, 409)
+    assert.deepEqual(JSON.parse((await raced.guest.next()).data), { t: 'ready' })
+    assert.deepEqual(JSON.parse((await pairedHost.next()).data), { t: 'ready' })
+    assert.equal((await post(rejectPath(raced.id), room.token, { code: 'CONNECT' })).status, 409)
+    raced.guest.socket.destroy()
+    assert.equal((await pairedHost.next()).data.readUInt16BE(), 1011); pairedHost.socket.destroy()
+    const duplicateReject = await pending()
+    const answers = await Promise.all(['BUSY', 'CONNECT'].map(code => post(rejectPath(duplicateReject.id), room.token, { code })))
+    assert.deepEqual(answers.map(r => r.status).sort(), [200, 404])
+    assert([1011, 1013].includes((await duplicateReject.guest.next()).data.readUInt16BE())); duplicateReject.guest.socket.destroy()
+    console.log('OK Node host-only rejection before body/EOF, bounded JSON, purpose/room checks and pairing races')
     const lengthHeader = n => { const h = Buffer.alloc(14); h[0] = 0x82; h[1] = 0xff; h.writeBigUInt64BE(n, 2); return h }
     const malformed = [
       [Buffer.from([0x82, 1, 0]), 1002], // unmasked
@@ -534,7 +742,7 @@ async function nodeFrames() {
       const otherClose = await q.host.next(); assert.equal(otherClose.op, 8); assert.equal(otherClose.data.readUInt16BE(), code)
       q.guest.socket.destroy(); q.host.socket.destroy()
     }
-    const q = await pair(), other = await api('/api/rooms', null, { name: 'Other room' })
+    const q = await pair()
     const cross = await rawSocket(port, `/api/rooms/${other.id}/ws/${q.id}`, other.token)
     assert.equal(cross.status, 404); cross.socket.destroy()
     const duplicate = await rawSocket(port, `/api/rooms/${room.id}/ws/${q.id}`, room.token)
@@ -560,7 +768,44 @@ async function nodeFrames() {
     assert.equal(fragmentClose.op, 8); assert.equal(fragmentClose.data.readUInt16BE(), 1009)
     assert.equal((await fragments.host.next()).data.readUInt16BE(), 1009)
     fragments.guest.socket.destroy(); fragments.host.socket.destroy()
-    console.log('PASS Node raw RFC frames, fragmentation across rate windows, binary/FIN and room/host binding')
+    const eof = await pair()
+    eof.guest.socket.write(masked(2, Buffer.from([7, 8])))
+    assert.deepEqual((await eof.host.next()).data, Buffer.from([7, 8]))
+    assert.equal(JSON.parse((await eof.host.next()).data).t, 'credit')
+    eof.guest.socket.end(masked(2, Buffer.from([3, 4])).subarray(0, 5)) // EOF in a partial frame, credit still outstanding
+    assert.equal((await eof.host.next()).data.readUInt16BE(), 1011)
+    eof.guest.socket.destroy(); eof.host.socket.destroy()
+    const second = await api(`/api/rooms/${room.id}/previews/${p.pid}/tunnel`, member.token)
+    const otherPort = await api(`/api/rooms/${room.id}/previews`, room.token, { port: 34568, tcp: true })
+    const portCap = await api(`/api/rooms/${room.id}/previews/${otherPort.pid}/tunnel`, member.token)
+    const lanes = [[cap, p.pid], [second, p.pid], [portCap, otherPort.pid]], slots = []
+    for (let i = 0; i < 31; i++) {
+      const [grant, pid] = lanes[i % lanes.length]
+      slots.push({ ...await (i % 2 ? pending : pair)(grant, pid), grant: grant.token })
+    }
+    const racedOpens = await Promise.all([0, 1].map(() => rawSocket(port, `/api/rooms/${room.id}/previews/${p.pid}/tunnel`, second.token)))
+    assert.deepEqual(racedOpens.map(r => r.status).sort(), [101, 429])
+    slots.push({ guest: racedOpens.find(r => r.status === 101), id: (await notice()).id, grant: second.token })
+    racedOpens.find(r => r.status === 429).socket.destroy()
+    for (const [grant, pid] of lanes) {
+      const denied = await rawSocket(port, `/api/rooms/${room.id}/previews/${pid}/tunnel`, grant.token)
+      assert.equal(denied.status, 429); denied.socket.destroy()
+    }
+    const rotated = await api(`/api/rooms/${room.id}/previews/${p.pid}/tunnel`, member.token)
+    const revoked = slots.filter(s => s.grant === cap.token)
+    for (const s of revoked) {
+      assert.equal((await s.guest.next()).data.readUInt16BE(), 1008)
+      if (s.host) assert.equal((await s.host.next()).data.readUInt16BE(), 1008)
+    }
+    const renewed = []
+    for (let i = 0; i < revoked.length; i++) renewed.push(await pending(rotated))
+    const full = await rawSocket(port, `/api/rooms/${room.id}/previews/${p.pid}/tunnel`, rotated.token)
+    assert.equal(full.status, 429); full.socket.destroy()
+    assert.equal((await post(rejectPath(renewed[0].id), room.token, { code: 'BUSY' })).status, 200)
+    assert.equal((await renewed[0].guest.next()).data.readUInt16BE(), 1013)
+    renewed.push(await pending(rotated)) // a released slot is immediately reusable
+    for (const s of [...slots, ...renewed]) { s.guest.socket.destroy(); s.host?.socket.destroy() }
+    console.log('PASS Node raw RFC/partial EOF, binary/credit/FIN, synchronous seat32 admission and grant/port rotation')
   } finally {
     await reader?.cancel().catch(() => {})
     child.kill()

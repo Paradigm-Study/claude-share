@@ -41,7 +41,7 @@ function connect(url, headers = {}, protocols = [], on = {}, { maxMessage = BUFF
     if (socket.writableLength + payload.length + 14 > BUFFER_MAX) { end(1009); return false }
     return socket.write(frame(op, payload))
   }
-  function end(code = 1000, reply = true) {
+  function end(code = 1000, reply = true, status) {
     if (closed) return
     closed = true
     open = false
@@ -59,7 +59,7 @@ function connect(url, headers = {}, protocols = [], on = {}, { maxMessage = BUFF
       closeTimer = setTimeout(() => socket.destroy(), 1000)
       closeTimer.unref()
     }
-    on.close?.(code)
+    on.close?.(code, status)
   }
   const send = (data, binary = false) => {
     if (closed) return false
@@ -164,7 +164,7 @@ function connect(url, headers = {}, protocols = [], on = {}, { maxMessage = BUFF
       if (res.statusCode !== 101 || res.headers.upgrade?.toLowerCase() !== 'websocket' || !res.headers.connection?.toLowerCase().split(/\s*,\s*/).includes('upgrade') || res.headers['sec-websocket-accept'] !== accept || res.headers['sec-websocket-extensions'] || (selected !== undefined && !protocols.includes(selected))) { s.destroy(); return end(1002, false) }
       attach(s, head)
     })
-    req.on('response', res => { const status = res.statusCode; res.destroy(); end(status === 401 || status === 403 ? 1008 : 1011, false) })
+    req.on('response', res => { const status = res.statusCode; res.destroy(); end(status === 401 || status === 403 ? 1008 : status === 429 ? 1013 : 1011, false, status) })
     req.on('error', () => { if (!closed && !open) i + 1 < hosts.length ? attempt(i + 1) : end(1006, false) })
     req.end()
   }
