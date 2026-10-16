@@ -96,18 +96,22 @@ const MOTION = `<style>
 @keyframes breathe{0%,100%{transform:scale(1)}50%{transform:scale(1.12)}}
 @media (prefers-reduced-motion: reduce){.breathe .dot{animation:none}}
 .more{fill:#73726c}@media (prefers-color-scheme: dark){.more{fill:#9c9a92}}
+.edge{stroke:#fff}@media (prefers-color-scheme: dark){.edge{stroke:#30302e}}
+.ring{transform-box:fill-box;transform-origin:center;animation:ring 2s cubic-bezier(.32,.72,0,1) infinite}
+@keyframes ring{0%{transform:scale(.6);opacity:.55}100%{transform:scale(1.7);opacity:0}}
+@media (prefers-reduced-motion: reduce){.ring{animation:none;opacity:0}}
 </style>`
 
 // A filled dot in the person's color with their initial knocked out in white;
 // away, a ring in their color around their initial. Breathes while Claude
 // works for them.
-function face(f: Face, cx: number, cy: number, r: number): string {
+function face(f: Face, cx: number, cy: number, r: number, edge = false): string {
   const color = f.color ?? colorFor(f.name)
   const classes = ['face', f.active ? 'breathe' : ''].filter(Boolean).join(' ')
   const letters = f.label ?? initials(f.name)
   const size = letters.length > 1 ? r * 0.8 : r * 0.98
   const dot = f.online
-    ? `<circle class="dot" cx="${cx}" cy="${cy}" r="${r}" fill="${color}"/>`
+    ? `<circle class="dot${edge ? ' edge' : ''}" cx="${cx}" cy="${cy}" r="${r}" fill="${color}"${edge ? ' stroke-width="1.5"' : ''}/>`
     : `<circle class="dot" cx="${cx}" cy="${cy}" r="${r - 0.9}" fill="none" stroke="${color}" stroke-width="1.8"/>`
   return `<g class="${classes}"><title>${esc(f.name)}${f.note ? ` · ${esc(f.note)}` : ''}</title>${dot}<text x="${cx}" y="${cy}" dy=".36em" text-anchor="middle" font-family='${FONT}' font-size="${size.toFixed(1)}" font-weight="650" fill="${f.online ? '#fff' : color}">${esc(letters)}</text></g>`
 }
@@ -132,7 +136,7 @@ export function stackSvg(faces: readonly Face[], opts: { size?: number; max?: nu
   const width = Math.ceil(r * 2 + 2 + Math.max(0, shown.length - 1) * step + (extra > 0 ? 24 : 0))
   // Later faces under earlier ones: the host, first, sits on top.
   const dots = shown
-    .map((f, i) => face(f, 1 + r + i * step, cy, r))
+    .map((f, i) => face(f, 1 + r + i * step, cy, r, true))
     .reverse()
     .join('')
   const more =
@@ -143,6 +147,12 @@ export function stackSvg(faces: readonly Face[], opts: { size?: number; max?: nu
     source: `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${size}" viewBox="0 0 ${width} ${size}">${MOTION}${dots}${more}</svg>`,
     width,
   }
+}
+
+/** Live: Claude's orange dot, a ring around it that widens and fades (still under reduced motion). */
+export function liveSvg(color = '#d97757', size = 12): string {
+  const c = size / 2
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}">${MOTION}<circle class="ring" cx="${c}" cy="${c}" r="${c - 1}" fill="none" stroke="${color}" stroke-width="1.2"/><circle cx="${c}" cy="${c}" r="${c / 2.4}" fill="${color}"/></svg>`
 }
 
 /** Clover, Paradigm's cat, for the one empty screen it brightens. */

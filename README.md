@@ -49,7 +49,7 @@ Try this with a new session in a scratch project:
 
 Sharing a session with existing history asks whether to include it. Choose **Only from now on** or `/share-session new` to leave earlier messages out. Anything you share passes through the room server; [read what it sees and keeps](#privacy-and-the-public-server).
 
-Use `/room` for people, side chat and host controls. Use `/team` for optional teams. For an explicitly shared local dev server, run `/share-preview <port>` on the host; guests press **Open** in the Room. Local TCP previews require Node 20+, POSIX `sh` and the host's live `curl` stream. [Commands and supported previews](docs/guide.md#use-it).
+Use `/room` for people, the timeline of turns, the files Claude changed, side chat and host controls, and `/who` for who's here. In the transcript, react to Claude's replies, see who has seen each, and `@name` a teammate. Use `/team` for optional teams. For an explicitly shared local dev server, run `/share-preview <port>` on the host; guests press **Open** in the Room. Local TCP previews require Node 20+, POSIX `sh` and the host's live `curl` stream. [Commands and supported previews](docs/guide.md#use-it).
 
 ## Privacy and the public server
 

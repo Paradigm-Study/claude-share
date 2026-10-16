@@ -103,9 +103,23 @@ export const TCP_LIMITS = Object.freeze({
 
 // What each seat may post. `chat` is the room's side channel: people talk,
 // Claude never reads it. `policy` is the host's say over what guests may do;
-// `declined` answers a guest prompt the host's policy turned away.
-const HOST_TYPES = new Set(['row', 'delta', 'turn', 'approval', 'title', 'policy', 'declined', 'chat', 'artifact'])
-const GUEST_TYPES = new Set(['prompt', 'stop', 'chat'])
+// `declined` answers a guest prompt the host's policy turned away. `react` is
+// someone's reaction to one of Claude's replies, and `seen` the replies that
+// came on someone's screen, each filed under the reply's key.
+const HOST_TYPES = new Set(['row', 'delta', 'turn', 'approval', 'title', 'policy', 'declined', 'chat', 'artifact', 'react', 'seen'])
+const GUEST_TYPES = new Set(['prompt', 'stop', 'chat', 'react', 'seen'])
+const REACTIONS = new Set(['👍', '🎉', '👀'])
+const REPLY_KEY = /^[a-z0-9]{1,16}\.\d{1,5}$/
+
+// A reaction or a seen list as the room keeps it, or null when it isn't one.
+function tidyMark(type, body) {
+  if (type === 'react') {
+    if (!REPLY_KEY.test(String(body?.key)) || !REACTIONS.has(body?.emoji)) return null
+    return { key: body.key, emoji: body.emoji, on: body.on !== false }
+  }
+  const keys = Array.isArray(body?.keys) ? body.keys.filter(k => REPLY_KEY.test(String(k))).slice(0, 100) : []
+  return keys.length ? { keys } : null
+}
 const LIVE_TYPES = new Set(['delta'])
 
 export const ROOM_ID = /^[A-Za-z0-9_-]{16,64}$/
@@ -747,6 +761,12 @@ async function handleRoom(room, req, rest, now, origin, ctx) {
       if (item.type === 'title' && typeof item.body?.title === 'string') {
         room.title = item.body.title.slice(0, 120)
       }
+      if (item.type === 'react' || item.type === 'seen') {
+        const mark = tidyMark(item.type, item.body)
+        if (mark) room.append(from, item.type, mark, now)
+        if (mark) changed = true
+        continue
+      }
       room.append(from, item.type, item.body, now)
       if (!LIVE_TYPES.has(item.type)) changed = true
     }
@@ -1064,7 +1084,7 @@ section.more { padding:0 0 72px; }
   <section class="more prose" id="privacy">
     <h2>What this server sees and keeps</h2>
     <ul>
-      <li><b>What passes through:</b> while a session is shared, its prompts and the files people attach to them, Claude's replies and, while someone else is in the room, its thinking as it happens (passed along, never kept), the tools it runs with the first lines of their results and the pictures in them (screenshots, images it opens), the side chat, and any files or local previews the host's Claude shows. Sharing a session that already has history asks first whether to include it.</li>
+      <li><b>What passes through:</b> while a session is shared, its prompts and the files people attach to them, Claude's replies and, while someone else is in the room, its thinking as it happens (passed along, never kept), the tools it runs with the first lines of their results and the pictures in them (screenshots, images it opens), the side chat, people's reactions to Claude's replies and which replies each person has had on screen, and any files or local previews the host's Claude shows. Sharing a session that already has history asks first whether to include it.</li>
       <li><b>How long:</b> a room and everything in it is deleted 24 hours after the host stops sharing or was last seen. For TCP previews the room keeps grants (which preview and seat, and when they expire) and coarse connection and byte-budget counters until the room is deleted; expired or revoked grants are removed sooner. Application TCP bytes are relayed, never stored. There are no analytics, and no request logs kept.</li>
       <li><b>Accounts, only for teams:</b> sharing and joining need none. If you sign in (GitHub or Google) to use teams, the server keeps your name, username, verified email, which GitHub organizations you're in, the teams you're in and their settings, which open sessions are shared with each team, and invites to a session (who invited whom, until it's joined, dismissed, ends, or 12 hours pass). Sign-ins are kept as hashes, never the token itself. They stay until you delete your account (<code>/team delete-account</code>), which removes them at once. Signed in, a session you share or join also knows your account for as long as it lasts, so your sessions count as one person.</li>
       <li><b>Who can see it:</b> anyone with the room's link, or for a session shared with a team that keeps it to its people, only the people in that team. Links are long and random; forward one only to people you'd hand the session to. Content is encrypted in transit, not end to end: the server can read what passes through it.</li>

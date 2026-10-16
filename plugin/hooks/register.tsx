@@ -18,8 +18,11 @@
 import { atom, memberOf, read, update } from 'claude-code'
 import type { Elements, EngineInterface, HookStream, ProcessSpawnChunk, ProcessSpawnResult, Register, RenderChildren, RenderSurface, Timer, TurnStepChunk } from 'claude-code'
 
-import type { ShareAccount, ShareActivity, ShareChat, ShareDoing, ShareFileMeta, ShareInvite, ShareLocalPreview, ShareMode, SharePerson, SharePolicy, ShareRoom, ShareShown, ShareTeam, ShareTeams, ShareTeamSession, ShareWorking } from '../types'
-import { BAD, GOOD, ago, avatarSvg, cloverSvg, colorFor, colorsFor, labelsFor, stackSvg, toolGlyph } from './look'
+import type { ShareAccount, ShareActivity, ShareChange, ShareChat, ShareDoing, ShareFileMeta, ShareInvite, ShareLocalPreview, ShareMode, SharePerson, SharePolicy, SharePrefs, ShareRoom, ShareShown, ShareTeam, ShareTeams, ShareTeamSession, ShareTurn, ShareWorking } from '../types'
+import { fit, isModern } from './fit'
+import { BAD, GOOD, ago, avatarSvg, cloverSvg, colorFor, colorsFor, labelsFor, liveSvg, stackSvg, toolGlyph } from './look'
+import { REACTS, diffOf, mentionsOf, patchOf, replyKey, took, writeOf } from './room'
+import type { Patch } from './room'
 import type { Face } from './look'
 import { attachmentsOf, delivered, rowsFromMessage, rowsToMarkdown, splitSpeaker, summarizeTool } from './rows'
 import type { Media, RoomImage, Row } from './rows'
@@ -67,6 +70,11 @@ const READ_ONLY = new Set([
 ])
 
 const DEFAULT_POLICY: SharePolicy = { prompts: 'everyone', approvals: 'edits', files: 'on' }
+// What a person hears and sees of the room: a ping when mentioned and a
+// chime when their prompt starts, no voice, no status line, until they choose.
+const DEFAULT_PREFS: SharePrefs = { sounds: 'mentions', voice: false, statusLine: false }
+const PREFS_KEY = 'prefs' // in $.store: the same for every session of this person
+type RoomTab = 'people' | 'chat' | 'timeline' | 'changes' | 'shown' | 'settings'
 
 const modeA = atom({ plugin: 'shared-session', key: 'mode' } as const, 'idle' as ShareMode)
 const roomA = atom({ plugin: 'shared-session', key: 'room' } as const, null as ShareRoom | null)
@@ -99,7 +107,16 @@ const teamsA = atom({ plugin: 'shared-session', key: 'teams' } as const, NO_TEAM
 const invitesA = atom({ plugin: 'shared-session', key: 'invites' } as const, [] as ShareInvite[])
 const invitedA = atom({ plugin: 'shared-session', key: 'invited' } as const, {} as Record<string, number>)
 const pinRefusedA = atom({ plugin: 'shared-session', key: 'pinRefused' } as const, false)
-const roomTabA = atom({ plugin: 'shared-session', key: 'roomTab' } as const, 'people' as 'people' | 'chat' | 'shown' | 'settings')
+const roomTabA = atom({ plugin: 'shared-session', key: 'roomTab' } as const, 'people' as RoomTab)
+const turnsA = atom({ plugin: 'shared-session', key: 'turns' } as const, [] as ShareTurn[])
+const changesA = atom({ plugin: 'shared-session', key: 'changes' } as const, [] as ShareChange[])
+const reactionsA = atom({ plugin: 'shared-session', key: 'reactions' } as const, {} as Record<string, Record<string, string[]>>)
+const seenA = atom({ plugin: 'shared-session', key: 'seen' } as const, {} as Record<string, string[]>)
+const replyForA = atom({ plugin: 'shared-session', key: 'replyFor' } as const, {} as Record<string, string>)
+const callsA = atom({ plugin: 'shared-session', key: 'calls' } as const, 0)
+const copiedA = atom({ plugin: 'shared-session', key: 'copied' } as const, false)
+const changeOpenA = atom({ plugin: 'shared-session', key: 'changeOpen' } as const, null as string | null)
+const prefsA = atom({ plugin: 'shared-session', key: 'prefs' } as const, DEFAULT_PREFS)
 const teamTabA = atom({ plugin: 'shared-session', key: 'teamTab' } as const, 'live' as 'live' | 'people' | 'settings')
 
 // Context a host app puts into the person's message (Claude Desktop adds a
@@ -531,6 +548,25 @@ let streamEnded = false
 const streamed: ServerEvent[] = []
 const feedWaiters = new Set<() => void>()
 let roomOpen = false
+// The engine draws the type scale and named spacing (2.1.299+): read from
+// AI_AGENT at session.start; until then, drawings fit the older engine.
+let modern = false
+// The room's extras, kept as events arrive: whose turn the rows belong to,
+// each call made (by id) until its result says what it changed, and the
+// count of calls a history replay found (written once it's done).
+let turnBy: string | null = null
+const openCalls = new Map<string, { tool: string; path: string; input?: Record<string, unknown> }>()
+let callsPending = 0
+// Host: each edit's hunks as the tool reported them, for its result row.
+const patches = new Map<string, Patch>()
+// Guest: replies that came on screen, to say so to the room (every 4 s).
+const pendingSeen = new Set<string>()
+const sentSeen = new Set<string>()
+let seenTimer: Timer | null = null
+// The prompts drawn in this transcript, by their text: where the Timeline scrolls.
+const promptRows = new Map<string, string>()
+// Who the last turn was for: the terminal's closing line says so.
+let lastTurnFor: string | null = null
 
 type LocalPreviewRun = {
   room: string
@@ -1152,7 +1188,10 @@ async function absorb($: $, room: ShareRoom, mode: ShareMode, event: ServerEvent
       // transcript doesn't.
       const back = (lostAt.get(who) ?? -Infinity) > event.ts - 30 * 60_000
       lostAt.delete(who)
-      if (live && !mine && !back) $.ui.log(`${who} joined`)
+      if (live && !mine && !back) {
+        $.ui.log(`${who} joined`)
+        void cue($, 'join', `${who} joined your session`)
+      }
       break
     }
     case 'leave': {
@@ -1178,6 +1217,7 @@ async function absorb($: $, room: ShareRoom, mode: ShareMode, event: ServerEvent
       break
     case 'chat':
       if (typeof body.text === 'string') {
+        if (live && !mine) await noteMention($, room, who, body.text, 'chat')
         const line: ShareChat = { ts: event.ts, who, seat: event.from.seat, text: body.text }
         await update($, chatA, list => [...list, line].slice(-100))
         // Unread until the chat page shows it; a toast when the Room is shut.
@@ -1204,6 +1244,48 @@ async function absorb($: $, room: ShareRoom, mode: ShareMode, event: ServerEvent
       await note({ ts: event.ts, who: room.host, kind: 'shown', text: shown.name })
       break
     }
+    case 'turn':
+      if (body.state === 'start') {
+        const by = typeof body.by === 'string' ? body.by : room.host
+        const prompt = typeof body.prompt === 'string' ? body.prompt : ''
+        turnBy = by
+        const turn: ShareTurn = { id: String(body.turnId ?? event.seq), who: by, prompt: prompt.replace(/\s+/g, ' ').trim().slice(0, 400), at: event.ts }
+        await update($, turnsA, list => [...list.filter(t => t.id !== turn.id), turn].slice(-200))
+        if (live && !mine && prompt) await noteMention($, room, by, prompt, 'prompt')
+        // A guest's own prompt starting on the host's Claude.
+        if (live && mode === 'guest' && by === (await meIn($, room))) void cue($, 'turn')
+      } else if (body.state === 'end') {
+        const id = String(body.turnId ?? '')
+        lastTurnFor = turnBy
+        turnBy = null
+        await update($, turnsA, list => list.map(t => (t.id === id && t.ms === undefined ? { ...t, ms: typeof body.durationMs === 'number' ? body.durationMs : Math.max(0, event.ts - t.at) } : t)))
+      }
+      break
+    case 'row':
+      await noteRow($, room, body as unknown as Row, event.ts)
+      break
+    case 'react':
+      if (typeof body.key === 'string' && typeof body.emoji === 'string' && (REACTS as readonly string[]).includes(body.emoji)) {
+        const key = body.key
+        const emoji = body.emoji
+        const on = body.on !== false
+        await update($, reactionsA, all => {
+          const now = all[key]?.[emoji] ?? []
+          const next = on ? [...new Set([...now, who])] : now.filter(n => n !== who)
+          return { ...all, [key]: { ...all[key], [emoji]: next } }
+        })
+      }
+      break
+    case 'seen':
+      if (Array.isArray(body.keys)) {
+        const keys = body.keys.filter((k): k is string => typeof k === 'string').slice(0, 200)
+        await update($, seenA, all => {
+          const out = { ...all }
+          for (const k of keys) out[k] = [...new Set([...(out[k] ?? []), who])]
+          return out
+        })
+      }
+      break
     case 'preview':
       if (body.state === 'closed' && typeof body.pid === 'string') {
         const pid = body.pid
@@ -1243,6 +1325,156 @@ function shownOf(event: ServerEvent): ShareShown | null {
     ...(kind === 'preview' && body.tcp === true ? { tcp: true } : {}),
     url: typeof body.url === 'string' ? body.url : undefined,
   }
+}
+
+// ---------------------------------------------------------------------------
+// The room beside the transcript: every turn, the files Claude changed,
+// reactions and who saw each reply, mentions, and what each person hears.
+
+// The name this session goes by in the room.
+async function meIn($: $, room: ShareRoom): Promise<string> {
+  const mine = (await read($, peopleA)).find(p => isMe(p, room.seat))
+  return mine?.name ?? (room.seat === 'host' ? room.host : await whoami($))
+}
+
+// A sound for something that concerns this person, as their setting allows:
+// a mention or their own prompt starting under "mentions", joins too under
+// "all"; and, with the voice on, the moment said out loud.
+async function prefsOf($: $): Promise<SharePrefs> {
+  const kept = (await $.store.get(PREFS_KEY).catch(() => undefined)) as Partial<SharePrefs> | undefined
+  return { ...DEFAULT_PREFS, ...(kept && typeof kept === 'object' ? kept : {}) }
+}
+
+async function cue($: $, kind: 'join' | 'mention' | 'turn', say?: string) {
+  const prefs = await prefsOf($)
+  if (prefs.sounds === 'all' || (prefs.sounds === 'mentions' && kind !== 'join')) void $.audio.play({ asset: `sounds/${kind}.wav` }).catch(() => {})
+  if (prefs.voice && say) void $.audio.speak(say).catch(() => {})
+}
+
+// Someone's prompt or chat line that @mentions this person: a toast, a ping,
+// and a reply begun in their empty prompt box.
+async function noteMention($: $, room: ShareRoom, who: string, text: string, where: 'prompt' | 'chat') {
+  const me = await meIn($, room)
+  if (who === me || !mentionsOf(text, [me]).length) return
+  const said = text.replace(/\s+/g, ' ').trim()
+  $.ui.toast(`${who} mentioned you${where === 'chat' ? ' in the chat' : ''}: ${said.slice(0, 120)}${said.length > 120 ? '…' : ''}`)
+  void cue($, 'mention', `${who} mentioned you`)
+  void $.prompt.suggest({ text: `@${who} ` }).catch(() => {})
+  nudgeSidebar($)
+}
+
+const FILE_TOOLS = new Set(['Edit', 'MultiEdit', 'Write'])
+
+// Where a call's file sits, as the room names it: the row's own words for an
+// edit or a write (relative to the host's project), else its path's tail.
+function changedPath(tool: string, text: string, input?: Record<string, unknown>): string {
+  if ((tool === 'Edit' || tool === 'Write') && text) return text
+  const path = typeof input?.file_path === 'string' ? input.file_path : ''
+  return path.split('/').slice(-3).join('/') || text
+}
+
+// What a file call changed: the host's hunks when they came with its result,
+// else worked out from the call's own input.
+function changeOf(call: { tool: string; input?: Record<string, unknown> }, patch?: string): Patch | null {
+  if (patch) {
+    const lines = patch.split('\n')
+    return { patch, added: lines.filter(l => l.startsWith('+')).length, removed: lines.filter(l => l.startsWith('-')).length }
+  }
+  const i = call.input ?? {}
+  const str = (v: unknown) => (typeof v === 'string' ? v : '')
+  if (call.tool === 'Write' && typeof i.content === 'string') return writeOf(i.content)
+  if (call.tool === 'Edit' && typeof i.old_string === 'string') return diffOf(str(i.old_string), str(i.new_string))
+  if (call.tool === 'MultiEdit' && Array.isArray(i.edits)) {
+    const parts = (i.edits as { old_string?: unknown; new_string?: unknown }[]).map(x => diffOf(str(x.old_string), str(x.new_string)))
+    if (!parts.length) return null
+    return { patch: parts.map(x => x.patch).join('\n'), added: parts.reduce((n, x) => n + x.added, 0), removed: parts.reduce((n, x) => n + x.removed, 0) }
+  }
+  return null
+}
+
+// A file's patches, newest first, held to what the Changes page draws (cut
+// at a hunk's start so it still reads as hunks).
+function joinPatches(newer: string, older: string): string {
+  const all = `${newer}\n${older}`.split('\n')
+  if (all.join('\n').length <= 16_000) return all.join('\n')
+  let chars = 0
+  let end = 0
+  for (let k = 0; k < all.length; k++) {
+    chars += all[k]!.length + 1
+    if (chars > 16_000) break
+    if (all[k]!.startsWith('@@')) end = k
+  }
+  return all.slice(0, end || all.length).join('\n')
+}
+
+// A row of the host's transcript: a call counted, and a call that changed a
+// file filed on the Changes page, for whoever's turn it was.
+async function noteRow($: $, room: ShareRoom, row: Row, ts: number) {
+  if (row.kind === 'tool' && row.id) {
+    callsPending += 1 // written once per page (flushCalls)
+    if (row.tool && FILE_TOOLS.has(row.tool)) {
+      openCalls.set(row.id, { tool: row.tool, path: changedPath(row.tool, row.text, row.input), input: row.input })
+      if (openCalls.size > 200) openCalls.delete(openCalls.keys().next().value as string)
+    }
+    return
+  }
+  if (row.kind !== 'result' || !row.id) return
+  const call = openCalls.get(row.id)
+  if (!call) return
+  openCalls.delete(row.id)
+  if (row.isError) return
+  const change = changeOf(call, row.patch)
+  if (!change || (!change.added && !change.removed)) return
+  const who = turnBy ?? room.host
+  await update($, changesA, list => {
+    const was = list.find(c => c.path === call.path)
+    const merged: ShareChange = was
+      ? { path: call.path, who, added: was.added + change.added, removed: was.removed + change.removed, patch: joinPatches(change.patch, was.patch), at: ts }
+      : { path: call.path, who, ...change, at: ts }
+    return [...list.filter(c => c.path !== call.path), merged].slice(-40)
+  })
+}
+
+// The calls a page of events (or a history replay) counted, written at once.
+async function flushCalls($: $) {
+  if (!callsPending) return
+  const n = callsPending
+  callsPending = 0
+  await update($, callsA, c => c + n)
+}
+
+// Guest: the replies that came on screen since the last time, said to the room.
+async function flushSeen($: $) {
+  if (!pendingSeen.size || (await read($, modeA)) !== 'guest') return
+  const keys = [...pendingSeen].slice(0, 100)
+  for (const k of keys) {
+    pendingSeen.delete(k)
+    sentSeen.add(k)
+  }
+  send($, 'seen', { keys })
+}
+
+// The status line under the prompt, for whoever turned it on.
+let statusShown = false
+async function refreshStatus($: $) {
+  const prefs = await prefsOf($)
+  const v = await view($)
+  if (!prefs.statusLine || v.mode === 'idle' || !v.room) {
+    if (statusShown) $.ui.status(undefined)
+    statusShown = false
+    return
+  }
+  statusShown = true
+  const here = [...new Set(v.everyone.filter(p => p.online).map(p => p.name))]
+  const w = v.working
+  $.ui.status(`● Live · ${v.mode === 'host' ? 'sharing' : `${v.room.host}'s session`} · ${listNames(here)} here${w ? ` · Claude for ${w.by}` : ''}`)
+}
+
+async function setPrefs($: $, change: Partial<SharePrefs>) {
+  const next = { ...(await prefsOf($)), ...change }
+  await update($, prefsA, () => next)
+  await $.store.set(PREFS_KEY, next).catch(() => {})
+  await refreshStatus($)
 }
 
 // The update command (or either half of it), as the "is out" line gives it.
@@ -1401,6 +1633,8 @@ async function receive($: $, mode: ShareMode, room: ShareRoom, page: EventsPage)
     }
   }
   await update($, roomA, r => (r && r.id === room.id ? { ...r, seq: Math.max(r.seq, seq) } : r))
+  await flushCalls($)
+  await refreshStatus($)
   if (mode === 'guest') scheduleRides($)
 }
 
@@ -1447,6 +1681,22 @@ async function reset($: $, opts: { keepSidebar?: boolean } = {}) {
   await update($, confirmingA, () => null)
   bandAnswer?.('Decline')
   await update($, approvingA, () => null)
+  await update($, turnsA, () => [])
+  await update($, changesA, () => [])
+  await update($, reactionsA, () => ({}))
+  await update($, seenA, () => ({}))
+  await update($, replyForA, () => ({}))
+  await update($, callsA, () => 0)
+  turnBy = null
+  openCalls.clear()
+  callsPending = 0
+  patches.clear()
+  pendingSeen.clear()
+  sentSeen.clear()
+  seenTimer?.cancel()
+  seenTimer = null
+  lastTurnFor = null
+  await refreshStatus($)
   savedNames.clear()
 }
 
@@ -2139,6 +2389,7 @@ async function resumeJoined($: $) {
   if (people) await update($, peopleA, () => people)
   await readyReplay($)
   for (const event of missed) await absorb($, room, 'guest', event, false)
+  await flushCalls($)
   const starts = missed.filter(e => e.type === 'turn' && e.body.state === 'start')
   const ends = new Set(missed.filter(e => e.type === 'turn' && e.body.state === 'end').map(e => e.body.turnId))
   const running = starts.filter(e => !ends.has(e.body.turnId)).at(-1)
@@ -2209,6 +2460,7 @@ async function resumeHosting($: $) {
       }
       await absorb($, room, 'host', event, false)
     }
+    await flushCalls($)
   }
   startFeed($)
   $.ui.log(`Still sharing this session: ${room.url}`)
@@ -2369,6 +2621,7 @@ async function join($: $, server: string, id: string) {
     await update($, workingA, () => null)
     // The room as it stands: its timeline, its chat, the host's policy.
     for (const event of history) await absorb($, room, 'guest', event, false)
+    await flushCalls($)
 
     // A turn still running on the host plays out live; everything before it is
     // shown as it was, one exchange per prompt.
@@ -3576,7 +3829,7 @@ async function postChat($: $, text: string) {
   send($, 'chat', { text: line.slice(0, 2000) })
 }
 
-async function openRoom($: $, page?: 'people' | 'chat' | 'shown' | 'settings') {
+async function openRoom($: $, page?: RoomTab) {
   roomOpen = true
   // On the page asked for; else, with messages waiting, on the chat.
   if (page) await update($, roomTabA, () => page)
@@ -3824,6 +4077,8 @@ type View = {
 }
 
 async function view($: $): Promise<View> {
+  // What the engine draws, before anything is drawn for it.
+  modern = isModern(await $.env.get('AI_AGENT'))
   const room = await read($, roomA)
   return {
     mode: await read($, modeA),
@@ -3982,6 +4237,20 @@ const svgOf = (el: UI, surface: RenderSurface) => (surface === 'desktop' && 'Svg
 // Fields and pickers: every surface but mobile draws them.
 const inputOf = (el: UI) => ('Input' in el ? el.Input : undefined)
 const selectOf = (el: UI) => ('Select' in el ? el.Select : undefined)
+// A region that moves on the surface's own clock: the terminal and the desktop.
+const clientOf = (el: UI) => ('Client' in el ? el.Client : undefined)
+
+// The Room's Copy says Copied for a moment after it worked.
+async function flashCopied($: $) {
+  await update($, copiedA, () => true)
+  $.clock.after(1_500, () => void update($, copiedA, () => false))
+}
+
+// A teammate's name put in the prompt box, to mention them.
+async function mention($: $, name: string) {
+  const filled = await $.prompt.fill({ text: `@${name} `, mode: 'insert' }).catch(() => null)
+  if (!filled?.isFilled) $.ui.toast(`Type @${name} in your prompt to mention them`)
+}
 
 // ---------------------------------------------------------------------------
 // The pieces every surface is built from: a person's face and name in their
@@ -4001,22 +4270,6 @@ function faceOf(el: UI, surface: RenderSurface, f: Face, size = 24) {
   const { Text } = el
   const color = f.color ?? colorFor(f.name)
   return Svg ? <Svg source={avatarSvg({ ...f, color }, size)} alt={f.name} width={size} height={size} /> : <Text color={color}>{f.online ? '●' : '○'}</Text>
-}
-
-// What's going on, as a chip: Live in Claude's orange, Reconnecting in the
-// warning color. Filled on the desktop; a colored mark and word in a terminal.
-function chip(el: UI, surface: RenderSurface, live: boolean) {
-  const { Box, Text } = el
-  const tone = live ? 'claude' : 'warning'
-  const label = live ? 'Live' : 'Reconnecting'
-  if (surface !== 'desktop') return <Text bold color={tone}>{`● ${label}`}</Text>
-  return (
-    <Box backgroundColor={tone} borderStyle="round" borderColor={tone} paddingX={1} flexShrink={0}>
-      <Text bold color={live ? '#ffffff' : '#1f1e1d'}>
-        {label}
-      </Text>
-    </Box>
-  )
 }
 
 // A panel's pages, side by side: the one showing drawn as the pressed
@@ -4869,6 +5122,10 @@ export const register: Register = (on, options) => {
 
   on('session.start', async ($, e, next) => {
     const started = await next(e)
+    // The engine's version says which drawings it takes (fit.ts).
+    modern = isModern(await $.env.get('AI_AGENT'))
+    const prefs = (await $.store.get(PREFS_KEY).catch(() => undefined)) as Partial<SharePrefs> | undefined
+    if (prefs && typeof prefs === 'object') await update($, prefsA, () => ({ ...DEFAULT_PREFS, ...prefs }))
     // Not /share: Claude has its own. Every name here is the plugin's alone.
     await $.command.register({ name: 'share-session', description: 'Share this session (with your team when signed in): /share-session [all | new] [link]' })
     await $.command.register({ name: 'team', description: "Your team's shared sessions, one click to join: /team [signin | create <name> | invite | signout]" })
@@ -4877,6 +5134,7 @@ export const register: Register = (on, options) => {
     await $.command.register({ name: 'room', description: 'Open the Room: who is here, activity, side chat' })
     await $.command.register({ name: 'share-file', description: 'Show a file to everyone in the shared session: /share-file <path>' })
     await $.command.register({ name: 'share-preview', description: "Let teammates open this machine's localhost: /share-preview <port> [title]" })
+    await $.command.register({ name: 'who', description: "Who's in this shared session and what each is doing" })
     // Do this before readUpdates can move the next load to another identity.
     await migrateRoomCheckpoints($).catch(error => $.ui.log(`Couldn't preserve saved shared sessions: ${String((error as Error)?.message ?? error)}`))
     void readUpdates($)
@@ -4915,6 +5173,7 @@ export const register: Register = (on, options) => {
     if (!(await read($, roomA))) await resumeJoined($).catch(error => $.ui.log(`Couldn't get back into the shared session: ${String(error?.message ?? error)}`))
     void restoreLocalPreviews($).catch(() => {})
     void holdRoom($).catch(() => {})
+    void refreshStatus($).catch(() => {})
     $.clock.after(2_000, () => void repinMarked($).catch(() => {}))
     return started
   })
@@ -4955,6 +5214,33 @@ export const register: Register = (on, options) => {
     if ((await read($, modeA)) === 'idle') return { text: 'This session is not shared. Press Share above the prompt, or type /share-session.' }
     await openRoom($)
     return { text: 'Opened the Room.' }
+  })
+
+  // Who's here, as words the model can read too; the transcript draws it as a
+  // card (the CommandOutput hook below).
+  on('command.run', { command: 'who' }, async $ => {
+    const v = await view($)
+    if (v.mode === 'idle' || !v.room) return { text: 'This session is not shared. Press Share above the prompt, or type /share-session.' }
+    const people = faces(v)
+    const here = people.filter(p => p.online).map(p => p.name)
+    const away = people.filter(p => !p.online).map(p => p.name)
+    const w = v.working
+    return {
+      text: `${v.mode === 'host' ? 'Sharing this session' : `In ${v.room.host}'s session`}: ${listNames(here)} here${away.length ? `; ${listNames(away)} away` : ''}.${w ? ` Claude is working for ${w.by}.` : ''}`,
+    }
+  })
+
+  // What a Client region posts: a turn picked on the Timeline scrolls the
+  // transcript to its prompt (the person's own press, so the engine lets it).
+  on('ui.message', async ($, e, next) => {
+    const data = (e.data ?? {}) as { turn?: unknown }
+    if (e.module.endsWith('timeline.tsx') && typeof data.turn === 'number') {
+      const turn = (await read($, turnsA)).slice(-60)[data.turn]
+      const id = turn ? (promptRows.get(turn.prompt) ?? [...promptRows.entries()].find(([text]) => text.startsWith(turn.prompt.slice(0, 60)))?.[1]) : undefined
+      const moved = id ? await $.ui.scroll({ to: { requestId: id }, block: 'start' }).catch(() => ({ deny: 'no' })) : { deny: 'not drawn here' }
+      if (moved.deny && turn) $.ui.toast(`${turn.who}: “${turn.prompt.slice(0, 100)}”`)
+    }
+    return next(e)
   })
 
   on('command.run', { command: 'share-file' }, async ($, e) => {
@@ -5110,6 +5396,7 @@ export const register: Register = (on, options) => {
     const relayed = guest ? delivered(guest.text) : null
     const guestPrompt = guest ? (relayed ? `(from ${relayed.from}) ${relayed.text}` : guest.text) : undefined
     send($, 'turn', { state: 'start', turnId: e.turnId, by: sent?.from ?? by, prompt: guestPrompt ?? sent?.text ?? (said || startedBy(e.text)), pid: guest?.pid ?? '' })
+    void refreshStatus($)
     return next(e)
   })
 
@@ -5123,8 +5410,10 @@ export const register: Register = (on, options) => {
     if (e.agentId !== undefined) return next(e)
     const mode = await read($, modeA)
     if (mode === 'host') {
+      lastTurnFor = (await read($, workingA))?.by ?? lastTurnFor
       await update($, workingA, w => (w?.turnId === e.turnId ? null : w))
       send($, 'turn', { state: 'end', turnId: e.turnId, aborted: e.isAborted, durationMs: e.durationMs, reason: e.reason })
+      void refreshStatus($)
     } else {
       const ride = ridesByTurn.get(e.turnId)
       ridesInStep.delete(e.turnId)
@@ -5414,7 +5703,16 @@ export const register: Register = (on, options) => {
     }
     // A prompt typed mid-turn is raised once as it's queued (`queue`, from
     // 2.1.300; never a row of the conversation) and again when it goes in.
-    if (e.agentId !== undefined || (e.door as string) === 'queue' || (await read($, modeA)) !== 'host') return stored
+    if (e.agentId !== undefined || (e.door as string) === 'queue') return stored
+    const mode = await read($, modeA)
+    // Who each of Claude's replies was for, by its message id: the line over
+    // it in the transcript says so, for the host and in a guest's replay.
+    const message = (stored.message ?? e.message) as { type?: string; role?: string }
+    if (mode !== 'idle' && (message.role ?? message.type) === 'assistant') {
+      const working = await read($, workingA)
+      if (working) await update($, replyForA, all => Object.fromEntries(Object.entries({ ...all, [e.uuid]: working.by }).slice(-400)))
+    }
+    if (mode !== 'host') return stored
     const room = await read($, roomA)
     const host = room?.host ?? 'host'
     const fromGuest = e.origin.kind === 'plugin' && 'name' in e.origin && e.origin.name === PLUGIN
@@ -5423,13 +5721,17 @@ export const register: Register = (on, options) => {
     for (const row of rowsFromMessage(stored.message ?? e.message, typed ? host : null, cwd)) {
       // A guest's prompt reached the model as "Name: text"; show it as theirs.
       const spoken = fromGuest && row.kind === 'user' ? splitSpeaker(row.text) : null
-      sendRow($, spoken ? { ...row, who: spoken.who, text: spoken.text } : row)
+      // An edit's result carries its hunks as the tool reported them.
+      const patch = row.kind === 'result' && row.id ? patches.get(row.id) : undefined
+      if (patch && row.id) patches.delete(row.id)
+      sendRow($, spoken ? { ...row, who: spoken.who, text: spoken.text } : patch ? { ...row, patch: patch.patch } : row)
       if (row.kind === 'assistant' && LOCAL_URL.test(row.text)) void shareLocal($, localPages(row.text))
     }
     return stored
   })
 
-  // Host: remember whose turn each tool call ran for, so its row can say so.
+  // Host: remember whose turn each tool call ran for, so its row can say so,
+  // and say it under the approval dialog with who's watching.
   on('tool.call', async ($, e, next) => {
     if (e.agentId === undefined && (await read($, modeA)) === 'host') {
       const working = await read($, workingA)
@@ -5440,8 +5742,25 @@ export const register: Register = (on, options) => {
           return Object.fromEntries(entries.slice(-300))
         })
       }
+      const room = await read($, roomA)
+      const watching = [...new Set((await read($, peopleA)).filter(p => p.online && p.role === 'guest' && !(room && isMe(p, room.seat))).map(p => p.name))]
+      const line = working?.byGuest ? `${working.by}'s prompt asked for this${watching.length ? ` · ${listNames(watching)} watching` : ''}` : watching.length ? `${listNames(watching)} ${watching.length === 1 ? 'is' : 'are'} watching this session` : ''
+      if (line) {
+        try {
+          $.ui.notice(e.tool_use_id, line)
+        } catch {}
+      }
     }
     const result = await next(e)
+    // Host: an edit's hunks as the tool reported them, for its row in the room.
+    if (e.agentId === undefined && FILE_TOOLS.has(e.tool) && result && typeof result === 'object' && 'result' in result && (await read($, modeA)) === 'host') {
+      const out = (result as { result?: { structuredPatch?: unknown; type?: unknown; content?: unknown } }).result
+      const patch = patchOf(out?.structuredPatch) ?? (out?.type === 'create' && typeof out.content === 'string' ? writeOf(out.content) : null)
+      if (patch) {
+        patches.set(e.tool_use_id, patch)
+        if (patches.size > 100) patches.delete(patches.keys().next().value as string)
+      }
+    }
     if (result && typeof result === 'object' && 'deny' in result && typeof result.deny === 'string' && (await read($, modeA)) === 'guest') {
       refusedCalls.set(e.tool_use_id, result.deny)
     }
@@ -5571,6 +5890,7 @@ export const register: Register = (on, options) => {
     if (!('name' in origin) || (origin.name !== PLUGIN && !String(origin.name).startsWith(`${PLUGIN}@`))) return next(e)
     const said = splitSpeaker(typedText(e.props.text))
     if (!said) return next(e)
+    promptRows.set(said.text.replace(/\s+/g, ' ').trim().slice(0, 400), e.requestId)
     // A message another session sent them, passed on: its body, and whence it
     // came (its wrapper drawn as markdown would hide the first lines).
     const relayed = delivered(said.text)
@@ -5592,7 +5912,7 @@ export const register: Register = (on, options) => {
           {avatar}
           <Box flexDirection="column" flexShrink={1} minWidth={0}>
             <Box flexDirection="row" gap={1}>
-              <Text bold color={color}>
+              <Text bold color={color} hover={{ scope: `person-${said.who}`, inverse: true }}>
                 {said.who}
               </Text>
               <Text dimColor>{`relayed a message from ${relayed.from}`}</Text>
@@ -5606,13 +5926,149 @@ export const register: Register = (on, options) => {
       <Box flexDirection="row" gap={1}>
         {avatar}
         <Box flexDirection="column" flexShrink={1} minWidth={0}>
-          <Text bold color={color}>
+          <Text bold color={color} hover={{ scope: `person-${said.who}`, inverse: true }}>
             {said.who}
           </Text>
           <Markdown key="said" text={said.text} />
         </Box>
       </Box>
     )
+  })
+
+  // In a shared session, a person's own prompt: Desktop's bubble as it is,
+  // under their name in their color, which lights up with them in the Room.
+  on('ui.render', { component: 'UserMessage' }, async ($, e, next) => {
+    if (e.props.isExpanded || !GUEST_SENDS.has(e.props.origin.kind)) return next(e)
+    const v = await view($)
+    if (v.mode === 'idle' || !v.room) return next(e)
+    promptRows.set(typedText(e.props.text).replace(/\s+/g, ' ').trim().slice(0, 400), e.requestId)
+    const me = await meIn($, v.room)
+    const el = $.ui.resolve(e)
+    const { Box, Text } = el
+    const color = roomColors(v.everyone).get(me) ?? colorFor(me)
+    const native = await next(e)
+    return fit(
+      <Box key={`prompt-${e.requestId}`} flexDirection="column">
+        <Box flexDirection="row" alignItems="center" gap={1}>
+          {faceOf(el, e.surface, { name: me, online: true, color }, 16)}
+          <Text size="caption" weight="semibold" color={color} hover={{ scope: `person-${me}`, inverse: true }}>
+            {` ${me} `}
+          </Text>
+          {v.mode === 'host' ? (
+            <Text size="caption" dimColor>
+              host
+            </Text>
+          ) : null}
+        </Box>
+        {native}
+      </Box>,
+      modern,
+    )
+  })
+
+  // Claude's replies in a shared session: who the turn was for over its
+  // first block, and under each, reactions and who has seen it. A row
+  // nobody reacted to or saw shows its reactions when the reply is hovered.
+  on('ui.render', { component: 'AssistantMessage' }, async ($, e, next) => {
+    if (e.props.isSummary || !e.props.text.trim()) return next(e)
+    const v = await view($)
+    if (v.mode === 'idle' || !v.room) return next(e)
+    const key = replyKey(e.props.text)
+    // On screen here (or where the surface doesn't say): seen, said to the room.
+    if (v.mode === 'guest' && e.props.onScreen !== null && !sentSeen.has(key) && !pendingSeen.has(key)) {
+      pendingSeen.add(key)
+      seenTimer ??= $.clock.after(4_000, () => {
+        seenTimer = null
+        void flushSeen($).catch(() => {})
+      })
+    }
+    const me = await meIn($, v.room)
+    const forWho = e.props.isFirstOfReply ? (await read($, replyForA))[e.requestId] : undefined
+    const reactions = (await read($, reactionsA))[key] ?? {}
+    const seen = (await read($, seenA))[key] ?? []
+    const colors = roomColors(v.everyone, [...seen, ...Object.values(reactions).flat(), ...(forWho ? [forWho] : [])])
+    const colorOf = (name: string) => colors.get(name) ?? colorFor(name)
+    const el = $.ui.resolve(e)
+    const { Box, Text, Button } = el
+    const Svg = svgOf(el, e.surface)
+    const native = await next(e)
+    const counts = REACTS.map(r => ({ r, who: reactions[r] ?? [], mine: (reactions[r] ?? []).includes(me) }))
+    const reacted = counts.filter(c => c.who.length)
+    const unreacted = counts.filter(c => !c.who.length)
+    const seenBy = [...new Set([...seen, ...reacted.flatMap(c => c.who)])].filter(n => n !== me)
+    const shows = reacted.length > 0 || seenBy.length > 0
+    const stack = seenBy.length && Svg ? stackSvg(seenBy.map(n => ({ name: n, online: true, color: colorOf(n) })), { size: 16, max: 6 }) : null
+    const chip = (r: string, who: string[], mine: boolean) => (
+      <Button key={`react-${r}`} plain onPress={() => void react($, key, r, !mine)}>
+        {r}
+        <Text tabular dimColor={!mine} color={mine ? 'claude' : undefined}>
+          {` ${who.length || '+'}`}
+        </Text>
+      </Button>
+    )
+    return fit(
+      <Box key={`reply-${e.requestId}-${key}`} flexDirection="column">
+        {forWho ? (
+          <Box flexDirection="row" alignItems="center" gap={1}>
+            <Text size="caption" color="claude">
+              ◆
+            </Text>
+            <Text size="caption" dimColor>
+              Claude, for
+            </Text>
+            <Text size="caption" weight="semibold" color={colorOf(forWho)} hover={{ scope: `person-${forWho}`, inverse: true }}>
+              {` ${forWho} `}
+            </Text>
+          </Box>
+        ) : null}
+        {native}
+        <Box flexDirection="row" alignItems="center" gap="xs" display={shows ? 'flex' : 'none'} hover={shows ? undefined : { display: 'flex' }}>
+          {reacted.map(c => chip(c.r, c.who, c.mine))}
+          {shows && unreacted.length ? (
+            <Box flexDirection="row" gap="xs" display="none" hover={{ display: 'flex' }}>
+              {unreacted.map(c => chip(c.r, c.who, c.mine))}
+            </Box>
+          ) : (
+            unreacted.map(c => chip(c.r, c.who, c.mine))
+          )}
+          {stack && Svg ? <Svg source={stack.source} alt={`Seen by ${seenBy.join(', ')}`} width={stack.width} height={16} /> : null}
+          {seenBy.length ? (
+            <Text size="caption" dimColor>
+              {`${listNames(seenBy)} saw this`}
+            </Text>
+          ) : null}
+        </Box>
+      </Box>,
+      modern,
+    )
+  })
+
+  // The terminal's line that closes a turn: who it was for, who watched.
+  on('ui.render', { component: 'TurnDuration' }, async ($, e, next) => {
+    const v = await view($)
+    if (v.mode === 'idle' || !v.room || !lastTurnFor) return next(e)
+    const { Box, Text } = $.ui.resolve(e)
+    const watching = [...new Set(v.everyone.filter(p => p.online && !isMe(p, v.me)).map(p => p.name))]
+    const native = await next(e)
+    return (
+      <Box flexDirection="row" gap={1}>
+        {native}
+        <Text dimColor>{`· for ${lastTurnFor}${watching.length ? ` · ${listNames(watching)} watching` : ''}`}</Text>
+      </Box>
+    )
+  })
+
+  // /who's answer as a card in the transcript: the room live, everyone in
+  // their color with what they're doing, and the Room a press away.
+  on('ui.render', { component: 'CommandOutput', props: { command: 'who' } }, async ($, e, next) => {
+    const v = await view($)
+    if (v.mode === 'idle' || !v.room) return next(e)
+    return fit(whoCard($.ui.resolve(e), e.surface, v, await read($, turnsA), await $.clock.now(), () => void openRoom($)), modern)
+  })
+  on('ui.render', { component: 'CommandOutput', props: { command: 'shared-session:who' } }, async ($, e, next) => {
+    const v = await view($)
+    if (v.mode === 'idle' || !v.room) return next(e)
+    return fit(whoCard($.ui.resolve(e), e.surface, v, await read($, turnsA), await $.clock.now(), () => void openRoom($)), modern)
   })
 
   // Host: a tool call Claude made for a teammate says for whom.
@@ -5662,6 +6118,9 @@ export const register: Register = (on, options) => {
     const w = v.working
     let message: string | null = null
     if (v.mode === 'host' && w?.byGuest) message = w.waitingFor ? `Waiting for your OK to run ${w.waitingFor}` : `Working for ${w.by}`
+    // The host's own turn: the engine's words, and who's watching it.
+    const watching = v.mode === 'host' ? new Set(v.everyone.filter(p => p.online && p.role === 'guest' && !isMe(p, v.me)).map(p => p.name)).size : 0
+    if (v.mode === 'host' && watching) message = `${message ?? e.props.message ?? e.props.word} · ${watching} watching`
     if (v.mode === 'guest') {
       if (w?.waitingFor) message = `Waiting for ${host} to allow ${w.waitingFor}`
       else if (w?.doing) message = `${doingLine(w.doing)}${w.by === myName ? '' : ` · for ${w.by}`}`
@@ -5674,11 +6133,18 @@ export const register: Register = (on, options) => {
   // A guest's hint line says where typing goes.
   on('ui.render', { component: 'PromptHint' }, async ($, e, next) => {
     const v = await view($)
+    if (v.mode === 'host' && !e.props.isDraft) {
+      // The host: who sees what they send.
+      const others = [...new Set(v.everyone.filter(p => p.online && p.role === 'guest' && !isMe(p, v.me)).map(p => p.name))]
+      if (!others.length) return next(e)
+      const hint = e.props.isWorking ? `${listNames(others)} ${others.length === 1 ? 'sees' : 'see'} this turn as it happens` : `${listNames(others)} will see what you send · @name mentions someone`
+      return next({ ...e, props: { ...e.props, hint } })
+    }
     if (v.mode !== 'guest') return next(e)
     const hint =
       v.policy.prompts === 'watch'
         ? `Watch-only · chat in the Room (/room) · Leave anytime`
-        : `↵ sends to ${v.room?.host}'s session · Esc stops the turn · /room opens the Room`
+        : `↵ sends to ${v.room?.host}'s session · @name mentions someone · Esc stops the turn`
     return next({ ...e, props: { ...e.props, hint } })
   })
 
@@ -6082,48 +6548,99 @@ export const register: Register = (on, options) => {
     const latest = await latestKnown($)
     const behind = (p: Face) => Boolean(p.version && latest && newerThan(latest, p.version))
     const pinRefused = e.surface === 'desktop' && (await read($, pinRefusedA))
+    const turns = await read($, turnsA)
+    const changes = await read($, changesA)
+    const calls = await read($, callsA)
+    const copied = await read($, copiedA)
+    const prefs = await read($, prefsA)
+    const me = await meIn($, room)
+    const Client = clientOf(el)
     const saved = await read($, roomTabA)
-    const tab = saved === 'shown' && !shown.length ? 'people' : saved
-    const pick = (id: 'people' | 'chat' | 'shown' | 'settings') => {
+    const tab: RoomTab = (saved === 'shown' && !shown.length) || (saved === 'changes' && !changes.length) ? 'people' : saved
+    const pick = (id: RoomTab) => {
       void update($, roomTabA, () => id)
       if (id === 'chat') void update($, unreadA, () => 0)
     }
+    const label = (text: string) => (
+      <Text key={`label-${text}`} size="caption" weight="semibold" dimColor>
+        {text}
+      </Text>
+    )
 
-    // On top: the session's name and Live, who's here, the link.
+    // On top: Live and for how long, the session's name, who's here, the
+    // link, and (for the host) the one main action, Invite.
     const stack = stackSvg(people, { size: 26, max: 7 })
     const header = (
-      <Box flexDirection="column" gap={1}>
-        <Box flexDirection="row" gap={1} alignItems="center" justifyContent="space-between">
-          <Box flexShrink={1} minWidth={0}>
-            <Text bold wrap="truncate-end">
-              {tidyTitle(room.title)}
-            </Text>
-          </Box>
-          {chip(el, e.surface, live)}
-        </Box>
-        <Box flexDirection="row" gap={1} alignItems="center">
-          {Svg ? <Svg key="room-faces" source={stack.source} alt={`With ${people.map(p => p.name).join(', ')}`} width={stack.width} height={26} /> : null}
-          <Text dimColor wrap="truncate-end">
-            {`${isHost ? `You're sharing${room.team ? ` with ${room.team.name}` : ''}` : `${room.host}'s session${room.team ? ` · ${room.team.name}` : ''}`} · ${online} here`}
+      <Box flexDirection="column" gap="xs">
+        <Box flexDirection="row" alignItems="center" gap={1}>
+          {live && Svg ? <Svg key="room-live-dot" source={liveSvg()} alt="Live" width={12} height={12} /> : null}
+          <Text size="caption" weight="semibold" color={live ? 'claude' : 'warning'}>
+            {live ? (Svg ? 'Live' : '● Live') : '● Reconnecting'}
+          </Text>
+          <Text size="caption" dimColor tabular>
+            {`· ${ago(room.since, now).replace(' ago', '')} · ${turns.length} turn${turns.length === 1 ? '' : 's'}`}
           </Text>
         </Box>
-        <Box flexDirection="row" alignItems="center" gap={1} borderStyle="round" borderDimColor paddingX={1}>
+        <Text size="title" weight="semibold" wrap="truncate-end">
+          {tidyTitle(room.title)}
+        </Text>
+        <Box flexDirection="row" gap={1} alignItems="center">
+          {Svg ? <Svg key="room-faces" source={stack.source} alt={`With ${people.map(p => p.name).join(', ')}`} width={stack.width} height={26} /> : null}
+          <Text size="footnote" dimColor wrap="truncate-end">
+            {`${isHost ? `You're sharing${room.team ? ` with ${room.team.name}` : ''}` : `${room.host}'s session${room.team ? ` · ${room.team.name}` : ''}`} · ${online} of ${people.length} here`}
+          </Text>
+        </Box>
+        <Box flexDirection="row" alignItems="center" gap={1}>
           <Box flexGrow={1} flexShrink={1} minWidth={0}>
-            <Text dimColor wrap="truncate-middle">
+            <Text size="footnote" mono dimColor wrap="truncate-middle">
               {room.url.replace(/^https?:\/\//, '')}
             </Text>
           </Box>
-          <Button key="room-copy" label="Copy link" plain onPress={press => void copyLink($, room.url, press.surface)} />
+          <Box flexDirection="row" gap="xs" flexShrink={0}>
+            <Button key="room-copy" label={copied ? 'Copied ✓' : 'Copy link'} plain onPress={press => void copyLink($, room.url, press.surface).then(() => flashCopied($))} />
+            {isHost ? <Button key="room-invite" label="Invite" variant="primary" onPress={() => pick('people')} /> : null}
+          </Box>
         </Box>
-        {isHost ? null : <Text dimColor>{rulesLine(v.policy, room.host)}</Text>}
+        {isHost ? null : (
+          <Text size="footnote" dimColor>
+            {rulesLine(v.policy, room.host)}
+          </Text>
+        )}
       </Box>
     )
+
+    // While Claude works: for whom (their lane, in their color), what it's
+    // doing, and for how long, ticking on its own.
+    const w = v.working
+    const nowBlock = w ? (
+      <Box key="room-now" flexDirection="row" gap={1}>
+        <Text color={colorOf(w.by)}>{'▎\n▎'}</Text>
+        {w.waitingFor ? (
+          <Text color="permission" wrap="truncate-end">
+            {isHost ? `${w.by} is waiting for your OK on ${w.waitingFor}` : `Waiting for ${room.host} to allow ${w.waitingFor}`}
+          </Text>
+        ) : Client ? (
+          <Box flexGrow={1} minWidth={0}>
+            <Client
+              key="room-live"
+              module="./live.tsx"
+              flexGrow={1}
+              props={{ variant: 'room', who: { name: w.by, color: colorOf(w.by) }, mine: w.by === me, doing: w.doing ? doingLine(w.doing) : '', elapsedMs: Math.max(0, now - w.startedAt), claude: 'claude', modern }}
+            />
+          </Box>
+        ) : (
+          <Text wrap="truncate-end">{`Claude is working for ${w.by}`}</Text>
+        )}
+      </Box>
+    ) : null
 
     const tabs = tabsOf(
       el,
       [
         { id: 'people', label: 'People', count: online },
         { id: 'chat', label: 'Chat', count: v.unread || undefined, news: v.unread > 0 },
+        { id: 'timeline', label: 'Timeline', count: turns.length || undefined },
+        ...(changes.length ? [{ id: 'changes' as const, label: 'Changes', count: changes.length }] : []),
         ...(shown.length ? [{ id: 'shown' as const, label: 'Shown', count: shown.length }] : []),
         { id: 'settings', label: newer || pinRefused ? 'Settings ●' : 'Settings' },
       ],
@@ -6134,7 +6651,7 @@ export const register: Register = (on, options) => {
     // People: everyone here in their color, what each is doing; for the host,
     // teammates to invite straight into this session.
     const joinedAt = (name: string) => activity.find(a => a.kind === 'join' && a.who === name)?.ts
-    const prompts = (name: string) => activity.filter(a => a.kind === 'prompt' && a.who === name).length
+    const prompts = (name: string) => Math.max(activity.filter(a => a.kind === 'prompt' && a.who === name).length, turns.filter(t => t.who === name).length)
     const roles = (p: Face) => [p.note?.includes('host') ? 'host' : '', p.note?.includes('you') ? 'you' : ''].filter(Boolean).join(' · ')
     const personRow = (p: Face) => {
       const joined = joinedAt(p.name)
@@ -6152,16 +6669,43 @@ export const register: Register = (on, options) => {
             .join(' · ')}
         </Text>
       )
+      const isYou = p.note?.includes('you')
       return (
         <Box key={`person-${p.name}`} flexDirection="row" gap={1} alignItems="center" justifyContent="space-between">
           <Box flexDirection="row" gap={1} alignItems="center" flexShrink={1} minWidth={0}>
-            {faceOf(el, e.surface, p)}
-            <Text bold color={p.online ? p.color : undefined} dimColor={!p.online} wrap="truncate-end">
-              {p.name}
+            {faceOf(el, e.surface, p, 22)}
+            <Text weight="semibold" color={p.online ? p.color : undefined} dimColor={!p.online} wrap="truncate-end" hover={{ scope: `person-${p.name}`, inverse: true }}>
+              {` ${p.name} `}
             </Text>
-            {roles(p) ? <Text dimColor>{roles(p)}</Text> : null}
+            {roles(p) ? (
+              <Text size="footnote" dimColor>
+                {roles(p)}
+              </Text>
+            ) : null}
           </Box>
           <Box flexShrink={0}>{doing}</Box>
+          {/* Hovered: who they are, over the rows above; and @ to mention them. */}
+          <Box position="absolute" top={-4} left={4} display="none" hover={{ display: 'flex' }} flexDirection="column" borderStyle="round" borderColor={p.color} paddingX={1} backgroundColor="inverseText">
+            <Box flexDirection="row" gap={1}>
+              <Text weight="semibold" color={p.color}>
+                {p.name}
+              </Text>
+              <Text size="caption" dimColor>
+                {[roles(p), joined && !p.note?.includes('host') ? `joined ${ago(joined, now)}` : ''].filter(Boolean).join(' · ') || (p.online ? 'here' : 'away')}
+              </Text>
+            </Box>
+            <Text size="footnote">{`${asked ? `${asked} prompt${asked === 1 ? '' : 's'}` : 'No prompts yet'}${v.working?.by === p.name ? ' · Claude is working for them' : ''}`}</Text>
+            {p.version ? (
+              <Text size="caption" dimColor mono>
+                {`shared-session ${p.version}`}
+              </Text>
+            ) : null}
+          </Box>
+          {isYou ? null : (
+            <Box position="absolute" right={0} display="none" hover={{ display: 'flex' }}>
+              <Button key={`mention-${p.name}`} label={`@${p.name}`} plain onPress={() => void mention($, p.name)} />
+            </Box>
+          )}
         </Box>
       )
     }
@@ -6213,13 +6757,121 @@ export const register: Register = (on, options) => {
         </Box>
       </Box>
     )
+    const longest = turns.reduce((m, t) => Math.max(m, t.ms ?? 0), 0)
+    const stats: [string, string][] = [
+      ['Turns', String(turns.length)],
+      ['Tool calls', String(calls)],
+      ['Files changed', changes.length ? `${changes.length} · +${changes.reduce((n, c) => n + c.added, 0)} −${changes.reduce((n, c) => n + c.removed, 0)}` : '0'],
+      ...(longest ? [['Longest turn', took(longest)] as [string, string]] : []),
+    ]
     const peoplePage = (
-      <Box flexDirection="column" gap={2}>
-        <Box flexDirection="column" gap={1}>
+      <Box flexDirection="column" gap="lg">
+        <Box flexDirection="column" gap="sm">
           {people.map(personRow)}
           {isHost && people.length <= 1 ? <Text dimColor>No one yet. Send the link to a teammate; it opens in their Claude Code.</Text> : null}
         </Box>
         {inviteBlock}
+        <Box key="room-stats" flexDirection="column" gap="xs">
+          {label('This session')}
+          {stats.map(([k, value]) => (
+            <Box key={`stat-${k}`} flexDirection="row" justifyContent="space-between">
+              <Text size="footnote" dimColor>
+                {k}
+              </Text>
+              <Text size="footnote" weight="medium" tabular>
+                {value}
+              </Text>
+            </Box>
+          ))}
+        </Box>
+      </Box>
+    )
+
+    // Timeline: every turn as a bar in the color of who asked, then the
+    // newest turns as words.
+    const strip = turns.slice(-60)
+    const timelinePage = (
+      <Box flexDirection="column" gap="md">
+        {turns.length && Client ? (
+          <Client
+            key="timeline"
+            module="./timeline.tsx"
+            props={{ turns: strip.map(t => ({ who: t.who, color: colorOf(t.who), prompt: t.prompt.slice(0, 200), seconds: t.ms === undefined ? null : Math.round(t.ms / 1000) })), claude: 'claude', modern }}
+          />
+        ) : null}
+        <Text size="footnote" dimColor>
+          {turns.length ? 'Hover a bar to read it; click it to go to that prompt, then ←/→ to walk.' : 'No turns yet. Every prompt shows here, in the color of whoever asked.'}
+        </Text>
+        <Box flexDirection="column" gap="xs">
+          {turns
+            .slice(-12)
+            .reverse()
+            .map(t => (
+              <Box key={`turn-${t.id}`} flexDirection="row" gap={1} justifyContent="space-between">
+                <Box flexDirection="row" gap={1} flexShrink={1} minWidth={0}>
+                  <Text color={colorOf(t.who)}>▎</Text>
+                  <Text size="footnote" wrap="truncate-end">
+                    <Text weight="semibold" color={colorOf(t.who)}>
+                      {t.who}
+                    </Text>
+                    <Text dimColor>{` ${t.prompt}`}</Text>
+                  </Text>
+                </Box>
+                <Text size="caption" dimColor tabular>
+                  {t.ms === undefined ? 'running' : took(t.ms)}
+                </Text>
+              </Box>
+            ))}
+        </Box>
+      </Box>
+    )
+
+    // Changes: every file Claude changed, in the color of who asked for it,
+    // and the one opened as a diff in the engine's own highlighter.
+    const openPath = (await read($, changeOpenA)) ?? changes.at(-1)?.path
+    const opened = changes.find(c => c.path === openPath) ?? changes.at(-1)
+    const { Code } = el
+    const changesPage = (
+      <Box flexDirection="column" gap="md">
+        <Box flexDirection="row" justifyContent="space-between">
+          {label(`${changes.length} file${changes.length === 1 ? '' : 's'} changed`)}
+          <Text size="caption" tabular>
+            <Text color="success">{`+${changes.reduce((n, c) => n + c.added, 0)}`}</Text>
+            <Text>{' '}</Text>
+            <Text color="error">{`−${changes.reduce((n, c) => n + c.removed, 0)}`}</Text>
+          </Text>
+        </Box>
+        <Box flexDirection="column" gap="xs">
+          {[...changes].reverse().map(c => (
+            <Box key={`change-${c.path}`} flexDirection="row" gap={1} alignItems="center" justifyContent="space-between">
+              <Box flexDirection="row" gap={1} flexShrink={1} minWidth={0}>
+                <Text color={colorOf(c.who)}>▎</Text>
+                <Button key={`open-change-${c.path}`} label={c.path} plain dimColor={c.path !== opened?.path} onPress={() => void update($, changeOpenA, () => c.path)} />
+              </Box>
+              <Text size="caption" tabular>
+                <Text color="success">{`+${c.added}`}</Text>
+                <Text>{' '}</Text>
+                <Text color="error">{`−${c.removed}`}</Text>
+              </Text>
+            </Box>
+          ))}
+        </Box>
+        {opened ? (
+          <Box flexDirection="column" gap="xs">
+            <Box flexDirection="row" gap={1}>
+              <Text size="footnote" mono weight="medium" wrap="truncate-middle">
+                {opened.path}
+              </Text>
+              <Text size="footnote" dimColor>
+                for
+              </Text>
+              <Text size="footnote" weight="semibold" color={colorOf(opened.who)} hover={{ scope: `person-${opened.who}`, inverse: true }}>
+                {` ${opened.who} `}
+              </Text>
+            </Box>
+            <Code key={`diff-${opened.path}`} source={opened.patch} path={opened.path} format="diff" />
+          </Box>
+        ) : null}
       </Box>
     )
 
@@ -6442,6 +7094,52 @@ export const register: Register = (on, options) => {
                 />,
               )
             : null}
+          {Select
+            ? settingOf(
+                el,
+                'Sounds',
+                <Select
+                  key="pref-sounds"
+                  value={prefs.sounds}
+                  options={[
+                    { value: 'mentions', label: 'Mentions and my turns' },
+                    { value: 'all', label: 'Those and joins' },
+                    { value: 'off', label: 'None' },
+                  ]}
+                  onSelect={(value: string) => void setPrefs($, { sounds: value === 'all' || value === 'off' ? value : 'mentions' })}
+                />,
+              )
+            : null}
+          {Select
+            ? settingOf(
+                el,
+                'Said out loud',
+                <Select
+                  key="pref-voice"
+                  value={prefs.voice ? 'on' : 'off'}
+                  options={[
+                    { value: 'off', label: 'Nothing' },
+                    { value: 'on', label: 'Joins and mentions' },
+                  ]}
+                  onSelect={(value: string) => void setPrefs($, { voice: value === 'on' })}
+                />,
+              )
+            : null}
+          {Select
+            ? settingOf(
+                el,
+                'Status line',
+                <Select
+                  key="pref-status"
+                  value={prefs.statusLine ? 'on' : 'off'}
+                  options={[
+                    { value: 'off', label: 'Off' },
+                    { value: 'on', label: 'Who’s here' },
+                  ]}
+                  onSelect={(value: string) => void setPrefs($, { statusLine: value === 'on' })}
+                />,
+              )
+            : null}
           {updatesSetting}
           {switchTo ? (
             <Box flexDirection="row" gap={1} alignItems="center" justifyContent="space-between">
@@ -6467,12 +7165,14 @@ export const register: Register = (on, options) => {
       </Box>
     )
 
-    return (
-      <Box flexDirection="column" gap={2}>
+    return fit(
+      <Box flexDirection="column" gap="lg">
         {header}
+        {nowBlock}
         {tabs}
-        {tab === 'chat' ? chatPage : tab === 'shown' ? shownPage : tab === 'settings' ? settingsPage : peoplePage}
-      </Box>
+        {tab === 'chat' ? chatPage : tab === 'timeline' ? timelinePage : tab === 'changes' ? changesPage : tab === 'shown' ? shownPage : tab === 'settings' ? settingsPage : peoplePage}
+      </Box>,
+      modern,
     )
   })
 
@@ -6587,15 +7287,39 @@ export const register: Register = (on, options) => {
 
     const stack = stackSvg(people, { size: 24, max: 5 })
     const roomLabel = v.unread ? `Room · ${v.unread} new` : `Room · ${people.filter(p => p.online).length}`
+    // Live: Claude's orange dot, its ring widening; Reconnecting in the warning color.
+    const liveMark = (
+      <Box key="live" flexDirection="row" gap={1} alignItems="center" flexShrink={0}>
+        {live && Svg ? <Svg source={liveSvg()} alt="Live" width={12} height={12} /> : null}
+        <Text weight="semibold" color={live ? 'claude' : 'warning'}>
+          {live ? (Svg ? 'Live' : '● Live') : '● Reconnecting'}
+        </Text>
+      </Box>
+    )
+    // While Claude works (and nothing waits on an OK): for whom, for how
+    // long, what it's doing, moving on the surface's own clock.
+    const Client = clientOf(el)
+    const w = v.working
+    const ticking =
+      w && !w.waitingFor && Client && (v.mode === 'guest' || w.byGuest) ? (
+        <Box key="now" flexGrow={1} flexShrink={1} minWidth={0}>
+          <Client
+            key="band-live"
+            module="./live.tsx"
+            flexGrow={1}
+            props={{ variant: 'band', who: { name: w.by, color: colors.get(w.by) ?? colorFor(w.by) }, mine: v.mode === 'guest' && w.by === (await meIn($, v.room!)), doing: w.doing ? doingLine(w.doing) : '', elapsedMs: Math.max(0, (await $.clock.now()) - w.startedAt), claude: 'claude', modern }}
+          />
+        </Box>
+      ) : null
     const pin = !stopping && e.surface === 'desktop' && (await read($, pinRefusedA))
     const signedIn = isHost && Boolean((await read($, teamsA)).account)
     // An invite to another session waits here too (every session may be in a
     // room): a button in the row, in place of the two it can spare.
     const invites = stopping ? [] : await read($, invitesA)
     const invite = invites[0]
-    return row(
+    return fit(row(
       [
-        chip(el, e.surface, live),
+        liveMark,
         Svg ? (
           <Svg key="faces" source={stack.source} alt={`With ${people.map(p => p.name).join(', ')}`} width={stack.width} height={24} />
         ) : (
@@ -6616,7 +7340,7 @@ export const register: Register = (on, options) => {
             Press again to end the room for everyone
           </Text>
         ) : (
-          nowOf(el, v, colors)
+          (ticking ?? nowOf(el, v, colors))
         ),
       ],
       [
@@ -6651,8 +7375,76 @@ export const register: Register = (on, options) => {
           <Button key="leave" label="Leave" plain dimColor onPress={() => void leave($)} />
         ),
       ],
-    )
+    ), modern)
   })
+}
+
+// A reaction of this person's to a reply, on or off: here at once, and to
+// the room, which tells everyone (and this session again, which changes nothing).
+async function react($: $, key: string, emoji: string, on: boolean) {
+  const room = await read($, roomA)
+  if (!room) return
+  const me = await meIn($, room)
+  await update($, reactionsA, all => {
+    const now = all[key]?.[emoji] ?? []
+    return { ...all, [key]: { ...all[key], [emoji]: on ? [...new Set([...now, me])] : now.filter(n => n !== me) } }
+  })
+  send($, 'react', { key, emoji, on })
+}
+
+// The room as a card: live and for how long, its name, everyone in their
+// color with what they're doing, and the Room a press away.
+function whoCard(el: UI, surface: RenderSurface, v: View, turns: ShareTurn[], now: number, open: () => void) {
+  const { Box, Text, Button } = el
+  const Svg = svgOf(el, surface)
+  const room = v.room!
+  const colors = roomColors(v.everyone)
+  const people = faces(v, colors)
+  const here = people.filter(p => p.online)
+  const stack = stackSvg(here, { size: 24, max: 7 })
+  const asked = (name: string) => turns.filter(t => t.who === name).length
+  const doing = (p: Face) =>
+    v.working?.by === p.name ? 'Claude is working for them' : !p.online ? 'away' : [p.note?.includes('host') ? 'hosting' : 'here', asked(p.name) ? `${asked(p.name)} prompt${asked(p.name) === 1 ? '' : 's'}` : ''].filter(Boolean).join(' · ')
+  return (
+    <Box flexDirection="column" gap="sm" borderStyle="round" borderDimColor paddingX={1}>
+      <Box flexDirection="row" alignItems="center" gap={1}>
+        {Svg ? <Svg source={liveSvg()} alt="Live" width={12} height={12} /> : null}
+        <Text size="caption" weight="semibold" color="claude">
+          {Svg ? 'Live' : '● Live'}
+        </Text>
+        <Text size="caption" dimColor tabular>
+          {`· ${ago(room.since, now).replace(' ago', '')}`}
+        </Text>
+      </Box>
+      <Box flexDirection="column">
+        <Text size="heading" weight="semibold" wrap="truncate-end">
+          {tidyTitle(room.title)}
+        </Text>
+        <Text size="footnote" dimColor>
+          {`${v.mode === 'host' ? 'Your session' : `${room.host}'s session`} · ${here.length} of ${people.length} here`}
+        </Text>
+      </Box>
+      <Box flexDirection="column" gap="xs">
+        {people.map(p => (
+          <Box key={`who-${p.name}`} flexDirection="row" alignItems="center" gap={1}>
+            {faceOf(el, surface, p, 18)}
+            <Text weight="semibold" color={p.online ? p.color : undefined} dimColor={!p.online} hover={{ scope: `person-${p.name}`, inverse: true }}>
+              {p.name}
+            </Text>
+            <Text size="footnote" dimColor wrap="truncate-end">
+              {doing(p)}
+            </Text>
+          </Box>
+        ))}
+      </Box>
+      <Box flexDirection="row" alignItems="center" gap={1}>
+        {Svg ? <Svg source={stack.source} alt={`Here: ${here.map(p => p.name).join(', ')}`} width={stack.width} height={24} /> : null}
+        <Button key="who-room" variant="primary" onPress={open}>
+          Open the Room
+        </Button>
+      </Box>
+    </Box>
+  )
 }
 
 // One person in several sessions is still one name.

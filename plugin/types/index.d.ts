@@ -59,6 +59,22 @@ export type ShareActivity = {
   text?: string
 }
 
+/** One turn of the session, as the Timeline draws it: who asked, what, how long it took. */
+export type ShareTurn = { id: string; who: string; prompt: string; at: number; /** How long it ran, once it ended. */ ms?: number }
+
+/** A file Claude changed this session, for whom, and its patch (unified-diff hunks). */
+export type ShareChange = { path: string; who: string; added: number; removed: number; patch: string; at: number }
+
+/** What a person hears and sees of the room, kept across sessions. */
+export type SharePrefs = {
+  /** `mentions`: a ping when someone @mentions you, a chime when your prompt starts; `all`: a knock when someone joins too. */
+  sounds: 'off' | 'mentions' | 'all'
+  /** Joins and mentions said out loud by the computer's voice. */
+  voice: boolean
+  /** The room in the status line under the prompt. */
+  statusLine: boolean
+}
+
 /** The room's side channel: people talk, Claude never reads it. */
 export type ShareChat = { ts: number; who: string; seat: string; text: string }
 
@@ -205,8 +221,26 @@ declare module 'claude-code' {
       invited: Record<string, number>
       /** Claude Code (auto mode) wouldn't let this session be pinned: the Room offers to allow it. */
       pinRefused: boolean
-      /** The Room's page showing: who's here, the chat, what Claude showed, or the settings. */
-      roomTab: 'people' | 'chat' | 'shown' | 'settings'
+      /** The Room's page showing: who's here, the chat, every turn, the files changed, what Claude showed, or the settings. */
+      roomTab: 'people' | 'chat' | 'timeline' | 'changes' | 'shown' | 'settings'
+      /** Every turn of the session, oldest first (the newest 200). */
+      turns: ShareTurn[]
+      /** The files Claude changed, newest last (the newest 40). */
+      changes: ShareChange[]
+      /** Reactions to Claude's replies: by the reply's key, by emoji, who. */
+      reactions: Record<string, Record<string, string[]>>
+      /** Who has had each reply on screen, by the reply's key. */
+      seen: Record<string, string[]>
+      /** Who each of Claude's replies was for, by message id. */
+      replyFor: Record<string, string>
+      /** Tool calls Claude made this session. */
+      calls: number
+      /** The file open on the Room's Changes page. */
+      changeOpen: string | null
+      /** The link was just copied: the Room's Copy says so for a moment. */
+      copied: boolean
+      /** What this person hears and sees of the room. */
+      prefs: SharePrefs
       /** The Team panel's page showing: live sessions, the team's people, or the settings. */
       teamTab: 'live' | 'people' | 'settings'
     }

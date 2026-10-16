@@ -133,6 +133,28 @@ try {
   ok((await call('/api/auth/logout', { method: 'POST', tok: bob })).status === 200 && (await call('/api/me', { tok: bob })).status === 401, 'Bob signs out')
   ok((await call('/auth/github/start?login=' + 'x'.repeat(24))).status === 200, 'unconfigured provider says so')
 
+  // Reactions to Claude's replies and who saw them: kept when they're well
+  // formed, from the host and guests alike; anything else is dropped.
+  const marks = (await call('/api/rooms', { method: 'POST', body: { name: 'Host', title: 'marks' } })).data
+  const guest = (await call(`/api/rooms/${marks.id}/join`, { method: 'POST', body: { name: 'Gia' } })).data
+  const post = (tok, events) => call(`/api/rooms/${marks.id}/events`, { method: 'POST', tok, body: { events } })
+  await post(guest.token, [
+    { type: 'react', body: { key: 'abc123.40', emoji: '🎉', on: true, extra: 'x'.repeat(5000) } },
+    { type: 'react', body: { key: 'abc123.40', emoji: '💩' } },
+    { type: 'react', body: { key: '<script>', emoji: '👍' } },
+    { type: 'seen', body: { keys: ['abc123.40', 'not a key', 'zz9.7'] } },
+    { type: 'seen', body: { keys: ['nope'] } },
+    { type: 'row', body: { kind: 'assistant', text: 'a guest pretending to be Claude' } },
+  ])
+  await post(marks.token, [{ type: 'react', body: { key: 'abc123.40', emoji: '👍', on: false } }])
+  const kept = (await call(`/api/rooms/${marks.id}/events?after=0&wait=0`, { tok: marks.token })).data.events
+  const reacts = kept.filter(e => e.type === 'react')
+  const seens = kept.filter(e => e.type === 'seen')
+  ok(reacts.length === 2 && JSON.stringify(reacts[0].body) === JSON.stringify({ key: 'abc123.40', emoji: '🎉', on: true }) && reacts[1].from.role === 'host' && reacts[1].body.on === false, 'a reaction is kept as a key, an emoji and on, from a guest or the host')
+  ok(seens.length === 1 && JSON.stringify(seens[0].body.keys) === JSON.stringify(['abc123.40', 'zz9.7']), 'seen keeps only the keys that are reply keys')
+  ok(!kept.some(e => e.type === 'row'), "a guest can't post a row of the transcript")
+  await call(`/api/rooms/${marks.id}/end`, { method: 'POST', tok: marks.token })
+
   // A guest away past the grace (asleep, offline): its token seats it again.
   const { Room } = await import('../server/core.mjs')
   const r0 = Room.create({ id: 'r0', name: 'Host', title: 't', now: 0 })

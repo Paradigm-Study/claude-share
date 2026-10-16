@@ -22,6 +22,8 @@ export type Row = {
   images?: RoomImage[]
   /** The host's own copy of those pictures, before they go up; never sent. */
   media?: Media[]
+  /** A result row's change to a file, as unified-diff hunks (an edit's or a write's). */
+  patch?: string
 }
 
 /** A picture in the room's files: its id (the bytes' SHA-256), type and size. */
