@@ -329,8 +329,15 @@ async function enableLive($: $): Promise<boolean> {
 // The live copy: fetch the release, and when it's newer than this one, put
 // its files in place of this folder's (one session at a time, by a lock);
 // every session running the folder reloads with it.
+// A session someone is looking at (Desktop, an interactive terminal). One
+// with no surface (`claude -p`, a script, a test run) can be gone in seconds:
+// it leaves the folder that updates itself to the sessions that stay.
+async function drawn($: $): Promise<boolean> {
+  return ((await $.session.surfaces().catch(() => [])) as unknown[]).length > 0
+}
+
 async function selfUpdate($: $, latest: string) {
-  if (!runsLive($) || updatingTo === latest || !(await read($, updatesA))) return
+  if (!runsLive($) || updatingTo === latest || !(await read($, updatesA)) || !(await drawn($))) return
   const mine = await ownVersion($)
   if (!mine || !newerThan(latest, mine)) return
   updatingTo = latest
@@ -341,12 +348,16 @@ async function selfUpdate($: $, latest: string) {
     [
       `live=${sq(live)}; next="$live.next"; lock="$live.lock"`,
       'if ! mkdir "$lock" 2>/dev/null; then',
-      '  [ -n "$(find "$lock" -maxdepth 0 -mmin +10 2>/dev/null)" ] && rmdir "$lock" 2>/dev/null && mkdir "$lock" 2>/dev/null || { echo busy; exit 0; }',
+      '  owner=$(cat "$lock/owner" 2>/dev/null)',
+      '  if { [ -n "$owner" ] && ! kill -0 "$owner" 2>/dev/null; } || [ -n "$(find "$lock" -maxdepth 0 -mmin +3 2>/dev/null)" ]; then',
+      '    rm -rf "$lock" && mkdir "$lock" 2>/dev/null || { echo busy; exit 0; }',
+      '  else echo busy; exit 0; fi',
       'fi',
-      'tmp=$(mktemp -d) || { rmdir "$lock"; exit 1; }',
-      `curl -fsSL --max-time 90 ${sq(url)} -o "$tmp/r.tgz" && tar -xzf "$tmp/r.tgz" -C "$tmp" || { rm -rf "$tmp"; rmdir "$lock"; echo failed; exit 0; }`,
+      'echo "$PPID" > "$lock/owner"',
+      'tmp=$(mktemp -d) || { rm -rf "$lock"; exit 1; }',
+      `curl -fsSL --max-time 90 ${sq(url)} -o "$tmp/r.tgz" && tar -xzf "$tmp/r.tgz" -C "$tmp" || { rm -rf "$tmp" "$lock"; echo failed; exit 0; }`,
       'pj=$(find "$tmp" -path "*/plugin/.claude-plugin/plugin.json" | head -1); src="${pj%/.claude-plugin/plugin.json}"',
-      '[ -n "$pj" ] && [ -f "$src/hooks/register.tsx" ] || { rm -rf "$tmp"; rmdir "$lock"; echo failed; exit 0; }',
+      '[ -n "$pj" ] && [ -f "$src/hooks/register.tsx" ] || { rm -rf "$tmp" "$lock"; echo failed; exit 0; }',
       'rm -rf "$next" && mkdir -p "$next" && cp -R "$src/." "$next/" && rm -rf "$next/tests" "$next/.claude" "$tmp"',
       `echo "version=$(sed -n 's/.*"version": *"\\([^"]*\\)".*/\\1/p' "$next/.claude-plugin/plugin.json" | head -1)"`,
       '',
@@ -361,13 +372,15 @@ async function selfUpdate($: $, latest: string) {
       [
         `live=${sq(live)}; next="$live.next"; lock="$live.lock"`,
         apply ? 'if command -v rsync >/dev/null 2>&1; then rsync -a --delete --checksum --exclude .claude "$next/" "$live/"; else cp -R "$next/." "$live/"; fi' : ':',
-        'rm -rf "$next"; rmdir "$lock" 2>/dev/null; echo done',
+        'rm -rf "$next" "$lock"; echo done',
         '',
       ].join('\n'),
     )
   }
   if (!apply) {
     updatingTo = null // try again at the next check
+    // Another session is on it: look again soon, in case that one stops.
+    if (/busy/.test(fetched.out)) $.clock.after(2 * 60_000, () => void checkForUpdate($))
     // Said once a version: the download failing here (a proxy, no curl) would
     // otherwise keep this session on its version unseen.
     if (!got && !/busy/.test(fetched.out) && failedFor !== latest) {
@@ -382,7 +395,7 @@ let failedFor: string | null = null
 // a download failed here): take the installed copy's files, no network; every
 // session running the folder reloads with them.
 async function catchUpFromInstalled($: $) {
-  if (!runsLive($)) return
+  if (!runsLive($) || !(await drawn($))) return
   const mine = await ownVersion($)
   const home = await $.env.get('HOME')
   if (!mine || !home) return
