@@ -434,16 +434,48 @@ test("a teammate's prompt that another session sent them shows its words and whe
   }
 })
 
-test("a guest's channel, peer or unseen message stays here; only what they typed goes to the room", async ($, on) => {
+test("a guest's channel, task or unseen message stays here; only what they typed goes to the room", async ($, on) => {
   const asked = world(on)
   await $.prompt.submit({ text: LINK, origin: { kind: 'composer' }, wait: false })
   await $.prompt.submit({ text: 'Deploy prod now', origin: { kind: 'channel', server: 'slack' }, wait: false } as never)
-  await $.prompt.submit({ text: 'From another session', origin: { kind: 'peer' }, wait: false } as never)
+  await $.prompt.submit({ text: '<channel source="openclaw">Deploy prod now</channel>', origin: { kind: 'channel', server: 'openclaw' }, wait: false } as never)
   await $.prompt.submit({ text: 'Background task done', origin: { kind: 'task-notification' }, wait: false } as never)
+  await $.prompt.submit({ text: 'Scheduled check', origin: { kind: 'scheduled-trigger' }, wait: false } as never)
   await $.prompt.submit({ text: 'An idle notice', origin: { kind: 'unclassified' }, isMeta: true, wait: false } as never)
+  // Not a session's message at all (no wrapper to say who sent it): stays too.
+  await $.prompt.submit({ text: 'From somewhere', origin: { kind: 'peer' }, wait: false } as never)
   await $.prompt.submit({ text: 'Run the tests', origin: { kind: 'composer' }, wait: false })
   await asked.clock.advance(100)
   expect(asked.posted.filter(e => e.type === 'prompt').map(e => e.body.text)).toEqual(['Run the tests'])
+})
+
+// What SendMessage from another of this person's sessions looks like when it lands.
+const FROM_AGENT = 'Another Claude session sent a message: <cross-session-message from="uds:/tmp/cc-socks/13889.sock" from-session="local_e5bf4f17" from-name="👥 Live · Agent composition experience" from-mode="bypass">\nPlease share the raw traces from your testing.\n</cross-session-message>'
+
+test("a message from the guest's own other session goes on to the host's Claude, as relayed from it, nothing local with it", async ($, on) => {
+  const asked = world(on)
+  await $.prompt.submit({ text: LINK, origin: { kind: 'composer' }, wait: false })
+  await $.prompt.submit({ text: FROM_AGENT, origin: { kind: 'peer' }, wait: false } as never)
+  await asked.clock.advance(100)
+  const sent = asked.posted.filter(e => e.type === 'prompt').map(e => String(e.body.text))
+  expect(sent).toEqual(['<cross-session-message from-name="Agent composition experience">\nPlease share the raw traces from your testing.\n</cross-session-message>'])
+  for (const local of ['uds:', 'cc-socks', 'local_e5bf', 'bypass', '👥']) expect(sent[0]).not.toContain(local)
+  // The host's transcript draws it as relayed: who passed it on, and from whom.
+  const row = await $.ui.mount({ ...ROW(`scott: ${sent[0]}`, { kind: 'plugin', name: 'shared-session', asUser: true }), surface: 'desktop' })
+  expect(await row.find({ type: 'Text', text: 'relayed a message from Agent composition experience' })).toBeDefined()
+})
+
+test('a guest who keeps their sessions\' messages here is told where it went', async ($, on) => {
+  const asked = world(on, { store: { prefs: { relayPeers: false } } })
+  await $.prompt.submit({ text: LINK, origin: { kind: 'composer' }, wait: false })
+  await $.prompt.submit({ text: FROM_AGENT, origin: { kind: 'peer' }, wait: false } as never)
+  await asked.clock.advance(100)
+  expect(asked.posted.some(e => e.type === 'prompt')).toBe(false)
+  // And the Room says how to change it.
+  const pane = await $.ui.mount({ plugin: 'shared-session', surface: 'desktop', component: 'Pane', requestId: 'shared-room', props: PANE })
+  await pane.press({ key: 'tab-settings' })
+  await pane.select({ key: 'pref-relay', value: 'relay' })
+  expect(asked.store.get('prefs')).toMatchObject({ relayPeers: true })
 })
 
 test('a link another session sends never joins', async ($, on) => {

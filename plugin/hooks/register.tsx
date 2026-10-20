@@ -72,7 +72,7 @@ const READ_ONLY = new Set([
 const DEFAULT_POLICY: SharePolicy = { prompts: 'everyone', approvals: 'edits', files: 'on' }
 // What a person hears and sees of the room: a ping when mentioned and a
 // chime when their prompt starts, no voice, no status line, until they choose.
-const DEFAULT_PREFS: SharePrefs = { sounds: 'mentions', voice: false, statusLine: false }
+const DEFAULT_PREFS: SharePrefs = { sounds: 'mentions', voice: false, statusLine: false, relayPeers: true }
 const PREFS_KEY = 'prefs' // in $.store: the same for every session of this person
 type RoomTab = 'people' | 'chat' | 'timeline' | 'changes' | 'shown' | 'settings'
 
@@ -151,6 +151,10 @@ const PERSON = new Set(['composer', 'sdk', 'bridge'])
 // follow-up to their own click. Never a channel's, a peer's or a task's
 // message, nor one the engine marks as unseen (`isMeta`, 2.1.300).
 const GUEST_SENDS = new Set([...PERSON, 'unclassified', 'auto-continuation'])
+// A message one of this person's other Claude sessions on this computer sent
+// (`SendMessage` to this session): theirs to relay, unless they've said not to.
+// It goes as the message alone, from the sender's name, never its socket or id.
+const OWN_SESSIONS = new Set(['peer', 'peer-send-message'])
 
 // A share link: <server origin, with any path prefix>/s/<room id>, alone.
 const LINK = /^\s*(https?:\/\/[^\s]+?)\/s\/([A-Za-z0-9_-]{16,64})\/?\s*$/
@@ -1884,6 +1888,8 @@ async function markSidebar($: $, title: (current: string) => string) {
 }
 
 // A title without the marks sharing and joining put in front of it.
+// A session's name as a message from it is signed: its sidebar marks left out.
+const tidySender = (name: string) => unmarked(name.trim()).slice(0, 80) || 'another session'
 const unmarked = (title: string) => title.replace(/^(?:👥 [^·]{1,80} · )+/u, '').replace(/^(?:[^·]{1,80}'s session · )+/u, '')
 
 // A row sharing or joining marked whose pin never took (refused in auto
@@ -5348,8 +5354,18 @@ export const register: Register = (on, options) => {
       void updateHere($)
       return next(e)
     }
-    const fromPerson = GUEST_SENDS.has(e.origin.kind) && !(e as { isMeta?: true }).isMeta
-    if (mode === 'guest' && fromPerson && (typed || e.attachments?.length) && !typed.startsWith('/')) {
+    const isMeta = Boolean((e as { isMeta?: true }).isMeta)
+    const fromPerson = GUEST_SENDS.has(e.origin.kind) && !isMeta
+    // Another of this person's sessions wrote to this one: relayed to the
+    // host's Claude as that session's message, if they let it.
+    const fromOwn = mode === 'guest' && OWN_SESSIONS.has(e.origin.kind) && !isMeta ? delivered(typed) : null
+    if (fromOwn && !(await prefsOf($)).relayPeers) {
+      const room = await read($, roomA)
+      answerWith({ kind: 'note', text: `A message from **${tidySender(fromOwn.from)}** stayed here: your **Room**'s Settings keep your other sessions' messages from ${room?.host ?? 'the host'}'s Claude.`, then: [] })
+      return next(e)
+    }
+    const relay = fromOwn?.text ? `<cross-session-message from-name="${tidySender(fromOwn.from).replaceAll('"', '’')}">\n${fromOwn.text}\n</cross-session-message>` : null
+    if (mode === 'guest' && (fromPerson || relay) && (typed || e.attachments?.length) && !typed.startsWith('/')) {
       const room = await read($, roomA)
       if ((await read($, policyA)).prompts === 'watch') {
         answerWith({
@@ -5377,7 +5393,7 @@ export const register: Register = (on, options) => {
       if (e.attachments?.length) {
         if (heldPrompt) await releaseHeld($, [])
         heldPrompt = { text: typed, pid, names: e.attachments.map(a => a.filename ?? ''), timer: $.clock.after(8_000, () => void releaseHeld($, [])) }
-      } else send($, 'prompt', { text: typed, pid })
+      } else send($, 'prompt', { text: relay ?? typed, pid })
     }
     lastActivity = await $.clock.now()
     return next(e)
@@ -7104,6 +7120,21 @@ export const register: Register = (on, options) => {
                     { value: 'each', label: 'Each shown, with its result' },
                   ]}
                   onSelect={(value: string) => void update($, toolRowsA, () => (value === 'each' ? 'each' : 'grouped'))}
+                />,
+              )
+            : null}
+          {!isHost && Select
+            ? settingOf(
+                el,
+                'Messages from my other sessions',
+                <Select
+                  key="pref-relay"
+                  value={prefs.relayPeers ? 'relay' : 'keep'}
+                  options={[
+                    { value: 'relay', label: `Go to ${room.host}’s Claude` },
+                    { value: 'keep', label: 'Stay here' },
+                  ]}
+                  onSelect={(value: string) => void setPrefs($, { relayPeers: value !== 'keep' })}
                 />,
               )
             : null}

@@ -73,6 +73,8 @@ export type SharePrefs = {
   voice: boolean
   /** The room in the status line under the prompt. */
   statusLine: boolean
+  /** A guest: messages from their other Claude sessions here go on to the host's Claude (relayed, as from that session). */
+  relayPeers: boolean
 }
 
 /** The room's side channel: people talk, Claude never reads it. */
