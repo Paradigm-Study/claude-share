@@ -52,7 +52,7 @@ const check = (name, ok, detail = '') => {
 
 function startServer() {
   const child = spawn(process.execPath, [join(ROOT, 'server/node.mjs')], {
-    // AUTH_TEST: a sign-in provider that signs in whoever its link names, for the team checks.
+    // AUTH_TEST: a sign-in provider that asks for whoever its link names, for the team checks (they post its confirmation form).
     env: { ...process.env, PORT: String(PORT), PREVIEW_PORT: String(PORT + 1), AUTH_TEST: '1', DATA_FILE: '' },
     stdio: ['ignore', 'pipe', 'pipe'],
   })
@@ -250,7 +250,9 @@ const UPDATE_LINE = 'claude plugin marketplace update claude-share && claude plu
 const roomInfo = async id => (await fetch(`${SERVER}/api/rooms/${id}`)).json()
 
 // Public preview checks explicitly ask as a room member, independently of
-// whether a guest has pressed Open to start a local TCP listener.
+// whether a guest has pressed Open to start a local TCP listener. The member
+// stays until its caller has used the link (`leave`): a link, and the
+// browser session it makes, end with their seat.
 async function publicPreview(id, port) {
   const base = `${SERVER}/api/rooms/${id}`
   const headers = { 'content-type': 'application/json', 'x-shared-session-version': JSON.parse(readFileSync(join(ROOT, 'plugin/.claude-plugin/plugin.json'), 'utf8')).version }
@@ -258,6 +260,7 @@ async function publicPreview(id, port) {
   const seat = await joined.json()
   if (!joined.ok || !seat.token) throw new Error('Preview probe could not join')
   headers.authorization = `Bearer ${seat.token}`
+  const leave = () => fetch(`${base}/leave`, { method: 'POST', headers }).catch(() => {})
   try {
     let events = seat.history ?? []
     const shown = await until('shared preview registered', async () => {
@@ -270,10 +273,20 @@ async function publicPreview(id, port) {
     const ticket = await fetch(`${base}/previews/${shown.body.pid}/ticket`, { method: 'POST', headers, body: JSON.stringify({ path: shown.body.path ?? '/' }) })
     const data = await ticket.json()
     if (!ticket.ok || !data.url) throw new Error('Public preview ticket was refused')
-    return data.url
-  } finally {
-    await fetch(`${base}/leave`, { method: 'POST', headers }).catch(() => {})
+    return { url: data.url, leave }
+  } catch (error) {
+    await leave()
+    throw error
   }
+}
+
+// A browser opening a preview link. A first entry clears what other rooms
+// left on the shared host name, with a page that sets no cookie and leads on
+// to a second link, which the browser opens with its cookies gone.
+async function enterPreview(url) {
+  const first = await fetch(url, { redirect: 'manual' })
+  const next = first.status === 200 && first.headers.get('clear-site-data') ? /url=([^"]+)"/.exec(await first.text())?.[1] : null
+  return next ? fetch(new URL(next.replaceAll('&amp;', '&'), url), { redirect: 'manual' }) : first
 }
 
 // Sharing: hosts and guests, everything a shared session carries.
@@ -504,17 +517,22 @@ async function sharing() {
   await new Promise(r => app.listen(0, '127.0.0.1', r))
   children.push({ kill: () => app.close() })
   const beforePreview = guest.text.length
-  const openInstruction = `press **Open** in the Room to forward it to your own localhost:${app.address().port}`
+  // A live guest is told to press Open preview (or the Room's Open) for the
+  // host's own address; nothing opens or forwards until they press it.
+  const port = app.address().port
+  const openInstruction = new RegExp(`\\(or \\*\\*Open\\*\\* in the Room\\) to open it at http://(?:localhost|127\\.0\\.0\\.1):${port}/`)
+  const toldToOpen = text => openInstruction.test(text)
   host.say(`/share-preview ${app.address().port} Dev app`)
-  await until('live guest told to press Open for forwarding', () => guest.text.slice(beforePreview).includes(openInstruction), 60_000).catch(() => null)
-  check('a live guest is told to press Open before forwarding, without public fallback', guest.text.slice(beforePreview).includes(openInstruction) && !guest.text.slice(beforePreview).includes('/__share/enter?'))
-  const enter = await publicPreview(id, app.address().port).catch(() => null)
+  await until('live guest told to press Open for forwarding', () => toldToOpen(guest.text.slice(beforePreview)), 60_000).catch(() => null)
+  check('a live guest is told to press Open before forwarding, without public fallback', toldToOpen(guest.text.slice(beforePreview)) && !guest.text.slice(beforePreview).includes('/__share/enter?'))
+  const probe = await publicPreview(id, app.address().port).catch(() => null)
+  const enter = probe?.url
   let previewed = false
   let cookie = ''
   let origin = ''
   if (enter) {
     origin = new URL(enter).origin
-    const opened = await fetch(enter, { redirect: 'manual' })
+    const opened = await enterPreview(enter)
     cookie = (opened.headers.get('set-cookie') ?? '').split(';')[0]
     const page = await fetch(`${origin}/`, { headers: { cookie } }).then(r => r.text())
     const asset = await fetch(`${origin}/assets/app.js`, { headers: { cookie } })
@@ -542,6 +560,7 @@ async function sharing() {
   // dev pages don't start without theirs): the app's echo answers.
   const echoed = origin ? await wsEcho(`${origin.replace(/^http/, 'ws')}/__echo`, cookie, 'ping-through-preview').catch(e => `error: ${e.message}`) : 'no preview'
   check("a WebSocket opened on a preview reaches the host's dev server and back", echoed === 'echo:ping-through-preview', echoed)
+  await probe?.leave()
 
   // A late joiner's replay also asks them to press Open; joining grants no listener.
   mkdirSync(join(WORK, 'lee'), { recursive: true })
@@ -550,8 +569,8 @@ async function sharing() {
   lee.say(link)
   await until('late joiner caught up', () => assistantText(lee).some(t => /kiwi/i.test(t)), 120_000).catch(() => null)
   const leeCaughtUp = Date.now()
-  await until('late guest told to press Open for forwarding', () => lee.text.includes(openInstruction), 60_000).catch(() => null)
-  check('a late guest is also told to press Open before forwarding, without public fallback', lee.text.includes(openInstruction) && !lee.text.includes('/__share/enter?'))
+  await until('late guest told to press Open for forwarding', () => toldToOpen(lee.text), 60_000).catch(() => null)
+  check('a late guest is also told to press Open before forwarding, without public fallback', toldToOpen(lee.text) && !lee.text.includes('/__share/enter?'))
   // Each earlier prompt arrives as a turn of its own, as it was for the host,
   // and quickly: one step for its calls, one for its last words.
   check('and sees each earlier prompt as its own turn, with its reply', ['marmalade', 'pineapple', 'kiwi'].every(w => assistantText(lee).some(t => t.toLowerCase().includes(w))) && lee.lines.filter(l => l.type === 'result').length >= 6, `${lee.lines.filter(l => l.type === 'result').length} turns in ${((leeCaughtUp - leeJoined) / 1000).toFixed(1)} s`)
@@ -564,12 +583,13 @@ async function sharing() {
   const mentioned = await publicPreview(id, dev.address().port).catch(() => null)
   let mentionedOk = false
   if (mentioned) {
-    const opened = await fetch(mentioned, { redirect: 'manual' })
+    const opened = await enterPreview(mentioned.url)
     const jar = (opened.headers.get('set-cookie') ?? '').split(';')[0]
-    const page = await fetch(`${new URL(mentioned).origin}/dash`, { headers: { cookie: jar } })
+    const page = await fetch(`${new URL(mentioned.url).origin}/dash`, { headers: { cookie: jar } })
     mentionedOk = opened.status === 302 && opened.headers.get('location') === '/dash' && page.ok && (await page.text()).includes('mentioned ok')
+    await mentioned.leave()
   }
-  check("a dev server the host's Claude mentions opens at its path through an explicit public ticket", mentionedOk, mentioned ? `${new URL(mentioned).origin}/dash` : 'no public ticket')
+  check("a dev server the host's Claude mentions opens at its path through an explicit public ticket", mentionedOk, mentioned ? `${new URL(mentioned.url).origin}/dash` : 'no public ticket')
 
   // How everyone heard the room: one open stream each, or polls when asked to.
   const polling = process.env.SHARED_SESSION_TRANSPORT === 'poll'
@@ -686,12 +706,18 @@ async function teams() {
         return null
       }
     }
+    // The test provider asks as GitHub and Google do: a page that names who it
+    // is, with the code Claude Code shows, and only its Continue signs in.
+    const codes = []
     const signIn = async (s, email) => {
       const before = s.text.length
       s.say('/team signin test')
       // Links are read from the stream's JSON: they end at a quote or a backslash.
       const url = await until(`${s.name}'s sign-in link`, () => /If no browser opened: (https?:\/\/[^\s"\\]+)/.exec(s.text.slice(before))?.[1], 60_000)
-      await fetch(`${url}&email=${encodeURIComponent(email)}&name=${s.name}`)
+      const page = await fetch(`${url}&email=${encodeURIComponent(email)}&name=${s.name}`).then(r => r.text())
+      const field = name => /value="([^"]*)"/.exec(new RegExp(`<input[^>]*name="${name}"[^>]*>`).exec(page)?.[0] ?? '')?.[1] ?? ''
+      await fetch(new URL('/auth/confirm', url), { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ login: field('login'), nonce: field('nonce') }) })
+      codes.push([/code <b>([^<]+)<\/b>/.exec(page)?.[1] ?? 'none on the page', /code\W{0,4}([0-9A-F]{4}-[0-9A-F]{4})/.exec(s.text.slice(before))?.[1] ?? 'none in Claude Code'])
       return until(`${s.name} signed in`, () => accountOf(s), 30_000)
     }
     const pat = session('Pat', join(WORK, 'pat'), [], 'Pat', NO_BROWSER)
@@ -700,6 +726,7 @@ async function teams() {
     const invite = await until('the team', () => /Invite people with this link: (https?:\/\/[^\s"\\]+)/.exec(pat.text)?.[1], 30_000)
     const keptPrivate = (statSync(join(pat.home, '.claude', 'shared-session', 'account.json')).mode & 0o077) === 0
     check('signing in from Claude Code keeps the sign-in where only its user reads it, and a team is made', Boolean(patSignIn?.token) && keptPrivate && Boolean(invite), invite)
+    check('the sign-in page shows the code Claude Code showed', codes[0][0] === codes[0][1], codes[0].join(' / '))
     pat.say('/share-session all')
     const teamLink = await until('a team share', () => /Sharing this session with Acme\. [^\n]*?: (https?:\/\/[^\s"\\]+?\/s\/[A-Za-z0-9_-]+)/.exec(pat.text)?.[1], 30_000)
     const teamRoom = teamLink.split('/s/')[1]

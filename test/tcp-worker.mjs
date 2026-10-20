@@ -7,7 +7,11 @@ import { spawn } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
 import { once } from 'node:events'
 import { fileURLToPath } from 'node:url'
-import { Room, PLUGIN_LATEST, TCP_LIMITS, LIMITS, Windows, limitOf, token, tcpOperation, tcpState, tcpReserve, tcpRefund, tcpControl, previewSocketTarget, previewRequest } from '../server/core.mjs'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { Room, ROOM_ID, PLUGIN_LATEST, TCP_LIMITS, PUBLIC_LIMITS, LIMITS, NEED_LIMIT, Windows, limitOf, token, tcpAdmit, tcpState, tcpReserve, tcpRefund, chargeControl, tcpRelay, previewSocketTarget, previewRequest, previewRoomOf, previewMissing, bodyLimit, EVENT_BYTES } from '../server/core.mjs'
+import { BODY_CHARS } from '../server/teams.mjs'
 import worker, { RoomObject } from '../server/worker.mjs'
 
 const NativeResponse = globalThis.Response, nativeNow = Date.now
@@ -55,6 +59,8 @@ class Storage {
   async transaction(fn) { return fn(this) }
 }
 class State {
+  // A Durable Object's id, as toString() writes it: the room's preview key.
+  id = (hex => ({ toString: () => hex }))(randomBytes(32).toString('hex'))
   storage = new Storage()
   sockets = []
   barrier = Promise.resolve()
@@ -67,11 +73,24 @@ class State {
   // Closing sockets deliberately remain listed, as on Cloudflare during close.
   getWebSockets(tag) { return this.sockets.filter(ws => !tag || ws.tags.includes(tag)) }
 }
+// The part of the ROOMS namespace the Worker uses. As on Cloudflare, a name
+// and a hex id are different objects (idFromName(key) isn't the room whose
+// id the key is), idFromString refuses anything but an object's hex id, and
+// an id no room has is an empty object.
+function namespace(...worlds) {
+  const empty = new RoomObject(new State(), {})
+  return {
+    idFromName: name => `name:${name}`,
+    idFromString: hex => { if (!/^[0-9a-f]{64}$/.test(hex)) throw new TypeError('Invalid Durable Object ID'); return `hex:${hex}` },
+    get: id => worlds.find(w => id === `name:${w.id}` || id === `hex:${w.key}`)?.obj ?? empty,
+  }
+}
 function req(w, path, bearer, method = 'GET', body, upgrade = false) {
   const headers = { 'x-shared-session-version': PLUGIN_LATEST }
   if (bearer) headers.authorization = `Bearer ${bearer}`
   if (upgrade) headers.upgrade = 'websocket'
-  return new Request(`https://room.internal/${w.id}/${path}`, { method, headers, ...(body === undefined ? {} : { body: JSON.stringify(body) }) })
+  // A preview's requests name the room by its preview key, as the preview Worker sends them.
+  return new Request(`https://room.internal/${path.startsWith('__preview') ? w.key : w.id}/${path}`, { method, headers, ...(body === undefined ? {} : { body: JSON.stringify(body) }) })
 }
 function heldReject(w, id, bearer = w.host) {
   let release, read = false, started
@@ -83,19 +102,35 @@ function heldReject(w, id, bearer = w.host) {
   return { request: new Request(`https://room.internal/${w.id}/ws/${id}/reject`, { method: 'POST', headers: { authorization: `Bearer ${bearer}` }, body, duplex: 'half' }),
     reading, get read() { return read }, release: (text = '{"code":"BUSY"}') => release(text) }
 }
+async function api(w, ...args) {
+  const response = await w.obj.fetch(req(w, ...args))
+  assert.equal(response.status, 200, await response.clone().text())
+  return response.json()
+}
+// A request whose body arrives only when the test says.
+function heldBody(w, path, bearer = w.host, method = 'POST') {
+  let release, reads = 0, started
+  const reading = new Promise(resolve => { started = resolve })
+  const body = new ReadableStream({ pull(controller) {
+    reads++; started()
+    return new Promise(resolve => { release = data => { controller.enqueue(new TextEncoder().encode(typeof data === 'string' ? data : JSON.stringify(data))); controller.close(); resolve() } })
+  } }, { highWaterMark: 0 })
+  return { request: new Request(req(w, path, bearer, method), { body, duplex: 'half' }), reading,
+    get reads() { return reads }, release: data => release(data) }
+}
 const jsonControl = ws => ws.sent.filter(x => typeof x === 'string').map(x => JSON.parse(x))
 const tcp = ws => ws.deserializeAttachment().tcp
 function live(w, side, id) { return w.state.getWebSockets(`${side === 'guest' ? 'tg' : 'th'}:${id}`).find(ws => !tcp(ws).closed) }
 async function world(support = true) {
   const state = new State(), obj = new RoomObject(state, {})
   await state.barrier
-  const w = { state, obj, id: token(16) }
+  const w = { state, obj, id: token(16), key: state.id.toString() }
   assert.equal((await obj.fetch(req(w, 'create', null, 'POST', { name: 'Host' }))).status, 200)
   w.host = obj.room.host.token
   const joined = await (await obj.fetch(req(w, 'join', null, 'POST', { name: 'Guest' }))).json()
   w.member = joined.token; w.seat = joined.seat
   w.pid = (await (await obj.fetch(req(w, 'previews', w.host, 'POST', { port: 34567, tcp: true }))).json()).pid
-  assert.equal((await obj.fetch(req(w, `socket?after=0${support ? '&tcp=1' : ''}`, w.host, 'GET', undefined, true))).status, 101)
+  assert.equal((await obj.fetch(req(w, `socket?after=0${support ? '&tcp=1&need=1' : ''}`, w.host, 'GET', undefined, true))).status, 101)
   w.control = state.getWebSockets('host').at(-1)
   return w
 }
@@ -140,6 +175,53 @@ function closed(pair, code) {
   assert.equal(pair.guest.closes.at(-1)?.code, code)
   if (pair.host) assert.equal(pair.host.closes.at(-1)?.code, code)
 }
+function publicRequest(w, cookie) {
+  const request = req(w, '__preview/live', null, 'GET', undefined, true)
+  request.headers.set('cookie', cookie)
+  return request
+}
+async function pairPublic(w, pair) {
+  assert.equal((await w.obj.fetch(req(w, `ws/${pair.id}`, w.host, 'GET', undefined, true))).status, 101)
+  pair.host = w.state.getWebSockets(`ph:${pair.id}`).at(-1)
+  return pair
+}
+// A browser entering by a link: anything but this room's cookie is cleared
+// first (D2-3), by a page that sets nothing and leads on to a second link,
+// which the browser, its cookies cleared, opens with none.
+async function entering(w, url, cookie) {
+  const go = (link, cookie) => {
+    const request = req(w, `__preview${link.pathname}${link.search}`)
+    if (cookie) request.headers.set('cookie', cookie)
+    return w.obj.fetch(request)
+  }
+  const first = await go(url, cookie)
+  if (first.status !== 200 || first.headers.get('clear-site-data') !== '"cache", "cookies", "storage"') return first
+  assert.equal(first.headers.get('set-cookie'), null)
+  return go(new URL(/url=([^"]+)"/.exec(await first.text())[1].replaceAll('&amp;', '&'), url))
+}
+async function openPublic(w, pid, paired = true, bearer = w.member) {
+  const request = req(w, `previews/${pid}/ticket`, bearer, 'POST', {})
+  request.headers.set('x-preview-origin', 'https://preview.test')
+  const ticket = await w.obj.fetch(request)
+  assert.equal(ticket.status, 200)
+  const entered = await entering(w, new URL((await ticket.json()).url))
+  assert.equal(entered.status, 302)
+  const cookie = entered.headers.get('set-cookie').split(';')[0]
+  assert.equal((await w.obj.fetch(publicRequest(w, cookie))).status, 101)
+  const notice = jsonControl(w.control).filter(x => x.ws).at(-1).ws
+  assert.equal(notice.pid, pid)
+  const pair = { id: notice.id, pid, cookie, guest: w.state.getWebSockets(`pb:${notice.id}`).at(-1) }
+  return paired ? pairPublic(w, pair) : pair
+}
+async function publicTraffic(w, pair, label) {
+  const sent = [pair.host.sent.length, pair.guest.sent.length]
+  const reply = new Uint8Array([0, 255, 3, 13]).buffer
+  await w.obj.webSocketMessage(pair.guest, label)
+  assert.equal(pair.host.sent.at(-1), label)
+  await w.obj.webSocketMessage(pair.host, reply)
+  assert.deepEqual(pair.guest.sent.at(-1), reply)
+  assert.deepEqual([pair.host.sent.length, pair.guest.sent.length], sent.map(n => n + 1))
+}
 
 try {
   // Authentication, purpose isolation, cap persistence and legacy cookie path.
@@ -157,14 +239,14 @@ try {
     for (const [pid, bearer] of [[w.pid, w.member], [w.pid, w.host], ['wrong-pid', cap.token], [w.pid, 'missing']]) {
       assert.equal((await w.obj.fetch(req(w, `previews/${pid}/tunnel`, bearer, 'GET', undefined, true))).status, 401)
     }
-    const cookieReq = new Request('https://preview.local/test', { headers: { cookie: `cs_pv=${w.id}.${cap.token}` } })
+    const cookieReq = new Request('https://preview.local/test', { headers: { cookie: `cs_pv=${w.key}.${cap.token}` } })
     assert.equal(previewSocketTarget(w.obj.room, cookieReq, now).ok, false)
     assert.equal((await previewRequest(w.obj.room, cookieReq, now)).response.status, 404)
     const ticket = await (await w.obj.fetch(req(w, `previews/${w.pid}/ticket`, w.member, 'POST', { path: '/app?a=1' }))).json()
     // RoomObject normally gets this header from the outer Worker.
     assert.equal(ticket.error, 'This server does not serve previews.')
     w.obj.room.previewSessions.set('old-http', { pid: w.pid, exp: now + 100_000 })
-    const publicReq = new Request(`https://preview.local/app?a=1`, { headers: { cookie: `cs_pv=${w.id}.old-http` } })
+    const publicReq = new Request(`https://preview.local/app?a=1`, { headers: { cookie: `cs_pv=${w.key}.old-http` } })
     assert.equal(previewSocketTarget(w.obj.room, publicReq, now).ok, true)
     assert.equal((await w.obj.fetch(req(w, `previews/${w.pid}/tunnel`, 'old-http', 'GET', undefined, true))).status, 401)
     const pair = await open(w, cap)
@@ -190,6 +272,213 @@ try {
     // A guest can't ask for forwarding: only the host makes previews.
     assert.equal((await w.obj.fetch(req(w, 'previews', w.member, 'POST', { port: 6379, tcp: true }))).status, 403)
     console.log('OK forwarding only for previews the host chose to forward')
+  }
+
+  // A preview's Stop ends its own grants and channels and no other's; what
+  // the room says about previews comes from its state, not trimmed history.
+  {
+    const w = await world()
+    await w.obj.fetch(req(w, 'socket?after=0', w.member, 'GET', undefined, true))
+    const viewer = w.state.getWebSockets(w.seat).at(-1)
+    const other = await api(w, 'previews', w.host, 'POST', { port: 43170, tcp: true })
+    const caps = [await grant(w)], pairs = [await open(w, caps[0])]
+    const otherCap = await api(w, `previews/${other.pid}/tunnel`, w.member, 'POST')
+    pairs.push(await open({ ...w, pid: other.pid }, otherCap))
+    for (let i = 0; i < 5010; i++) w.obj.room.append({ seat: 'host', role: 'host', name: 'Host' }, 'row', { text: 'history '.repeat(30) }, now)
+    await w.obj.persist(); await reconstruct(w)
+    assert.equal(w.obj.room.events.length, 5000)
+    assert.deepEqual([w.obj.room.previews.get(other.pid)?.port, w.obj.room.previews.get(other.pid)?.tcp], [43170, true])
+    assert(w.obj.room.previewSessions.has(otherCap.token))
+    const before = w.obj.room.seq
+    assert.deepEqual(await api(w, `previews/${other.pid}/end`, w.host, 'POST'), { ok: true })
+    closed(pairs[1], 1008)
+    assert.equal(pairs[0].guest.closes.length, 0, "another preview's channel goes on")
+    assert.equal(w.obj.room.previewSessions.has(otherCap.token), false); assert(w.obj.room.previewSessions.has(caps[0].token))
+    assert.equal((await w.obj.fetch(req(w, `previews/${other.pid}/tunnel`, otherCap.token, 'GET', undefined, true))).status, 401)
+    assert.equal((await w.obj.fetch(req(w, `previews/${other.pid}/tunnel`, w.member, 'POST', {}))).status, 404)
+    assert.deepEqual(w.obj.room.since(before).filter(e => e.type === 'preview').map(e => [e.body.pid, e.body.state]), [[other.pid, 'closed']])
+    assert.deepEqual(jsonControl(viewer).at(-1).events.filter(e => e.type === 'preview').map(e => e.body.state), ['closed'])
+    const again = await api(w, 'previews', w.host, 'POST', { port: 43170, tcp: true })
+    assert.notEqual(again.pid, other.pid)
+    await reconstruct(w)
+    assert.equal(w.obj.room.previews.has(other.pid), false); assert.equal(w.obj.room.previews.get(again.pid).tcp, true)
+    assert(pairs.every(p => jsonControl(p.guest).every(x => x.events === undefined)), 'TCP payload channels never receive room pages')
+    console.log('OK Worker preview Stop ends only its own grants and channels; metadata after trimmed history and reconstruction')
+  }
+
+  // Public sockets end with their preview, open or still waiting for the
+  // host's half, including after hibernation; other previews' go on.
+  {
+    const w = await world()
+    const pids = [(await api(w, 'previews', w.host, 'POST', { port: 43211 })).pid, (await api(w, 'previews', w.host, 'POST', { port: 43210 })).pid, w.pid]
+    const active = [], waiting = []
+    for (const pid of pids) {
+      active.push(await openPublic(w, pid))
+      waiting.push(await openPublic(w, pid, false))
+    }
+    const cap = await api(w, `previews/${w.pid}/tunnel`, w.member, 'POST', {})
+    const tcpPair = await open(w, cap)
+    await w.obj.persist(); await reconstruct(w)
+    for (let i = 0; i < active.length; i++) {
+      await publicTraffic(w, active[i], `before stop ${i}`)
+      await w.obj.webSocketMessage(waiting[i].guest, `queued ${i}`)
+      assert.equal(w.obj.pending.get(waiting[i].id).messages[0], `queued ${i}`)
+    }
+    await api(w, `previews/${pids[0]}/end`, w.host, 'POST')
+    closed(active[0], 1008); closed(waiting[0], 1008)
+    assert.equal(w.obj.pending.has(waiting[0].id), false)
+    assert.equal((await w.obj.fetch(req(w, `previews/${active[0].pid}`, w.member))).status, 404)
+    assert.equal((await w.obj.fetch(publicRequest(w, active[0].cookie))).status, 404)
+    assert.equal(tcpPair.guest.closes.length, 0, "another preview's TCP goes on")
+    for (let i = 1; i < active.length; i++) {
+      assert.equal(active[i].guest.closes.length, 0); assert.equal(active[i].host.closes.length, 0)
+      assert.equal(waiting[i].guest.closes.length, 0)
+      await pairPublic(w, waiting[i])
+      assert.equal(waiting[i].host.sent[0], `queued ${i}`)
+      await publicTraffic(w, active[i], `kept ${i}`)
+      await publicTraffic(w, waiting[i], `late pair ${i}`)
+    }
+    for (const pair of [...active, ...waiting]) {
+      assert.equal(pair.guest.deserializeAttachment().pid, pair.pid)
+      if (pair.host) assert.equal(pair.host.deserializeAttachment().pid, pair.pid)
+    }
+    // Even if closing sockets remain listed across another reconstruction and
+    // the same port is shared again, neither old half may forward or re-pair.
+    const replacement = (await api(w, 'previews', w.host, 'POST', { port: 43211 })).pid
+    assert.notEqual(replacement, active[0].pid)
+    await reconstruct(w)
+    const sent = [active[0].guest.sent.length, active[0].host.sent.length]
+    await w.obj.webSocketMessage(active[0].guest, 'revoked request')
+    await w.obj.webSocketMessage(active[0].host, 'revoked reply')
+    assert.deepEqual([active[0].guest.sent.length, active[0].host.sent.length], sent)
+    for (const pair of [active[0], waiting[0]]) {
+      assert.equal((await w.obj.fetch(req(w, `ws/${pair.id}`, w.host, 'GET', undefined, true))).status, 410)
+      assert.equal(pair.guest.deserializeAttachment().closed, true)
+    }
+    const fresh = await openPublic(w, pids[1])
+    await publicTraffic(w, fresh, 'a new public handshake')
+    await api(w, `previews/${pids[1]}/end`, w.host, 'POST')
+    closed(active[1], 1008); closed(waiting[1], 1008); closed(fresh, 1008)
+    await publicTraffic(w, active[2], 'the other preview survives Stop')
+    const pendingEnd = await openPublic(w, w.pid, false)
+    await api(w, 'end', w.host, 'POST')
+    for (const pair of [active[2], waiting[2], pendingEnd, tcpPair]) closed(pair, 1008)
+    await reconstruct(w)
+    const before = active[2].host.sent.length
+    await w.obj.webSocketMessage(active[2].guest, 'after room end')
+    assert.equal(active[2].host.sent.length, before)
+  }
+  console.log('OK Worker public WS: Stop ends open and waiting pairs, other previews and late pairs go on, room end and reconstruction')
+
+  // Expired grants are swept by the alarm and by ordinary room requests, not
+  // by every fetch (a page asset, an upgrade, a host's rejection): those
+  // write nothing for it. Admission still counts only live halves: the ones
+  // past their pairing deadline close right before it, TCP and public alike.
+  {
+    const w = await world()
+    const pid = (await api(w, 'previews', w.host, 'POST', { port: 43220 })).pid
+    const pair = await openPublic(w, pid, false)
+    w.obj.room.previewSessions.set('expired-for-alarm', { scope: 'tcp', pid: w.pid, seat: w.seat, exp: now - 1 })
+    const writes = w.state.storage.writes.length
+    const asset = new Request(`https://room.internal/${w.key}/__preview/app.js`, { headers: { cookie: pair.cookie } })
+    const answered = w.obj.fetch(asset)
+    await new Promise(resolve => setImmediate(resolve))
+    assert.equal(w.state.storage.writes.length, writes, 'a page asset writes nothing for an expired grant')
+    assert(w.obj.room.previewSessions.has('expired-for-alarm'))
+    for (const p of w.obj.room.proxied.values()) p(new Response('ok'))
+    assert.equal((await answered).status, 200)
+    await w.obj.alarm()
+    assert.equal(w.obj.room.previewSessions.has('expired-for-alarm'), false, 'the alarm sweeps it')
+    const cap = await grant(w)
+    const stale = []
+    for (let i = 0; i < TCP_LIMITS.seatPairs; i++) stale.push(await open(w, cap, false))
+    assert.equal((await w.obj.fetch(req(w, `previews/${w.pid}/tunnel`, cap.token, 'GET', undefined, true))).status, 429)
+    now += TCP_LIMITS.pairMs + 1 // no alarm delivered yet
+    const fresh = await open(w, cap, false)
+    for (const p of stale) closed(p, 1008)
+    assert.equal(fresh.guest.closes.length, 0)
+    console.log('OK Worker cleanup from the alarm and constructor; stale halves close right before admission')
+  }
+  // A deploy disconnects every socket, so no attachment comes from older code;
+  // still, one that doesn't name its preview, session and seat proves nothing,
+  // and its authority isn't guessed from history or a port: it closes on reload.
+  {
+    const w = await world(), pair = await openPublic(w, w.pid)
+    pair.guest.serializeAttachment({ pb: pair.id }); pair.host.serializeAttachment({ ph: pair.id })
+    await reconstruct(w)
+    closed(pair, 1008)
+    assert.equal((await w.obj.fetch(req(w, `ws/${pair.id}`, w.host, 'GET', undefined, true))).status, 410)
+  }
+  console.log('OK Worker asynchronous public handshake fences and fail-closed incomplete attachments')
+
+  // Outer Worker ingress must preserve streaming authorization and byte limits.
+  // A held upload shares nothing in a room that changed meanwhile.
+  {
+    const w = await world(), env = { ROOMS: { idFromName: id => id, get: () => w.obj }, PREVIEW_URL: 'https://preview.test' }
+    const outer = held => worker.fetch(new Request(`https://share.test/api/rooms${new URL(held.request.url).pathname}`, held.request), env)
+    for (const bearer of ['', 'invalid', w.member]) {
+      const held = heldBody(w, 'previews', bearer)
+      held.request.headers.set('content-length', String(1_000_000))
+      assert.equal((await outer(held)).status, bearer === w.member ? 403 : 401)
+      assert.equal(held.reads, 0)
+    }
+    const oversized = heldBody(w, 'previews')
+    oversized.request.headers.set('content-length', String(1_000_000))
+    assert.equal((await outer(oversized)).status, 413); assert.equal(oversized.reads, 0)
+    let reads = 0
+    const body = new ReadableStream({ pull(controller) { reads++; assert.equal(reads, 1); controller.enqueue(new TextEncoder().encode('界'.repeat(5500))) } }, { highWaterMark: 0 })
+    const large = new Request('https://share.test/api/rooms/' + w.id + '/previews', { method: 'POST', headers: req(w, '', w.host).headers, body, duplex: 'half' })
+    assert.equal((await worker.fetch(large, env)).status, 413); assert.equal(reads, 1)
+    assert.equal(w.obj.room.previews.size, 1)
+    // A grant reads no body: answered at once, whatever is still uploading.
+    const grantHeld = heldBody(w, `previews/${w.pid}/tunnel`, w.member)
+    assert.equal((await outer(grantHeld)).status, 200); assert.equal(grantHeld.reads, 0)
+    // A link reads its page, streamed through the outer Worker: a Stop
+    // meanwhile mints nothing, and takes the grant with it.
+    const linkHeld = heldBody(w, `previews/${w.pid}/ticket`, w.member), linking = outer(linkHeld)
+    await linkHeld.reading
+    await api(w, `previews/${w.pid}/end`, w.host, 'POST')
+    linkHeld.release({ path: '/late' })
+    assert.equal((await linking).status, 404); assert.equal(w.obj.room.tickets.size, 0)
+    assert.equal([...w.obj.room.previewSessions.values()].some(s => s.scope === 'tcp'), false)
+    const sharing = heldBody(w, 'previews'), applying = outer(sharing)
+    await sharing.reading
+    w.obj.room.host.token = token(24); sharing.release({ port: 43180, tcp: true })
+    assert.equal((await applying).status, 401)
+    const wrong = heldBody({ ...w, id: token(16) }, 'previews')
+    assert.equal((await outer(wrong)).status, 404); assert.equal(wrong.reads, 0)
+    await reconstruct(w); assert.equal(w.obj.room.previews.size, 0)
+    console.log('OK outer Worker auth-before-body, streaming UTF-8 limits and stale grant, token and room checks')
+  }
+
+  // Save completion order cannot bring back a stopped preview or lose its
+  // close event when another change commits during a storage await.
+  {
+    const w = await world()
+    const original = w.state.storage.put.bind(w.state.storage)
+    let release, entered, held = false, writes = 0
+    const blocked = new Promise(resolve => { release = resolve }), writing = new Promise(resolve => { entered = resolve })
+    w.state.storage.put = async (key, value) => {
+      if (key === 'meta' || (typeof key === 'object' && key.meta)) {
+        writes++
+        if (!held) { held = true; entered(); await blocked }
+      }
+      return original(key, value)
+    }
+    const sharing = api(w, 'previews', w.host, 'POST', { port: 43190, tcp: true })
+    await writing
+    const pid = [...w.obj.room.previews.values()].find(p => p.port === 43190).pid
+    const ending = api(w, `previews/${pid}/end`, w.host, 'POST')
+    await new Promise(resolve => setImmediate(resolve))
+    assert.equal(w.obj.room.previews.has(pid), false); assert.equal(writes, 1, 'saves are serialized, not merely their start order')
+    release()
+    await Promise.all([sharing, ending])
+    assert.equal(writes, 2)
+    assert.equal((await w.state.storage.get('meta')).previews[pid], undefined)
+    await reconstruct(w)
+    assert.equal(w.obj.room.previews.has(pid), false)
+    assert(w.obj.room.events.some(e => e.type === 'preview' && e.body.pid === pid && e.body.state === 'closed'))
+    console.log('OK ordered Worker persistence keeps the latest Stop and its close event across overlapping writes')
   }
 
   // Grants and WS opens share the exact minute counters; one seat cannot
@@ -324,8 +613,11 @@ try {
     console.log('OK premature data, frame/control size, nonce/FIFO/one-use, credit and DATA rate limits')
   }
 
-  // Cumulative control ceiling is exact and survives hibernation; ACKs cannot
-  // make the server queue unbounded control output to a non-reading sender.
+  // Control output a half hasn't proven it read is bounded exactly, and the
+  // count survives hibernation. An ack's nonce proves its credit notice read,
+  // so that notice no longer counts (the forwarded ack still does, against
+  // the sender): ACKs cannot make the server queue unbounded control output
+  // to a non-reading sender, and a half that keeps reading isn't cut off.
   {
     const w = await world(), cap = await grant(w), p = await open(w, cap)
     const n = JSON.stringify({ t: 'credit', n: 1, nonce: 'a'.repeat(22) }).length
@@ -335,13 +627,37 @@ try {
     assert.equal(tcp(p.host).controlSent, TCP_LIMITS.bufferBytes)
     await reconstruct(w)
     assert.equal(tcp(p.host).controlSent, TCP_LIMITS.bufferBytes)
-    await ack(w, p.host)
-    await w.obj.webSocketMessage(p.guest, new Uint8Array([2]).buffer); closed(p, 1008)
+    const sender = tcp(p.guest).controlSent, credit = await ack(w, p.host)
+    assert.equal(tcp(p.host).controlSent, TCP_LIMITS.bufferBytes - n, 'the acknowledged notice is given back')
+    assert.equal(tcp(p.guest).controlSent, sender + JSON.stringify({ t: 'ack', ...credit }).length, 'the forwarded ack is charged to its sender')
+    await w.obj.webSocketMessage(p.guest, new Uint8Array([2]).buffer)
+    assert.equal(p.guest.closes.length, 0); assert.equal(tcp(p.host).controlSent, TCP_LIMITS.bufferBytes)
+    await w.obj.webSocketMessage(p.guest, new Uint8Array([3]).buffer); closed(p, 1008) // not acknowledged: the bound holds
     const exact = { controlSent: TCP_LIMITS.bufferBytes - 11 }
-    assert.equal(tcpControl(exact, { t: 'fin' }).length, 11)
+    assert.equal(chargeControl(exact, { t: 'fin' }).length, 11)
     assert.equal(exact.controlSent, TCP_LIMITS.bufferBytes)
-    assert.throws(() => tcpControl(exact, { t: 'fin' }), /control output limit/)
-    console.log('OK exact lifetime control-output bound and reconstruction')
+    assert.throws(() => chargeControl(exact, { t: 'fin' }), /control output limit/)
+    // One-frame request/response exchanges, every credit acknowledged: past
+    // the 9.8k after which both halves used to close, each half has been
+    // charged only the acks it was forwarded.
+    const target = { room: 'r', pid: 'p', port: 1, cap: 'c', ownerSeat: 's', exp: Infinity }
+    const guest = tcpState('id', target, 'guest', 0), host = tcpState('id', target, 'host', 0)
+    guest.ready = host.ready = true; guest.remaining = host.remaining = Number.MAX_SAFE_INTEGER
+    let at = 0
+    const relay = (from, to, frame) => tcpRelay(from, to, frame, at++)
+    const byte = new Uint8Array([7]).buffer
+    for (let i = 0; i < 12_000; i++) {
+      relay(guest, host, { t: 'data', n: 1, data: byte }); relay(host, guest, { t: 'ack', ...host.credits[0] })
+      relay(host, guest, { t: 'data', n: 1, data: byte }); relay(guest, host, { t: 'ack', ...guest.credits[0] })
+    }
+    const ackBytes = JSON.stringify({ t: 'ack', n: 1, nonce: 'a'.repeat(22) }).length
+    assert.equal(guest.controlSent, 12_000 * ackBytes); assert.equal(host.controlSent, 12_000 * ackBytes)
+    // A half that only receives (and acknowledges) is charged nothing at all.
+    const reader = tcpState('id', target, 'host', at), writer = tcpState('id', target, 'guest', at)
+    reader.ready = writer.ready = true; writer.remaining = Number.MAX_SAFE_INTEGER
+    for (let i = 0; i < 12_000; i++) { relay(writer, reader, { t: 'data', n: 1, data: byte }); relay(reader, writer, { t: 'ack', ...reader.credits[0] }) }
+    assert.equal(reader.controlSent, 0); assert.equal(writer.controlSent, 12_000 * ackBytes)
+    console.log('OK exact control-output bound and reconstruction; acknowledged credit notices given back, past 9.8k exchanges')
   }
 
   // Rebind/Open/reload gets a fresh grant: roll this seat/pid's oldest rather
@@ -384,7 +700,7 @@ try {
       assert.equal((await w.obj.fetch(held.request)).status, 401); assert.equal(held.read, false)
     }
     const cookie = heldReject(w, pending.id, '')
-    cookie.request.headers.delete('authorization'); cookie.request.headers.set('cookie', `cs_pv=${w.id}.${cap.token}`)
+    cookie.request.headers.delete('authorization'); cookie.request.headers.set('cookie', `cs_pv=${w.key}.${cap.token}`)
     assert.equal((await w.obj.fetch(cookie.request)).status, 401); assert.equal(cookie.read, false)
     const outer = heldReject(w, pending.id, w.member)
     const external = new Request(`https://share.test/api/rooms/${w.id}/${path}`, outer.request)
@@ -400,11 +716,14 @@ try {
     const wrong = await world()
     assert.equal((await wrong.obj.fetch(req(wrong, path, wrong.host, 'POST', { code: 'BUSY' }))).status, 404)
     assert.equal((await w.obj.fetch(req({ ...w, id: wrong.id }, path, w.host, 'POST', { code: 'BUSY' }))).status, 404)
+    // A waiting public browser is the host's to turn away too (C-reject): BUSY.
     w.obj.room.previewSessions.set('public-cookie', { pid: w.pid, exp: now + 60_000 })
-    assert.equal((await w.obj.fetch(new Request(`https://room.internal/${w.id}/__preview/live`, { headers: { upgrade: 'websocket', cookie: `cs_pv=${w.id}.public-cookie` } }))).status, 101)
+    assert.equal((await w.obj.fetch(new Request(`https://room.internal/${w.key}/__preview/live`, { headers: { upgrade: 'websocket', cookie: `cs_pv=${w.key}.public-cookie` } }))).status, 101)
     const publicId = jsonControl(w.control).at(-1).ws.id, publicSocket = w.state.getWebSockets(`pb:${publicId}`)[0]
-    assert.equal((await w.obj.fetch(req(w, `ws/${publicId}/reject`, w.host, 'POST', { code: 'BUSY' }))).status, 404)
-    assert.equal(publicSocket.closes.length, 0)
+    assert.equal((await w.obj.fetch(req(w, `ws/${publicId}/reject`, w.member, 'POST', { code: 'BUSY' }))).status, 401)
+    assert.equal((await w.obj.fetch(req(w, `ws/${publicId}/reject`, w.host, 'POST', { code: 'BUSY' }))).status, 200)
+    assert.equal(publicSocket.closes.at(-1).code, 1013)
+    assert.equal(pending.guest.closes.length, 0)
     assert.equal(pending.guest.closes.length, 0)
     const half = tcp(pending.guest)
     assert(tcpReserve(w.obj.room, half)); pending.guest.serializeAttachment({ tcp: half })
@@ -501,12 +820,12 @@ try {
   {
     const w = await world(), cap = await grant(w)
     w.obj.room.tcpStats.opens = { start: now, count: 0 }
-    for (let i = 0; i < TCP_LIMITS.opensPerMinute; i++) assert.equal(tcpOperation(w.obj.room, now), true)
-    assert.equal(tcpOperation(w.obj.room, now), false)
+    for (let i = 0; i < TCP_LIMITS.opensPerMinute; i++) assert.equal(tcpAdmit(w.obj.room, now), true)
+    assert.equal(tcpAdmit(w.obj.room, now), false)
     await w.obj.persistTCPStats(); await reconstruct(w)
-    assert.equal(tcpOperation(w.obj.room, now), false)
+    assert.equal(tcpAdmit(w.obj.room, now), false)
     now += TCP_LIMITS.openWindowMs + 1
-    assert.equal(tcpOperation(w.obj.room, now), true)
+    assert.equal(tcpAdmit(w.obj.room, now), true)
     w.obj.room.tcpStats.used = TCP_LIMITS.roomBytes - TCP_LIMITS.reserveBytes
     await w.obj.persistTCPStats()
     const q = await open(w, cap)
@@ -562,6 +881,665 @@ try {
     }
     console.log('OK alarms, away vs Leave, preview/room/expiry/TTL active and idle revocation')
   }
+
+  // A guest's need reaches the host's control stream alone, as one line, on a
+  // live and on a reconstructed object: nothing stored, no page for anyone, no
+  // TCP or public channel's, and outside the room's events window.
+  {
+    const w = await world(), env = { ROOMS: { idFromName: id => id, get: () => w.obj } }
+    assert.equal((await w.obj.fetch(req(w, 'socket?after=0', w.member, 'GET', undefined, true))).status, 101)
+    const viewer = w.state.getWebSockets(w.seat).at(-1)
+    const busy = await (await w.obj.fetch(req(w, 'join', null, 'POST', { name: 'Busy' }))).json()
+    // Connected, so a later minute doesn't sweep it.
+    assert.equal((await w.obj.fetch(req(w, 'socket?after=0', busy.token, 'GET', undefined, true))).status, 101)
+    const cap = await grant(w), channels = [await open(w, cap), await openPublic(w, w.pid)]
+    await api(w, 'events', w.host, 'POST', { events: [{ type: 'delta', body: { text: 'before any need' } }] })
+    const ask = async (body, bearer = w.member) => { const r = await w.obj.fetch(req(w, 'need', bearer, 'POST', body)); return [r.status, await r.json()] }
+    const needs = ws => jsonControl(ws).filter(x => x.need)
+    const quiet = () => JSON.stringify({ writes: w.state.storage.writes.length, seq: w.obj.room.seq, events: w.obj.room.events.length, viewer: viewer.sent.length, posts: w.obj.room.posts.windows.get('all') ?? null })
+    const nowhereElse = () => { for (const ws of channels.flatMap(c => [c.guest, c.host])) assert.deepEqual(needs(ws), []) }
+    let before = quiet()
+    assert.deepEqual(await ask({ port: 43230 }), [200, { delivered: true }])
+    assert.deepEqual(JSON.parse(w.control.sent.at(-1)), { need: { port: 43230, seat: w.seat, name: 'Guest' } })
+    assert.equal(quiet(), before, 'not stored, no event, no page, not the events window')
+    nowhereElse()
+    const fromHost = heldBody(w, 'need', w.host)
+    assert.equal((await w.obj.fetch(fromHost.request)).status, 403); assert.equal(fromHost.reads, 0)
+    // Through the outer Worker the body is a stream, read only after auth.
+    const outer = held => worker.fetch(new Request(`https://share.test/api/rooms${new URL(held.request.url).pathname}`, held.request), env)
+    const viaHost = heldBody(w, 'need', w.host)
+    assert.equal((await outer(viaHost)).status, 403); assert.equal(viaHost.reads, 0)
+    const declared = heldBody(w, 'need', w.member)
+    declared.request.headers.set('content-length', String(NEED_LIMIT.bodyBytes + 1))
+    assert.equal((await outer(declared)).status, 413); assert.equal(declared.reads, 0)
+    const viaOuter = heldBody(w, 'need', w.member), sending = outer(viaOuter)
+    await viaOuter.reading; viaOuter.release({ port: 43231 })
+    assert.deepEqual(await (await sending).json(), { delivered: true })
+    for (const bad of [{}, { port: 0 }, { port: '43231' }, { port: 43231, seat: 'host' }]) assert.equal((await ask(bad))[0], 400)
+    // Forwarded already by the host: nothing to ask, and which preview it is.
+    const sharedPid = async port => { const [status, body] = await ask({ port }); assert.equal(status, 200); assert.equal(body.shared, true); assert.equal(typeof body.pid, 'string'); return body.pid }
+    assert.equal(await sharedPid(34567), w.pid)
+    const forwarded = (await api(w, 'previews', w.host, 'POST', { port: 43232, tcp: true })).pid
+    assert.equal(await sharedPid(43232), forwarded)
+    await api(w, `previews/${forwarded}/end`, w.host, 'POST')
+    assert.deepEqual(await ask({ port: 43232 }), [200, { delivered: true }])
+    assert.deepEqual(needs(w.control).map(x => x.need.port), [43230, 43231, 43232])
+    for (let i = 0; i < NEED_LIMIT.limit; i++) assert.deepEqual(await ask({ port: 43240 + i }, busy.token), [200, { delivered: true }])
+    const limited = heldBody(w, 'need', busy.token), refused = await w.obj.fetch(limited.request)
+    assert.equal(refused.status, 429); assert.equal(limited.reads, 0)
+    assert.deepEqual(await ask({ port: 43233 }), [200, { delivered: true }], 'another seat still asks')
+    assert.deepEqual(needs(w.control).filter(x => x.need.seat === busy.seat).map(x => x.need.port), Array.from({ length: 20 }, (_, i) => 43240 + i))
+    now += NEED_LIMIT.periodMs
+    assert.deepEqual(await ask({ port: 43260 }, busy.token), [200, { delivered: true }], 'a new minute')
+    await reconstruct(w)
+    before = quiet()
+    assert.deepEqual(await ask({ port: 43261 }), [200, { delivered: true }])
+    assert.deepEqual(JSON.parse(w.control.sent.at(-1)), { need: { port: 43261, seat: w.seat, name: 'Guest' } })
+    assert.equal(quiet(), before)
+    nowhereElse()
+    await w.obj.webSocketClose(w.control, 1000, '')
+    assert.deepEqual(await ask({ port: 43262 }), [200, { delivered: false }], 'a closing host socket is not a stream')
+    await reconstruct(w)
+    assert.deepEqual(await ask({ port: 43263 }), [200, { delivered: false }], 'closed, still listed after reconstruction')
+    w.state.sockets = w.state.sockets.filter(ws => ws !== w.control)
+    assert.deepEqual(await ask({ port: 43264 }), [200, { delivered: false }], 'no host stream at all')
+    assert.equal(needs(viewer).length, 0)
+    assert.equal((await w.obj.fetch(req(w, 'end', w.host, 'POST'))).status, 200)
+    assert.equal((await ask({ port: 43265 }))[0], 410)
+    console.log('OK Worker need: host control stream only, live and reconstructed; never stored; 403/413/400/429 per seat/410; shared when forwarded')
+  }
+  // The public link on the Worker. Links outlive the object sleeping (they are
+  // kept with the room). A seat's 32 sockets, pending or paired, then 429;
+  // one the host doesn't take up closes at its deadline (alarm, 1011), or when
+  // a late host half comes. The host may turn away a waiting one, never a
+  // paired one. A socket's messages a second and its peer's unread output are
+  // bounded; its rate outlives the object sleeping. Leave, a seat's fifth
+  // browser and a session's expiry end its sockets.
+  {
+    const w = await world(), pid = (await api(w, 'previews', w.host, 'POST', { port: 43470 })).pid
+    const link = async bearer => {
+      const request = req(w, `previews/${pid}/ticket`, bearer, 'POST', { path: '/start' })
+      request.headers.set('x-preview-origin', 'https://preview.test')
+      return new URL((await (await w.obj.fetch(request)).json()).url)
+    }
+    const enter = (url, cookie) => entering(w, url, cookie)
+    const cookieFor = async bearer => (await enter(await link(bearer))).headers.get('set-cookie').split(';')[0]
+    const kept = await link(w.member)
+    await reconstruct(w)
+    const entered = await enter(kept)
+    assert.equal(entered.status, 302); assert.equal(entered.headers.get('location'), '/start')
+    const cookie = entered.headers.get('set-cookie').split(';')[0]
+    const opened = []
+    for (let i = 0; i < PUBLIC_LIMITS.seatPairs; i++) {
+      assert.equal((await w.obj.fetch(publicRequest(w, cookie))).status, 101)
+      opened.push({ id: jsonControl(w.control).filter(x => x.ws).at(-1).ws.id })
+    }
+    for (const p of opened) p.guest = w.state.getWebSockets(`pb:${p.id}`)[0]
+    assert(opened.every(p => p.guest.tags.includes('public')))
+    assert.equal((await w.obj.fetch(publicRequest(w, cookie))).status, 429)
+    const deadline = opened[0].guest.deserializeAttachment().deadline
+    assert.equal(deadline, now + PUBLIC_LIMITS.pairMs); assert(w.state.storage.alarm <= deadline)
+    // Four more seats fill the room's 128; a sixth seat is refused.
+    const members = [w.member]
+    for (let i = 0; i < 4; i++) members.push((await (await w.obj.fetch(req(w, 'join', null, 'POST', { name: `Seat ${i}` }))).json()).token)
+    for (const member of members.slice(1, 4)) {
+      const c = await cookieFor(member)
+      for (let i = 0; i < PUBLIC_LIMITS.seatPairs; i++) assert.equal((await w.obj.fetch(publicRequest(w, c))).status, 101)
+    }
+    assert.equal((await w.obj.fetch(publicRequest(w, await cookieFor(members[4])))).status, 429, 'the room has 128')
+    // Past the deadline: the alarm closes what the host never took up, and
+    // they no longer hold places.
+    now += PUBLIC_LIMITS.pairMs + 1
+    await w.obj.alarm()
+    for (const p of opened) assert.equal(p.guest.closes.at(-1).code, 1011)
+    assert.equal((await w.obj.fetch(req(w, `ws/${opened[0].id}`, w.host, 'GET', undefined, true))).status, 410)
+    const late = await openPublic(w, pid, false)
+    now += PUBLIC_LIMITS.pairMs + 1 // no alarm yet: a late host half is refused all the same
+    assert.equal((await w.obj.fetch(req(w, `ws/${late.id}`, w.host, 'GET', undefined, true))).status, 410)
+    assert.equal(late.guest.closes.at(-1).code, 1011)
+    // The host turns away a waiting socket (CONNECT), never a paired one.
+    const turned = await openPublic(w, pid, false)
+    assert.equal((await w.obj.fetch(req(w, `ws/${turned.id}/reject`, w.host, 'POST', { code: 'CONNECT' }))).status, 200)
+    assert.equal(turned.guest.closes.at(-1).code, 1011)
+    assert.equal((await w.obj.fetch(req(w, `ws/${turned.id}`, w.host, 'GET', undefined, true))).status, 410)
+    const pair = await openPublic(w, pid)
+    assert.equal((await w.obj.fetch(req(w, `ws/${pair.id}/reject`, w.host, 'POST', { code: 'BUSY' }))).status, 409)
+    assert.equal(pair.guest.closes.length, 0)
+    // Taken up in time, a pair outlives its deadline.
+    now += PUBLIC_LIMITS.pairMs + 1
+    await w.obj.alarm()
+    assert.equal(pair.guest.closes.length, 0); assert.equal(pair.host.closes.length, 0)
+    // So many messages a second, counted where the object's sleep can't reset it.
+    for (let i = 0; i < 4000; i++) await w.obj.webSocketMessage(pair.guest, 'm')
+    await reconstruct(w)
+    for (let i = 4000; i < PUBLIC_LIMITS.framesPerWindow; i++) await w.obj.webSocketMessage(pair.guest, 'm')
+    assert.equal(pair.host.sent.length, PUBLIC_LIMITS.framesPerWindow); assert.equal(pair.guest.closes.length, 0)
+    await w.obj.webSocketMessage(pair.guest, 'one too many')
+    closed(pair, 1008); assert.equal(pair.host.sent.length, PUBLIC_LIMITS.framesPerWindow)
+    now += PUBLIC_LIMITS.rateWindowMs
+    // A peer that doesn't read: past a megabyte it hasn't taken, where the
+    // runtime says how much, the pair closes rather than queue more.
+    const slow = await openPublic(w, pid)
+    slow.guest.bufferedAmount = PUBLIC_LIMITS.bufferBytes
+    await w.obj.webSocketMessage(slow.host, 'broadcast')
+    closed(slow, 1009); assert.equal(slow.guest.sent.length, 0)
+    // Leave ends the seat's sockets; another seat's go on.
+    const mine = await openPublic(w, pid), theirs = await (async () => {
+      const c = await cookieFor(members[4])
+      assert.equal((await w.obj.fetch(publicRequest(w, c))).status, 101)
+      return { guest: w.state.getWebSockets(`pb:${jsonControl(w.control).filter(x => x.ws).at(-1).ws.id}`)[0] }
+    })()
+    assert.equal((await w.obj.fetch(req(w, 'leave', w.member, 'POST'))).status, 200)
+    closed(mine, 1008); assert.equal(theirs.guest.closes.length, 0)
+    // A seat's fifth browser on a preview lets the first go, its sockets too.
+    const browsers = []
+    for (let i = 0; i < PUBLIC_LIMITS.seatSessions + 1; i++) {
+      const c = await cookieFor(members[3])
+      assert.equal((await w.obj.fetch(publicRequest(w, c))).status, 101)
+      browsers.push(w.state.getWebSockets(`pb:${jsonControl(w.control).filter(x => x.ws).at(-1).ws.id}`)[0])
+    }
+    assert.equal(browsers[0].closes.at(-1).code, 1008); assert(browsers.slice(1).every(b => b.closes.length === 0))
+    // A browser session's expiry ends its sockets, from the alarm.
+    const lasting = await openPublic(w, pid, true, members[2])
+    const exp = lasting.guest.deserializeAttachment().exp
+    assert(w.state.storage.alarm <= exp)
+    now = exp
+    await w.obj.alarm()
+    closed(lasting, 1008)
+    console.log('OK Worker public link: links survive sleep; 32 a seat, 128 a room; deadline by alarm; host reject; rate and output bounds; Leave, fifth browser, expiry')
+  }
+
+  // What's shared, on the Worker (C-snap); proxied answers in format 2 and the
+  // shared host name's protections; a body through the preview Worker is
+  // streamed to the room, which bounds it.
+  {
+    const w = await world()
+    const page = (await api(w, 'previews', w.host, 'POST', { port: 43480, title: 'Page' })).pid
+    const joined = await (await w.obj.fetch(req(w, 'join', null, 'POST', { name: 'Late' }))).json()
+    assert.deepEqual(joined.previews, [{ pid: w.pid, port: 34567, tcp: true, title: 'localhost:34567' }, { pid: page, port: 43480, tcp: false, title: 'Page' }])
+    await reconstruct(w)
+    assert.deepEqual(await api(w, 'previews', joined.token), { previews: joined.previews })
+    assert.deepEqual(w.obj.room.events.filter(e => e.type === 'preview').map(e => [e.body.state, e.body.pid, e.body.tcp]), [['open', w.pid, true], ['open', page, false]])
+    const pair = await openPublic(w, page, false)
+    const preview = (path, init = {}) => new Request(`https://room.internal/${w.key}/__preview${path}`, { ...init, headers: { cookie: pair.cookie, ...init.headers } })
+    const asking = w.obj.fetch(preview('/hello?x=1'))
+    await new Promise(resolve => setImmediate(resolve))
+    const ask = jsonControl(w.control).filter(x => x.proxy).at(-1).proxy
+    assert.equal(ask.answer, 2); assert.equal(ask.path, '/hello?x=1')
+    const head = JSON.stringify({ status: 203, headers: [['content-type', 'text/plain'], ['set-cookie', 'one=1'], ['set-cookie', 'two=2']] })
+    const answer = new Request(`https://room.internal/${w.id}/proxy/${ask.id}`, { method: 'POST', headers: { authorization: `Bearer ${w.host}`, 'x-proxy-format': '2' }, body: `${head}\nfrom the host` })
+    assert.equal((await w.obj.fetch(answer)).status, 200)
+    const got = await asking
+    assert.equal(got.status, 203); assert.equal(await got.text(), 'from the host'); assert.deepEqual(got.headers.getSetCookie(), ['one=1', 'two=2'])
+    const malformed = w.obj.fetch(preview('/bad'))
+    await new Promise(resolve => setImmediate(resolve))
+    const badAsk = jsonControl(w.control).filter(x => x.proxy).at(-1).proxy
+    assert.equal((await w.obj.fetch(new Request(`https://room.internal/${w.id}/proxy/${badAsk.id}`, { method: 'POST', headers: { authorization: `Bearer ${w.host}`, 'x-proxy-format': '2' }, body: 'no line' }))).status, 400)
+    assert.equal((await malformed).status, 502)
+    assert.equal((await w.obj.fetch(preview('/sw.js', { headers: { 'service-worker': 'script' } }))).status, 403)
+    // Through the preview Worker: the body streams to the room, bounded there.
+    const env = { ROLE: 'preview', ROOMS: namespace(w) }
+    const outer = (body, length) => worker.fetch(new Request('https://preview.test/upload', { method: 'POST', headers: { cookie: pair.cookie, ...(length ? { 'content-length': String(length) } : {}) }, body, duplex: 'half' }), env)
+    let reads = 0
+    const flood = new ReadableStream({ pull(controller) { reads++; controller.enqueue(new Uint8Array(700 * 1024)) } }, { highWaterMark: 0 })
+    const tooLarge = await outer(flood)
+    assert.equal(tooLarge.status, 413); assert.match(await tooLarge.text(), /limited to 1 MB/); assert.equal(reads, 2, 'read no further than past the bound')
+    const posting = outer('a small form')
+    await new Promise(resolve => setTimeout(resolve, 20))
+    const upload = jsonControl(w.control).filter(x => x.proxy).at(-1).proxy
+    assert.equal(upload.path, '/upload'); assert.equal(Buffer.from(upload.body, 'base64').toString(), 'a small form')
+    w.obj.room.proxied.get(upload.id)(new Response('stored'))
+    assert.equal(await (await posting).text(), 'stored')
+    // Another room's state is cleared before this room's cookie, through the
+    // preview Worker as on Node: a page that sets nothing, then a second link.
+    const minted = req(w, `previews/${page}/ticket`, w.member, 'POST', { path: '/start' })
+    minted.headers.set('x-preview-origin', 'https://preview.test')
+    const link = new URL((await (await w.obj.fetch(minted)).json()).url)
+    const elsewhere = `cs_pv=${token(16)}.elsewhere`
+    const viaWorker = url => worker.fetch(new Request(url, { headers: { cookie: elsewhere } }), env)
+    const clearing = await viaWorker(link)
+    assert.equal(clearing.status, 200); assert.equal(clearing.headers.get('clear-site-data'), '"cache", "cookies", "storage"'); assert.equal(clearing.headers.get('set-cookie'), null)
+    const next = new URL(/url=([^"]+)"/.exec(await clearing.text())[1].replaceAll('&amp;', '&'), link)
+    const entered = await viaWorker(next)
+    assert.equal(entered.status, 302); assert.equal(entered.headers.get('location'), '/start'); assert.match(entered.headers.get('set-cookie'), /^cs_pv=/)
+    console.log('OK Worker C-snap, format 2 answers, no service workers, another room cleared first, preview bodies streamed and bounded in the room')
+  }
+
+  // Previews name a room by its object's id (D2-2): the preview Worker finds
+  // it by that key, which joins nothing and isn't the room's id; a link or
+  // cookie from before rooms had keys names the room's id, which still
+  // reaches it (S3-3), and nothing new carries. The main Worker serves no
+  // previews, page or socket (D2-10).
+  {
+    const w = await world(), env = { ROLE: 'preview', ROOMS: namespace(w) }
+    const pid = (await api(w, 'previews', w.host, 'POST', { port: 43490 })).pid
+    const link = async () => {
+      const request = req(w, `previews/${pid}/ticket`, w.member, 'POST', { path: '/start' })
+      request.headers.set('x-preview-origin', 'https://preview.test')
+      return new URL((await (await w.obj.fetch(request)).json()).url)
+    }
+    const url = await link(), spare = await link()
+    assert.equal(url.searchParams.get('room'), w.key); assert(!url.href.includes(w.id))
+    const clearing = await worker.fetch(new Request(url), env)
+    assert.equal(clearing.status, 200)
+    const entered = await worker.fetch(new Request(new URL(/url=([^"]+)"/.exec(await clearing.text())[1].replaceAll('&amp;', '&'), url)), env)
+    assert.equal(entered.status, 302)
+    const cookie = entered.headers.get('set-cookie').split(';')[0], sid = cookie.split('.')[1]
+    assert.equal(cookie, `cs_pv=${w.key}.${sid}`)
+    await reconstruct(w)
+    assert.equal(w.obj.room.previewKey, w.key, 'the same key after the object sleeps')
+    const asking = worker.fetch(new Request('https://preview.test/app.js', { headers: { cookie } }), env)
+    await new Promise(resolve => setTimeout(resolve, 20))
+    for (const p of w.obj.room.proxied.values()) p(new Response('app'))
+    assert.equal(await (await asking).text(), 'app')
+    // A key no room has, or one that isn't a room's name at all: no room there, the link unspent.
+    for (const key of [randomBytes(32).toString('hex'), 'Z'.repeat(64), 'a b']) {
+      const named = new URL(spare); named.searchParams.set('room', key)
+      const response = await worker.fetch(new Request(named), env)
+      assert.equal(response.status, 404); assert.match(await response.text(), /This preview has ended/)
+      assert.equal((await worker.fetch(new Request('https://preview.test/app.js', { headers: { cookie: `cs_pv=${key}.${sid}` } }), env)).status, 404)
+      assert.equal((await worker.fetch(new Request('https://preview.test/live', { headers: { upgrade: 'websocket', cookie: `cs_pv=${key}.${sid}` } }), env)).status, 404)
+    }
+    // The key joins nothing on the main Worker, and the main Worker hands no
+    // __preview path to any object.
+    let reached = 0
+    const rooms = namespace(w), main = { PREVIEW_URL: 'https://preview.test', ROOMS: { ...rooms, get: id => { reached++; return rooms.get(id) } } }
+    const outside = (path, init) => worker.fetch(new Request(`https://share.test${path}`, { ...init, headers: { 'x-shared-session-version': PLUGIN_LATEST, ...init?.headers } }), main)
+    assert.equal((await outside(`/api/rooms/${w.key}/join`, { method: 'POST', body: JSON.stringify({ name: 'Stranger' }) })).status, 404)
+    assert.equal((await outside(`/api/rooms/${w.key}`, { headers: { authorization: `Bearer ${w.member}` } })).status, 404)
+    assert.equal(reached, 2)
+    for (const id of [w.id, w.key]) {
+      for (const [path, headers] of [[`__preview${spare.pathname}${spare.search}`, {}], ['__preview', {}], ['__preview/app.js', { cookie }], ['__preview/live', { cookie, upgrade: 'websocket' }]]) {
+        assert.equal((await outside(`/api/rooms/${id}/${path}`, { headers })).status, 404, path)
+      }
+    }
+    assert.equal(reached, 2, 'never forwarded')
+    assert.equal((await w.obj.fetch(new Request(`https://room.internal/${w.key}/join`, { method: 'POST', headers: { 'x-shared-session-version': PLUGIN_LATEST }, body: '{"name":"Stranger"}' }))).status, 404)
+    assert(!w.obj.room.tickets.get(spare.searchParams.get('ticket')).used, 'the spare link is still unused')
+    // By the room's id, as a link made or a cookie set before rooms had keys
+    // names it: the preview Worker sends it by name, as 0.11.24's did, and the
+    // room answers. Its clearing hop and its cookie name the key.
+    const old = new URL(spare); old.searchParams.set('room', w.id)
+    const hop = await worker.fetch(new Request(old), env)
+    assert.equal(hop.status, 200); assert.equal(hop.headers.get('clear-site-data'), '"cache", "cookies", "storage"')
+    const next = new URL(/url=([^"]+)"/.exec(await hop.text())[1].replaceAll('&amp;', '&'), old)
+    assert.equal(next.searchParams.get('room'), w.key, 'the second link names the key')
+    const opened = await worker.fetch(new Request(next), env)
+    assert.equal(opened.status, 302); assert.match(opened.headers.get('set-cookie'), new RegExp(`^cs_pv=${w.key}\\.`))
+    const byName = worker.fetch(new Request('https://preview.test/app.js', { headers: { cookie: `cs_pv=${w.id}.${sid}` } }), env)
+    await new Promise(resolve => setTimeout(resolve, 20))
+    for (const p of w.obj.room.proxied.values()) p(new Response('app by its id'))
+    assert.equal(await (await byName).text(), 'app by its id')
+    assert.equal((await w.obj.fetch(new Request(`https://room.internal/${w.id}/__preview/live`, { headers: { upgrade: 'websocket', cookie: `cs_pv=${w.id}.${sid}` } }))).status, 101)
+    console.log('OK Worker previews by the object id: the key joins nothing; a link or cookie naming the room id from before keys still reaches it, and what it gets names the key; the main Worker serves no preview, page or socket')
+  }
+
+  // A deploy in either order keeps previews working (S3-3). 0.11.24's preview
+  // Worker (`released`, its previewFetch as it was) names every room by
+  // idFromName of what a link or cookie says; this one routes a 64-hex key by
+  // idFromString and anything else the same way. A room object of 0.11.24
+  // named its room by its id, in links and cookies (`old`: one whose key is its
+  // id answers as that did, at its id alone). On an update setup.mjs puts the
+  // preview Worker first: [this preview Worker, old objects], then this pair.
+  // The other way round, a key can't reach its room through the old preview
+  // Worker, only a cookie from before can.
+  {
+    const released = (req, env) => {
+      const id = previewRoomOf(req)
+      if (!id || !ROOM_ID.test(id)) return previewMissing()
+      const url = new URL(req.url)
+      return env.ROOMS.get(env.ROOMS.idFromName(id)).fetch(new Request(`https://room.internal/${id}/__preview${url.pathname}${url.search}`, { method: req.method, headers: req.headers, redirect: 'manual' }))
+    }
+    const current = (req, env) => worker.fetch(req, env)
+    // What each Worker asks of the namespace, and the object's request.
+    const recording = w => {
+      const rooms = namespace(w), asked = []
+      return { asked, env: { ROLE: 'preview', ROOMS: { ...rooms, get: id => { const obj = rooms.get(id); return { fetch: r => { asked.push([id, new URL(r.url).pathname]); return obj.fetch(r) } } } } } }
+    }
+    const link = async w => {
+      const request = req(w, `previews/${w.page}/ticket`, w.member, 'POST', { path: '/start' })
+      request.headers.set('x-preview-origin', 'https://preview.test')
+      return new URL((await (await w.obj.fetch(request)).json()).url)
+    }
+    // A browser entering by a link, through `front`: the clearing hop, then the page's own link.
+    const enterBy = async (front, env, url) => {
+      const first = await front(new Request(url), env)
+      if (first.status !== 200 || !first.headers.get('clear-site-data')) return first
+      return front(new Request(new URL(/url=([^"]+)"/.exec(await first.text())[1].replaceAll('&amp;', '&'), url)), env)
+    }
+    const pageBy = async (front, env, w, cookie) => {
+      const asking = front(new Request('https://preview.test/app.js', { headers: { cookie } }), env)
+      await new Promise(resolve => setTimeout(resolve, 20))
+      for (const p of w.obj.room.proxied.values()) p(new Response('app'))
+      const response = await asking
+      return response.status === 200 ? response.text() : response.status
+    }
+    const cookieIn = response => response.headers.get('set-cookie')?.split(';')[0]
+    const setUp = async ({ old = false } = {}) => {
+      const w = await world()
+      if (old) w.obj.room.previewKey = w.id
+      w.page = (await api(w, 'previews', w.host, 'POST', { port: 43491 })).pid
+      return w
+    }
+    // An old object's link and cookie (what 0.11.24 made) and a new object's.
+    const oldW = await setUp({ old: true }), newW = await setUp()
+    const oldLink = await link(oldW), newLink = await link(newW)
+    assert.equal(oldLink.searchParams.get('room'), oldW.id); assert.equal(newLink.searchParams.get('room'), newW.key)
+    // The preview Worker first: [this preview Worker, an old object].
+    {
+      const { env, asked } = recording(oldW), byReleased = recording(oldW)
+      const entered = await enterBy(current, env, oldLink)
+      assert.equal(entered.status, 302); const cookie = cookieIn(entered)
+      assert(cookie.startsWith(`cs_pv=${oldW.id}.`), "the old object's own cookie")
+      assert.equal(await pageBy(current, env, oldW, cookie), 'app', 'its old cookie serves')
+      // Exactly what 0.11.24's preview Worker asked: the same object, the same path.
+      const again = await link(oldW)
+      await enterBy(current, env, again); await pageBy(current, env, oldW, cookie)
+      await enterBy(released, byReleased.env, await link(oldW)); await pageBy(released, byReleased.env, oldW, cookie)
+      assert.deepEqual(asked.slice(-3), byReleased.asked.slice(-3))
+      assert(asked.every(([id, path]) => id === `name:${oldW.id}` && path.startsWith(`/${oldW.id}/__preview/`)))
+      // A key there would come only from a newer object, rolled back: an old one never knew it.
+      assert.equal((await current(new Request(newLink.href.replace(newW.key, oldW.key)), env)).status, 404)
+    }
+    // Then the main Worker: [this preview Worker, this object]. Old links and cookies go on; new ones work.
+    {
+      const { env } = recording(newW)
+      const old = new URL(newLink); old.searchParams.set('room', newW.id)
+      const fromOld = await enterBy(current, env, old)
+      assert.equal(fromOld.status, 302); assert(cookieIn(fromOld).startsWith(`cs_pv=${newW.key}.`), 'what an old link gets names the key')
+      const sid = cookieIn(fromOld).split('.')[1]
+      assert.equal(await pageBy(current, env, newW, `cs_pv=${newW.id}.${sid}`), 'app', 'a cookie naming the room id serves')
+      const entered = await enterBy(current, env, await link(newW))
+      assert.equal(entered.status, 302); assert.equal(await pageBy(current, env, newW, cookieIn(entered)), 'app', 'a new link and cookie')
+    }
+    // The other way round, or a failed preview deploy: [0.11.24's preview Worker, this object].
+    {
+      const { env } = recording(newW)
+      const sid = [...newW.obj.room.previewSessions.keys()][0]
+      assert.equal(await pageBy(released, env, newW, `cs_pv=${newW.id}.${sid}`), 'app', 'a cookie from before still serves')
+      assert.equal((await enterBy(released, env, await link(newW))).status, 404, "a new link doesn't reach its room")
+      assert.equal(await pageBy(released, env, newW, `cs_pv=${newW.key}.${sid}`), 404, 'nor a new cookie')
+      const old = new URL(await link(newW)); old.searchParams.set('room', newW.id)
+      const hop = await released(new Request(old), env)
+      assert.equal(hop.status, 200, 'an old link reaches it')
+      const next = new URL(/url=([^"]+)"/.exec(await hop.text())[1].replaceAll('&amp;', '&'), old)
+      assert.equal((await released(new Request(next), env)).status, 404, 'but its second link names the key')
+    }
+    console.log('OK deploy in either order: the preview Worker first keeps every old link and cookie (asked as 0.11.24 asked) and then every new one; the other way, cookies from before go on and keys wait for it')
+  }
+
+  // A new link renews the browser session it goes on in (S3-1), on the Worker
+  // too: a socket opened before closes at the expiry it had, by the alarm,
+  // which isn't then due again at once (its expiry is behind it, so a socket
+  // that went on would set it for the next millisecond, and the next), and
+  // the browser opens it again under the renewed session, whose page serves.
+  {
+    const w = await world(), pid = (await api(w, 'previews', w.host, 'POST', { port: 43497 })).pid, H = 60 * 60_000, t0 = now
+    const pair = await openPublic(w, pid)
+    now = t0 + 12 * H - 60_000
+    const minted = req(w, `previews/${pid}/ticket`, w.member, 'POST', { path: '/next' })
+    minted.headers.set('x-preview-origin', 'https://preview.test')
+    const link = new URL((await (await w.obj.fetch(minted)).json()).url)
+    const renewing = await w.obj.fetch(new Request(`https://room.internal/${w.key}/__preview${link.pathname}${link.search}`, { headers: { cookie: pair.cookie } }))
+    assert.equal(renewing.status, 302); assert.equal(renewing.headers.get('set-cookie').split(';')[0], pair.cookie, 'the same session')
+    now = t0 + 12 * H + 1
+    await w.obj.alarm()
+    closed(pair, 1008)
+    assert(w.state.storage.alarm > now + 1, 'the alarm is not due again at once')
+    assert.equal((await w.obj.fetch(publicRequest(w, pair.cookie))).status, 101, 'the browser opens its socket again')
+    const asking = w.obj.fetch(new Request(`https://room.internal/${w.key}/__preview/next`, { headers: { cookie: pair.cookie } }))
+    await new Promise(resolve => setTimeout(resolve, 20))
+    for (const p of w.obj.room.proxied.values()) p(new Response('still serving'))
+    assert.equal(await (await asking).text(), 'still serving')
+    console.log('OK Worker renewed browser session: a socket opened before closes at its own expiry by the alarm, which then waits; it reopens under the renewed one, whose page serves')
+  }
+
+  // A room's files on the Worker (S3-2): each one's record beside its bytes
+  // (bm:<id>), so a room takes them past 512, and after the object sleeps
+  // they're served as they were. Its one value keeps the newest 512 records
+  // too, as 0.11.24 kept all of them there (`releasedFile`, its file lookup as
+  // it was, reads meta alone), so a rollback to it still serves those; on load
+  // a record beside the bytes wins over meta's. A room 0.11.24 saved kept its
+  // files in meta, and beside their bytes only type, size and chunks: they
+  // move there as it loads, and stay in meta, where 0.11.24 finds them after
+  // the room's next save, and a file uploaded since too (the recheck's
+  // rollback probe).
+  {
+    // 0.11.24's file lookup as it was: its Room's files from meta, then store.get.
+    const releasedFile = async (storage, id) => {
+      const file = new Map(Object.entries((await storage.get('meta')).files ?? {})).get(id)
+      const kept = file ? await storage.get(`bm:${file.id}`) : null
+      if (!kept) return 404
+      const parts = await storage.get(Array.from({ length: kept.chunks }, (_, n) => `b:${file.id}:${n}`))
+      const data = new Uint8Array(kept.size)
+      let at = 0
+      for (let n = 0; n < kept.chunks; n++) {
+        const part = parts.get(`b:${file.id}:${n}`)
+        if (!part) return 404
+        data.set(new Uint8Array(part), at); at += part.byteLength
+      }
+      return [file.type, new TextDecoder().decode(data)]
+    }
+    const w = await world()
+    const upload = (r, body, name) => r.obj.fetch(new Request(`https://room.internal/${r.id}/files`, { method: 'POST', headers: { authorization: `Bearer ${r.host}`, 'x-file-name': name, 'content-type': 'image/png' }, body }))
+    const files = []
+    for (let i = 0; i < 600; i++) {
+      now += 1 // each newer than the last
+      const r = await upload(w, `picture ${i}`, `shot-${i}.png`)
+      assert.equal(r.status, 200, `file ${i + 1}`); files.push(await r.json())
+    }
+    const newest = Object.fromEntries(files.slice(-512).map(f => [f.id, f]))
+    assert.deepEqual(w.state.storage.data.get('meta').files, newest, "the newest 512 in meta, as 0.11.24's records were")
+    for (const i of [88, 599]) assert.deepEqual(await releasedFile(w.state.storage, files[i].id), ['image/png', `picture ${i}`], `0.11.24 serves file ${i + 1}`)
+    assert.equal(await releasedFile(w.state.storage, files[87].id), 404, 'but not the 88 before them')
+    const kept = w.state.storage.data.get(`bm:${files[599].id}`)
+    assert.deepEqual(kept, { id: files[599].id, name: 'shot-599.png', type: 'image/png', size: 11, ts: files[599].ts, chunks: 1 })
+    await reconstruct(w)
+    assert.equal(w.obj.room.files.size, 600)
+    const got = await w.obj.fetch(req(w, `files/${files[123].id}`, w.member))
+    assert.equal(got.status, 200); assert.equal(got.headers.get('content-type'), 'image/png'); assert.equal(await got.text(), 'picture 123')
+    assert.equal(w.obj.room.files.get(files[123].id).name, 'shot-123.png')
+    await w.obj.persist()
+    assert.deepEqual(w.state.storage.data.get('meta').files, newest, 'after it slept too: the newest by when they came, not by their keys')
+    // Meta's record of a file whose bytes have one beside them counts for nothing.
+    const stale = { ...files[599], name: 'stale.png', type: 'text/plain' }
+    w.state.storage.data.set('meta', { ...w.state.storage.data.get('meta'), files: { ...newest, [stale.id]: stale } })
+    await reconstruct(w)
+    assert.deepEqual(w.obj.room.files.get(stale.id), files[599], "bm:'s record wins")
+    assert.deepEqual(w.state.storage.data.get(`bm:${stale.id}`), kept, 'and stays as it was')
+    // As 0.11.24 saved a room: its files in meta, beside their bytes type, size and chunks.
+    const r = await world(), old = []
+    for (let i = 0; i < 3; i++) old.push(await (await upload(r, `old ${i}`, `old-${i}.png`)).json())
+    r.state.storage.data.set('meta', { ...r.state.storage.data.get('meta'), files: Object.fromEntries(old.map(f => [f.id, f])) })
+    for (const f of old) r.state.storage.data.set(`bm:${f.id}`, { type: f.type, size: f.size, chunks: 1 })
+    await reconstruct(r)
+    assert.deepEqual(old.map(f => r.obj.room.files.get(f.id)), old, 'its files load as they were')
+    assert.deepEqual(old.map(f => r.state.storage.data.get(`bm:${f.id}`)), old.map(f => ({ ...f, chunks: 1 })), 'moved beside their bytes')
+    // An event saves the room and a file comes: rolled back, 0.11.24 serves both.
+    await api(r, 'events', r.host, 'POST', { events: [{ type: 'chat', body: { text: 'hello' } }] })
+    assert.deepEqual(r.state.storage.data.get('meta').files, Object.fromEntries(old.map(f => [f.id, f])), 'still in meta at its next save')
+    const after = await (await upload(r, 'after the deploy', 'after.png')).json()
+    for (const [f, text] of [[old[2], 'old 2'], [after, 'after the deploy']]) assert.deepEqual(await releasedFile(r.state.storage, f.id), ['image/png', text], `0.11.24 serves ${f.name}`)
+    await reconstruct(r)
+    assert.equal(await (await r.obj.fetch(req(r, `files/${old[2].id}`, r.member))).text(), 'old 2')
+    assert.equal(r.obj.room.files.get(old[2].id).name, 'old-2.png')
+    console.log('OK Worker files beside their bytes, the newest 512 in meta too: 600 kept and served after sleep, a record beside its bytes winning; 0.11.24 serves the newest 512 rolled back to, and a room it saved moves its files beside their bytes')
+  }
+
+  // The outer Worker refuses a declared length past the route's bound before
+  // reading any of it, and streams every other body on to the room's object,
+  // which reads it bounded (D2-7); the directory's it reads itself, bounded as
+  // it arrives, and hands on whole.
+  {
+    const w = await world(), directed = [], rooms = namespace(w)
+    let forwarded = 0, readFirst = null
+    // The room's object counts what reaches it, and whether its body was read yet.
+    const env = { PREVIEW_URL: 'https://preview.test', JOIN_LIMIT: { limit: async () => ({ success: true }) },
+      ROOMS: { ...rooms, get: id => ({ fetch: r => { forwarded++; readFirst?.(); return rooms.get(id).fetch(r) } }) },
+      DIRECTORY: { idFromName: name => name, get: () => ({ fetch: async r => { directed.push([r.headers.get('content-type'), await r.text()]); return new Response('{}') } }) } }
+    const outer = (path, held) => worker.fetch(new Request(`https://share.test${path}`, held.request), env)
+    for (const [path, length] of [[`/api/rooms/${w.id}/events`, bodyLimit('/api/rooms/x/events')], [`/api/rooms/${w.id}/join`, bodyLimit('/api/rooms/x/join')], [`/api/rooms/${w.id}/files`, bodyLimit('/api/rooms/x/files')], ['/api/rooms', bodyLimit('/api/rooms')], ['/api/teams', 3 * BODY_CHARS], ['/auth/confirm', 3 * BODY_CHARS]]) {
+      const held = heldBody(w, 'events', w.member)
+      held.request.headers.set('content-length', String(length + 1))
+      const response = await outer(path, held)
+      assert.equal(response.status, 413, path); assert.match((await response.json()).error, new RegExp(`limited to ${length} bytes`)); assert.equal(held.reads, 0, path)
+    }
+    assert.equal(forwarded, 0, 'refused before the room was asked'); assert.equal(directed.length, 0)
+    assert.equal(bodyLimit('/api/rooms/x/files'), 10 * 1024 * 1024); assert.equal(bodyLimit('/api/rooms/x/events'), 1_536_000)
+    // No length said: the directory's body is read here, to its bound and no further.
+    let reads = 0
+    const flood = new ReadableStream({ pull(controller) { if (++reads > 100) return controller.close(); controller.enqueue(new Uint8Array(16 * 1024).fill(32)) } }, { highWaterMark: 0 })
+    assert.equal((await worker.fetch(new Request('https://share.test/api/teams', { method: 'POST', body: flood, duplex: 'half' }), env)).status, 413)
+    assert.equal(reads, Math.ceil((3 * BODY_CHARS + 1) / (16 * 1024)), 'read no further than past the bound')
+    assert.equal(directed.length, 0)
+    const form = new ReadableStream({ start(controller) { controller.enqueue(new TextEncoder().encode('login=abc&nonce=')); controller.enqueue(new TextEncoder().encode('xyz')); controller.close() } })
+    assert.equal((await worker.fetch(new Request('https://share.test/auth/confirm', { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: form, duplex: 'half' }), env)).status, 200)
+    assert.deepEqual(directed, [['application/x-www-form-urlencoded', 'login=abc&nonce=xyz']])
+    // A room's body goes on as a stream: the object has the request before it's read.
+    const held = heldBody(w, 'events', w.member)
+    let unread = null
+    readFirst = () => { unread = held.reads === 0 }
+    const sending = outer(`/api/rooms/${w.id}/events`, held)
+    await held.reading
+    assert.equal(unread, true, 'forwarded before its body was read')
+    readFirst = null
+    held.release({ events: [{ type: 'chat', body: { text: 'streamed' } }] })
+    assert.equal((await sending).status, 200); assert(w.obj.room.events.some(e => e.body?.text === 'streamed'))
+    let streamed = 0
+    const large = new ReadableStream({ pull(controller) { if (++streamed > 20) return controller.close(); controller.enqueue(new Uint8Array(512 * 1024).fill(32)) } }, { highWaterMark: 0 })
+    const unsaid = new Request(`https://share.test/api/rooms/${w.id}/events`, { method: 'POST', headers: req(w, '', w.member).headers, body: large, duplex: 'half' })
+    assert.equal((await worker.fetch(unsaid, env)).status, 413)
+    assert(streamed <= 4, 'the room read it no further than past its bound')
+    console.log('OK outer Worker: a declared length past the route bound refused unread, room bodies streamed to the object, the directory body read bounded and handed on')
+  }
+
+  // A public socket's bytes a second, and what a room's waiting browsers hold
+  // together, are bounded on the Worker too (D2-6): past either, 1009.
+  {
+    const w = await world(), pid = (await api(w, 'previews', w.host, 'POST', { port: 43495 })).pid
+    const mib = () => new Uint8Array(1024 ** 2).buffer
+    const pair = await openPublic(w, pid)
+    for (let i = 0; i < 2; i++) await w.obj.webSocketMessage(pair.guest, mib())
+    await reconstruct(w) // counted in its attachment, past the object's sleep
+    for (let i = 0; i < 2; i++) await w.obj.webSocketMessage(pair.guest, mib())
+    assert.equal(pair.host.sent.length, 4); assert.equal(pair.guest.closes.length, 0)
+    await w.obj.webSocketMessage(pair.guest, 'x')
+    closed(pair, 1009); assert.equal(pair.host.sent.length, 4)
+    const next = await openPublic(w, pid)
+    for (let i = 0; i < 4; i++) await w.obj.webSocketMessage(next.guest, mib())
+    now += PUBLIC_LIMITS.rateWindowMs
+    await w.obj.webSocketMessage(next.guest, mib())
+    assert.equal(next.guest.closes.length, 0, 'a new second, a new budget'); assert.equal(next.host.sent.length, 5)
+    // Nine browsers waiting for the host, 1,000,000 bytes each: the ninth passes 8 MiB.
+    const socketOn = async cookie => {
+      assert.equal((await w.obj.fetch(publicRequest(w, cookie))).status, 101)
+      const id = jsonControl(w.control).filter(x => x.ws).at(-1).ws.id
+      return { id, pid, guest: w.state.getWebSockets(`pb:${id}`).at(-1) }
+    }
+    const waiting = [], bytes = () => new Uint8Array(1_000_000).buffer
+    for (let i = 0; i < 9; i++) waiting.push(await socketOn(next.cookie))
+    for (const p of waiting.slice(0, 8)) await w.obj.webSocketMessage(p.guest, bytes())
+    assert.equal(w.obj.pendingBytes, 8_000_000)
+    await w.obj.webSocketMessage(waiting[8].guest, bytes())
+    assert.equal(waiting[8].guest.closes.at(-1).code, 1009)
+    assert.equal(w.obj.pendingBytes, 8_000_000); assert(waiting.slice(0, 8).every(p => !p.guest.closes.length))
+    // Paired or closed, a browser's bytes leave the count.
+    await pairPublic(w, waiting[0])
+    assert.equal(waiting[0].host.sent[0].byteLength, 1_000_000); assert.equal(w.obj.pendingBytes, 7_000_000)
+    await w.obj.webSocketClose(waiting[1].guest, 1000, '')
+    assert.equal(w.obj.pendingBytes, 6_000_000)
+    const later = await socketOn(next.cookie)
+    await w.obj.webSocketMessage(later.guest, bytes())
+    assert.equal(later.guest.closes.length, 0); assert.equal(w.obj.pendingBytes, 7_000_000)
+    await api(w, 'end', w.host, 'POST')
+    assert.equal(w.obj.pendingBytes, 0)
+    console.log('OK Worker public relay bounded in bytes: 4 MB a second a socket, kept across sleep; 8 MiB waiting a room, given back as browsers pair or close')
+  }
+
+  // A host half that vanished (1006 or 1015, no close frame) is a failure the
+  // page sees, 1011; a host half's close frame passes as it came, and a
+  // browser that vanished closes the host's plainly (C2-wsrelay2).
+  {
+    const w = await world(), pid = (await api(w, 'previews', w.host, 'POST', { port: 43496 })).pid
+    const first = await openPublic(w, pid)
+    const pairOn = async () => {
+      assert.equal((await w.obj.fetch(publicRequest(w, first.cookie))).status, 101)
+      const id = jsonControl(w.control).filter(x => x.ws).at(-1).ws.id
+      return pairPublic(w, { id, pid, guest: w.state.getWebSockets(`pb:${id}`).at(-1) })
+    }
+    for (const [side, code, other] of [['host', 1006, 1011], ['host', 1015, 1011], ['host', 1000, 1000], ['host', 1001, 1001], ['host', 4000, 4000], ['guest', 1006, 1000], ['guest', 1001, 1001]]) {
+      const pair = await pairOn()
+      await w.obj.webSocketClose(pair[side], code, '')
+      assert.equal(pair[side === 'host' ? 'guest' : 'host'].closes.at(-1).code, other, `${side} ${code}`)
+    }
+    assert.equal(first.guest.closes.length, 0)
+    console.log('OK Worker public pair: a vanished host half is 1011 to the page; close frames pass; a vanished browser is 1000 to the host')
+  }
+
+  // A guest's need goes only to a host stream that said need=1, which
+  // 0.11.24's doesn't (C2-need): to any other it isn't delivered, and the
+  // guest is told so. What a stream takes is kept in its attachment.
+  {
+    const w = await world(false)
+    const ask = async port => { const r = await w.obj.fetch(req(w, 'need', w.member, 'POST', { port })); return [r.status, await r.json()] }
+    assert.deepEqual(await ask(43300), [200, { delivered: false }])
+    assert.equal((await w.obj.fetch(req(w, 'socket?after=0&tcp=1', w.host, 'GET', undefined, true))).status, 101)
+    const older = w.state.getWebSockets('host').at(-1)
+    assert.equal((await w.obj.fetch(req(w, 'socket?after=0&tcp=1&need=1', w.member, 'GET', undefined, true))).status, 101)
+    const viewer = w.state.getWebSockets(w.seat).at(-1)
+    assert.deepEqual(await ask(43301), [200, { delivered: false }], 'a guest saying need=1 is no host')
+    assert.equal((await w.obj.fetch(req(w, 'socket?after=0&tcp=1&need=1', w.host, 'GET', undefined, true))).status, 101)
+    const current = w.state.getWebSockets('host').at(-1)
+    assert.deepEqual(await ask(43302), [200, { delivered: true }])
+    await reconstruct(w)
+    assert.deepEqual(await ask(43303), [200, { delivered: true }], 'after the object sleeps')
+    assert.deepEqual(jsonControl(current).filter(x => x.need).map(x => x.need.port), [43302, 43303])
+    for (const ws of [older, w.control, viewer]) assert.equal(jsonControl(ws).some(x => x.need), false)
+    console.log('OK Worker need only to a host stream that said need=1, kept across sleep; others answer delivered: false')
+  }
+
+  // Events are bounded in bytes on the Worker as in core (D2-5): a guest's past
+  // 128 KB refused whole, a host's cut and stored as kept.
+  {
+    const w = await world(), seq = w.obj.room.seq
+    const big = { events: [{ type: 'chat', body: { text: 'é'.repeat(20_000), more: ['界'.repeat(30_000), '界'.repeat(30_000)] } }] }
+    assert.equal((await w.obj.fetch(req(w, 'events', w.member, 'POST', big))).status, 413)
+    assert.equal(w.obj.room.seq, seq)
+    assert.equal((await w.obj.fetch(req(w, 'events', w.host, 'POST', big))).status, 200)
+    const stored = [...(await w.state.storage.list({ prefix: 'e:' })).values()].at(-1)
+    assert(Buffer.byteLength(JSON.stringify(stored.body)) <= EVENT_BYTES); assert.match(stored.body.more[0], /…\(cut\)$/)
+    assert.deepEqual(stored, w.obj.room.events.at(-1))
+    console.log('OK Worker events bounded in bytes: a guest past 128 KB refused, a host cut and stored as kept')
+  }
+
+  // Streams alone hear room changes: broadcast never opens a TCP or public
+  // attachment (D8b). A refused grant writes nothing but the counters the
+  // room's minute moved (D-m5). The helpers' credit window is the server's (D9g).
+  {
+    const w = await world(), cap = await grant(w), tcpPair = await open(w, cap), publicPair = await openPublic(w, w.pid)
+    assert(w.control.tags.includes('stream'))
+    const opened = { n: 0 }
+    for (const ws of [tcpPair.guest, tcpPair.host, publicPair.guest, publicPair.host]) {
+      const read = ws.deserializeAttachment.bind(ws)
+      ws.deserializeAttachment = () => { opened.n++; return read() }
+    }
+    const sent = w.control.sent.length
+    w.obj.broadcast()
+    assert.equal(opened.n, 0); assert.equal(w.control.sent.length, sent + 1)
+    const r = await world()
+    while ((await r.obj.fetch(req(r, `previews/${r.pid}/tunnel`, r.member, 'POST'))).status === 200);
+    let writes = r.state.storage.writes.length
+    assert.equal((await r.obj.fetch(req(r, `previews/${r.pid}/tunnel`, r.member, 'POST'))).status, 429)
+    assert.deepEqual(r.state.storage.writes.slice(writes), [], "a seat's refusal changes nothing to save")
+    r.obj.room.tcpStats.opens = { start: now, count: TCP_LIMITS.opensPerMinute }
+    const other = (await (await r.obj.fetch(req(r, 'join', null, 'POST', { name: 'Other' }))).json()).token
+    writes = r.state.storage.writes.length
+    assert.equal((await r.obj.fetch(req(r, `previews/${r.pid}/tunnel`, other, 'POST'))).status, 429)
+    assert.deepEqual(r.state.storage.writes.slice(writes), ['tcp:stats'], "the room's minute moved: its counters alone")
+    const helper = (await import('../plugin/relay/tcp-relay.cjs')).default
+    assert.deepEqual([helper.DATA_MAX, helper.WINDOW_FRAMES, helper.WINDOW_BYTES], [TCP_LIMITS.dataBytes, TCP_LIMITS.creditFrames, TCP_LIMITS.creditBytes])
+    console.log("OK broadcast to streams alone; refused grants save only moved counters; the helpers' credit window is the server's")
+  }
   console.log('PASS TCP Worker/core protocol checks (stdlib stubs; not a deployed Cloudflare test)')
 } finally {
   Date.now = nativeNow
@@ -577,6 +1555,7 @@ async function freePort() {
   server.listen(0, '127.0.0.1'); await once(server, 'listening')
   const port = server.address().port
   await new Promise(resolve => server.close(resolve))
+  assert(![3000, 3009, 3610].includes(port))
   return port
 }
 function masked(op, payload = Buffer.alloc(0), fin = true) {
@@ -627,8 +1606,10 @@ async function rawSocket(port, path, bearer, cookie) {
   }) }
 }
 async function nodeFrames() {
-  const port = await freePort(), preview = await freePort()
-  const child = spawn(process.execPath, [fileURLToPath(new URL('../server/node.mjs', import.meta.url))], { cwd: fileURLToPath(new URL('..', import.meta.url)), env: { ...process.env, PORT: String(port), PREVIEW_PORT: String(preview), DATA_FILE: '' }, stdio: ['ignore', 'pipe', 'pipe'] })
+  const directory = await mkdtemp(join(tmpdir(), 'share-tcp-worker-'))
+  const port = await freePort(); let preview = await freePort()
+  while (preview === port) preview = await freePort()
+  const child = spawn(process.execPath, [fileURLToPath(new URL('../server/node.mjs', import.meta.url))], { cwd: directory, env: { PATH: process.env.PATH, HOME: directory, PORT: String(port), PREVIEW_PORT: String(preview), DATA_FILE: '' }, stdio: ['ignore', 'pipe', 'pipe'] })
   let logs = '', reader
   child.stdout.on('data', b => { logs += b }); child.stderr.on('data', b => { logs += b })
   const origin = `http://127.0.0.1:${port}`
@@ -693,11 +1674,19 @@ async function nodeFrames() {
     const other = await api('/api/rooms', null, { name: 'Other room' })
     assert.equal((await post(`/api/rooms/${other.id}/ws/${rejection.id}/reject`, other.token, { code: 'BUSY' })).status, 404)
     const ticket = await api(`/api/rooms/${room.id}/previews/${p.pid}/ticket`, member.token)
-    const entered = await fetch(ticket.url, { redirect: 'manual' }), cookie = entered.headers.get('set-cookie').split(';')[0]
+    // The clearing page first (D2-3), then its next link, the browser's cookies cleared.
+    const clearing = await fetch(ticket.url, { redirect: 'manual' })
+    assert.equal(clearing.headers.get('clear-site-data'), '"cache", "cookies", "storage"')
+    const entered = await fetch(new URL(/url=([^"]+)"/.exec(await clearing.text())[1].replaceAll('&amp;', '&'), ticket.url), { redirect: 'manual' })
+    const cookie = entered.headers.get('set-cookie').split(';')[0]
     const publicSocket = await rawSocket(preview, '/live', '', cookie)
     assert.equal(publicSocket.status, 101)
     const publicId = (await notice('ws')).id
-    assert.equal((await post(rejectPath(publicId), room.token, { code: 'BUSY' })).status, 404)
+    // A waiting public browser is the host's to turn away too (C-reject).
+    assert.equal((await post(rejectPath(publicId), member.token, { code: 'BUSY' })).status, 401)
+    assert.equal((await post(rejectPath(publicId), room.token, { code: 'BUSY' })).status, 200)
+    const publicClose = await publicSocket.next()
+    assert.equal(publicClose.op, 8); assert.equal(publicClose.data.readUInt16BE(), 1013)
     publicSocket.socket.destroy()
     assert.deepEqual(await (await post(rejectPath(rejection.id), room.token, { code: 'BUSY' })).json(), { ok: true })
     assert.equal((await rejection.guest.next()).data.readUInt16BE(), 1013)
@@ -810,6 +1799,7 @@ async function nodeFrames() {
     await reader?.cancel().catch(() => {})
     child.kill()
     if (child.exitCode === null) await once(child, 'exit')
+    await rm(directory, { recursive: true, force: true })
   }
 }
 await nodeFrames()

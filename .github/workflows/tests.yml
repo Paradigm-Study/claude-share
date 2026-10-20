@@ -22,7 +22,7 @@ jobs:
       fail-fast: false
       matrix:
         node: [20, 24]
-        suite: [setup, teams, tcp-worker, local-preview]
+        suite: [setup, teams, tcp-worker, local-preview, previews, browser-proxy, discover]
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -33,4 +33,11 @@ jobs:
           package-manager-cache: false
       # Each suite gets its own runner; servers and installer fixtures are local.
       # These tests use Node's standard library; no install or secrets needed.
+      # teams (the sign-in page's Continue) and local-preview (preview windows,
+      # WebRTC) drive a headless browser the runner image has, and print SKIP
+      # for those checks where they find none. With both Chrome and Firefox,
+      # local-preview takes about a minute, well inside the timeout.
+      # The plugin's own tests (plugin/tests: band.test.tsx, window.test.ts,
+      # preview.test.ts, proxy.test.ts, upstream.test.ts) need Claude Code and
+      # run with `claude plugin test plugin`, not here; see CONTRIBUTING.md.
       - run: node test/${{ matrix.suite }}.mjs

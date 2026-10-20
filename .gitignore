@@ -2,5 +2,6 @@ node_modules/
 .wrangler/
 plugin/.claude/
 rooms.json
+rooms.json.tcp
 .DS_Store
 *.log

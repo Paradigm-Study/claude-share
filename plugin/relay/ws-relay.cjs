@@ -2,6 +2,7 @@
 // Credentials arrive on stdin, never in argv or addresses. Node 20+, no deps.
 'use strict'
 
+const net = require('net')
 const http = require('http')
 const https = require('https')
 const crypto = require('crypto')
@@ -15,9 +16,11 @@ const sendable = code => validClose(code) ? code : 1000
 
 // send() accepts the message, returning false until drain when the transport
 // is full. It never pauses WS reads: TCP relays need the reverse direction's ACK.
-function connect(url, headers = {}, protocols = [], on = {}, { maxMessage = BUFFER_MAX, timeoutMs = 10_000 } = {}) {
+// `insecure` skips certificate checks, for a loopback dev server's own
+// certificate alone (start's local leg); everything else verifies.
+function connect(url, headers = {}, protocols = [], on = {}, { maxMessage = BUFFER_MAX, timeoutMs = 10_000, insecure = false } = {}) {
   const u = new URL(url)
-  if (!['ws:', 'wss:'].includes(u.protocol) || u.username || u.password || u.hash || !Array.isArray(protocols) || protocols.length > 16 || protocols.some(p => typeof p !== 'string' || !/^[!#$%&'*+.^_`|~\w-]{1,128}$/.test(p)) || new Set(protocols).size !== protocols.length || !Number.isInteger(maxMessage) || maxMessage < 1 || maxMessage > BUFFER_MAX) throw new Error('Invalid WebSocket settings')
+  if (!['ws:', 'wss:'].includes(u.protocol) || u.username || u.password || u.hash || !Array.isArray(protocols) || protocols.length > 16 || protocols.some(p => typeof p !== 'string' || !/^[!#$%&'*+.^_`|~\w-]{1,128}$/.test(p)) || new Set(protocols).size !== protocols.length || !Number.isInteger(maxMessage) || maxMessage < 1 || maxMessage > BUFFER_MAX || typeof insecure !== 'boolean') throw new Error('Invalid WebSocket settings')
   const secure = u.protocol === 'wss:'
   const hostname = u.hostname.replace(/^\[|\]$/g, '')
   const hosts = hostname === 'localhost' ? ['127.0.0.1', '::1'] : [hostname]
@@ -152,9 +155,11 @@ function connect(url, headers = {}, protocols = [], on = {}, { maxMessage = BUFF
     if (closed) return
     const key = crypto.randomBytes(16).toString('base64')
     const accept = crypto.createHash('sha1').update(key + GUID).digest('base64')
+    // SNI takes a name, never an address (RFC 6066; Node warns on stderr for one).
     const req = request = (secure ? https : http).request({
       host: hosts[i], port: u.port || (secure ? 443 : 80),
-      path: `${u.pathname}${u.search}`, servername: secure ? hostname : undefined,
+      path: `${u.pathname}${u.search}`, servername: secure && !net.isIP(hostname) ? hostname : undefined,
+      ...(secure ? { rejectUnauthorized: !insecure } : {}),
       agent: false, maxHeaderSize: HEADER_MAX,
       headers: { ...headers, host: u.host, connection: 'Upgrade', upgrade: 'websocket', 'sec-websocket-key': key, 'sec-websocket-version': '13', ...(protocols.length ? { 'sec-websocket-protocol': protocols.join(', ') } : {}) },
     })
@@ -172,19 +177,66 @@ function connect(url, headers = {}, protocols = [], on = {}, { maxMessage = BUFF
   return { send, close: end, isOpen: () => open && !closed }
 }
 
+// The public preview relay's settings, from the plugin on stdin. The
+// browser's socket goes to `local`, on this computer's loopback alone: ws://,
+// or wss:// for a TLS dev server, whose own certificate `insecureLocal`
+// accepts on that leg alone. It carries the browser's path and query whole
+// (SignalR's access_token runs past 4 KiB), bounded by stdin's 16 KiB alone.
+// `origin` is the plugin's (the server's own local origin). Its pair in the
+// room, `room`, always verifies.
+const KEYS = new Set(['local', 'insecureLocal', 'origin', 'protocols', 'room', 'token', 'version'])
+function configOf(cfg) {
+  const { failure, tokenOK, loopback } = require('./tcp-relay.cjs')
+  const url = (value, schemes, max = 4096) => {
+    if (typeof value !== 'string' || value.length > max) return null
+    try { const u = new URL(value); return schemes.includes(u.protocol) && !u.username && !u.password && !u.hash ? u : null } catch { return null }
+  }
+  if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg) || Object.keys(cfg).some(key => !KEYS.has(key)) || !tokenOK(cfg.token) || typeof cfg.version !== 'string' || !/^[\w.-]{0,64}$/.test(cfg.version) || (cfg.insecureLocal !== undefined && typeof cfg.insecureLocal !== 'boolean') || (cfg.protocols !== undefined && !Array.isArray(cfg.protocols))) throw failure('INVALID_CONFIG')
+  const local = url(cfg.local, ['ws:', 'wss:'], Infinity), origin = url(cfg.origin, ['http:', 'https:']), room = url(cfg.room, ['ws:', 'wss:'])
+  if (!local || !loopback(local.hostname) || !origin || !loopback(origin.hostname) || origin.href !== `${origin.origin}/` || !room || room.search || !/\/ws\/[A-Za-z0-9_-]{8,40}$/.test(room.pathname)) throw failure('INVALID_CONFIG')
+  return { local: local.href, insecureLocal: cfg.insecureLocal === true, origin: origin.origin, protocols: cfg.protocols ?? [], room: room.href, token: cfg.token, version: cfg.version }
+}
+
+// The local leg goes first, and the room is dialled only once it's open (the
+// TCP path dials localhost before pairing too): the room pairs the browser's
+// socket only with one the dev server took. A dev server that refuses it, or
+// never answers, is CONNECT before the room hears of it: `connected` rejects,
+// the executable says so and exits 1, and the plugin's reject closes the
+// browser's socket with 1011 at once. A local leg that ends without a close
+// frame (a crash, a restart: 1006) closes the room's with 1011, never 1000,
+// so the page sees a failure. Clients keyed on wasClean (Vite's) still see a
+// clean close: only a dropped connection would match localhost, and the room
+// can't drop a browser's on the Worker. A room leg that vanishes closes the
+// dev server's with 1000, as a browser leaving would.
 function start(cfg, options = {}) {
-  if (cfg?.tcp === true) return require('./tcp-relay.cjs').startHost(cfg, options)
-  let local, room, done = false
+  const { failure } = require('./tcp-relay.cjs')
+  const settings = configOf(cfg)
+  let local, room, stopped = false, done = false, up
+  const connected = new Promise((resolve, reject) => (up = { resolve, reject }))
+  connected.catch(() => {}) // For whoever asks; never an unhandled rejection.
   const finish = code => { if (done) return; done = true; local?.close(code); room?.close(code) }
   try {
-    local = connect(cfg.local, { origin: cfg.origin }, cfg.protocols || [], { message: (data, binary) => room?.send(data, binary), close: finish }, { timeoutMs: 30_000 })
-    room = connect(cfg.room, { authorization: `Bearer ${cfg.token}`, 'x-shared-session-version': cfg.version || '' }, [], { message: (data, binary) => local.send(data, binary), close: finish }, { timeoutMs: 30_000 })
-  } catch (error) { finish(1001); throw error }
-  const abort = () => finish(1001)
+    local = connect(settings.local, { origin: settings.origin }, settings.protocols, {
+      open: () => {
+        room = connect(settings.room, { authorization: `Bearer ${settings.token}`, 'x-shared-session-version': settings.version }, [], { message: (data, binary) => local.send(data, binary), close: finish }, { timeoutMs: 30_000 })
+        up.resolve()
+      },
+      message: (data, binary) => room?.send(data, binary),
+      close: code => {
+        if (!room) up.reject(failure(stopped ? 'STARTUP' : 'CONNECT'))
+        finish(code === 1006 || code === 1015 ? 1011 : code)
+      },
+    }, { timeoutMs: 30_000, insecure: settings.insecureLocal })
+  } catch { finish(1001); throw failure('INVALID_CONFIG') }
+  const abort = () => { stopped = true; finish(1001) }
   options.signal?.addEventListener('abort', abort, { once: true })
   if (options.signal?.aborted) abort()
-  return { close: abort }
+  return { close: abort, connected }
 }
 
 module.exports = { connect, start, BUFFER_MAX }
-if (require.main === module) require('./tcp-relay.cjs').run(start)
+// The executable waits for its local leg: CONNECT is its error row, and exit 1.
+if (require.main === module) require('./tcp-relay.cjs').run((cfg, options) => {
+  const relay = start(cfg, options)
+  return relay.connected.then(() => relay)
+})

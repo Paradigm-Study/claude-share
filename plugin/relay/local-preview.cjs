@@ -4,21 +4,23 @@
 'use strict'
 
 const net = require('net')
-const { bridge, run, endpoint, portOK, tokenOK, notify, failure, safeCode, DATA_MAX } = require('./tcp-relay.cjs')
-const UNSUPPORTED_V6 = new Set(['EAFNOSUPPORT', 'EADDRNOTAVAIL', 'EPROTONOSUPPORT'])
+const { bridge, run, vacant, endpoint, portOK, tokenOK, notify, failure, safeCode, UNSUPPORTED_V6, DATA_MAX } = require('./tcp-relay.cjs')
+// A bind the system refuses this user: a port below 1024 on Linux, a sandbox.
+const REFUSED = new Set(['EACCES', 'EPERM'])
 const BIND_TRIES = 8, SOCKETS_MAX = 32
 
 function configOf(cfg) {
-  if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg) || Object.keys(cfg).some(k => !['port', 'strict', 'url', 'token', 'expiresAt'].includes(k)) || !portOK(cfg.port) || typeof cfg.strict !== 'boolean' || !tokenOK(cfg.token) || !Number.isSafeInteger(cfg.expiresAt)) throw failure('INVALID_CONFIG')
+  // Port 0 asks the OS for any free port, so it only makes sense when not strict.
+  if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg) || Object.keys(cfg).some(k => !['port', 'strict', 'url', 'token', 'expiresAt'].includes(k)) || !(portOK(cfg.port) || (cfg.port === 0 && cfg.strict === false)) || typeof cfg.strict !== 'boolean' || !tokenOK(cfg.token) || !Number.isSafeInteger(cfg.expiresAt)) throw failure('INVALID_CONFIG')
   const url = endpoint(cfg.url)
   if (cfg.expiresAt <= Date.now()) throw failure('EXPIRED')
   return { port: cfg.port, strict: cfg.strict, url, token: cfg.token, expiresAt: cfg.expiresAt }
 }
 
 // testoptions are internal, never accepted from stdin.
-async function start(cfg, { emit = notify, signal, createServer = net.createServer } = {}) {
+async function start(cfg, { emit = notify, signal, createServer = net.createServer, connect = net.connect } = {}) {
   const servers = new Set(), sockets = new Set(), relays = new Set()
-  let settings, port, ready = false, stopped = false, closing, expiryTimer
+  let settings, port, ipv6 = false, ready = false, stopped = false, closing, expiryTimer
   const close = () => {
     if (closing) return closing
     stopped = true
@@ -78,23 +80,36 @@ async function start(cfg, { emit = notify, signal, createServer = net.createServ
     signal?.addEventListener('abort', close, { once: true })
     if (signal?.aborted) { await close(); throw failure('STARTUP') }
     for (let attempt = 0; attempt < BIND_TRIES; attempt++) {
+      ipv6 = false
+      const asked = attempt ? 0 : settings.port
       try {
-        port = await bind('127.0.0.1', attempt ? 0 : settings.port)
-        try { await bind('::1', port) } catch (error) { if (!UNSUPPORTED_V6.has(error.code)) throw error }
+        // An answering port is taken whatever bind() allows (vacant): a
+        // requested one is knocked on in both families first. Port 0's own
+        // number is knocked on ::1 alone, before the exact bind there: the
+        // IPv4 allocator passes over an IPv6-only listener's port ([::]:P).
+        if (asked && !(await Promise.all([vacant('127.0.0.1', asked, connect), vacant('::1', asked, connect)])).every(Boolean)) throw failure('EADDRINUSE')
+        if (stopped) throw failure('STARTUP')
+        port = await bind('127.0.0.1', asked)
+        if (!asked && !(await vacant('::1', port, connect))) throw failure('EADDRINUSE')
+        if (stopped) throw failure('STARTUP')
+        try { await bind('::1', port); ipv6 = true } catch (error) { if (!UNSUPPORTED_V6.has(error.code)) throw error }
         break
-      } catch (error) {
+      } catch (caught) {
         // Conflict on either family rolls back every bind from this attempt.
         await Promise.all([...servers].map(unbind))
         servers.clear()
-        if (stopped || settings.strict || error.code !== 'EADDRINUSE' || attempt === BIND_TRIES - 1) throw error
+        // A refused bind is DENIED, never STARTUP: strict reports it (the plugin
+        // falls back as for a taken port), and non-strict moves on as for one.
+        const error = REFUSED.has(caught.code) ? failure('DENIED') : caught
+        if (stopped || settings.strict || !['EADDRINUSE', 'DENIED'].includes(error.code) || attempt === BIND_TRIES - 1) throw error
       }
     }
     if (stopped) throw failure('STARTUP')
     if (Date.now() >= settings.expiresAt) throw failure('EXPIRED')
     ready = true
     scheduleExpiry()
-    emit({ state: 'ready', port })
-    return { close, port }
+    emit({ state: 'ready', port, ipv6 })
+    return { close, port, ipv6 }
   } catch (error) {
     await close()
     const code = safeCode(error)

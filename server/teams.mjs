@@ -7,7 +7,11 @@
 //   acct:<id>                 an account { id, provider, subject, name, login, email, emailVerified, githubOrgs }
 //   ident:<provider>:<sub>    → account id; email:<address> → account id (verified emails only)
 //   tok:<sha256>              a signed-in Claude Code { account, at } (the token itself is never kept)
-//   login:<hash>, state:<id>  a sign-in under way (ten minutes)
+//   login:<hash>              a sign-in under way (ten minutes): 'pending', then 'confirm' (who the provider
+//                             said, waiting for the browser's Continue), then 'done' (the account id, until
+//                             Claude Code collects it: its token is made then); `code` when that Claude Code
+//                             shows the code its page shows
+//   state:<id>                a provider's sign-in under way (ten minutes)
 //   team:<id>                 { id, name, createdAt, access: 'members' | 'link', domains, githubOrgs, invite }
 //   inv:<code>                → team id
 //   mem:<team>:<acct>         { role: 'owner' | 'member', at }; myteam:<acct>:<team> → 1
@@ -24,7 +28,12 @@ import { json, token, brandPage, commandBox, COPY_SCRIPT, INSTALL_COMMAND } from
 
 const LOGIN_MS = 10 * 60 * 1000
 const INVITE_MS = 12 * 60 * 60 * 1000 // a session invite lasts half a day at most
-const LOGIN_ID = /^[A-Za-z0-9_-]{20,64}$/
+// What Claude Code sends: the SHA-256 of its secret, in hex (anything else could never be collected).
+const LOGIN_ID = /^[0-9a-f]{64}$/
+// What one account may change in a minute: its teams, their invite links and
+// members, invites it takes or sends. Counted in memory, in the one
+// directory (a Durable Object on Cloudflare, the process on Node).
+const CHANGES = { limit: 30, periodMs: 60_000, message: 'Too many changes from your account. Try again in a minute.' }
 const TEAM_ID = /^[A-Za-z0-9_-]{8,40}$/
 const NAME_MAX = 60
 const DOMAIN = /^(?=.{3,253}$)[a-z0-9-]+(\.[a-z0-9-]+)+$/
@@ -77,6 +86,59 @@ function page(eyebrow, heading, lines, more = {}) {
   return brandPage({ title: heading, eyebrow, heading, body, ...more })
 }
 const startAgain = 'Start again from Claude Code: press <b>Team</b> above the prompt, or type <code>/team</code>.'
+const alreadyIn = () => page('Signed in', "You're already signed in", 'Go back to Claude Code. You can close this tab.')
+
+// The confirmation page's Continue starts disabled, and this enables it once
+// the page has been shown and focused for 400 ms and the pointer has moved
+// over it since (a move with no distance, which a browser makes up as a
+// window appears under the pointer, doesn't count), or a key is pressed after
+// those 400 ms. Losing sight or focus starts it over. So a page someone else
+// controls can't time a person's double-click to raise this window under it
+// and have the second click continue. Without script it stays enabled
+// (noscript): nobody can turn script off in someone else's browser.
+const CONTINUE_SCRIPT = `(function () {
+  var button = document.getElementById('continue'), since = 0, moved = false, at = '', timer = 0;
+  function reset() { since = 0; moved = false; at = ''; clearTimeout(timer); button.disabled = true; }
+  function shown() {
+    if (document.visibilityState !== 'visible' || !document.hasFocus()) { reset(); return false; }
+    if (!since) since = performance.now();
+    return true;
+  }
+  function left() { return 400 - (performance.now() - since); }
+  function ready() {
+    clearTimeout(timer);
+    if (!shown() || !moved) return;
+    if (left() > 0) timer = setTimeout(ready, left() + 10);
+    else button.disabled = false;
+  }
+  document.addEventListener('pointermove', function (e) {
+    if (!shown()) return;
+    var p = e.screenX + ',' + e.screenY;
+    if ((at && p !== at) || e.movementX || e.movementY) moved = true;
+    at = p;
+    ready();
+  });
+  document.addEventListener('keydown', function () { if (shown() && left() <= 0) button.disabled = false; });
+  document.addEventListener('visibilitychange', shown);
+  window.addEventListener('focus', shown);
+  window.addEventListener('blur', reset);
+  shown();
+})();`
+// …allowed by its hash, the one script the page may run.
+let continueHash = null
+const continueSource = () => (continueHash ??= crypto.subtle.digest('SHA-256', new TextEncoder().encode(CONTINUE_SCRIPT)).then(d => `'sha256-${btoa(String.fromCharCode(...new Uint8Array(d)))}'`))
+
+// The page whose Continue finishes a sign-in: never in a frame (nothing drawn
+// over it can take the click), running no script but its own, never cached,
+// and its address (the login) never sent on.
+async function guarded(res) {
+  const headers = new Headers(res.headers)
+  headers.set('x-frame-options', 'DENY')
+  headers.set('content-security-policy', `frame-ancestors 'none'; script-src ${await continueSource()}`)
+  headers.set('cache-control', 'no-store')
+  headers.set('referrer-policy', 'no-referrer')
+  return new Response(res.body, { status: res.status, headers })
+}
 
 export class Directory {
   // kv: { get(key), put(key, value), delete(key), list(prefix) → [key, value][] }
@@ -86,6 +148,16 @@ export class Directory {
     this.providers = opts.providers ?? {}
     this.roomInfo = opts.roomInfo ?? (async () => null)
     this.fetch = opts.fetch ?? ((...a) => fetch(...a))
+    this.changes = new Map() // account id → { start, count }: its minute (CHANGES)
+  }
+
+  // One change on the account's minute: false once it has made CHANGES.limit.
+  change(accountId, now) {
+    const w = this.changes.get(accountId)
+    if (w && now - w.start < CHANGES.periodMs) return ++w.count <= CHANGES.limit
+    if (this.changes.size >= 10_000) for (const [id, v] of this.changes) if (now - v.start >= CHANGES.periodMs) this.changes.delete(id)
+    this.changes.set(accountId, { start: now, count: 1 })
+    return true
   }
 
   // -- accounts --------------------------------------------------------------
@@ -97,6 +169,9 @@ export class Directory {
     return rec ? ((await this.kv.get(`acct:${rec.account}`)) ?? null) : null
   }
 
+  // The account a confirmed identity is, made or brought up to date, and the
+  // teams it now joins by itself. Its token is made only when Claude Code
+  // collects the sign-in (mint, from poll).
   async signIn(identity, now) {
     const ident = `ident:${identity.provider}:${identity.subject}`
     const email = identity.emailVerified && identity.email ? String(identity.email).toLowerCase() : ''
@@ -121,9 +196,14 @@ export class Directory {
     await this.kv.put(ident, id)
     if (email) await this.kv.put(`email:${email}`, id)
     await this.autoJoin(account, now)
+    return account
+  }
+
+  // A signed-in Claude Code's token, handed straight over: only its hash is kept.
+  async mint(accountId, now) {
     const secret = `ssa_${token(24)}`
-    await this.kv.put(`tok:${await sha256(secret)}`, { account: id, at: now })
-    return { account, token: secret }
+    await this.kv.put(`tok:${await sha256(secret)}`, { account: accountId, at: now })
+    return secret
   }
 
   // Teams that take this account by its email's domain or its GitHub orgs.
@@ -242,6 +322,7 @@ export class Directory {
   async sessionInvite(tokenText, room, to, now = Date.now()) {
     const account = await this.accountOf(tokenText)
     if (!account) return { ok: false, status: 401, error: 'Sign in to invite people: /team in Claude Code.' }
+    if (!this.change(account.id, now)) return { ok: false, status: 429, error: CHANGES.message }
     const mates = new Map((await this.teammates(account)).map(m => [m.id, m]))
     const invited = []
     const refused = []
@@ -329,6 +410,7 @@ export class Directory {
       }
       if (parts[0] === 'auth' && parts.length === 3 && parts[2] === 'start') return this.start(parts[1], url, origin, now)
       if (parts[0] === 'auth' && parts.length === 3 && parts[2] === 'callback') return this.callback(parts[1], url, origin, now)
+      if (url.pathname === '/auth/confirm') return method === 'POST' ? this.confirm(await readBody(req, 'form'), now) : page('Sign-in', "This sign-in link isn't complete", startAgain)
       if (url.pathname === '/api/auth/poll' && method === 'POST') return this.poll(await readBody(req), now)
       if (parts[0] === 'i' && parts.length === 2) return this.invitePage(parts[1], origin)
 
@@ -339,13 +421,16 @@ export class Directory {
         await this.kv.delete(`tok:${await sha256(String(req.headers.get('authorization')).replace(/^Bearer\s+/i, '').trim())}`)
         return json({ ok: true })
       }
+      if (url.pathname === '/api/me' && method === 'DELETE') return this.deleteAccount(account)
+      // Every other change counts against the account's minute; signing out
+      // and deleting the account always go through.
+      if (method !== 'GET' && !this.change(account.id, now)) return json({ error: CHANGES.message }, 429)
       if (url.pathname === '/api/me' && method === 'GET') return json({ account: this.accountView(account), teams: await this.teamsOf(account), teammates: await this.teammates(account) })
       if (url.pathname === '/api/me/invites' && method === 'GET') return json({ invites: await this.invitesOf(account, now) })
       if (parts[0] === 'api' && parts[1] === 'me' && parts[2] === 'invites' && parts.length === 4 && method === 'DELETE') {
         await this.kv.delete(`sinv:${account.id}:${parts[3]}`)
         return json({ ok: true })
       }
-      if (url.pathname === '/api/me' && method === 'DELETE') return this.deleteAccount(account)
       if (url.pathname === '/api/teams' && method === 'POST') return this.createTeam(account, await readBody(req), now)
       if (parts[0] === 'api' && parts[1] === 'invites' && parts.length === 3 && method === 'POST') return this.acceptInvite(account, parts[2], now)
       if (parts[0] === 'api' && parts[1] === 'teams' && parts.length >= 3) {
@@ -360,7 +445,7 @@ export class Directory {
           const body = await readBody(req)
           const refused = this.unclaimable(account, body)
           if (refused) return json({ error: refused }, 400)
-          return json({ team: this.teamView(await this.updateTeam(team, body), 'owner') })
+          return json({ team: this.teamView(await this.updateTeam(team, body, now), 'owner') })
         }
         if (sub === 'invite' && method === 'POST') {
           if (!owner) return json({ error: 'Only an owner makes a new invite link.' }, 403)
@@ -374,7 +459,8 @@ export class Directory {
         if (parts[3] === 'members' && parts.length === 5 && method === 'DELETE') {
           const who = parts[4] === 'me' ? account.id : parts[4]
           if (who !== account.id && !owner) return json({ error: 'Only an owner removes people.' }, 403)
-          await this.removeMember(team.id, who)
+          // Only someone in it: a `left:` mark for anyone else would only grow the store.
+          if (await this.kv.get(`mem:${team.id}:${who}`)) await this.removeMember(team.id, who)
           return json({ ok: true })
         }
       }
@@ -429,32 +515,49 @@ export class Directory {
     return ''
   }
 
-  async updateTeam(team, body) {
+  // An owner's changes. Only what changed is written, and only accounts a
+  // newly added domain or organization takes are looked at: saving the same
+  // lists again (or none) scans nothing.
+  async updateTeam(team, body, now = Date.now()) {
     const next = { ...team }
     if (body.name !== undefined && clean(body.name)) next.name = clean(body.name)
     if (body.access === 'members' || body.access === 'link') next.access = body.access
-    if (body.domains !== undefined) {
-      for (const d of team.domains ?? []) await this.kv.delete(`dom:${d}:${team.id}`)
-      next.domains = listOf(body.domains, DOMAIN)
-      for (const d of next.domains) await this.kv.put(`dom:${d}:${team.id}`, 1)
-    }
-    if (body.githubOrgs !== undefined) {
-      for (const o of team.githubOrgs ?? []) await this.kv.delete(`org:${o}:${team.id}`)
-      next.githubOrgs = listOf(body.githubOrgs, ORG)
-      for (const o of next.githubOrgs) await this.kv.put(`org:${o}:${team.id}`, 1)
-    }
+    if (body.domains !== undefined) next.domains = listOf(body.domains, DOMAIN)
+    if (body.githubOrgs !== undefined) next.githubOrgs = listOf(body.githubOrgs, ORG)
+    const minus = (a, b) => (a ?? []).filter(x => !(b ?? []).includes(x))
+    for (const d of minus(team.domains, next.domains)) await this.kv.delete(`dom:${d}:${team.id}`)
+    for (const o of minus(team.githubOrgs, next.githubOrgs)) await this.kv.delete(`org:${o}:${team.id}`)
+    const domains = minus(next.domains, team.domains)
+    const orgs = minus(next.githubOrgs, team.githubOrgs)
+    for (const d of domains) await this.kv.put(`dom:${d}:${team.id}`, 1)
+    for (const o of orgs) await this.kv.put(`org:${o}:${team.id}`, 1)
     await this.kv.put(`team:${team.id}`, next)
-    // People already signed in whom the new rules take in.
-    if (body.domains !== undefined || body.githubOrgs !== undefined) {
-      const now = Date.now()
-      for (const [, a] of await this.kv.list('acct:')) await this.autoJoin(a, now)
+    // People already signed in whom the new rules take in. Only an account
+    // says which organizations it's in, so a new one reads every account
+    // once; a new domain alone reads the verified-email index.
+    const takes = a => (a.emailVerified && domains.includes(domainOf(a.email))) || (a.githubOrgs ?? []).some(o => orgs.includes(o))
+    const found = new Map()
+    if (orgs.length) {
+      for (const [, a] of await this.kv.list('acct:')) if (takes(a)) found.set(a.id, a)
+    } else if (domains.length) {
+      for (const [key, id] of await this.kv.list('email:')) {
+        if (found.has(id) || !domains.includes(domainOf(key.slice('email:'.length)))) continue
+        const a = await this.kv.get(`acct:${id}`)
+        if (a && takes(a)) found.set(id, a)
+      }
     }
+    for (const a of found.values()) await this.autoJoin(a, now)
     return next
   }
 
+  // The team an invite code is for, while it works.
+  async inviteTeam(code) {
+    const teamId = /^[A-Za-z0-9_-]{8,40}$/.test(String(code ?? '')) ? await this.kv.get(`inv:${code}`) : null
+    return teamId ? ((await this.kv.get(`team:${teamId}`)) ?? null) : null
+  }
+
   async acceptInvite(account, code, now) {
-    const teamId = /^[A-Za-z0-9_-]{8,40}$/.test(code) ? await this.kv.get(`inv:${code}`) : null
-    const team = teamId ? await this.kv.get(`team:${teamId}`) : null
+    const team = await this.inviteTeam(code)
     if (!team) return json({ error: "That invite link doesn't work any more. Ask for a new one." }, 404)
     const mem = await this.kv.get(`mem:${team.id}:${account.id}`)
     if (!mem) await this.addMember(team.id, account.id, 'member', now)
@@ -475,23 +578,30 @@ export class Directory {
 
   // Claude Code opens this in the person's browser with `login`, the SHA-256
   // of a secret it keeps, and then asks for the sign-in with that secret: a
-  // link seen in a browser's history, or a process list, can't collect it. An
-  // invite code, when given, is taken once they're signed in.
+  // link seen in a browser's history, or a process list, can't collect it.
+  // Whoever makes a start link chooses its `login`, though, so the provider's
+  // answer only asks (ask): the browser says yes before anything is signed
+  // in. An invite code, when given, is taken once they're signed in.
   async start(provider, url, origin, now) {
     if (!this.providers[provider]) return page('Sign-in', "This sign-in isn't set up", 'This share server has no sign-in with that provider. Sharing by link works without one.')
     const login = url.searchParams.get('login') ?? ''
     if (!LOGIN_ID.test(login)) return page('Sign-in', "This sign-in link isn't complete", startAgain)
     const invite = url.searchParams.get('invite') ?? ''
     const known = await this.kv.get(`login:${login}`)
-    if (known?.status === 'done') return page('Signed in', "You're already signed in", 'Go back to Claude Code. You can close this tab.')
+    if (known?.status === 'done') return alreadyIn()
     // Sign-ins nobody finished or collected go after their ten minutes.
     for (const prefix of ['login:', 'state:']) for (const [key, rec] of await this.kv.list(prefix)) if (rec.exp < now) await this.kv.delete(key)
-    await this.kv.put(`login:${login}`, { status: 'pending', exp: now + LOGIN_MS })
+    // `code=1`: this Claude Code shows the code the page shows (0.11.25 and
+    // newer say so); kept with the sign-in for the page the provider's answer
+    // brings (ask).
+    const code = url.searchParams.get('code') === '1'
+    await this.kv.put(`login:${login}`, { status: 'pending', exp: now + LOGIN_MS, ...(code ? { code } : {}) })
     if (provider === 'test') {
-      // The end-to-end test's own provider: who to be comes in the link.
+      // The end-to-end test's own provider: who to be comes in the link. It
+      // asks in the browser as the others do.
       const email = clean(url.searchParams.get('email'), 120).toLowerCase()
       const identity = { provider: 'test', subject: email || login, name: url.searchParams.get('name') || email, email, emailVerified: Boolean(email), githubOrgs: url.searchParams.get('orgs') ?? '' }
-      return this.finish(identity, login, invite, now)
+      return this.ask(identity, login, invite, now)
     }
     const state = token(18)
     await this.kv.put(`state:${state}`, { provider, login, invite, exp: now + LOGIN_MS })
@@ -512,38 +622,90 @@ export class Directory {
     if (!code) return page('Sign-in', 'Sign-in cancelled', 'Nothing changed. Sign in from Claude Code whenever you like.')
     try {
       const identity = await this.identity(provider, code, `${origin}/auth/${provider}/callback`)
-      return await this.finish(identity, state.login, state.invite, now)
+      return await this.ask(identity, state.login, state.invite, now)
     } catch (error) {
       return page('Sign-in', "Sign-in didn't work", [esc(String(error?.message ?? error).slice(0, 200)), startAgain])
     }
   }
 
+  // The provider has said who this is: the browser is asked before anything
+  // is signed in. The page shows the code Claude Code shows (the start of
+  // `login`), so someone who opened another person's start link can tell
+  // it isn't theirs, and only its Continue, a POST carrying this page's
+  // nonce, goes on (CONTINUE_SCRIPT: not a click timed for it). A start
+  // link without `code=1` (0.11.24's) asks without the code, which that
+  // Claude Code doesn't show.
+  async ask(identity, login, invite, now) {
+    const known = await this.kv.get(`login:${login}`)
+    if (known?.status === 'done') return alreadyIn()
+    const nonce = token(18)
+    const shows = known?.code === true
+    await this.kv.put(`login:${login}`, { status: 'confirm', identity, invite, nonce, exp: now + LOGIN_MS, ...(shows ? { code: true } : {}) })
+    const email = clean(identity.email, 120)
+    const name = clean(identity.name || identity.login || email.split('@')[0] || 'teammate')
+    const team = invite ? await this.inviteTeam(invite) : null
+    const code = `${login.slice(0, 4)}-${login.slice(4, 8)}`.toUpperCase()
+    const who = `Claude Code is signing in as ${esc(name)}${email ? ` (${esc(email)})` : ''}.`
+    return guarded(page('Sign-in', 'Finish signing in', [
+      shows ? `${who} It shows the code <b>${code}</b>. Continue only if you started signing in from Claude Code just now and the codes match.` : `${who} Continue only if you started signing in from Claude Code just now.`,
+      ...(team ? [`Continuing also joins you to the team <b>${esc(team.name)}</b>.`] : []),
+    ], {
+      after: `<form class="cta" method="post" action="/auth/confirm"><input type="hidden" name="login" value="${esc(login)}"><input type="hidden" name="nonce" value="${esc(nonce)}"><button type="submit" class="btn-primary" id="continue" disabled>Continue</button><noscript><style>#continue{display:none}</style><button type="submit" class="btn-primary">Continue</button></noscript></form>`,
+      script: CONTINUE_SCRIPT,
+    }))
+  }
+
+  // The confirmation page's Continue. Only the page's own nonce finishes
+  // it: a form another site posts can't, nor a page a newer start has
+  // replaced.
+  async confirm(form, now) {
+    const login = String(form.get('login') ?? '')
+    const rec = LOGIN_ID.test(login) ? await this.kv.get(`login:${login}`) : null
+    if (!rec || rec.exp < now) {
+      if (rec) await this.kv.delete(`login:${login}`)
+      return page('Sign-in', 'This sign-in expired', ['A sign-in waits ten minutes.', startAgain], { status: 410 })
+    }
+    if (rec.status === 'done') return alreadyIn()
+    if (rec.status !== 'confirm' || !rec.nonce || form.get('nonce') !== rec.nonce) {
+      return page('Sign-in', 'This sign-in page is out of date', ['Nothing changed: a newer sign-in started since it opened, or it came from somewhere else.', startAgain], { status: 403 })
+    }
+    return this.finish(rec.identity, login, rec.invite, now)
+  }
+
+  // Signs the confirmed identity in and takes its invite. No token yet:
+  // storage never holds one, so it's made as Claude Code collects it (poll).
   async finish(identity, login, invite, now) {
-    const { account, token: secret } = await this.signIn(identity, now)
+    const account = await this.signIn(identity, now)
     let joined = null
     if (invite) {
       const res = await this.acceptInvite(account, invite, now)
       if (res.ok) joined = (await res.json()).team ?? null
     }
-    await this.kv.put(`login:${login}`, { status: 'done', token: secret, joined: joined?.id ?? null, exp: now + LOGIN_MS })
+    await this.kv.put(`login:${login}`, { status: 'done', account: account.id, joined: joined?.id ?? null, exp: now + LOGIN_MS })
     return page('Signed in', `You're signed in, ${account.name}`, [
       ...(joined ? [`You're in <b>${esc(joined.name)}</b> now: its live sessions show in your Team panel.`] : []),
       'Go back to Claude Code: it has picked up the sign-in. You can close this tab.',
     ])
   }
 
-  // Delivered once, to whoever has the secret behind `login`: Claude Code
-  // keeps the token, the server only its hash.
+  // Delivered once, to whoever has the secret behind `login`, and only once
+  // the browser's Continue finished it: the token is made now, so Claude
+  // Code keeps it and the server only its hash. An expired sign-in is
+  // deleted as it's asked for, not only by the next start's sweep.
   async poll(body, now) {
     const verifier = String(body.verifier ?? '')
     if (!/^[A-Za-z0-9_-]{32,128}$/.test(verifier)) return json({ error: 'bad verifier' }, 400)
     const login = await sha256(verifier)
     const rec = await this.kv.get(`login:${login}`)
+    if (rec && rec.exp < now) await this.kv.delete(`login:${login}`)
     if (!rec || rec.exp < now) return json({ status: 'expired' })
-    if (rec.status !== 'done') return json({ status: 'pending' })
+    if (rec.status !== 'done') return json({ status: rec.status === 'confirm' ? 'confirm' : 'pending' })
     await this.kv.delete(`login:${login}`)
-    const account = await this.accountOf(rec.token)
-    return json({ status: 'done', token: rec.token, joined: rec.joined ?? null, account: account ? this.accountView(account) : null, teams: account ? await this.teamsOf(account) : [] })
+    // The account went since (deleted from another session), or the sign-in
+    // finished before tokens were made here: nothing to hand over.
+    const account = rec.account ? await this.kv.get(`acct:${rec.account}`) : null
+    if (!account) return json({ status: 'expired' })
+    return json({ status: 'done', token: await this.mint(account.id, now), joined: rec.joined ?? null, account: this.accountView(account), teams: await this.teamsOf(account) })
   }
 
   async identity(provider, code, redirect) {
@@ -578,8 +740,7 @@ export class Directory {
   // An invite link opened in a browser: what it is, and how to take it in
   // Claude Code (Desktop opens a new session with the link as its prompt).
   async invitePage(code, origin) {
-    const teamId = /^[A-Za-z0-9_-]{8,40}$/.test(code) ? await this.kv.get(`inv:${code}`) : null
-    const team = teamId ? await this.kv.get(`team:${teamId}`) : null
+    const team = await this.inviteTeam(code)
     if (!team) return page('Team invite', "This invite doesn't work any more", 'Someone in the team made a new link, or the team is gone. Ask them for the current one.', { status: 404 })
     const link = `${origin}/i/${code}`
     const name = esc(team.name)
@@ -601,10 +762,13 @@ export class Directory {
   }
 }
 
-async function readBody(req) {
+// The directory's bodies, in characters (node.mjs bounds their bytes at three
+// a character before buffering them): JSON, or a browser's form ('form').
+export const BODY_CHARS = 16_000
+async function readBody(req, as = 'json') {
   const text = await req.text()
-  if (text.length > 16_000) throw new Error('body too large')
-  return text ? JSON.parse(text) : {}
+  if (text.length > BODY_CHARS) throw new Error('body too large')
+  return as === 'form' ? new URLSearchParams(text) : text ? JSON.parse(text) : {}
 }
 
 // A store over a plain Map, for the Node server (persisted by its caller).
