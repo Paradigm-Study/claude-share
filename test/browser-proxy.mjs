@@ -1154,11 +1154,17 @@ async function dohFixtures() {
     'nat64.test': { AAAA: ['64:ff9b::a9fe:a9fe'] }, 'own.test': { A: ['192.168.1.5'] }, 'six.test': { AAAA: ['2001:db8::5'] }, 'cached.test': { A: ['93.184.216.34'], TTL: 300 },
     'servfail.test': { Status: 2 }, 'big.test': { body: `{"Status":0,"Answer":[],"pad":"${'p'.repeat(70_000)}"}` }, 'bad.test': { A: ['not-an-address'] }, 'lan.test': { A: ['10.0.0.7'] },
     'slow.test': { A: ['93.184.216.34'], delay: 4000 },
+    // Dual-stack names whose addresses the upstream fixtures refuse, hold or answer late (upstreamAs).
+    'dual.test': { A: ['198.51.100.7'], AAAA: ['2001:db8::5'] }, 'held.test': { A: ['198.51.100.7'], AAAA: ['2001:db8::6', '2001:db8::5'] }, 'blackhole.test': { A: ['198.51.100.14'], AAAA: ['2001:db8::5'] },
+    'dead.test': { A: ['198.51.100.7', '198.51.100.8', '198.51.100.9'], AAAA: ['2001:db8::7', '2001:db8::8', '2001:db8::9'] },
+    'late.test': { A: ['198.51.100.12', '198.51.100.13'], AAAA: ['2001:db8::12', '2001:db8::13'] },
   }
   // The Guest's own resolver: absent, poisoned or right.
   ctx.local = { 'evil.test': ['93.184.216.34'], 'accounts.test': ['203.0.113.99'], 'down.test': ['93.184.216.34'], 'loopy.test': ['93.184.216.34'], 'meta.test': ['93.184.216.34'], 'mapped.test': ['93.184.216.34'],
     'nat64.test': ['93.184.216.34'], 'own.test': ['93.184.216.34'], 'six.test': ['93.184.216.34'], 'cached.test': ['93.184.216.34'], 'servfail.test': ['93.184.216.34'], 'big.test': ['93.184.216.34'], 'bad.test': ['93.184.216.34'], 'lan.test': ['93.184.216.34'], 'slow.test': ['93.184.216.34'],
-    'n1.test': ['93.184.216.34'], 'n2.test': ['93.184.216.34'], 'n3.test': ['93.184.216.34'], 'n5.test': ['93.184.216.34'], 'n6.test': ['93.184.216.34'] }
+    'n1.test': ['93.184.216.34'], 'n2.test': ['93.184.216.34'], 'n3.test': ['93.184.216.34'], 'n5.test': ['93.184.216.34'], 'n6.test': ['93.184.216.34'],
+    // IPv6 first here: the upstream still gets the IPv4 address first.
+    'dual-local.test': ['2001:db8::5', '198.51.100.7'] }
   ctx.lookup = (name, _options, callback) => setImmediate(() => ctx.local[name] ? callback(null, ctx.local[name].map(address => ({ address, family: net.isIP(address) }))) : callback(Object.assign(new Error('not found'), { code: 'ENOTFOUND' })))
   ctx.interfaces = () => ({ en0: [iface('192.168.1.5', '192.168.1.0/24')] })
   const greeter = (word, count) => track(net.createServer({ allowHalfOpen: true }, socket => { ctx[count]++; socket.write(word); socket.on('data', bytes => socket.write(bytes)); socket.on('end', () => socket.end()) }))
@@ -1194,6 +1200,26 @@ async function dohFixtures() {
   // Where each upstream fixture sends what it's asked for: an address it knows,
   // the DoH server (127.0.0.1), or a name, which its own resolver puts at the private service.
   const addresses = { '93.184.216.34': publicPort, '2001:db8::5': publicPort, '203.0.113.99': wrongPort, '10.0.0.7': privatePort, '127.0.0.1': null }
+  // What both upstream fixtures do with these addresses instead: refuse them
+  // (HTTP 502, SOCKS5 REP 5; any other address they don't know is 502 or REP 4),
+  // hold the tunnel unanswered (ctx.held, until the proxy closes it), or refuse
+  // them 600 ms on.
+  ctx.upstreamAs = { '198.51.100.14': 'hold', '198.51.100.7': 'refuse', '198.51.100.8': 'refuse', '198.51.100.9': 'refuse', '2001:db8::6': 'hold', '198.51.100.12': 'late', '198.51.100.13': 'late', '2001:db8::12': 'late', '2001:db8::13': 'late' }
+  ctx.held = new Set()
+  const special = (socket, host, refused) => {
+    const as = ctx.upstreamAs[host]
+    if (!as) return false
+    socket.on('error', () => {})
+    if (as === 'refuse') socket.end(refused)
+    else if (as === 'late') setTimeout(() => socket.end(refused), 600)
+    else {
+      ctx.held.add(socket); sockets.add(socket)
+      socket.once('close', () => { ctx.held.delete(socket); sockets.delete(socket) })
+      socket.on('end', () => socket.destroy())
+      socket.resume()
+    }
+    return true
+  }
   const destination = (host, port) => {
     if (host === '127.0.0.1') return port
     if (Object.hasOwn(addresses, host)) return addresses[host]
@@ -1207,7 +1233,11 @@ async function dohFixtures() {
     target.on('close', () => sockets.delete(target))
     target.once('connect', () => { socket.write(ok); if (rest.length) target.write(rest); socket.pipe(target); target.pipe(socket) })
   }
+  // Every connection either upstream fixture holds open now: a try the proxy gave up on must not stay.
+  ctx.upstreamSockets = new Set()
+  const accepted = socket => { ctx.upstreamSockets.add(socket); socket.once('close', () => ctx.upstreamSockets.delete(socket)) }
   ctx.httpPort = await listen(track(net.createServer({ allowHalfOpen: true }, socket => {
+    accepted(socket)
     let head = Buffer.alloc(0)
     const read = bytes => {
       head = Buffer.concat([head, bytes])
@@ -1217,11 +1247,13 @@ async function dohFixtures() {
       const authority = /^CONNECT (\S+) HTTP\/1\.1\r\n/.exec(head.toString('latin1', 0, end + 2))?.[1] ?? ''
       ctx.connects.push(authority)
       const [, host, port] = /^\[?(.*?)\]?:([0-9]+)$/.exec(authority) ?? []
+      if (special(socket, host, 'HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n')) return
       pipeTo(socket, destination(host, Number(port)), head.subarray(end + 4), 'HTTP/1.1 200 Connection established\r\n\r\n', 'HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n')
     }
     socket.on('data', read)
   })))
   ctx.socksPort = await listen(track(net.createServer({ allowHalfOpen: true }, socket => {
+    accepted(socket)
     let buffer = Buffer.alloc(0), greeted = false
     const read = bytes => {
       buffer = Buffer.concat([buffer, bytes])
@@ -1237,6 +1269,7 @@ async function dohFixtures() {
       const host = atyp === 1 ? [...buffer.subarray(4, 8)].join('.') : atyp === 4 ? new net.SocketAddress({ address: Array.from({ length: 8 }, (_, i) => buffer.readUInt16BE(4 + 2 * i).toString(16)).join(':'), family: 'ipv6' }).address : buffer.toString('latin1', 5, 5 + buffer[4])
       const port = buffer.readUInt16BE(size - 2)
       ctx.socksSeen.push({ atyp, host, port })
+      if (special(socket, host, Buffer.from(reply(5)))) return
       pipeTo(socket, destination(host, port), buffer.subarray(size), Buffer.from(reply(0)), Buffer.from(reply(4)))
     }
     socket.on('data', read)
@@ -1254,6 +1287,8 @@ async function dohFixtures() {
     return c.bytes.subarray(12, 19).toString()
   }
   ctx.reset = () => { ctx.asked.length = ctx.connects.length = ctx.socksSeen.length = 0; ctx.privateHits = ctx.publicHits = ctx.wrongHits = 0 }
+  // The addresses the upstream was asked for, beside the DoH server's (127.0.0.1), as CONNECT spells them.
+  ctx.tried = () => [...ctx.connects, ...ctx.socksSeen.map(seen => seen.atyp === 4 ? `[${seen.host}]:${seen.port}` : `${seen.host}:${seen.port}`)].filter(authority => !authority.startsWith('127.0.0.1:'))
   ctx.numeric = () => ctx.connects.every(authority => /^(?:[0-9.]+|\[[0-9a-f:]+\]):[0-9]+$/.test(authority)) && ctx.socksSeen.every(seen => seen.atyp !== 3)
   return ctx
 }
@@ -1424,19 +1459,19 @@ async function backoffChecks(ctx) {
   assert.ok(ctx.gateHits === hits && Date.now() - at < 2000, `n2.test asked nothing of DoH (${ctx.gateHits - hits} tunnels, ${Date.now() - at} ms)`)
   await shut(four)
   // One server: held twice, the second wait is twice the first.
-  // A one-second wait, then two: each look comes well inside or past them, so a busy machine's late timers don't decide.
-  const one = await ctx.start(ctx.http, { servers: [gate], timeouts: { doh: 1000, dohEach: 1000, dohDown: 1000, dohDownMax: 10_000 } })
+  // A two-second wait, then four: each look comes well inside or past them, so a busy machine's late timers don't decide.
+  const one = await ctx.start(ctx.http, { servers: [gate], timeouts: { doh: 1000, dohEach: 1000, dohDown: 2000, dohDownMax: 20_000 } })
   ctx.gateHits = 0
   await ctx.open(one, 'n1.test', 'n1.test, held')
   assert.equal(ctx.gateHits, 2, 'A and AAAA tunnels')
-  await settle(1400)
+  await settle(2700)
   await ctx.open(one, 'n2.test', 'n2.test, held again after the first wait')
   assert.equal(ctx.gateHits, 4, 'asked again once the first wait ended')
-  await settle(1400)
-  await ctx.open(one, 'n3.test', 'n3.test, 1.4 s on')
-  assert.equal(ctx.gateHits, 4, 'still waiting: the second wait is 2 s')
+  await settle(2700)
+  await ctx.open(one, 'n3.test', 'n3.test, 2.7 s on')
+  assert.equal(ctx.gateHits, 4, 'still waiting: the second wait is 4 s')
   // An answer resets it.
-  await settle(1200)
+  await settle(2000)
   ctx.gateOpen = true
   ctx.wrongHits = 0
   assert.equal(await ctx.open(one, 'accounts.test', 'accounts.test with DoH back'), 'PUBLIC!', 'DoH answers again after the wait')
@@ -1445,16 +1480,102 @@ async function backoffChecks(ctx) {
   ctx.gateHits = 0
   await ctx.open(one, 'n5.test', 'n5.test, held after an answer')
   assert.equal(ctx.gateHits, 2)
-  await settle(1600)
-  await ctx.open(one, 'n6.test', 'n6.test, 1.6 s on')
+  await settle(3000)
+  await ctx.open(one, 'n6.test', 'n6.test, 3 s on')
   assert.equal(ctx.gateHits, 4, 'back to the first wait, not a doubled one')
   await shut(one)
 }
 
-async function dohChecks(cases = Object.keys(DOH_CASES)) {
+// Each case is one regression the helper that gave the upstream a name's
+// first IPv4 address alone (and refused at its first failure) fails.
+const RETRY_CASES = {
+  async 'h: an IPv4 address the upstream refuses gives way to the IPv6 one, both checked'(ctx) {
+    for (const [label, host, servers] of [['the DoH answer', 'dual.test', ctx.servers], ['the local answer, DoH down', 'dual-local.test', [{ ...ctx.servers[0], port: await deadPort() }]]]) {
+      ctx.reset()
+      const p = await ctx.start(ctx.http, { servers, timeouts: { connect: 10_000 } })
+      assert.equal(await ctx.open(p, host, `${host}, ${label}`), 'PUBLIC!', `${label}: the IPv6 address once the IPv4 one is refused`)
+      assert.deepEqual(ctx.tried(), ['198.51.100.7:443', '[2001:db8::5]:443'], `${label}: IPv4 first, then IPv6, each in a tunnel of its own`)
+      assert.ok(ctx.numeric() && !ctx.connects.some(authority => authority.includes('test')), `${label}: never the name`)
+      assert.equal(ctx.privateHits, 0)
+      await shut(p)
+    }
+  },
+  async 'i: a SOCKS5 upstream refusing the first address (REP 5) is given the next'(ctx) {
+    const p = await ctx.start(ctx.socks5, { timeouts: { connect: 10_000 } })
+    assert.equal(await ctx.open(p, 'dual.test', 'dual.test through SOCKS5'), 'PUBLIC!')
+    assert.deepEqual(ctx.socksSeen.filter(seen => seen.host !== '127.0.0.1'), [{ atyp: 1, host: '198.51.100.7', port: 443 }, { atyp: 4, host: '2001:db8::5', port: 443 }])
+    assert.ok(ctx.numeric())
+    await shut(p)
+  },
+  async 'j: every address refused: four tries at most, the last one\'s code, all within one deadline'(ctx) {
+    const four = ['198.51.100.7:443', '[2001:db8::7]:443', '198.51.100.8:443', '[2001:db8::8]:443']
+    // HTTP refuses all with 502 (01); SOCKS5 refuses the IPv4 ones REP 5 and the IPv6 ones REP 4, the fourth's.
+    for (const [upstream, rep] of [[ctx.http, 1], [ctx.socks5, 4]]) {
+      ctx.reset()
+      const p = await ctx.start(upstream, { timeouts: { connect: 10_000 } })
+      await expectReply(await socks(p.port, { atyp: 3, host: 'dead.test', port: 443 }), rep, `dead.test through ${upstream.kind}`)
+      await pause(200)
+      assert.deepEqual(ctx.tried(), four, `${upstream.kind}: the families in turn, IPv4 first, and no more than four`)
+      await shut(p)
+    }
+    // Each refusal 600 ms late, one second for the whole: every try's turn
+    // ends inside that one deadline, and so does the last (a try's own fresh
+    // deadline would have let all four be refused, 01, after 2.4 s).
+    ctx.reset()
+    const p = await ctx.start(ctx.http, { timeouts: { connect: 1000 } })
+    const began = Date.now()
+    await expectReply(await socks(p.port, { atyp: 3, host: 'late.test', port: 443 }), 4, 'late.test: past the one deadline')
+    assert.ok(Date.now() - began < 2000, `answered within the one deadline (${Date.now() - began} ms)`)
+    await pause(200)
+    const tried = ctx.tried()
+    assert.deepEqual(tried, ['198.51.100.12:443', '[2001:db8::12]:443', '198.51.100.13:443', '[2001:db8::13]:443'].slice(0, tried.length), 'in turn, IPv4 first')
+    await shut(p)
+    // An upstream that can't be reached at all says nothing of the address: one try, 05.
+    const dead = await deadPort(), tunnels = []
+    const connect = options => { if (options.port === dead && options.allowHalfOpen) tunnels.push(options); return net.connect(options) }
+    const q = await inProcess({ lookup: ctx.lookup, interfaces: ctx.interfaces, connect, doh: ctx.servers, timeouts: { ...FAST, connect: 10_000 } }, { upstream: { ...ctx.http, port: dead } })
+    await expectReply(await socks(q.port, { atyp: 3, host: 'dual-local.test', port: 443 }), 5, 'dual-local.test, the upstream down')
+    assert.equal(tunnels.length, 1, 'tried once')
+    await shut(q)
+  },
+  async 'l: an IPv4 address the upstream holds unanswered (a blackholed route) gives way to the IPv6 one within the deadline'(ctx) {
+    const p = await ctx.start(ctx.http, { timeouts: { connect: 6000 } })
+    const began = Date.now()
+    assert.equal(await ctx.open(p, 'blackhole.test', 'blackhole.test, its IPv4 held'), 'PUBLIC!', 'the IPv6 address once the IPv4 try has had its turn')
+    assert.ok(Date.now() - began < 5500, `inside the one deadline (${Date.now() - began} ms)`)
+    assert.deepEqual(ctx.tried(), ['198.51.100.14:443', '[2001:db8::5]:443'])
+    await until(() => ctx.held.size === 0, 'the held try is closed')
+    assert.ok(ctx.numeric())
+    await shut(p)
+  },
+  async 'k: a client leaving, or the proxy closing, mid-retry ends the tries and leaves nothing open'(ctx) {
+    const p = await ctx.start(ctx.http, { timeouts: { connect: 10_000 } })
+    const two = ['198.51.100.7:443', '[2001:db8::6]:443']
+    const c = await socks(p.port, { atyp: 3, host: 'held.test', port: 443 })
+    await until(() => ctx.held.size === 1, 'the second try is held')
+    assert.deepEqual(ctx.tried(), two)
+    c.client.destroy()
+    await until(() => ctx.held.size === 0, 'its tunnel closes with the client')
+    await pause(300)
+    assert.deepEqual(ctx.tried(), two, 'no third try')
+    await until(() => ctx.upstreamSockets.size === 0, 'no connection to the upstream left open')
+    ctx.reset()
+    const d = await socks(p.port, { atyp: 3, host: 'held.test', port: 443 })
+    await until(() => ctx.held.size === 1, 'held again')
+    await shut(p)
+    await until(() => ctx.held.size === 0 && (d.ended || d.closed), 'close() ends the try and the client')
+    await pause(300)
+    assert.deepEqual(ctx.tried(), two, 'no try after close()')
+    await until(() => ctx.upstreamSockets.size === 0, 'nothing left open after close()')
+  },
+}
+
+async function dohChecks(cases = Object.keys(DOH_CASES), retries = Object.keys(RETRY_CASES)) {
   const ctx = await dohFixtures()
   if (ctx.skip) return console.log(`SKIP DNS-over-HTTPS through the upstream (${ctx.skip})`)
   for (const name of cases) { ctx.reset(); await DOH_CASES[name](ctx) }
+  for (const name of retries) { ctx.reset(); await RETRY_CASES[name](ctx) }
+  console.log(`ok checked addresses in turn through the upstream: ${retries.length} regressions (${retries.map(name => name.slice(0, 1)).join(', ')}): an IPv4 address the upstream refuses (HTTP 502, SOCKS5 REP 5) gives way to the checked IPv6 one in a fresh tunnel (DoH and local answers), families in turn, IPv4 first, four tries at most within one deadline, the last try's code; a client leaving or close() mid-retry ends the tries, nothing left open`)
   await dohClientChecks(ctx)
   console.log(`ok DNS-over-HTTPS through the upstream (real TLS with a test CA, HTTP CONNECT and SOCKS5): ${cases.length} regressions (${cases.map(name => name.slice(0, 1)).join(', ')}): names never reach the upstream, only checked addresses (CONNECT a.b.c.d / ATYP 1 or 4); a DoH answer with any refused address refuses; DoH down or empty falls back to the local answer, pinned; neither refuses 04; certificate name and CA checked, servers in order, an unreachable one skipped, a slow name its own failure (the next name still asked), DoH held by the proxy backing off as a whole and doubling until an answer, bad answers (SERVFAIL, past 64 KiB, no address) fall back, concurrent asks shared, TTL kept, literals ask nothing`)
 }

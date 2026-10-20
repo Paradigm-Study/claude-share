@@ -20,7 +20,7 @@ const tls = require('tls')
 const http = require('http')
 const { run, controlServer, vacant, portOK, notify, failure, safeCode } = require('./tcp-relay.cjs')
 
-const LIMITS = Object.freeze({ clients: 512, held: 64, routes: 128, startable: 128, bypass: 64, entry: 253, body: 8192, headers: 8192, line: 8192, controlSockets: 8, upstreamHead: 8192, stdout: 1 << 20, dohBody: 65_536, dohNames: 256 })
+const LIMITS = Object.freeze({ clients: 512, held: 64, routes: 128, startable: 128, bypass: 64, entry: 253, body: 8192, headers: 8192, line: 8192, controlSockets: 8, upstreamHead: 8192, upstreamTries: 4, stdout: 1 << 20, dohBody: 65_536, dohNames: 256 })
 // doh: one name's whole look, every server; dohEach: one server's A and AAAA;
 // dohDown: a server that couldn't be reached (and DoH as a whole, when none
 // could) is skipped this long, doubling while it stays so, up to dohDownMax;
@@ -196,6 +196,15 @@ function commandOf(row) {
   const entries = Object.entries(row.routes)
   if (entries.length > LIMITS.routes || !entries.every(([key, target]) => /^[1-9][0-9]{0,4}$/.test(key) && portOK(Number(key)) && portOK(target))) throw failure('INVALID_CONFIG')
   return { routes: new Map(entries.map(([key, target]) => [Number(key), target])), startable: new Set(row.startable) }
+}
+// Addresses in the order an upstream is given them: IPv4 first, then the
+// families in turn (A, AAAA, A, AAAA…), each address once.
+function alternate(pool) {
+  const keys = new Set(), fours = [], sixes = []
+  for (const a of pool) if (!keys.has(a.key)) { keys.add(a.key); (a.family === 4 ? fours : sixes).push(a) }
+  const order = []
+  for (let i = 0; i < Math.max(fours.length, sixes.length); i++) order.push(...[fours[i], sixes[i]].filter(Boolean))
+  return order
 }
 function codeOf(error) {
   const codes = [error?.code, ...(Array.isArray(error?.errors) ? error.errors.map(e => e?.code) : [])]
@@ -529,8 +538,47 @@ async function start(cfg, { emit = notify, signal, timeouts: wait = {}, limits: 
       } else pool = verdict.addresses
     }
     if (!pool?.length) return refuse(conn, UNREACHABLE)
-    const target = pool.find(a => a.family === 4) ?? pool[0]
-    dial(conn, { host: up.host, port: up.port, allowHalfOpen: true, noDelay: true, autoSelectFamily: true }, codeOf, socket => through(up.kind, socket, target, targetPort, () => splice(conn, socket), code => refuse(conn, code)))
+    tunnel(conn, up, alternate(pool).slice(0, limits.upstreamTries), targetPort)
+  }
+  // The checked addresses one after another, each through a fresh tunnel,
+  // until the upstream lets one through: autoSelectFamily only finds a way to
+  // the upstream, never the address inside its tunnel, so a site whose IPv4
+  // route is broken there still opens at its IPv6. One deadline covers every
+  // try, from the first, and each try but the last has its share of what's
+  // left of it, so one the upstream holds unanswered (a blackholed route)
+  // can't take the others' turns. An upstream that couldn't be reached at
+  // all says nothing of the address, so that is refused at once. All
+  // refused: the last try's code.
+  function tunnel(conn, up, order, targetPort) {
+    if (conn.done || conn.closed || stopped) return
+    const deadline = Date.now() + timeouts.connect
+    later(conn, timeouts.connect, () => refuse(conn, codeOf({ code: 'ETIMEDOUT' })))
+    const attempt = (i, last) => {
+      if (conn.done || conn.closed || stopped) return
+      if (i >= order.length) return refuse(conn, last)
+      let socket, share = null, over = false, reached = false
+      const settled = () => { if (share) { clearTimeout(share); conn.timers.delete(share) } }
+      const failed = code => {
+        if (over) return
+        over = true
+        settled()
+        if (conn.target === socket) conn.target = null
+        socket?.destroy()
+        reached ? attempt(i + 1, code) : refuse(conn, code)
+      }
+      if (i < order.length - 1) share = later(conn, Math.max(1, (deadline - Date.now()) / (order.length - i)), () => failed(codeOf({ code: 'ETIMEDOUT' })))
+      try { socket = connect({ host: up.host, port: up.port, allowHalfOpen: true, noDelay: true, autoSelectFamily: true }) } catch (error) { return failed(codeOf(error)) }
+      // Held as the client's target, so a client leaving, a refusal or close() ends this try too.
+      conn.target = socket
+      socket.on('error', error => failed(codeOf(error)))
+      socket.once('close', () => failed(FAILED))
+      socket.once('connect', () => {
+        reached = true
+        if (conn.done || conn.closed) return socket.destroy()
+        through(up.kind, socket, order[i], targetPort, () => { if (!over) { over = true; settled(); splice(conn, socket) } }, failed)
+      })
+    }
+    attempt(0, FAILED)
   }
   // Reads an upstream's reply: parse returns bytes used, 0 for more, or -REP.
   function collect(socket, max, parse, done, fail) {

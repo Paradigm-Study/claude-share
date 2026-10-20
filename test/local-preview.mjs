@@ -48,6 +48,12 @@ const listen = (server, host = '127.0.0.1', port = 0) => new Promise((resolve, r
   server.listen({ host, port, ipv6Only: host === '::1' }, () => { server.removeListener('error', reject); resolve(server.address().port) })
 })
 const close = server => new Promise(resolve => server.listening ? server.close(resolve) : resolve())
+// Whether nothing answers on 127.0.0.1 at this port (a refused connect).
+const refused = port => new Promise(resolve => {
+  const socket = net.connect({ host: '127.0.0.1', port })
+  socket.once('connect', () => { socket.destroy(); resolve(false) })
+  socket.once('error', () => resolve(true))
+})
 function track(server) {
   servers.add(server)
   server.on('connection', socket => { sockets.add(socket); socket.on('error', () => {}); socket.on('close', () => sockets.delete(socket)) })
@@ -1214,7 +1220,14 @@ async function realChain() {
     await until(() => v6guest.closed, 'IPv6 guest')
     assert.ok(v6guest.bytes.subarray(0, 10).equals(Buffer.from('ipv6 guest')))
     const v6app = track(net.createServer({ allowHalfOpen: true }, socket => { socket.on('data', b => socket.write(b)); socket.on('end', () => socket.end()) }))
-    const v6port = await listen(v6app, '::1'), v6cfg = await grant(await share(v6port))
+    // An IPv6-only app on a number nothing holds on 127.0.0.1 (the room's own
+    // server could hold it there, and the host would reach that first).
+    let v6port = await listen(v6app, '::1')
+    while (!(await refused(v6port))) {
+      await close(v6app)
+      v6port = await listen(v6app, '::1')
+    }
+    const v6cfg = await grant(await share(v6port))
     const v6run = await ready({ ...v6cfg, port: await freePort(), strict: true })
     const v6host = await wire(v6run.port); v6host.client.end('host IPv6 fallback')
     await until(() => v6host.closed, 'IPv6-only host fallback')
