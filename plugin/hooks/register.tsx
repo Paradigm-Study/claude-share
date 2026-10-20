@@ -154,6 +154,9 @@ const GUEST_SENDS = new Set([...PERSON, 'unclassified', 'auto-continuation'])
 // A message one of this person's other Claude sessions on this computer sent
 // (`SendMessage` to this session): theirs to relay, unless they've said not to.
 // It goes as the message alone, from the sender's name, never its socket or id.
+// The engine marks every such message `isMeta` (no person typed it), so that
+// mark doesn't keep it here; its origin, from the engine's own socket, does the
+// telling.
 const OWN_SESSIONS = new Set(['peer', 'peer-send-message'])
 
 // A share link: <server origin, with any path prefix>/s/<room id>, alone.
@@ -5358,7 +5361,7 @@ export const register: Register = (on, options) => {
     const fromPerson = GUEST_SENDS.has(e.origin.kind) && !isMeta
     // Another of this person's sessions wrote to this one: relayed to the
     // host's Claude as that session's message, if they let it.
-    const fromOwn = mode === 'guest' && OWN_SESSIONS.has(e.origin.kind) && !isMeta ? delivered(typed) : null
+    const fromOwn = mode === 'guest' && OWN_SESSIONS.has(e.origin.kind) ? delivered(typed) : null
     if (fromOwn && !(await prefsOf($)).relayPeers) {
       const room = await read($, roomA)
       answerWith({ kind: 'note', text: `A message from **${tidySender(fromOwn.from)}** stayed here: your **Room**'s Settings keep your other sessions' messages from ${room?.host ?? 'the host'}'s Claude.`, then: [] })
@@ -5384,10 +5387,15 @@ export const register: Register = (on, options) => {
         return next(e)
       }
       const pid = newId()
-      ownPending.add(pid)
-      const list = ridesByText.get(typed) ?? []
-      list.push({ kind: 'own', pid, fromSeq: room?.seq ?? 0 })
-      ridesByText.set(typed, list)
+      // A message delivered into a turn already playing here starts no turn of
+      // its own to show the answer under: the host's turn then plays after
+      // that one, as anyone's would, rather than waiting for a turn never coming.
+      if (!fromOwn?.midTurn) {
+        ownPending.add(pid)
+        const list = ridesByText.get(typed) ?? []
+        list.push({ kind: 'own', pid, fromSeq: room?.seq ?? 0 })
+        ridesByText.set(typed, list)
+      }
       // Only what the person typed (and attached) leaves this machine, never
       // the host app's context. Attachments' bytes come with the stored message.
       if (e.attachments?.length) {

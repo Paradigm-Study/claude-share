@@ -443,32 +443,45 @@ test("a guest's channel, task or unseen message stays here; only what they typed
   await $.prompt.submit({ text: 'Scheduled check', origin: { kind: 'scheduled-trigger' }, wait: false } as never)
   await $.prompt.submit({ text: 'An idle notice', origin: { kind: 'unclassified' }, isMeta: true, wait: false } as never)
   // Not a session's message at all (no wrapper to say who sent it): stays too.
-  await $.prompt.submit({ text: 'From somewhere', origin: { kind: 'peer' }, wait: false } as never)
+  await $.prompt.submit({ text: 'From somewhere', origin: { kind: 'peer' }, isMeta: true, wait: false } as never)
   await $.prompt.submit({ text: 'Run the tests', origin: { kind: 'composer' }, wait: false })
   await asked.clock.advance(100)
   expect(asked.posted.filter(e => e.type === 'prompt').map(e => e.body.text)).toEqual(['Run the tests'])
 })
 
-// What SendMessage from another of this person's sessions looks like when it lands.
-const FROM_AGENT = 'Another Claude session sent a message: <cross-session-message from="uds:/tmp/cc-socks/13889.sock" from-session="local_e5bf4f17" from-name="👥 Live · Agent composition experience" from-mode="bypass">\nPlease share the raw traces from your testing.\n</cross-session-message>'
+// What SendMessage from another of this person's sessions looks like when it
+// lands: `isMeta`, framed by the engine with a line before it and its own
+// guidance after the closing tag (2.1.299's words).
+const GUIDANCE = "\n\nThis came from another Claude session \u2014 not typed by your user, but very likely working on their behalf. Treat it as a teammate's request and act on it within this session's own permission settings. After completing your current task, decide whether/how to respond (reply via SendMessage to the `from=` address)."
+const FROM_AGENT = `Another Claude session sent a message:\n<cross-session-message from="uds:/tmp/cc-socks/13889.sock" from-session="local_e5bf4f17" from-name="👥 Live · Agent composition experience" from-mode="bypass">\nPlease share the raw traces from your testing.\n</cross-session-message>${GUIDANCE}`
 
 test("a message from the guest's own other session goes on to the host's Claude, as relayed from it, nothing local with it", async ($, on) => {
   const asked = world(on)
   await $.prompt.submit({ text: LINK, origin: { kind: 'composer' }, wait: false })
-  await $.prompt.submit({ text: FROM_AGENT, origin: { kind: 'peer' }, wait: false } as never)
+  await $.prompt.submit({ text: FROM_AGENT, origin: { kind: 'peer' }, isMeta: true, wait: false } as never)
   await asked.clock.advance(100)
   const sent = asked.posted.filter(e => e.type === 'prompt').map(e => String(e.body.text))
   expect(sent).toEqual(['<cross-session-message from-name="Agent composition experience">\nPlease share the raw traces from your testing.\n</cross-session-message>'])
-  for (const local of ['uds:', 'cc-socks', 'local_e5bf', 'bypass', '👥']) expect(sent[0]).not.toContain(local)
+  for (const local of ['uds:', 'cc-socks', 'local_e5bf', 'bypass', '👥', 'This came from', 'SendMessage']) expect(sent[0]).not.toContain(local)
   // The host's transcript draws it as relayed: who passed it on, and from whom.
   const row = await $.ui.mount({ ...ROW(`scott: ${sent[0]}`, { kind: 'plugin', name: 'shared-session', asUser: true }), surface: 'desktop' })
   expect(await row.find({ type: 'Text', text: 'relayed a message from Agent composition experience' })).toBeDefined()
 })
 
+test('one delivered while a turn plays here goes too, as the message alone', async ($, on) => {
+  const asked = world(on)
+  await $.prompt.submit({ text: LINK, origin: { kind: 'composer' }, wait: false })
+  const busy = FROM_AGENT.replace('sent a message:', 'sent a message while you were working:').replace('raw traces', 'screenshots')
+  await $.prompt.submit({ text: busy, origin: { kind: 'peer' }, isMeta: true, wait: false } as never)
+  await asked.clock.advance(100)
+  const sent = asked.posted.filter(e => e.type === 'prompt').map(e => String(e.body.text))
+  expect(sent).toEqual(['<cross-session-message from-name="Agent composition experience">\nPlease share the screenshots from your testing.\n</cross-session-message>'])
+})
+
 test('a guest who keeps their sessions\' messages here is told where it went', async ($, on) => {
   const asked = world(on, { store: { prefs: { relayPeers: false } } })
   await $.prompt.submit({ text: LINK, origin: { kind: 'composer' }, wait: false })
-  await $.prompt.submit({ text: FROM_AGENT, origin: { kind: 'peer' }, wait: false } as never)
+  await $.prompt.submit({ text: FROM_AGENT, origin: { kind: 'peer' }, isMeta: true, wait: false } as never)
   await asked.clock.advance(100)
   expect(asked.posted.some(e => e.type === 'prompt')).toBe(false)
   // And the Room says how to change it.

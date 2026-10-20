@@ -65,19 +65,25 @@ type Block = {
 }
 
 // A message another session, a teammate or a channel delivered: its markup
-// off, its sender's name kept (`from-name`, `source`, `teammate`).
-const DELIVERED = /^\s*(?:Another Claude session sent a message:\s*)?<(cross-session-message|teammate-message|channel|agent-message)\b([^>]*)>([\s\S]*?)(?:<\/\1>\s*)?$/
+// off, its sender's name kept (`from-name`, `source`, `teammate`). The engine
+// frames a session's message with a line before it ("Another Claude session
+// sent a message:", or "… while you were working:" into a running turn) and
+// its own guidance after the closing tag; neither is the message.
+const DELIVERED =
+  /^\s*(?:(Another Claude session|A peer session) sent a message( while you were working)?:\s*)?<(cross-session-message|teammate-message|channel|agent-message)\b([^>]*)>(?:([\s\S]*)<\/\3>[\s\S]*|([\s\S]*))$/
 
-export function delivered(text: string): { from: string; text: string } | null {
+export function delivered(text: string): { from: string; text: string; midTurn: boolean } | null {
   const m = DELIVERED.exec(text)
   if (!m) return null
-  const attr = (name: string) => new RegExp(`\\b${name}="([^"]*)"`).exec(m[2] ?? '')?.[1]
-  if (m[1] === 'agent-message') {
+  const attr = (name: string) => new RegExp(`\\b${name}="([^"]*)"`).exec(m[4] ?? '')?.[1]
+  const body = m[5] ?? m[6] ?? ''
+  const midTurn = Boolean(m[2]) || m[1] === 'A peer session'
+  if (m[3] === 'agent-message') {
     // A subagent's hand-back: long, and the session's own work, not a prompt anyone typed.
-    const body = (m[3] ?? '').replace(/^\s*\[Subagent hand-back\][^\n]*\n?/, '').trim()
-    return { from: 'Subagent', text: body.length > 600 ? `${body.slice(0, 600)}…` : body }
+    const back = body.replace(/^\s*\[Subagent hand-back\][^\n]*\n?/, '').trim()
+    return { from: 'Subagent', text: back.length > 600 ? `${back.slice(0, 600)}…` : back, midTurn }
   }
-  return { from: attr('from-name') ?? attr('source') ?? attr('teammate') ?? attr('from') ?? 'another session', text: (m[3] ?? '').trim() }
+  return { from: attr('from-name') ?? attr('source') ?? attr('teammate') ?? attr('from') ?? 'another session', text: body.trim(), midTurn }
 }
 
 const INPUT_MAX = 16_000 // chars of JSON a tool row carries to replay
