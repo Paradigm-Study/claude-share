@@ -5,17 +5,36 @@
 // its local network (private ranges and every on-link subnet) and cloud
 // metadata are refused; everything else leaves directly or through the
 // person's own upstream proxy (one it can't use is left out, and said once).
-// Routes arrive over an authenticated loopback control port and live only in
-// memory. stdout carries ports and codes, never names or addresses. Node 20+.
+// An upstream is only ever given a checked address, never a name: a name is
+// looked up over DNS-over-HTTPS through that upstream (its local answer when
+// that fails), and each address checked, so the upstream's own lookup can't
+// take a refused one. Routes arrive over an authenticated loopback control
+// port and live only in memory. stdout carries ports and codes, never names
+// or addresses. Node 20+.
 'use strict'
 
 const net = require('net')
 const dns = require('dns')
 const os = require('os')
+const tls = require('tls')
+const http = require('http')
 const { run, controlServer, vacant, portOK, notify, failure, safeCode } = require('./tcp-relay.cjs')
 
-const LIMITS = Object.freeze({ clients: 512, held: 64, routes: 128, startable: 128, bypass: 64, entry: 253, body: 8192, headers: 8192, line: 8192, controlSockets: 8, upstreamHead: 8192, stdout: 1 << 20 })
-const TIMEOUTS = Object.freeze({ handshake: 10_000, firstConfig: 5_000, want: 8_000, wantEvery: 10_000, blockedEvery: 30_000, lanEvery: 30_000, interfaces: 30_000, lookup: 3_000, connect: 15_000, control: 2_000, linger: 2_000 })
+const LIMITS = Object.freeze({ clients: 512, held: 64, routes: 128, startable: 128, bypass: 64, entry: 253, body: 8192, headers: 8192, line: 8192, controlSockets: 8, upstreamHead: 8192, stdout: 1 << 20, dohBody: 65_536, dohNames: 256 })
+// doh: one name's whole look, every server; dohEach: one server's A and AAAA;
+// dohDown: a server that couldn't be reached (and DoH as a whole, when none
+// could) is skipped this long, doubling while it stays so, up to dohDownMax;
+// dohMiss: a name no server answered in time (slow or bad) goes by its local
+// answer this long; dohTTL: the longest an answer is kept.
+const TIMEOUTS = Object.freeze({ handshake: 10_000, firstConfig: 5_000, want: 8_000, wantEvery: 10_000, blockedEvery: 30_000, lanEvery: 30_000, interfaces: 30_000, lookup: 3_000, connect: 15_000, control: 2_000, linger: 2_000, doh: 6_000, dohEach: 2_500, dohDown: 30_000, dohDownMax: 600_000, dohMiss: 30_000, dohTTL: 60_000 })
+// DNS-over-HTTPS servers, asked in order through the upstream at these
+// addresses (never by name) and checked against their own certificates.
+const DOH = Object.freeze([
+  { address: '1.1.1.1', port: 443, servername: 'cloudflare-dns.com', path: '/dns-query' },
+  { address: '1.0.0.1', port: 443, servername: 'cloudflare-dns.com', path: '/dns-query' },
+  { address: '8.8.8.8', port: 443, servername: 'dns.google', path: '/resolve' },
+  { address: '8.8.4.4', port: 443, servername: 'dns.google', path: '/resolve' },
+].map(Object.freeze))
 // RFC 1928 replies: general failure, not allowed, host unreachable, refused, command, address type.
 const FAILED = 1, NOT_ALLOWED = 2, UNREACHABLE = 4, REFUSED = 5, COMMAND = 7, ADDRESS = 8, NO_METHOD = 0xff
 const SUCCESS = Buffer.from([5, 0, 0, 1, 0, 0, 0, 0, 0, 0])
@@ -183,12 +202,37 @@ function codeOf(error) {
   if (codes.includes('ECONNREFUSED')) return REFUSED
   return codes.some(code => UNREACHABLE_CODES.has(code)) ? UNREACHABLE : FAILED
 }
+// A DNS JSON answer (RFC 8427's shape, as Cloudflare and Google give it): the
+// addresses of its A (1) or AAAA (28) records and their least TTL in seconds.
+// NXDOMAIN or no records is an empty list; any other status, or a record of
+// the type asked whose data is no address, is a bad answer (the next server).
+function answerOf(body, type) {
+  const want = type === 'A' ? 1 : 28
+  if (!plain(body) || !Number.isInteger(body.Status)) throw failure('PROTOCOL')
+  if (body.Status === 3) return { list: [], ttl: 30 }
+  if (body.Status !== 0) throw failure('PROTOCOL')
+  const list = []
+  let ttl = 30
+  for (const record of Array.isArray(body.Answer) ? body.Answer : []) {
+    if (!plain(record) || record.type !== want) continue
+    // A AAAA record holding a mapped IPv4 address is read as that address and judged as one.
+    const a = want === 1 ? (net.isIPv4(record.data) ? address(record.data) : null) : (net.isIPv6(record.data) ? address(record.data) : null)
+    if (!a) throw failure('PROTOCOL')
+    if (list.length === 0) ttl = Infinity
+    ttl = Math.min(ttl, Number.isFinite(record.TTL) && record.TTL >= 0 ? record.TTL : 0)
+    list.push(a)
+  }
+  return { list, ttl }
+}
 
 // Test hooks (timeouts, limits, lookup, interfaces, connect for dials, knock
-// for the port's own check) are internal, never from stdin.
-async function start(cfg, { emit = notify, signal, timeouts: wait = {}, limits: cap = {}, lookup = dns.lookup, interfaces = os.networkInterfaces, connect = net.connect, knock = net.connect } = {}) {
+// for the port's own check, doh for the DNS-over-HTTPS servers with a ca of
+// their own) are internal, never from stdin.
+async function start(cfg, { emit = notify, signal, timeouts: wait = {}, limits: cap = {}, lookup = dns.lookup, interfaces = os.networkInterfaces, connect = net.connect, knock = net.connect, doh = DOH } = {}) {
   const timeouts = { ...TIMEOUTS, ...wait }, limits = { ...LIMITS, ...cap }
   const conns = new Set(), held = new Set(), lookups = new Map()
+  const servers = doh.map(server => ({ ...server, ip: address(server.address) })).filter(server => server.ip && portOK(server.port))
+  const answers = new Map(), looks = new Map(), down = new Map(), asking = new Set(), off = { until: 0, wait: 0 }
   const seen = new Set(), wanted = new Map(), blocked = new Map()
   let settings, routes = new Map(), startable = new Set(), configured = false, lanAt = -Infinity, known = null, knownAt = 0
   let stopped = false, closing, binding, socks, control, port, controlPort
@@ -211,6 +255,7 @@ async function start(cfg, { emit = notify, signal, timeouts: wait = {}, limits: 
     signal?.removeEventListener('abort', close)
     const ending = control?.close()
     for (const conn of [...conns]) drop(conn)
+    for (const socket of [...asking]) socket.destroy()
     closing = (async () => {
       await binding?.catch(() => {})
       await Promise.all([new Promise(resolve => socks?.listening ? socks.close(() => resolve()) : resolve()), ending])
@@ -453,16 +498,39 @@ async function start(cfg, { emit = notify, signal, timeouts: wait = {}, limits: 
     // An upstream that is this proxy itself would only loop.
     return up.port === port && (up.host === 'localhost' || (ip && local(ip))) ? null : up
   }
-  function outbound(conn, targetPort, verdict) {
+  // An upstream is given an address, never a name: it would look the name up
+  // again and could take one refused here. Literals go as they are; a name
+  // goes at an address from DNS-over-HTTPS through that upstream (a local
+  // answer can be poisoned where the upstream is needed), every one of which
+  // must pass, else at its local answer's checked addresses; with neither, it
+  // is refused.
+  async function outbound(conn, targetPort, verdict) {
     const up = upstreamFor(verdict)
-    // An upstream looks the name up again and could take the address refused here.
-    if (up && verdict.tainted) return refuseNetwork(conn)
-    if (up) return dial(conn, { host: up.host, port: up.port, allowHalfOpen: true, noDelay: true, autoSelectFamily: true }, codeOf, socket => (up.kind === 'http' ? viaHTTP : viaSOCKS)(conn, socket, verdict, targetPort))
-    if (!verdict.addresses) return refuse(conn, UNREACHABLE)
-    // Connect only to the addresses just checked: a second lookup could rebind.
-    const fixed = verdict.addresses.map(a => ({ address: a.key, family: a.family }))
-    const pinned = (_name, options, callback) => options?.all ? callback(null, fixed) : callback(null, fixed[0].address, fixed[0].family)
-    dial(conn, { host: verdict.host, port: targetPort, lookup: pinned, allowHalfOpen: true, noDelay: true, autoSelectFamily: true }, codeOf, socket => splice(conn, socket))
+    if (!up) {
+      if (!verdict.addresses) return refuse(conn, UNREACHABLE)
+      // Connect only to the addresses just checked: a second lookup could rebind.
+      const fixed = verdict.addresses.map(a => ({ address: a.key, family: a.family }))
+      const pinned = (_name, options, callback) => options?.all ? callback(null, fixed) : callback(null, fixed[0].address, fixed[0].family)
+      return dial(conn, { host: verdict.host, port: targetPort, lookup: pinned, allowHalfOpen: true, noDelay: true, autoSelectFamily: true }, codeOf, socket => splice(conn, socket))
+    }
+    // Nothing the local answer refused is tunnelled, whatever DNS-over-HTTPS says.
+    if (verdict.tainted) return refuseNetwork(conn)
+    let pool = verdict.ip ? [verdict.ip] : null
+    if (!pool) {
+      const found = await resolveOver(up, verdict.host)
+      if (conn.done || conn.closed || stopped) return
+      if (found?.length) {
+        const here = network()
+        if (!here) return refuse(conn, FAILED)
+        const kinds = found.map(a => kindOf(a, here))
+        if (kinds.includes('own')) return refuse(conn, NOT_ALLOWED)
+        if (kinds.some(kind => kind !== 'ok')) return refuseNetwork(conn)
+        pool = found
+      } else pool = verdict.addresses
+    }
+    if (!pool?.length) return refuse(conn, UNREACHABLE)
+    const target = pool.find(a => a.family === 4) ?? pool[0]
+    dial(conn, { host: up.host, port: up.port, allowHalfOpen: true, noDelay: true, autoSelectFamily: true }, codeOf, socket => through(up.kind, socket, target, targetPort, () => splice(conn, socket), code => refuse(conn, code)))
   }
   // Reads an upstream's reply: parse returns bytes used, 0 for more, or -REP.
   function collect(socket, max, parse, done, fail) {
@@ -482,24 +550,26 @@ async function start(cfg, { emit = notify, signal, timeouts: wait = {}, limits: 
     socket.once('end', ended)
     socket.resume()
   }
-  // Upstreams get the name when there is one: proxies route by name.
-  function viaHTTP(conn, socket, verdict, targetPort) {
-    const authority = `${verdict.ip?.family === 6 ? `[${verdict.host}]` : verdict.host}:${targetPort}`
+  // The upstream's handshake for one checked address (CONNECT a.b.c.d:p or
+  // [v6]:p; SOCKS5 ATYP 1 or 4), then done() or fail(REP).
+  function through(kind, socket, ip, targetPort, done, fail) {
+    if (kind === 'http') return viaHTTP(socket, ip, targetPort, done, fail)
+    viaSOCKS(socket, ip, targetPort, done, fail)
+  }
+  function viaHTTP(socket, ip, targetPort, done, fail) {
+    const authority = `${ip.family === 6 ? `[${ip.key}]` : ip.key}:${targetPort}`
     socket.write(`CONNECT ${authority} HTTP/1.1\r\nHost: ${authority}\r\n\r\n`)
     collect(socket, LIMITS.upstreamHead, buffer => {
       const end = buffer.indexOf('\r\n\r\n')
       if (end === -1) return 0
       if (end + 4 > LIMITS.upstreamHead) return -FAILED
       return /^HTTP\/1\.[01] 2[0-9]{2}[ \r]/.test(buffer.toString('latin1', 0, Math.min(end + 2, 64))) ? end + 4 : -FAILED
-    }, () => splice(conn, socket), code => refuse(conn, code))
+    }, done, fail)
   }
-  function viaSOCKS(conn, socket, verdict, targetPort) {
-    const fail = code => refuse(conn, code)
+  function viaSOCKS(socket, ip, targetPort, done, fail) {
     socket.write(Buffer.from([5, 1, 0]))
     collect(socket, 2, b => b.length < 2 ? 0 : b[0] === 5 && b[1] === 0 ? 2 : -FAILED, () => {
-      const where = verdict.ip?.family === 4 ? [1, ...verdict.ip.bytes]
-        : verdict.ip ? [4, ...verdict.ip.words.flatMap(word => [word >> 8, word & 255])]
-        : [3, verdict.host.length, ...Buffer.from(verdict.host, 'latin1')]
+      const where = ip.family === 4 ? [1, ...ip.bytes] : [4, ...ip.words.flatMap(word => [word >> 8, word & 255])]
       socket.write(Buffer.from([5, 1, 0, ...where, targetPort >> 8, targetPort & 255]))
       collect(socket, 262, b => {
         if (b.length < 4) return 0
@@ -507,8 +577,120 @@ async function start(cfg, { emit = notify, signal, timeouts: wait = {}, limits: 
         if (b[1] !== 0) return -(b[1] <= ADDRESS ? b[1] : FAILED)
         const size = b[3] === 1 ? 10 : b[3] === 4 ? 22 : b[3] === 3 ? (b.length < 5 ? 263 : 7 + b[4]) : 0
         return !size ? -FAILED : b.length < size ? 0 : size
-      }, () => splice(conn, socket), fail)
+      }, done, fail)
     }, fail)
+  }
+
+  // A name's addresses from DNS-over-HTTPS through the upstream: the first
+  // server that answers both A and AAAA decides, its answer kept for its TTL
+  // (at most a minute). null when none answers in time, so the caller falls
+  // back to the local answer; concurrent looks of one name share one.
+  // Unreachable (no tunnel, no TLS, the connection lost: the proxy or its
+  // network) is the server's, skipped a while; slow once TLS is up, or a bad
+  // answer, is the name's alone (a slow domain, or one made slow on purpose),
+  // and never makes other names wait on their local answers.
+  function resolveOver(up, name) {
+    const kept = answers.get(name)
+    if (kept && kept.until > Date.now()) return Promise.resolve(kept.list)
+    let pending = looks.get(name)
+    if (pending) return pending
+    // No server reachable on the last look: DoH waits, as a whole, for its back-off.
+    if (off.until > Date.now()) return Promise.resolve(null)
+    const remember = (list, ms) => {
+      answers.delete(name)
+      answers.set(name, { list, until: Date.now() + ms })
+      while (answers.size > limits.dohNames) answers.delete(answers.keys().next().value)
+    }
+    const backoff = previous => Math.min(timeouts.dohDownMax, previous ? previous * 2 : timeouts.dohDown)
+    pending = (async () => {
+      // Back-offs grow from what they were as this look began, so a burst of
+      // looks failing together doubles them once, not once a look.
+      const until = Date.now() + timeouts.doh, offWas = off.wait
+      let named = false, unreachable = false
+      for (const server of servers) {
+        if (stopped || Date.now() >= until) break
+        const skip = down.get(server)
+        if (skip && skip.until > Date.now()) continue
+        const by = Math.min(until, Date.now() + timeouts.dohEach)
+        // Less than its own time (the whole look's ran short): a timeout says nothing of the server.
+        const short = by < Date.now() + timeouts.dohEach
+        const asks = ['A', 'AAAA'].map(type => ask(up, server, name, type, by, short))
+        const [a, aaaa] = await Promise.allSettled(asks)
+        if (a.status === 'fulfilled' && aaaa.status === 'fulfilled') {
+          down.delete(server)
+          off.until = off.wait = 0
+          const list = [...a.value.list, ...aaaa.value.list]
+          remember(list, Math.min(timeouts.dohTTL, 1000 * Math.min(a.value.ttl, aaaa.value.ttl)))
+          return list
+        }
+        const codes = [a, aaaa].filter(r => r.status === 'rejected').map(r => r.reason?.code)
+        if (codes.some(code => code === 'PROTOCOL' || code === 'SLOW')) named = true
+        if (codes.some(code => code !== 'PROTOCOL' && code !== 'SLOW' && code !== 'SHORT')) {
+          unreachable = true
+          const wait = backoff(skip?.wait)
+          down.set(server, { until: Date.now() + wait, wait })
+        }
+      }
+      if (named) remember(null, timeouts.dohMiss)
+      else if (unreachable && !stopped) {
+        off.wait = backoff(offWas)
+        off.until = Date.now() + off.wait
+      }
+      return null
+    })().catch(() => null)
+    looks.set(name, pending)
+    pending.then(() => { if (looks.get(name) === pending) looks.delete(name) })
+    return pending
+  }
+  // One GET of one record type from one server, over TLS (its certificate
+  // checked for its name) inside a tunnel through the upstream to its address.
+  // Its codes: PROTOCOL a bad answer, SLOW no answer in time once TLS was up
+  // (the name's); SHORT no TLS in time when given less than its own time
+  // (nobody's); anything else unreachable (the server's).
+  function ask(up, server, name, type, until, short) {
+    return new Promise((resolve, reject) => {
+      let socket, secure, over = false, reached = false
+      const finish = (error, value) => {
+        if (over) return
+        over = true
+        clearTimeout(timer)
+        secure?.destroy()
+        socket?.destroy()
+        error ? reject(error) : resolve(value)
+      }
+      const fail = (code = 'CONNECT') => finish(failure(code))
+      const timer = setTimeout(() => fail(reached ? 'SLOW' : short ? 'SHORT' : 'CONNECT'), Math.max(1, until - Date.now()))
+      if (stopped) return fail()
+      try { socket = connect({ host: up.host, port: up.port, noDelay: true, autoSelectFamily: true }) } catch { return fail() }
+      asking.add(socket)
+      socket.once('close', () => { asking.delete(socket); fail() })
+      socket.on('error', () => fail())
+      socket.once('connect', () => through(up.kind, socket, server.ip, server.port, () => {
+        if (over) return
+        secure = tls.connect({ socket, servername: server.servername, ALPNProtocols: ['http/1.1'], ...(server.ca ? { ca: server.ca } : {}) })
+        secure.on('error', () => fail())
+        secure.once('secureConnect', () => { reached = true })
+        const request = http.request({ createConnection: () => secure, method: 'GET', path: `${server.path}?name=${encodeURIComponent(name)}&type=${type}`, headers: { host: server.servername, accept: 'application/dns-json' } }, response => {
+          if (response.statusCode !== 200) return fail('PROTOCOL')
+          const parts = []
+          let size = 0
+          response.on('data', chunk => {
+            size += chunk.length
+            if (size > limits.dohBody) return fail('PROTOCOL')
+            parts.push(chunk)
+          })
+          response.on('end', () => {
+            if (over) return
+            let value
+            try { value = answerOf(JSON.parse(Buffer.concat(parts, size).toString('utf8')), type) } catch { return fail('PROTOCOL') }
+            finish(null, value)
+          })
+          response.on('error', () => fail())
+        })
+        request.on('error', () => fail())
+        request.end()
+      }, () => fail()))
+    })
   }
 
   const bindTo = (server, wanted) => new Promise((resolve, reject) => {

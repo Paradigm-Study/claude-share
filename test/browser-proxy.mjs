@@ -1,13 +1,18 @@
 // Standalone Node 20+ checks for the isolated preview browser's SOCKS5 proxy:
 // no models, dependencies or outside connections. Names and interfaces are
-// injected (one stdout check resolves a reserved .invalid name for real).
+// injected (one stdout check resolves a reserved .invalid name for real, and
+// its DNS-over-HTTPS goes only to a local fixture upstream). The DoH checks
+// make a test CA with openssl.
 // Optional parts print SKIP with the reason.
 //   node test/browser-proxy.mjs
 import assert from 'node:assert/strict'
 import net from 'node:net'
 import os from 'node:os'
 import { randomBytes, createHash } from 'node:crypto'
-import { spawn } from 'node:child_process'
+import https from 'node:https'
+import { spawn, spawnSync } from 'node:child_process'
+import { mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs'
+import { join } from 'node:path'
 import { once } from 'node:events'
 import { fileURLToPath } from 'node:url'
 import { setTimeout as pause } from 'node:timers/promises'
@@ -94,7 +99,8 @@ async function startupError(cfg, code) {
 }
 async function inProcess(hooks = {}, cfg = {}) {
   const rows = []
-  const instance = await proxy.start({ ...BASE, ...cfg }, { timeouts: FAST, emit: row => rows.push(row), ...hooks })
+  // No DNS-over-HTTPS unless a check names its servers (dohChecks): never the real ones.
+  const instance = await proxy.start({ ...BASE, ...cfg }, { timeouts: FAST, emit: row => rows.push(row), doh: [], ...hooks })
   running.add(instance)
   assert.deepEqual(rows.shift(), { state: 'ready', port: instance.port, control: instance.control })
   instance.rows = rows
@@ -618,7 +624,9 @@ async function outboundChecks() {
       const end = head.indexOf('\r\n\r\n')
       if (end === -1) return
       socket.removeListener('data', read)
-      const text = head.subarray(0, end).toString('latin1'), rest = head.subarray(end + 4), target = /^CONNECT (\S+) HTTP\/1\.1\r\n/.exec(`${text}\r\n`)?.[1] ?? ''
+      const text = head.subarray(0, end).toString('latin1'), rest = head.subarray(end + 4), authority = /^CONNECT (\S+) HTTP\/1\.1\r\n/.exec(`${text}\r\n`)?.[1] ?? ''
+      // The proxy sends only addresses: the fixture's behavior is keyed by the name that address stands for.
+      const target = byAddress[authority.replace(/:[0-9]+$/, '')] ?? authority
       connects.push(text)
       if (target.startsWith('deny.')) return socket.end('HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n')
       if (target.startsWith('huge.')) return socket.write(`HTTP/1.1 200 OK\r\nX-Pad: ${'p'.repeat(9000)}\r\n`)
@@ -632,7 +640,9 @@ async function outboundChecks() {
     socket.on('data', read)
   }))
   const httpPort = await listen(httpUpstream)
-  const names = { 'ok.test': '93.184.216.34', 'direct.test': '198.51.100.20', 'www.direct.test': '198.51.100.21', 'a.suffix.test': '198.51.100.22', 'suffix.test': '198.51.100.23', 'x.star.test': '198.51.100.24', 'other.test': '198.51.100.25', 'lvh.test': '127.0.0.1', 'own.test': '203.0.113.7', 'same.test': '198.51.100.26', 'deny.test': '198.51.100.27', 'huge.test': '198.51.100.28', 'garbage.test': '198.51.100.29', 'drop.test': '198.51.100.30', 'refused.test': '198.51.100.31', 'unreach.test': '198.51.100.32', 'perm.test': '198.51.100.33', 'agg.test': '198.51.100.34', 'hang.test': '198.51.100.35', 'pinned.test': '198.51.100.36', 'deep.www.direct.test': '198.51.100.37', 'notdirect.test': '198.51.100.38', 'direct.test.evil': '198.51.100.39', 'corp.lan.test': '10.20.30.40' }
+  const names = { 'ok.test': '93.184.216.34', 'direct.test': '198.51.100.20', 'www.direct.test': '198.51.100.21', 'a.suffix.test': '198.51.100.22', 'suffix.test': '198.51.100.23', 'x.star.test': '198.51.100.24', 'other.test': '198.51.100.25', 'lvh.test': '127.0.0.1', 'own.test': '203.0.113.7', 'same.test': '198.51.100.26', 'deny.test': '198.51.100.27', 'huge.test': '198.51.100.28', 'garbage.test': '198.51.100.29', 'drop.test': '198.51.100.30', 'refused.test': '198.51.100.31', 'unreach.test': '198.51.100.32', 'perm.test': '198.51.100.33', 'agg.test': '198.51.100.34', 'hang.test': '198.51.100.35', 'pinned.test': '198.51.100.36', 'deep.www.direct.test': '198.51.100.37', 'notdirect.test': '198.51.100.38', 'direct.test.evil': '198.51.100.39', 'corp.lan.test': '10.20.30.40',
+    'bnd6.test': '198.51.100.40', 'bnd3.test': '198.51.100.41', 'fail.test': '198.51.100.42', 'odd.test': '198.51.100.43', 'version.test': '198.51.100.44', 'k64.test': '198.51.100.45', 'k99.test': '198.51.100.46' }
+  const byAddress = Object.fromEntries(Object.entries(names).map(([name, address]) => [address, name]))
   let lookupCalls = []
   const lookup = (name, _options, callback) => {
     lookupCalls.push(name)
@@ -666,19 +676,21 @@ async function outboundChecks() {
     await until(() => c.bytes.length >= 12 + 5, `${label}: first bytes`)
     return c
   }
-  const tunnel = await through({ atyp: 3, host: 'OK.Test.', port: 443 }, 'HTTP CONNECT by name')
+  const tunnel = await through({ atyp: 3, host: 'OK.Test.', port: 443 }, 'HTTP CONNECT for a name')
   assert.equal(tunnel.bytes.subarray(12, 17).toString(), 'EXTRA', 'bytes after the upstream headers are forwarded')
   await echoes(tunnel)
-  assert.equal(connects.at(-1), 'CONNECT ok.test:443 HTTP/1.1\r\nHost: ok.test:443')
+  assert.equal(connects.at(-1), 'CONNECT 93.184.216.34:443 HTTP/1.1\r\nHost: 93.184.216.34:443', 'a name goes at its checked address, never by name')
   await through({ atyp: 1, host: '93.184.216.34', port: 8443 }, 'HTTP CONNECT IPv4')
   assert.equal(connects.at(-1), 'CONNECT 93.184.216.34:8443 HTTP/1.1\r\nHost: 93.184.216.34:8443')
   await through({ atyp: 4, host: '2001:db8:0:0:0:0:0:5', port: 443 }, 'HTTP CONNECT IPv6')
   assert.equal(connects.at(-1), 'CONNECT [2001:db8::5]:443 HTTP/1.1\r\nHost: [2001:db8::5]:443')
-  await through({ atyp: 3, host: 'unknown.test', port: 443 }, 'a name the Guest cannot resolve still goes by name')
-  assert.equal(connects.at(-1), 'CONNECT unknown.test:443 HTTP/1.1\r\nHost: unknown.test:443')
+  // With no address checked (no DNS-over-HTTPS here, no local answer) nothing goes: the name never reaches the upstream.
+  const connectsAt = connects.length
+  await expectReply(await socks(viaHttp.port, { atyp: 3, host: 'unknown.test', port: 443 }), 4, 'a name the Guest cannot resolve is refused')
   const slowAt = Date.now()
-  await through({ atyp: 3, host: 'slow.test', port: 443 }, 'a lookup past its deadline still goes by name')
+  await expectReply(await socks(viaHttp.port, { atyp: 3, host: 'slow.test', port: 443 }), 4, 'a lookup past its deadline is refused')
   assert.ok(Date.now() - slowAt >= FAST.lookup - 20)
+  assert.equal(connects.length, connectsAt, 'neither reached the upstream')
   for (const name of ['deny.test', 'huge.test', 'garbage.test', 'drop.test']) await expectReply(await socks(viaHttp.port, { atyp: 3, host: name, port: 443 }), 1, `upstream ${name}`)
   assert.equal(dials.filter(dial => typeof dial === 'object').length, 0, 'nothing went direct so far')
   const routedBefore = dials.filter(dial => dial === 'route').length
@@ -737,8 +749,9 @@ async function outboundChecks() {
       const atyp = buffer[3], size = atyp === 1 ? 10 : atyp === 4 ? 22 : 7 + buffer[4]
       if (buffer.length < size) return
       socket.removeListener('data', read)
-      const host = atyp === 1 ? [...buffer.subarray(4, 8)].join('.') : atyp === 4 ? buffer.subarray(4, 20).toString('hex') : buffer.toString('latin1', 5, 5 + buffer[4])
-      socksSeen.push({ atyp, host, port: buffer.readUInt16BE(size - 2) })
+      const seen = atyp === 1 ? [...buffer.subarray(4, 8)].join('.') : atyp === 4 ? buffer.subarray(4, 20).toString('hex') : buffer.toString('latin1', 5, 5 + buffer[4])
+      socksSeen.push({ atyp, host: seen, port: buffer.readUInt16BE(size - 2) })
+      const host = byAddress[seen] ?? seen
       const rest = buffer.subarray(size)
       if (host === 'fail.test') return socket.end(Buffer.from(reply(5)))
       if (host === 'deny.test') return socket.end(Buffer.from(reply(2)))
@@ -756,8 +769,8 @@ async function outboundChecks() {
   }))
   const socksPort = await listen(socksUpstream())
   const viaSocks = await inProcess({ lookup, interfaces }, { upstream: { kind: 'socks5', host: 'localhost', port: socksPort, bypass: [] } })
-  for (const [target, seenAs] of [[{ atyp: 3, host: 'ok.test', port: 443 }, { atyp: 3, host: 'ok.test', port: 443 }], [{ atyp: 1, host: '93.184.216.34', port: 80 }, { atyp: 1, host: '93.184.216.34', port: 80 }],
-    [{ atyp: 4, host: '2001:db8::5', port: 443 }, { atyp: 4, host: '20010db8000000000000000000000005', port: 443 }], [{ atyp: 3, host: 'bnd6.test', port: 443 }, { atyp: 3, host: 'bnd6.test', port: 443 }], [{ atyp: 3, host: 'bnd3.test', port: 443 }, { atyp: 3, host: 'bnd3.test', port: 443 }]]) {
+  for (const [target, seenAs] of [[{ atyp: 3, host: 'ok.test', port: 443 }, { atyp: 1, host: '93.184.216.34', port: 443 }], [{ atyp: 1, host: '93.184.216.34', port: 80 }, { atyp: 1, host: '93.184.216.34', port: 80 }],
+    [{ atyp: 4, host: '2001:db8::5', port: 443 }, { atyp: 4, host: '20010db8000000000000000000000005', port: 443 }], [{ atyp: 3, host: 'bnd6.test', port: 443 }, { atyp: 1, host: '198.51.100.40', port: 443 }], [{ atyp: 3, host: 'bnd3.test', port: 443 }, { atyp: 1, host: '198.51.100.41', port: 443 }]]) {
     const c = await expectReply(await socks(viaSocks.port, target), 0, `SOCKS5 upstream ${target.host}`)
     await until(() => c.bytes.length >= 17, 'upstream extra bytes')
     assert.equal(c.bytes.subarray(12, 17).toString(), 'EXTRA')
@@ -766,6 +779,7 @@ async function outboundChecks() {
     assert.deepEqual(socksSeen.at(-2), { greeting: [5, 1, 0] }, 'no-auth greeting only')
   }
   for (const [host, rep] of [['fail.test', 5], ['deny.test', 2], ['odd.test', 1], ['version.test', 1]]) await expectReply(await socks(viaSocks.port, { atyp: 3, host, port: 443 }), rep, `SOCKS5 upstream reply for ${host}`)
+  assert.ok(socksSeen.every(seen => seen.atyp !== 3), 'a SOCKS5 upstream never gets a name (ATYP 3)')
   await shut(viaSocks)
   const authPort = await listen(socksUpstream([5, 0xff]))
   const authOnly = await inProcess({ lookup, interfaces }, { upstream: { kind: 'socks5', host: '127.0.0.1', port: authPort, bypass: [] } })
@@ -818,7 +832,7 @@ async function outboundChecks() {
   await configure(stuck, { 3000: echoPort })
   await expectReply(await socks(stuck.port, loopbackTo(3000)), 5, 'a route that never connects')
   await shut(stuck)
-  console.log('ok outbound: HTTP CONNECT and SOCKS5 upstreams by name (IPv4/IPv6 too), extra bytes, non-2xx/huge/garbage/drop/auth/REP failures, upstream down 05, an unusable one left out (direct); bypass names with subdomains/.suffix/*.suffix/IP/CIDR/* direct (first 64 usable entries, overlong ignored), never opening the local network; loopback and own never upstream; DNS 04/deadline/coalescing; pinned addresses; error mapping 05/04/01')
+  console.log('ok outbound: HTTP CONNECT and SOCKS5 upstreams given checked addresses only (a name at its local answer here; IPv4/IPv6 literals as they are; unresolvable names refused 04, never by name), extra bytes, non-2xx/huge/garbage/drop/auth/REP failures, upstream down 05, an unusable one left out (direct); bypass names with subdomains/.suffix/*.suffix/IP/CIDR/* direct (first 64 usable entries, overlong ignored), never opening the local network; loopback and own never upstream; DNS 04/deadline/coalescing; pinned addresses; error mapping 05/04/01')
 }
 
 async function localNetworkChecks() {
@@ -909,15 +923,15 @@ async function localNetworkChecks() {
   await expectReply(await socks(viaUpstream.port, { atyp: 3, host: 'rebind.test', port: 443 }), 2, 'rebind: private first')
   assert.equal(upstreamHits, 1)
   assert.equal(await upstreamed(viaUpstream, 'public.test', 'a public name'), 'UPSTREAM')
-  assert.equal(await upstreamed(viaUpstream, 'unknown.test', 'a name the Guest cannot resolve still goes by name'), 'UPSTREAM')
-  assert.equal(upstreamHits, 3)
+  await expectReply(await socks(viaUpstream.port, { atyp: 3, host: 'unknown.test', port: 443 }), 4, 'a name with no checked address is refused, never sent by name')
+  assert.equal(upstreamHits, 2)
   await shut(viaUpstream)
   // lan: true opens private addresses for the upstream too, never the rest.
   const lanUp = await inProcess({ lookup, interfaces, connect, timeouts: { ...FAST, lanEvery: 60_000 } }, { lan: true, upstream: { kind: 'http', host: '127.0.0.1', port: upstreamPort, bypass: [] } })
   for (const host of ['nas.test', 'public-private.test']) assert.equal(await upstreamed(lanUp, host, `lan: true, ${host} through an upstream`), 'UPSTREAM')
   for (const host of ['mixed.test', 'meta-lan.test', 'link-mixed.test', 'proto-mixed.test']) await expectReply(await socks(lanUp.port, { atyp: 3, host, port: 443 }), 2, `lan: true still refuses ${host} through an upstream`)
   assert.deepEqual(lanUp.rows, [{ state: 'lan' }])
-  assert.equal(upstreamHits, 5)
+  assert.equal(upstreamHits, 4)
   assert.equal(dials.filter(dial => typeof dial === 'object').length, directBefore, 'nothing went direct')
   await shut(lanUp)
 
@@ -946,7 +960,7 @@ async function localNetworkChecks() {
   await expectReply(await socks(windowed.port, { atyp: 1, host: '10.9.9.9', port: 80 }), 2)
   assert.deepEqual(windowed.rows, [{ state: 'lan' }, { state: 'lan' }])
   await shut(windowed)
-  console.log(`ok local network: ${refusedForms.length} refusals (RFC1918, CGNAT, link-local/metadata, 192.0.0.0/24, multicast, reserved, ULA, fe80/fec0/ff00, NAT64/compat/SIIT; literal, text, mapped, resolved) never dialled; mixed names pinned to public addresses direct, refused through an upstream (rebinding answers judged one by one; unresolvable names still go by name); bypass cannot reopen; lan: true opens only private ranges; own addresses silent; one bare lan row per window`)
+  console.log(`ok local network: ${refusedForms.length} refusals (RFC1918, CGNAT, link-local/metadata, 192.0.0.0/24, multicast, reserved, ULA, fe80/fec0/ff00, NAT64/compat/SIIT; literal, text, mapped, resolved) never dialled; mixed names pinned to public addresses direct, refused through an upstream (rebinding answers judged one by one; unresolvable names refused); bypass cannot reopen; lan: true opens only private ranges; own addresses silent; one bare lan row per window`)
 }
 
 async function onLinkChecks() {
@@ -1107,6 +1121,344 @@ async function numericNameChecks() {
   console.log(`ok numeric names: ${spellings.length} non-canonical spellings (octal, hex, short forms, one number, trailing dot, ending in a number) refused 04 before any lookup, dial or upstream (direct, upstream, bypass '*'); partly numeric names and canonical dotted-decimal still go`)
 }
 
+// DNS-over-HTTPS through the upstream: a real TLS server with a test CA, asked
+// through real HTTP CONNECT and SOCKS5 upstream fixtures. Each upstream
+// fixture does its own name lookup as the attacker would have it (every name
+// a private service), so a name ever sent to it shows up as PRIVATE bytes.
+function testCertificates() {
+  const dir = mkdtempSync(join(os.tmpdir(), 'doh-ca-'))
+  try {
+    const openssl = (...args) => {
+      const result = spawnSync('openssl', args, { cwd: dir, encoding: 'utf8' })
+      if (result.error || result.status !== 0) throw Object.assign(new Error(`openssl ${args[0]}: ${result.error?.code ?? result.stderr.trim().split('\n').at(-1)}`), { code: result.error?.code })
+    }
+    // Named-curve parameters and SHA-256 spelled out: macOS's LibreSSL otherwise
+    // writes explicit parameters and signs with SHA-1, which Node's OpenSSL refuses.
+    const ec = ['-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:prime256v1', '-pkeyopt', 'ec_param_enc:named_curve', '-nodes', '-sha256']
+    openssl('req', '-x509', ...ec, '-keyout', 'ca.key', '-out', 'ca.pem', '-days', '2', '-subj', '/CN=Shared Session test DoH CA', '-addext', 'basicConstraints=critical,CA:TRUE', '-addext', 'keyUsage=critical,keyCertSign')
+    openssl('req', '-new', ...ec, '-keyout', 'doh.key', '-out', 'doh.csr', '-subj', '/CN=doh.test')
+    writeFileSync(join(dir, 'ext.cnf'), 'subjectAltName=DNS:doh.test\nextendedKeyUsage=serverAuth\nbasicConstraints=CA:FALSE\n')
+    openssl('x509', '-req', '-in', 'doh.csr', '-CA', 'ca.pem', '-CAkey', 'ca.key', '-set_serial', '1', '-sha256', '-out', 'doh.pem', '-days', '2', '-extfile', 'ext.cnf')
+    return { ca: readFileSync(join(dir, 'ca.pem')), key: readFileSync(join(dir, 'doh.key')), cert: readFileSync(join(dir, 'doh.pem')) }
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+}
+
+async function dohFixtures() {
+  let pem
+  try { pem = testCertificates() } catch (error) { return { skip: error.code === 'ENOENT' ? 'no openssl' : error.message } }
+  const ctx = { ca: pem.ca, asked: [], connects: [], socksSeen: [], privateHits: 0, publicHits: 0, wrongHits: 0 }
+  // What the DNS-over-HTTPS server answers: { A, AAAA, Status, TTL, body }.
+  ctx.answers = {
+    'evil.test': { A: ['93.184.216.34'] }, 'hidden.test': { A: ['10.0.0.7'] }, 'accounts.test': { A: ['93.184.216.34'] }, 'down.test': { A: ['93.184.216.34'] },
+    'gone.test': { Status: 3 }, 'loopy.test': { A: ['93.184.216.34', '127.0.0.1'] }, 'meta.test': { A: ['169.254.169.254'] }, 'mapped.test': { A: ['93.184.216.34'], AAAA: ['::ffff:10.0.0.7'] },
+    'nat64.test': { AAAA: ['64:ff9b::a9fe:a9fe'] }, 'own.test': { A: ['192.168.1.5'] }, 'six.test': { AAAA: ['2001:db8::5'] }, 'cached.test': { A: ['93.184.216.34'], TTL: 300 },
+    'servfail.test': { Status: 2 }, 'big.test': { body: `{"Status":0,"Answer":[],"pad":"${'p'.repeat(70_000)}"}` }, 'bad.test': { A: ['not-an-address'] }, 'lan.test': { A: ['10.0.0.7'] },
+    'slow.test': { A: ['93.184.216.34'], delay: 4000 },
+  }
+  // The Guest's own resolver: absent, poisoned or right.
+  ctx.local = { 'evil.test': ['93.184.216.34'], 'accounts.test': ['203.0.113.99'], 'down.test': ['93.184.216.34'], 'loopy.test': ['93.184.216.34'], 'meta.test': ['93.184.216.34'], 'mapped.test': ['93.184.216.34'],
+    'nat64.test': ['93.184.216.34'], 'own.test': ['93.184.216.34'], 'six.test': ['93.184.216.34'], 'cached.test': ['93.184.216.34'], 'servfail.test': ['93.184.216.34'], 'big.test': ['93.184.216.34'], 'bad.test': ['93.184.216.34'], 'lan.test': ['93.184.216.34'], 'slow.test': ['93.184.216.34'],
+    'n1.test': ['93.184.216.34'], 'n2.test': ['93.184.216.34'], 'n3.test': ['93.184.216.34'], 'n5.test': ['93.184.216.34'], 'n6.test': ['93.184.216.34'] }
+  ctx.lookup = (name, _options, callback) => setImmediate(() => ctx.local[name] ? callback(null, ctx.local[name].map(address => ({ address, family: net.isIP(address) }))) : callback(Object.assign(new Error('not found'), { code: 'ENOTFOUND' })))
+  ctx.interfaces = () => ({ en0: [iface('192.168.1.5', '192.168.1.0/24')] })
+  const greeter = (word, count) => track(net.createServer({ allowHalfOpen: true }, socket => { ctx[count]++; socket.write(word); socket.on('data', bytes => socket.write(bytes)); socket.on('end', () => socket.end()) }))
+  const publicPort = await listen(greeter('PUBLIC!', 'publicHits')), privatePort = await listen(greeter('PRIVATE', 'privateHits')), wrongPort = await listen(greeter('WRONGIP', 'wrongHits'))
+  const doh = track(https.createServer({ key: pem.key, cert: pem.cert }, (req, res) => {
+    const url = new URL(req.url, 'https://doh.test'), name = url.searchParams.get('name'), type = url.searchParams.get('type')
+    ctx.asked.push({ path: url.pathname, name, type, accept: req.headers.accept, host: req.headers.host })
+    const answer = ctx.answers[name] ?? { Status: 3 }
+    if (answer.body) return res.end(answer.body)
+    const data = type === 'A' ? answer.A ?? [] : type === 'AAAA' ? answer.AAAA ?? [] : []
+    res.setHeader('content-type', 'application/dns-json')
+    const send = () => res.end(JSON.stringify({ Status: answer.Status ?? 0, Answer: [{ name: `${name}.`, type: 5, TTL: 60, data: 'cname.test.' }, ...data.map(address => ({ name: `${name}.`, type: type === 'A' ? 1 : 28, TTL: answer.TTL ?? 0, data: address }))] }))
+    // A slow name: its authoritative servers take their time; TLS and the request are long done.
+    answer.delay ? setTimeout(send, answer.delay) : send()
+  }))
+  ctx.dohPort = await listen(doh)
+  // A gate in front of the DoH server: open, it passes through; shut, it holds
+  // the tunnel and never answers, as a proxy whose network drops DoH does.
+  ctx.gateOpen = false
+  ctx.gateHits = 0
+  ctx.gatePort = await listen(track(net.createServer(socket => {
+    ctx.gateHits++
+    sockets.add(socket)
+    socket.on('error', () => {})
+    socket.on('close', () => sockets.delete(socket))
+    if (!ctx.gateOpen) return socket.on('data', () => {})
+    const target = net.connect({ host: '127.0.0.1', port: ctx.dohPort })
+    sockets.add(target)
+    target.on('error', () => socket.destroy())
+    target.on('close', () => { sockets.delete(target); socket.destroy() })
+    socket.pipe(target); target.pipe(socket)
+  })))
+  // Where each upstream fixture sends what it's asked for: an address it knows,
+  // the DoH server (127.0.0.1), or a name, which its own resolver puts at the private service.
+  const addresses = { '93.184.216.34': publicPort, '2001:db8::5': publicPort, '203.0.113.99': wrongPort, '10.0.0.7': privatePort, '127.0.0.1': null }
+  const destination = (host, port) => {
+    if (host === '127.0.0.1') return port
+    if (Object.hasOwn(addresses, host)) return addresses[host]
+    return net.isIP(host) ? null : privatePort
+  }
+  const pipeTo = (socket, port, rest, ok, bad) => {
+    if (!port) return socket.end(bad)
+    const target = net.connect({ host: '127.0.0.1', port, allowHalfOpen: true })
+    sockets.add(target)
+    target.on('error', () => socket.destroy())
+    target.on('close', () => sockets.delete(target))
+    target.once('connect', () => { socket.write(ok); if (rest.length) target.write(rest); socket.pipe(target); target.pipe(socket) })
+  }
+  ctx.httpPort = await listen(track(net.createServer({ allowHalfOpen: true }, socket => {
+    let head = Buffer.alloc(0)
+    const read = bytes => {
+      head = Buffer.concat([head, bytes])
+      const end = head.indexOf('\r\n\r\n')
+      if (end === -1) return
+      socket.removeListener('data', read)
+      const authority = /^CONNECT (\S+) HTTP\/1\.1\r\n/.exec(head.toString('latin1', 0, end + 2))?.[1] ?? ''
+      ctx.connects.push(authority)
+      const [, host, port] = /^\[?(.*?)\]?:([0-9]+)$/.exec(authority) ?? []
+      pipeTo(socket, destination(host, Number(port)), head.subarray(end + 4), 'HTTP/1.1 200 Connection established\r\n\r\n', 'HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n')
+    }
+    socket.on('data', read)
+  })))
+  ctx.socksPort = await listen(track(net.createServer({ allowHalfOpen: true }, socket => {
+    let buffer = Buffer.alloc(0), greeted = false
+    const read = bytes => {
+      buffer = Buffer.concat([buffer, bytes])
+      if (!greeted) {
+        if (buffer.length < 3) return
+        buffer = buffer.subarray(3); greeted = true
+        socket.write(Buffer.from([5, 0]))
+      }
+      if (buffer.length < 5) return
+      const atyp = buffer[3], size = atyp === 1 ? 10 : atyp === 4 ? 22 : 7 + buffer[4]
+      if (buffer.length < size) return
+      socket.removeListener('data', read)
+      const host = atyp === 1 ? [...buffer.subarray(4, 8)].join('.') : atyp === 4 ? new net.SocketAddress({ address: Array.from({ length: 8 }, (_, i) => buffer.readUInt16BE(4 + 2 * i).toString(16)).join(':'), family: 'ipv6' }).address : buffer.toString('latin1', 5, 5 + buffer[4])
+      const port = buffer.readUInt16BE(size - 2)
+      ctx.socksSeen.push({ atyp, host, port })
+      pipeTo(socket, destination(host, port), buffer.subarray(size), Buffer.from(reply(0)), Buffer.from(reply(4)))
+    }
+    socket.on('data', read)
+  })))
+  ctx.servers = [{ address: '127.0.0.1', port: ctx.dohPort, servername: 'doh.test', path: '/dns-query', ca: pem.ca }]
+  ctx.http = { kind: 'http', host: '127.0.0.1', port: ctx.httpPort, bypass: [] }
+  ctx.socks5 = { kind: 'socks5', host: '127.0.0.1', port: ctx.socksPort, bypass: [] }
+  ctx.start = (upstream, { servers = ctx.servers, cfg = {}, timeouts = {} } = {}) => inProcess({ lookup: ctx.lookup, interfaces: ctx.interfaces, doh: servers, timeouts: { ...FAST, doh: 3000, dohEach: 1500, ...timeouts } }, { upstream, ...cfg })
+  // Opens a name through the proxy and returns the destination's greeting.
+  ctx.open = async (instance, host, label) => {
+    const c = await expectReply(await socks(instance.port, { atyp: 3, host, port: 443 }), 0, label)
+    await until(() => c.bytes.length >= 19, `${label}: first bytes`)
+    await echoes(c)
+    c.client.destroy()
+    return c.bytes.subarray(12, 19).toString()
+  }
+  ctx.reset = () => { ctx.asked.length = ctx.connects.length = ctx.socksSeen.length = 0; ctx.privateHits = ctx.publicHits = ctx.wrongHits = 0 }
+  ctx.numeric = () => ctx.connects.every(authority => /^(?:[0-9.]+|\[[0-9a-f:]+\]):[0-9]+$/.test(authority)) && ctx.socksSeen.every(seen => seen.atyp !== 3)
+  return ctx
+}
+
+// Each case is one regression the old helper (names sent to the upstream) fails.
+const DOH_CASES = {
+  async 'a: a public local answer goes at its checked address, never by name'(ctx) {
+    const p = await ctx.start(ctx.http)
+    assert.equal(await ctx.open(p, 'evil.test', 'evil.test through the upstream'), 'PUBLIC!', 'the checked address, not what the upstream would resolve')
+    assert.equal(ctx.privateHits, 0, 'no private bytes')
+    assert.deepEqual(ctx.connects.filter(authority => !authority.startsWith('127.0.0.1:')), ['93.184.216.34:443'], 'the upstream got an address')
+    assert.ok(ctx.numeric())
+    assert.deepEqual(ctx.asked.map(ask => ask.type).sort(), ['A', 'AAAA'], 'A and AAAA asked of the DoH server through the upstream')
+    assert.ok(ctx.asked.every(ask => ask.name === 'evil.test' && ask.accept === 'application/dns-json' && ask.host === 'doh.test' && ask.path === '/dns-query'))
+    assert.deepEqual(p.rows, [], 'nothing said')
+    await shut(p)
+  },
+  async 'b: no local answer and a private DoH answer is refused'(ctx) {
+    const p = await ctx.start(ctx.http)
+    await expectReply(await socks(p.port, { atyp: 3, host: 'hidden.test', port: 443 }), 2, 'hidden.test')
+    assert.deepEqual(p.rows, [{ state: 'lan' }], 'the bare lan row')
+    assert.equal(ctx.privateHits, 0, 'zero private connections')
+    assert.ok(ctx.connects.every(authority => authority.startsWith('127.0.0.1:')), 'only the DoH server was asked for')
+    await shut(p)
+  },
+  async 'c: a poisoned local answer gives way to the DoH answer'(ctx) {
+    const p = await ctx.start(ctx.http)
+    assert.equal(await ctx.open(p, 'accounts.test', 'accounts.test'), 'PUBLIC!', 'the DoH address, not the poisoned one')
+    assert.equal(ctx.wrongHits, 0)
+    assert.deepEqual(ctx.connects.filter(authority => !authority.startsWith('127.0.0.1:')), ['93.184.216.34:443'])
+    await shut(p)
+  },
+  async 'd: DoH down falls back to the local answer, by address'(ctx) {
+    const dead = await deadPort()
+    const p = await ctx.start(ctx.http, { servers: [{ ...ctx.servers[0], port: dead }] })
+    assert.equal(await ctx.open(p, 'down.test', 'down.test with DoH down'), 'PUBLIC!')
+    assert.equal(ctx.privateHits, 0)
+    assert.deepEqual(ctx.connects.filter(authority => authority !== `127.0.0.1:${dead}`), ['93.184.216.34:443'], 'the local answer, pinned')
+    // A server that couldn't be reached is skipped a while: the next name doesn't wait on it.
+    const before = ctx.connects.length
+    assert.equal(await ctx.open(p, 'evil.test', 'evil.test with DoH down'), 'PUBLIC!')
+    assert.deepEqual(ctx.connects.slice(before), ['93.184.216.34:443'])
+    await shut(p)
+    // Nor through a SOCKS5 upstream.
+    const s = await ctx.start(ctx.socks5, { servers: [{ ...ctx.servers[0], port: dead }] })
+    assert.equal(await ctx.open(s, 'down.test', 'down.test with DoH down, SOCKS5'), 'PUBLIC!')
+    assert.deepEqual(ctx.socksSeen.at(-1), { atyp: 1, host: '93.184.216.34', port: 443 })
+    await shut(s)
+  },
+  async 'e: no DoH answer and no local answer is refused, the name never sent'(ctx) {
+    for (const [label, servers] of [['NXDOMAIN', ctx.servers], ['DoH down', [{ ...ctx.servers[0], port: await deadPort() }]]]) {
+      for (const upstream of [ctx.http, ctx.socks5]) {
+        const p = await ctx.start(upstream, { servers })
+        await expectReply(await socks(p.port, { atyp: 3, host: 'gone.test', port: 443 }), 4, `gone.test, ${label}, ${upstream.kind}`)
+        await shut(p)
+      }
+    }
+    assert.ok(ctx.numeric(), 'the upstream never saw the name')
+    assert.ok(![...ctx.connects, ...ctx.socksSeen.map(seen => seen.host)].some(seen => seen.includes('gone')))
+    assert.equal(ctx.privateHits, 0)
+  },
+  async 'f: a DoH answer holding loopback, metadata, private or own addresses is refused'(ctx) {
+    const p = await ctx.start(ctx.http, { cfg: { lan: true } })
+    for (const host of ['loopy.test', 'meta.test', 'nat64.test']) await expectReply(await socks(p.port, { atyp: 3, host, port: 443 }), 2, `${host}: refused even with lan: true`)
+    await expectReply(await socks(p.port, { atyp: 3, host: 'own.test', port: 443 }), 2, 'own.test')
+    assert.equal(await ctx.open(p, 'lan.test', 'lan: true opens a private DoH answer'), 'PRIVATE')
+    await shut(p)
+    ctx.privateHits = 0
+    const q = await ctx.start(ctx.http)
+    for (const host of ['mapped.test', 'lan.test', 'loopy.test']) await expectReply(await socks(q.port, { atyp: 3, host, port: 443 }), 2, `${host}`)
+    assert.equal(ctx.privateHits, 0)
+    assert.ok(ctx.connects.filter(authority => !authority.startsWith('127.0.0.1:')).every(authority => authority === '10.0.0.7:443'), 'only lan: true reached a private address, by address')
+    await shut(q)
+  },
+  async 'g: a SOCKS5 upstream gets ATYP 1 or 4, never a name'(ctx) {
+    const p = await ctx.start(ctx.socks5)
+    assert.equal(await ctx.open(p, 'evil.test', 'evil.test through SOCKS5'), 'PUBLIC!')
+    assert.equal(await ctx.open(p, 'six.test', 'six.test (AAAA only) through SOCKS5'), 'PUBLIC!')
+    assert.equal(ctx.privateHits, 0)
+    assert.deepEqual(ctx.socksSeen.filter(seen => seen.host !== '127.0.0.1'), [{ atyp: 1, host: '93.184.216.34', port: 443 }, { atyp: 4, host: '2001:db8::5', port: 443 }])
+    assert.ok(ctx.socksSeen.every(seen => seen.atyp !== 3), 'ATYP 1 or 4 only, the DoH server too')
+    await shut(p)
+  },
+}
+
+// How the DoH client itself behaves: certificates, order, bounds, cache.
+async function dohClientChecks(ctx) {
+  const viaHttp = await ctx.start(ctx.http)
+  // A bad answer (SERVFAIL, a body past 64 KiB, an A record that is no address) is the local answer's turn.
+  for (const host of ['servfail.test', 'big.test', 'bad.test']) assert.equal(await ctx.open(viaHttp, host, `${host}: the local answer`), 'PUBLIC!')
+  // Concurrent asks of one name share one look, and an answer is kept for its TTL (at most a minute).
+  ctx.reset()
+  await Promise.all([1, 2, 3].map(() => ctx.open(viaHttp, 'cached.test', 'cached.test')))
+  assert.equal(await ctx.open(viaHttp, 'cached.test', 'cached.test again'), 'PUBLIC!')
+  assert.equal(ctx.asked.length, 2, 'one A and one AAAA for four connections')
+  // A TTL of 0 is asked again.
+  ctx.reset()
+  for (let i = 0; i < 2; i++) await ctx.open(viaHttp, 'evil.test', 'evil.test, TTL 0')
+  assert.equal(ctx.asked.length, 4)
+  await shut(viaHttp)
+  // Certificates are checked: a server whose certificate isn't for its name,
+  // or isn't signed by a trusted CA, is passed over for the next.
+  ctx.reset()
+  const strict = await ctx.start(ctx.http, { servers: [{ ...ctx.servers[0], servername: 'other.test' }, { ...ctx.servers[0], ca: undefined }, ctx.servers[0]] })
+  assert.equal(await ctx.open(strict, 'accounts.test', 'the third server answers'), 'PUBLIC!')
+  assert.equal(ctx.asked.length, 2, 'only the server that passed TLS was asked anything')
+  ctx.reset()
+  assert.equal(await ctx.open(strict, 'accounts.test', 'kept'), 'PUBLIC!')
+  await shut(strict)
+  // Every server failing: the local answer, the poisoned one here (nothing better is known).
+  ctx.reset()
+  const failing = await ctx.start(ctx.http, { servers: [{ ...ctx.servers[0], servername: 'other.test' }] })
+  assert.equal(await ctx.open(failing, 'accounts.test', 'no server passed TLS'), 'WRONGIP')
+  assert.deepEqual(ctx.connects.filter(authority => !authority.startsWith('127.0.0.1:')), ['203.0.113.99:443'])
+  await shut(failing)
+  // A server that never answers costs at most dohEach, and close() ends its tunnel.
+  const silent = track(net.createServer(socket => socket.on('data', () => {}))), silentPort = await listen(silent)
+  const slow = await ctx.start(ctx.http, { servers: [{ ...ctx.servers[0], port: silentPort }], timeouts: { dohEach: 400 } })
+  const at = Date.now()
+  assert.equal(await ctx.open(slow, 'down.test', 'a silent server'), 'PUBLIC!')
+  assert.ok(Date.now() - at >= 380 && Date.now() - at < 2500, `waited ${Date.now() - at} ms`)
+  await shut(slow)
+  await slowNameChecks(ctx)
+  await backoffChecks(ctx)
+  // A literal asks nothing of DoH.
+  ctx.reset()
+  const literal = await ctx.start(ctx.http)
+  await expectReply(await socks(literal.port, { atyp: 1, host: '93.184.216.34', port: 443 }), 0, 'a literal')
+  assert.deepEqual([ctx.asked.length, ctx.connects], [0, ['93.184.216.34:443']])
+  await shut(literal)
+}
+
+// A name that is slow once TLS is up (a slow domain, or an attacker's made
+// slow) is that name's failure alone: no server is skipped for it, so the next
+// name still gets its DoH answer, not its (here poisoned) local one. Before,
+// its timeout marked every server down for 30 s.
+async function slowNameChecks(ctx) {
+  ctx.reset()
+  // Each server's time is well past a TLS handshake on a busy machine, and the answer later still.
+  const p = await ctx.start(ctx.http, { servers: [ctx.servers[0], ctx.servers[0]], timeouts: { doh: 8000, dohEach: 1500 } })
+  const at = Date.now()
+  assert.equal(await ctx.open(p, 'slow.test', 'slow.test: the local answer once DoH is slow'), 'PUBLIC!')
+  assert.ok(Date.now() - at < 6000, `slow.test waited ${Date.now() - at} ms`)
+  assert.equal(ctx.asked.filter(ask => ask.name === 'slow.test').length, 4, 'both servers asked (A and AAAA each)')
+  assert.equal(await ctx.open(p, 'accounts.test', 'accounts.test right after a slow name'), 'PUBLIC!', 'the DoH answer, not the poisoned local one')
+  assert.equal(ctx.wrongHits, 0)
+  assert.ok(ctx.asked.some(ask => ask.name === 'accounts.test'), 'DoH asked for the next name')
+  // The slow name goes by its local answer a while, without waiting on DoH again.
+  const asked = ctx.asked.length, again = Date.now()
+  assert.equal(await ctx.open(p, 'slow.test', 'slow.test again'), 'PUBLIC!')
+  assert.ok(ctx.asked.length === asked && Date.now() - again < 1000, 'not asked again within dohMiss')
+  await shut(p)
+}
+
+// A proxy that silently holds DoH tunnels: once no server could be reached,
+// DoH waits as a whole (servers not yet tried included), and the wait doubles
+// while it stays so, until an answer resets it. Before, each server was
+// skipped a fixed while and an untried one cost the next name its full wait.
+async function backoffChecks(ctx) {
+  const gate = { ...ctx.servers[0], port: ctx.gatePort }
+  const settle = ms => new Promise(resolve => setTimeout(resolve, ms))
+  ctx.reset(); ctx.gateOpen = false; ctx.gateHits = 0
+  // Four servers, a look's time for two and a half: the fourth is never tried, and the next name waits on none.
+  const four = await ctx.start(ctx.http, { servers: [gate, gate, gate, gate], timeouts: { doh: 1000, dohEach: 400, dohDown: 5000 } })
+  assert.equal(await ctx.open(four, 'n1.test', 'n1.test, DoH held'), 'PUBLIC!')
+  const hits = ctx.gateHits, at = Date.now()
+  assert.equal(await ctx.open(four, 'n2.test', 'n2.test right after'), 'PUBLIC!')
+  assert.ok(ctx.gateHits === hits && Date.now() - at < 2000, `n2.test asked nothing of DoH (${ctx.gateHits - hits} tunnels, ${Date.now() - at} ms)`)
+  await shut(four)
+  // One server: held twice, the second wait is twice the first.
+  // A one-second wait, then two: each look comes well inside or past them, so a busy machine's late timers don't decide.
+  const one = await ctx.start(ctx.http, { servers: [gate], timeouts: { doh: 1000, dohEach: 1000, dohDown: 1000, dohDownMax: 10_000 } })
+  ctx.gateHits = 0
+  await ctx.open(one, 'n1.test', 'n1.test, held')
+  assert.equal(ctx.gateHits, 2, 'A and AAAA tunnels')
+  await settle(1400)
+  await ctx.open(one, 'n2.test', 'n2.test, held again after the first wait')
+  assert.equal(ctx.gateHits, 4, 'asked again once the first wait ended')
+  await settle(1400)
+  await ctx.open(one, 'n3.test', 'n3.test, 1.4 s on')
+  assert.equal(ctx.gateHits, 4, 'still waiting: the second wait is 2 s')
+  // An answer resets it.
+  await settle(1200)
+  ctx.gateOpen = true
+  ctx.wrongHits = 0
+  assert.equal(await ctx.open(one, 'accounts.test', 'accounts.test with DoH back'), 'PUBLIC!', 'DoH answers again after the wait')
+  assert.equal(ctx.wrongHits, 0)
+  ctx.gateOpen = false
+  ctx.gateHits = 0
+  await ctx.open(one, 'n5.test', 'n5.test, held after an answer')
+  assert.equal(ctx.gateHits, 2)
+  await settle(1600)
+  await ctx.open(one, 'n6.test', 'n6.test, 1.6 s on')
+  assert.equal(ctx.gateHits, 4, 'back to the first wait, not a doubled one')
+  await shut(one)
+}
+
+async function dohChecks(cases = Object.keys(DOH_CASES)) {
+  const ctx = await dohFixtures()
+  if (ctx.skip) return console.log(`SKIP DNS-over-HTTPS through the upstream (${ctx.skip})`)
+  for (const name of cases) { ctx.reset(); await DOH_CASES[name](ctx) }
+  await dohClientChecks(ctx)
+  console.log(`ok DNS-over-HTTPS through the upstream (real TLS with a test CA, HTTP CONNECT and SOCKS5): ${cases.length} regressions (${cases.map(name => name.slice(0, 1)).join(', ')}): names never reach the upstream, only checked addresses (CONNECT a.b.c.d / ATYP 1 or 4); a DoH answer with any refused address refuses; DoH down or empty falls back to the local answer, pinned; neither refuses 04; certificate name and CA checked, servers in order, an unreachable one skipped, a slow name its own failure (the next name still asked), DoH held by the proxy backing off as a whole and doubling until an answer, bad answers (SERVFAIL, past 64 KiB, no address) fall back, concurrent asks shared, TTL kept, literals ask nothing`)
+}
+
 async function capacityAndHygieneChecks() {
   const echo = echoServer(), echoPort = await listen(echo)
   const capped = await ready(BASE), clients = []
@@ -1138,8 +1490,16 @@ async function capacityAndHygieneChecks() {
   const log = await ready({ ...BASE, upstream: { kind: 'http', host: '127.0.0.1', port: upPort, bypass: ['bypassed-secret.invalid'] } })
   const res = await control(log.control, { body: routesBody({ 3000: echoPort }, [3610]) })
   assert.equal(res.status, 200)
-  await echoes(await expectReply(await socks(log.port, { atyp: 3, host: secretName, port: 443 }), 0, 'outbound by name through the upstream'))
-  assert.match(upstreamSeen[0], new RegExp(`^CONNECT ${secretName.replace(/\./g, '\\.')}:443 HTTP/1\\.1\\r\\n`))
+  // The production helper's own DNS-over-HTTPS: asked through the upstream at
+  // the servers' addresses (this fixture answers 200 and then echoes, so no
+  // TLS comes of it), and the name has no local answer either: refused, and
+  // the upstream never sees it.
+  await expectReply(await socks(log.port, { atyp: 3, host: secretName, port: 443 }), 4, 'a name with no checked address')
+  const authorities = upstreamSeen.map(head => /^CONNECT (\S+) HTTP\/1\.1\r\nHost: \1\r\n\r\n$/.exec(head)?.[1])
+  assert.deepEqual([...new Set(authorities)].sort(), ['1.0.0.1:443', '1.1.1.1:443', '8.8.4.4:443', '8.8.8.8:443'], 'only the DNS-over-HTTPS servers, by address')
+  assert.ok(upstreamSeen.every(head => !head.includes('secret')), 'the name never reached the upstream')
+  await echoes(await expectReply(await socks(log.port, { atyp: 1, host: '93.184.216.34', port: 443 }), 0, 'an address through the upstream'))
+  assert.equal(upstreamSeen.at(-1), 'CONNECT 93.184.216.34:443 HTTP/1.1\r\nHost: 93.184.216.34:443\r\n\r\n')
   await expectReply(await socks(log.port, { atyp: 3, host: 'bypassed-secret.invalid', port: 443 }), 4, 'bypassed and unresolvable')
   await echoes(await expectReply(await socks(log.port, loopbackTo(3000)), 0))
   const wanted = await socks(log.port, loopbackTo(3610))
@@ -1153,7 +1513,7 @@ async function capacityAndHygieneChecks() {
     assert.ok(Buffer.byteLength(line) <= 8192)
     assert.ok(Object.keys(JSON.parse(line)).every(key => ['state', 'port', 'control'].includes(key)))
   }
-  for (const secret of [TOKEN, 'secret', 'invalid', 'upstream', String(upPort), '127.0.0.1', '169.254', '192.168', 'CONNECT']) assert.ok(!log.stdout.includes(secret), `stdout never contains ${secret === TOKEN ? 'the token' : secret}`)
+  for (const secret of [TOKEN, 'secret', 'invalid', 'upstream', String(upPort), '127.0.0.1', '169.254', '192.168', 'CONNECT', '93.184', '1.1.1.1', '8.8.8.8', 'cloudflare', 'dns.google']) assert.ok(!log.stdout.includes(secret), `stdout never contains ${secret === TOKEN ? 'the token' : secret}`)
   console.log('ok 512-client cap (513th closed, slot reusable), SIGTERM closes all; stdout is only ready/seen/want/blocked/lan rows: no names, addresses, token or upstream details')
 }
 
@@ -1183,6 +1543,7 @@ try {
   await localNetworkChecks()
   await onLinkChecks()
   await numericNameChecks()
+  await dohChecks()
   await capacityAndHygieneChecks()
   await lifecycleChecks()
   console.log('All browser proxy tests passed.')
