@@ -8323,12 +8323,12 @@ test('updated in place from a version that kept no record of what the host forwa
 // One source of what the host forwards: Shown, as the room says (its preview
 // events, and the list of what's shared it gives), shown as the artifacts say.
 
-test("a later showing without forwarding keeps what the preview was forwarded as: its address, its scheme and the page it's for; only the page moves", async ($, on) => {
+test("a later showing of a forwarded preview moves its page, and says again what it's forwarded as: its address, its scheme and the page it's for", async ($, on) => {
   const APP = { seq: 2, type: 'artifact', ts: 900, from: HOST_FROM, body: { kind: 'preview', pid: 'pv-app', port: 61198, path: '/', title: 'Host app', tcp: true, host: '127.0.0.1', scheme: 'https' } }
   const API = { seq: 3, type: 'artifact', ts: 901, from: HOST_FROM, body: { kind: 'preview', pid: 'pv-api', port: 61199, path: '/', title: 'localhost:61199 (host-api.cjs)', tcp: true, host: 'localhost', dependency: 61198 } }
-  // What a 0.11.24 host sends as its Claude gives each address again: no forwarding, its own spelling.
-  const APP_AGAIN = { seq: 4, type: 'artifact', ts: 902, from: HOST_FROM, body: { kind: 'preview', pid: 'pv-app', port: 61198, path: '/account', title: 'Account', host: 'localhost' } }
-  const API_AGAIN = { seq: 5, type: 'artifact', ts: 903, from: HOST_FROM, body: { kind: 'preview', pid: 'pv-api', port: 61199, path: '/health', title: 'localhost:61199', host: '127.0.0.1' } }
+  // What the host sends as its Claude opens each address again (`sharedAs`): its share's forwarding with the new page.
+  const APP_AGAIN = { seq: 4, type: 'artifact', ts: 902, from: HOST_FROM, body: { kind: 'preview', pid: 'pv-app', port: 61198, path: '/account', title: 'Account', tcp: true, host: '127.0.0.1', scheme: 'https' } }
+  const API_AGAIN = { seq: 5, type: 'artifact', ts: 903, from: HOST_FROM, body: { kind: 'preview', pid: 'pv-api', port: 61199, path: '/health', title: 'localhost:61199', tcp: true, host: 'localhost', dependency: 61198 } }
   const asked = windowWorld(on, { localPreviewByPid: { 'pv-app': { port: 45020 }, 'pv-api': { port: 45021 } }, stream: [{ seq: 5, events: [APP, API, APP_AGAIN, API_AGAIN], people: PREVIEW_PEOPLE, ended: false, title: 'demo' }] })
   await $.prompt.submit({ text: LINK, origin: { kind: 'composer' }, wait: false })
   await asked.clock.advance(10)

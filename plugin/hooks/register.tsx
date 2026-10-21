@@ -1710,7 +1710,7 @@ async function absorb($: $, room: ShareRoom, mode: ShareMode, event: ServerEvent
           kept = old
           return list
         }
-        kept = guest && preview ? listedAs(s, shown, old) : shown
+        kept = guest && preview ? listedAs(s, shown) : shown
         return keptShown([...list.filter(s => s.key !== shown.key), kept])
       })
       await note({ ts: event.ts, who: room.host, kind: 'shown', text: kept.name })
@@ -1942,16 +1942,12 @@ async function takeRoomList($: $, room: ShareRoom, s: RoomScope, value: unknown)
 
 // A guest's preview as its artifact shows it, there and forwarded as the
 // room's newest list says (taken before the artifact's page): one the list
-// doesn't have has ended. One that says nothing of its forwarding (a 0.11.24
-// host's later mention) moves the page and keeps what it was forwarded as:
-// its address, its scheme and the page it's for.
-function listedAs(s: RoomScope, shown: ShareShown, old: ShareShown | undefined): ShareShown {
+// doesn't have has ended.
+function listedAs(s: RoomScope, shown: ShareShown): ShareShown {
   const said = shown.pid ? s.listed.get(shown.pid) : undefined
-  if (!said) return { ...shown, closed: true, tcp: false }
-  const as = !shown.tcp && old?.tcp && !old.closed ? old : shown
-  const next: ShareShown = { ...shown, port: said.port, ...(as === old ? { name: previewName(shown.title, old.dependency) } : {}) }
-  for (const key of ['tcp', 'host', 'scheme', 'dependency'] as const) delete next[key]
-  return { ...next, ...forwardedAs({ ...as, tcp: said.tcp }) }
+  const next: ShareShown = { ...shown }
+  delete next.tcp
+  return said ? { ...next, port: said.port, ...(said.tcp ? { tcp: true } : {}) } : { ...next, closed: true, tcp: false }
 }
 
 // Guest: what the host forwards this moment, oldest first: Shown's open
