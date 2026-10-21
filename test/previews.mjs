@@ -255,10 +255,10 @@ function held(w, path, bearer = w.host, method = 'POST') {
   console.log('OK need: host stream only, never stored or broadcast; 403/401/400/413/410/429 per seat; shared when forwarded')
 }
 
-// What's shared comes from the room (C-snap): join, GET previews and every
-// page (each stream line, each events answer) list every open preview, its
-// port, whether it's forwarded and its title, whatever history was pruned.
-// Older plugins ignore the field.
+// What's shared comes from the room (C-snap): join and every page (each
+// stream line, each events answer) list every open preview, its port,
+// whether it's forwarded and its title, whatever history was pruned. Older
+// plugins ignore the field.
 {
   const w = world()
   const page = (await api(w, 'previews', w.host, 'POST', { port: 43400, title: 'App' })).pid
@@ -268,8 +268,7 @@ function held(w, path, bearer = w.host, method = 'POST') {
   const joined = await api(w, 'join', '', 'POST', { name: 'Late' })
   const shared = [{ pid: page, port: 43400, tcp: false, title: 'App' }, { pid: forwarded.pid, port: 43401, tcp: true, title: 'localhost:43401' }]
   assert.deepEqual(joined.previews, shared)
-  for (const bearer of [joined.token, w.host]) assert.deepEqual(await api(w, 'previews', bearer), { previews: shared })
-  assert.equal((await call(w, 'previews', 'invalid')).status, 401)
+  assert.equal((await call(w, 'events?after=0&wait=0', 'invalid')).status, 401)
   const streamLine = async bearer => {
     const reader = (await call(w, 'stream?after=0', bearer)).body.getReader()
     const { value } = await reader.read()
@@ -286,12 +285,11 @@ function held(w, path, bearer = w.host, method = 'POST') {
   assert.deepEqual((await waiting).previews.map(p => [p.pid, p.tcp]), [[page, true], [forwarded.pid, true]])
   assert.deepEqual(w.room.events.filter(e => e.type === 'preview').map(e => [e.body.state, e.body.pid, e.body.tcp]), [['open', page, true]], 'forwarding is said again')
   await api(w, `previews/${page}/end`, w.host, 'POST')
-  assert.deepEqual((await api(w, 'previews', w.guest)).previews.map(p => p.pid), [forwarded.pid], 'open previews only')
-  assert.deepEqual((await streamLine(w.guest)).previews.map(p => p.pid), [forwarded.pid])
+  assert.deepEqual((await streamLine(w.guest)).previews.map(p => p.pid), [forwarded.pid], 'open previews only')
+  assert.equal((await call(w, 'previews', w.guest)).status, 404, 'no GET previews: every page says it')
   await api(w, 'end', w.host, 'POST')
-  assert.equal((await call(w, 'previews', w.guest)).status, 410)
   assert.deepEqual((await api(w, 'events?after=0&wait=0', w.guest)).previews, [], 'an ended room shares nothing')
-  console.log('OK what is shared: join, GET previews and every page from current state, { pid, tcp } answers, an open event per opening and forwarding')
+  console.log('OK what is shared: join and every page from current state, { pid, tcp } answers, an open event per opening and forwarding')
 }
 
 const enterLink = async (w, pid, bearer = w.guest, path = '/') => new URL((await api(w, `previews/${pid}/ticket`, bearer, 'POST', { path })).url)

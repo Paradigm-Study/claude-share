@@ -124,8 +124,6 @@ function world(
     pages?: Record<string, string>
     /** The share server's answer to a preview window's need. */
     need?: 'delivered' | 'undelivered' | 'shared' | 'old'
-    /** With `need: 'shared'`, the forwarded preview the answer names (a newer server). */
-    needPid?: string
     /** Where the session draws; the host's questions need one. */
     surfaces?: string[]
     /** What `scutil --proxy` prints. */
@@ -203,15 +201,14 @@ function world(
     /** What a poll of the room's events reads: the first of these pages past its `after`, else nothing new. */
     polled?: unknown[]
     /**
-     * What the room shares now (its grants answer at these ports), and what a
-     * newer room lists as shared: join's `previews` and GET previews' answer
-     * (changed live). Absent: an older server, whose answers have no such
-     * field. `join: false`: only GET previews lists them; `old`: an older
-     * server that lists nothing, its GET previews a 404 (`missing`) or an
-     * answer without the field (`unlisted`); `wait`: GET previews holds until
-     * it resolves.
+     * What the room shares now, as the join answer and every page list it
+     * (`previews`, read as each is sent), and where its grants answer.
+     * Absent: what the pages served so far opened (an artifact of a preview,
+     * an `open` event), forwarded once one said so, less those closed since.
      */
-    roomList?: { previews: { pid: string; port: number; tcp: boolean; title?: string }[]; join?: boolean; old?: 'missing' | 'unlisted'; wait?: () => Promise<void> }
+    roomList?: { previews: { pid: string; port: number; tcp: boolean; title?: string }[] }
+    /** While this resolves, a stream opened again (a reload's, a reconnect's) sends nothing: a room slow to answer. */
+    streamHeld?: () => Promise<void>
     /** The ids new rooms get, in turn; then `room0000000000000002`, every time. */
     roomIds?: string[]
     /** `false`: an older server, whose rooms (made or joined) don't say they pass messages between sessions on. */
@@ -258,6 +255,29 @@ function world(
   }
   for (const page of opts.stream ?? []) rememberPreviews(page)
   if (opts.joinHistory) rememberPreviews({ events: opts.joinHistory })
+  // What the room lists as shared on each page it sends (see `roomList`).
+  const sharedNow = new Map<string, { pid: string; port: number; tcp: boolean; title?: string }>()
+  const endedPids = new Set<string>()
+  const served = (page: unknown) => {
+    for (const event of (page as { events?: { type: string; body: Record<string, unknown> }[] })?.events ?? []) {
+      const b = event.body, pid = b?.pid
+      if (typeof pid !== 'string') continue
+      if (event.type === 'preview' && b.state === 'closed') {
+        sharedNow.delete(pid)
+        endedPids.add(pid)
+      } else if (((event.type === 'artifact' && b.kind === 'preview') || (event.type === 'preview' && b.state === 'open')) && typeof b.port === 'number' && !endedPids.has(pid)) {
+        const title = typeof b.title === 'string' && b.title ? { title: b.title } : {}
+        sharedNow.set(pid, { pid, port: b.port, tcp: sharedNow.get(pid)?.tcp === true || b.tcp === true, ...title })
+      }
+    }
+  }
+  const listed = () => (opts.roomList ? [...opts.roomList.previews] : [...sharedNow.values()])
+  // A page as the room sends it: what's shared now beside its events.
+  const withList = (page: unknown) => {
+    served(page)
+    const p = page as { events?: unknown; previews?: unknown } | null
+    return p && typeof p === 'object' && Array.isArray(p.events) && !('previews' in p) ? { ...p, previews: listed() } : page
+  }
   const tcpHelpers: typeof localHelpers = []
   // The host's mailboxes' helpers (started detached: their launchers are
   // gone once they're ready): their settings, pids, the commands they took,
@@ -603,12 +623,15 @@ function world(
       const stop = () => wake()
       next.signal.addEventListener('abort', stop, { once: true })
       try {
-        if (live.sent > 0) yield { stream: 'stdout' as const, text: `${JSON.stringify(live[0])}\n` }
+        if (live.sent > 0) {
+          await opts.streamHeld?.()
+          yield { stream: 'stdout' as const, text: `${JSON.stringify(withList(live[0]))}\n` }
+        }
         while (!next.signal.aborted) {
           if (live.sent < live.length) {
             const line = live[live.sent++]
             rememberPreviews(line)
-            yield { stream: 'stdout' as const, text: `${JSON.stringify(line)}\n` }
+            yield { stream: 'stdout' as const, text: `${JSON.stringify(withList(line))}\n` }
           } else {
             await new Promise<void>(done => {
               wake = done
@@ -629,9 +652,10 @@ function world(
       yield { stream: 'stdout' as const, text: '{"error":"Not a member of this session."}\n\n{"httpStatus":401}\n' }
       return { value: { code: 0, signal: null } }
     }
+    await opts.streamHeld?.()
     for (const line of opts.stream) {
       rememberPreviews(line)
-      yield { stream: 'stdout' as const, text: `${JSON.stringify(line)}\n` }
+      yield { stream: 'stdout' as const, text: `${JSON.stringify(withList(line))}\n` }
     }
     yield { stream: 'stdout' as const, text: '\n{"httpStatus":200}\n' }
     return { value: { code: 0, signal: null } }
@@ -810,7 +834,7 @@ function world(
       if (opts.needWait) await opts.needWait
       if (opts.needStatus) return { value: { status: opts.needStatus, ok: false, headers: {}, text: '{"error":"Too many preview port requests. Try again in a minute."}' } }
       if (opts.need === 'old') return { value: { status: 404, ok: false, headers: {}, text: '{"error":"Not found"}' } }
-      return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify(opts.need === 'shared' ? { shared: true, ...(opts.needPid ? { pid: opts.needPid } : {}) } : { delivered: opts.need !== 'undelivered' }) } }
+      return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify(opts.need === 'shared' ? { shared: true } : { delivered: opts.need !== 'undelivered' }) } }
     }
     if (opts.endFail?.count && method === 'POST' && /\/previews\/[^/]+\/end$/.test(path)) {
       opts.endFail.count -= 1
@@ -872,20 +896,15 @@ function world(
     } else if (opts.paged && path.endsWith('/events') && method === 'GET' && /after=1&/.test(e.url)) {
       if (opts.paged.failRest) return { value: { status: 500, ok: false, headers: {}, text: '{"error":"boom"}' } }
       const row = (seq: number, text: string) => ({ seq, type: 'row', from: { seat: 'host', name: 'Sam', role: 'host' }, ts: 900, body: { kind: 'user', who: 'Sam', text } })
-      body = { seq: 3, events: [row(2, 'second page'), row(3, 'third')], people, ended: false, title: 'demo' }
+      body = withList({ seq: 3, events: [row(2, 'second page'), row(3, 'third')], people, ended: false, title: 'demo' })
     } else if (path.endsWith('/join')) {
       joins += 1
       const history = opts.joinHistory ?? []
-      const listed = opts.roomList && !opts.roomList.old && opts.roomList.join !== false ? { previews: opts.roomList.previews } : {}
-      body = { token: joins === 1 ? 'g' : `g${joins}`, seat: joins === 1 ? 'seat1' : `seat${joins}1`, title: 'demo', host: 'Sam', seq: Math.max(1, ...history.map(e => e.seq)), history, people, latest: opts.latest, ...listed, ...(opts.peer === false ? {} : { peer: true }) }
-    } else if (path.endsWith('/previews') && method === 'GET') {
-      if (opts.roomList?.old === 'missing') return { value: { status: 404, ok: false, headers: {}, text: '{"error":"Not found"}' } }
-      // The list as the room had it when asked, however late the answer comes.
-      body = opts.roomList && !opts.roomList.old ? { previews: [...opts.roomList.previews] } : { ok: true }
-      await opts.roomList?.wait?.()
+      served({ events: history })
+      body = { token: joins === 1 ? 'g' : `g${joins}`, seat: joins === 1 ? 'seat1' : `seat${joins}1`, title: 'demo', host: 'Sam', seq: Math.max(1, ...history.map(e => e.seq)), history, people, latest: opts.latest, previews: listed(), ...(opts.peer === false ? {} : { peer: true }) }
     } else if (path.endsWith('/events') && method === 'GET') {
       const after = Number(/[?&]after=(\d+)/.exec(e.url)?.[1] ?? 0)
-      body = (opts.polled as { seq: number }[] | undefined)?.find(page => page.seq > after) ?? { seq: 1, events: [], people, ended: false, title: 'demo' }
+      body = withList((opts.polled as { seq: number }[] | undefined)?.find(page => page.seq > after) ?? { seq: 1, events: [], people, ended: false, title: 'demo' })
     } else if (/\/previews\/[^/]+\/ticket$/.test(path) && method === 'POST') {
       body = { url: `https://preview.test/__share/enter?room=room0000000000000001&ticket=ticket-${asked.filter(a => a.endsWith('/ticket')).length}` }
     } else if (/\/previews\/[^/]+\/tunnel$/.test(path) && method === 'POST') {
@@ -2189,7 +2208,7 @@ test('saved localhost listeners resume and restore after helper loss without ope
     shown: [{ key: 'preview:pv-local', kind: 'preview', name: 'Sign in (preview)', ts: 900, pid: 'pv-local', port: 3340, path: '/login?next=%2Faccount', tcp: true }],
     localPreviews: [{ pid: 'pv-local', port: 3340 }], activity: [], chat: [], sidebar: null,
   }
-  const asked = world(on, { env: { CLAUDE_CODE_ENTRYPOINT: 'cli' }, store: { 'joined:session-test-0001': saved } })
+  const asked = world(on, { env: { CLAUDE_CODE_ENTRYPOINT: 'cli' }, store: { 'joined:session-test-0001': saved }, roomList: { previews: [{ pid: 'pv-local', port: 3340, tcp: true }] } })
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   on('session.end', ($, e) => ({ sessionId: e.sessionId }))
   await $.session.start(START)
@@ -6572,7 +6591,10 @@ test("Leave while Open moves the page puts nothing back: no mapping is left save
   expect(asked.externals).toEqual([])
 })
 
-test("seated anew while Open forwards the page, what that Open started stops and it forwards both again with the new seat: the page opens, no second press", async ($, on) => {
+// What an Open seated anew while it binds says (`bindForOpen`, the window's `readyProxy`).
+const RESEATED = 'The room reconnected you while the preview was opening. Press Open again.'
+
+test("seated anew while Open forwards the page, what that Open started stops and it says to press Open again: the next Open forwards both with the new seat", async ($, on) => {
   let hold: (() => void) | undefined
   const refusals = { count: 0 }
   const asked = localWorld(on, { streamRefusals: refusals, beforeTunnel: pid => (pid === 'pv-local' && !hold ? new Promise<void>(done => { hold = done }) : Promise.resolve()) })
@@ -6587,18 +6609,24 @@ test("seated anew while Open forwards the page, what that Open started stops and
   await within(asked.clock, () => asked.state.room?.token === 'g2', 5_000)
   expect(asked.state.room?.token).toBe('g2')
   hold!()
+  await eventually(asked.clock, () => asked.toasted.includes(RESEATED))
+  await asked.clock.advance(10)
+  // What the old seat was granted stops; nothing opens, and nothing is saved.
+  expect(first.stopped).toBe(true)
+  expect(asked.externals).toEqual([])
+  expect(asked.state.localPreviews ?? []).toEqual([])
+  // The next Open: both granted to the new seat, and the page opens.
+  await ui.press({ key: 'open-preview' })
   await eventually(asked.clock, () => asked.externals.length)
   await asked.clock.advance(10)
-  // What the old seat was granted stops; both are granted again to the new one, and the page opens.
-  expect(first.stopped).toBe(true)
   expect(asked.sent.filter(s => s.path.endsWith('/tunnel')).map(s => s.headers.authorization)).toEqual(['Bearer g', 'Bearer g', 'Bearer g2', 'Bearer g2'])
   expect(asked.externals).toEqual([WINDOW_URL])
   expect((asked.state.localPreviews ?? []).map(p => [p.pid, p.localPort]).sort()).toEqual([['pv-dep', 3610], ['pv-local', 3340]])
-  expect(asked.toasted.some(t => t.includes('no longer open') || t.includes('reconnected you'))).toBe(false)
+  expect(asked.toasted.some(t => t.includes('no longer open'))).toBe(false)
   await $.command.run({ command: 'stop-sharing', args: '' } as never)
 })
 
-test("seated anew between a listener's grant and its start, the Open goes on with the new seat and opens the page once", async ($, on) => {
+test("seated anew between a listener's grant and its start, the Open stops what it started and says to press Open again: the next opens the page once, with the new seat", async ($, on) => {
   const refusals = { count: 0 }
   const asked = world(on, { localPreview: 'wait', streamRefusals: refusals, stream: localStream })
   const pane = paneCalls(on, false)
@@ -6610,41 +6638,22 @@ test("seated anew between a listener's grant and its start, the Open goes on wit
   await eventually(asked.clock, () => asked.localHelpers.length)
   refusals.count = 1
   await within(asked.clock, () => asked.state.room?.token === 'g2', 5_000)
-  // Up after the reseat: its grant went with the old seat, so it stops and the Open asks again.
+  // Up after the reseat: its grant went with the old seat, so it stops, and the Open says so.
   asked.localHelpers[0]!.send({ state: 'ready', port: 3340 })
-  await eventually(asked.clock, () => asked.localHelpers.length === 2)
+  await eventually(asked.clock, () => asked.toasted.includes(RESEATED))
+  await asked.clock.advance(10)
+  expect(asked.localHelpers).toHaveLength(1)
   expect(asked.localHelpers[0]!.stopped).toBe(true)
+  expect(pane).toEqual([])
+  expect(asked.state.localPreviews ?? []).toEqual([])
+  await room.press({ key: 'open-preview:pv-local' })
+  await eventually(asked.clock, () => asked.localHelpers.length === 2)
   asked.localHelpers[1]!.send({ state: 'ready', port: 3340 })
   await eventually(asked.clock, () => pane.length)
   await asked.clock.advance(10)
   expect(pane).toEqual([LOCAL_URL])
   expect(asked.state.localPreviews).toEqual([{ pid: 'pv-local', port: 3340, localPort: 3340 }])
   expect(asked.sent.filter(s => s.path.endsWith('/tunnel')).map(s => s.headers.authorization)).toEqual(['Bearer g', 'Bearer g2'])
-  await $.command.run({ command: 'stop-sharing', args: '' } as never)
-})
-
-test('seated anew twice while one Open forwards the page, it stops there and says to press Open again', async ($, on) => {
-  const refusals = { count: 0 }
-  const asked = world(on, { localPreview: 'wait', streamRefusals: refusals, stream: localStream })
-  const pane = paneCalls(on, false)
-  await $.prompt.submit({ text: LINK, origin: { kind: 'composer' }, wait: false })
-  await asked.clock.advance(10)
-  const room = await $.ui.mount(roomPane())
-  await room.press({ key: 'tab-shown' })
-  await room.press({ key: 'open-preview:pv-local' })
-  for (const [n, token] of [[1, 'g2'], [2, 'g3']] as const) {
-    await eventually(asked.clock, () => asked.localHelpers.length === n)
-    refusals.count = 1
-    await within(asked.clock, () => asked.state.room?.token === token, 5_000)
-    asked.localHelpers[n - 1]!.send({ state: 'ready', port: 3340 })
-  }
-  await eventually(asked.clock, () => asked.toasted.some(t => t.includes('reconnected you')))
-  await asked.clock.advance(10)
-  expect(asked.toasted).toContain('The room reconnected you while the preview was opening. Press Open again.')
-  expect(asked.localHelpers).toHaveLength(2)
-  expect(asked.localHelpers.every(h => h.stopped)).toBe(true)
-  expect(pane).toEqual([])
-  expect(asked.state.localPreviews ?? []).toEqual([])
   await $.command.run({ command: 'stop-sharing', args: '' } as never)
 })
 
@@ -6657,7 +6666,7 @@ test("a Local port 0.11.24 saved is only where the listener was: a reload binds 
     // The person chose localhost:4000 for the host's 3340, in 0.11.24's Room.
     localPreviews: [{ pid: 'pv-local', port: 3340, localPort: 4000, requestedPort: 4000 }], activity: [], chat: [], sidebar: null,
   }
-  const asked = world(on, { browser: { platform: 'Darwin', path: null }, env: { CLAUDE_CODE_ENTRYPOINT: 'cli' }, localPreviewByPid: { 'pv-local': { taken: [3340, 4000], port: 44321 } }, files: { [checkpointPath('joined:session-test-0001')]: JSON.stringify({ version: 1, value: saved }) }, stream: [{ seq: 2, events: [], people: PREVIEW_PEOPLE, ended: false, title: 'demo' }] })
+  const asked = world(on, { browser: { platform: 'Darwin', path: null }, env: { CLAUDE_CODE_ENTRYPOINT: 'cli' }, localPreviewByPid: { 'pv-local': { taken: [3340, 4000], port: 44321 } }, files: { [checkpointPath('joined:session-test-0001')]: JSON.stringify({ version: 1, value: saved }) }, stream: [{ seq: 2, events: [], people: PREVIEW_PEOPLE, ended: false, title: 'demo' }], roomList: { previews: [{ pid: 'pv-local', port: 3340, tcp: true }] } })
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   await $.session.start(START)
   // Back exactly where it was, or not at all: 4000 is taken now.
@@ -7108,7 +7117,7 @@ test("a listener this computer no longer lets Claude Code listen on stays closed
     shown: [{ key: 'preview:pv-low', kind: 'preview', name: 'App (preview)', ts: 900, pid: 'pv-low', port: 80, path: '/', tcp: true }],
     localPreviews: [{ pid: 'pv-low', port: 80, localPort: 80, requestedPort: 80 }], activity: [], chat: [], sidebar: null,
   }
-  const asked = world(on, { browser: { platform: 'Darwin', path: null }, env: { CLAUDE_CODE_ENTRYPOINT: 'cli' }, localPreviewByPid: { 'pv-low': { denied: [80] } }, files: { [checkpointPath('joined:session-test-0001')]: JSON.stringify({ version: 1, value: saved }) }, stream: [{ seq: 2, events: [LOW_SHOWN], people: PREVIEW_PEOPLE, ended: false, title: 'demo' }] })
+  const asked = world(on, { browser: { platform: 'Darwin', path: null }, env: { CLAUDE_CODE_ENTRYPOINT: 'cli' }, localPreviewByPid: { 'pv-low': { denied: [80] } }, files: { [checkpointPath('joined:session-test-0001')]: JSON.stringify({ version: 1, value: saved }) }, stream: [{ seq: 2, events: [LOW_SHOWN], people: PREVIEW_PEOPLE, ended: false, title: 'demo' }], roomList: { previews: [{ pid: 'pv-low', port: 80, tcp: true }] } })
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   await $.session.start(START)
   await eventually(asked.clock, () => asked.toasted.some(t => t.includes('forwarded again')))
@@ -7316,7 +7325,7 @@ test("seated anew while a window Open starts its proxy, the Open goes on: the pa
   await $.command.run({ command: 'stop-sharing', args: '' } as never)
 })
 
-test("seated anew while a window Open's tunnel is granted, it's asked once more with the new seat and the window opens", async ($, on) => {
+test("seated anew while a window Open's tunnel is granted, the Open says to press Open again: the next one's tunnel is the new seat's, and the window opens", async ($, on) => {
   let hold: (() => void) | undefined
   const refusals = { count: 0 }
   const asked = windowWorld(on, { streamRefusals: refusals, beforeTunnel: pid => (pid === 'pv-local' && !hold ? new Promise<void>(done => { hold = done }) : Promise.resolve()) })
@@ -7328,6 +7337,10 @@ test("seated anew while a window Open's tunnel is granted, it's asked once more 
   refusals.count = 1
   await within(asked.clock, () => asked.state.room?.token === 'g2', 5_000)
   hold!()
+  await eventually(asked.clock, () => asked.toasted.includes(RESEATED))
+  await asked.clock.advance(20)
+  expect(asked.launches).toHaveLength(0)
+  await ui.press({ key: 'open-preview' })
   await within(asked.clock, () => asked.launches.length, 5_000)
   await asked.clock.advance(20)
   expect(asked.sent.filter(s => s.path.endsWith('/tunnel')).map(s => s.headers.authorization)).toEqual(['Bearer g', 'Bearer g2'])
@@ -7336,7 +7349,7 @@ test("seated anew while a window Open's tunnel is granted, it's asked once more 
   await $.command.run({ command: 'stop-sharing', args: '' } as never)
 })
 
-test("seated anew between a window tunnel's grant and its start, what the old seat was granted stops, and the new seat's tunnel serves the window", async ($, on) => {
+test("seated anew between a window tunnel's grant and its start, what the old seat was granted stops and the Open says to press Open again: the next one's tunnel serves the window", async ($, on) => {
   const refusals = { count: 0 }
   const asked = windowWorld(on, { localPreview: 'wait', streamRefusals: refusals })
   await $.prompt.submit({ text: LINK, origin: { kind: 'composer' }, wait: false })
@@ -7347,13 +7360,19 @@ test("seated anew between a window tunnel's grant and its start, what the old se
   refusals.count = 1
   await within(asked.clock, () => asked.state.room?.token === 'g2', 5_000)
   asked.localHelpers[0]!.send({ state: 'ready', port: 45001 })
+  await eventually(asked.clock, () => asked.toasted.includes(RESEATED))
+  await asked.clock.advance(20)
+  // Nothing opened for it: its tunnel and the proxy it started stop.
+  expect(asked.localHelpers[0]!.stopped).toBe(true)
+  expect(asked.proxies[0]!.stopped).toBe(true)
+  expect(asked.launches).toHaveLength(0)
+  await ui.press({ key: 'open-preview' })
   await eventually(asked.clock, () => asked.localHelpers.length === 2)
   asked.localHelpers[1]!.send({ state: 'ready', port: 45002 })
   await within(asked.clock, () => asked.launches.length, 5_000)
   await asked.clock.advance(20)
-  expect(asked.localHelpers[0]!.stopped).toBe(true)
   expect(asked.sent.filter(s => s.path.endsWith('/tunnel')).map(s => s.headers.authorization)).toEqual(['Bearer g', 'Bearer g2'])
-  expect(routesOf(asked)?.routes['3340']).toBe(45002)
+  expect(asked.proxies.at(-1)!.routes.at(-1)?.routes['3340']).toBe(45002)
   await $.command.run({ command: 'stop-sharing', args: '' } as never)
 })
 
@@ -8279,7 +8298,7 @@ test("a reload that finds the window closed forgets its port: a window on the ho
 })
 
 test('updated in place from a version that kept no record of what the host forwards, a guest still opens it', async ($, on) => {
-  // As 0.11.24 ran: Shown alone, no `forwarded` written, and a room that lists nothing. Shown is the record.
+  // As 0.11.24 ran: Shown alone, no `forwarded` written. Shown is the record, as the room's list keeps it.
   const unwritten = new Set(['forwarded'])
   const stream: unknown[] = [{ seq: 2, events: [WINDOW_SHOWN], people: PREVIEW_PEOPLE, ended: false, title: 'demo' }]
   const asked = windowWorld(on, { stream, unwritten })
@@ -8327,7 +8346,7 @@ test("a later showing without forwarding keeps what the preview was forwarded as
   await $.command.run({ command: 'stop-sharing', args: '' } as never)
 })
 
-test("forwarding reaches a guest as the room's open event says it, before any artifact of the host's does", async ($, on) => {
+test("forwarding reaches a guest as the room's list says it, before any artifact of the host's does", async ($, on) => {
   // Shown through its link first.
   const LINKED = { ...WINDOW_SHOWN, body: { kind: 'preview', pid: 'pv-local', port: 3340, path: '/login?next=%2Faccount', title: 'Sign in', host: '127.0.0.1' } }
   const stream: unknown[] = [{ seq: 2, events: [LINKED], people: PREVIEW_PEOPLE, ended: false, title: 'demo' }]
@@ -8377,7 +8396,7 @@ const LOST_PLACE = {
   localPreviews: [{ pid: 'pv-local', port: 3340, localPort: 3340, requestedPort: 3340 }, { pid: 'pv-ended', port: 3341, localPort: 3341, requestedPort: 3341 }],
 }
 
-test("a reopened place asks the room what it shares before its listeners come back: one Shown lost the forwarding of comes back, one ended meanwhile stays closed", async ($, on) => {
+test("a reopened place takes what the room shares from its answer before its listeners come back: one Shown lost the forwarding of comes back, one ended meanwhile stays closed", async ($, on) => {
   const asked = localWorld(on, {
     roomList: { previews: [{ pid: 'pv-local', port: 3340, tcp: true, title: 'App' }] },
     files: { [checkpointPath('joined:session-test-0001')]: JSON.stringify({ version: 1, value: LOST_PLACE }) },
@@ -8395,30 +8414,11 @@ test("a reopened place asks the room what it shares before its listeners come ba
   await $.command.run({ command: 'stop-sharing', args: '' } as never)
 })
 
-for (const [old, said] of [['missing', 'a 404'], ['unlisted', 'no list in its answer']] as const) {
-  test(`a reopened place with an older server (${said}) goes on as its Shown says, as 0.11.24 did`, async ($, on) => {
-    const asked = localWorld(on, {
-      // What the room has, though it says nothing of it.
-      roomList: { previews: [{ pid: 'pv-local', port: 3340, tcp: true, title: 'App' }, { pid: 'pv-ended', port: 3341, tcp: true, title: 'App' }], old },
-      files: { [checkpointPath('joined:session-test-0001')]: JSON.stringify({ version: 1, value: LOST_PLACE }) },
-      stream: [{ seq: 3, events: [], people: PREVIEW_PEOPLE, ended: false, title: 'demo' }],
-    })
-    on('session.start', ($, e) => ({ cwd: e.cwd }))
-    await $.session.start(START)
-    await eventually(asked.clock, () => asked.localHelpers.some(h => h.pid === 'pv-ended'))
-    await asked.clock.advance(20)
-    expect(asked.urls.some(u => u.endsWith('/api/rooms/room0000000000000001/previews'))).toBe(true)
-    expect(tunnels(asked).map(t => [t.port, t.strict])).toEqual([[3341, true]])
-    expect(asked.state.shown?.find(s => s.pid === 'pv-ended')?.closed).toBeUndefined()
-    expect((asked.state.localPreviews ?? []).map(p => p.pid)).toEqual(['pv-ended'])
-    await $.command.run({ command: 'stop-sharing', args: '' } as never)
-  })
-}
-
-test("a reload whose room is slow to say what it shares brings its listeners back anyway, a moment on", async ($, on) => {
+test("a reload whose room is slow to send its first page brings its listeners back anyway, a moment on", async ($, on) => {
   let release: (() => void) | undefined
-  const roomList: { previews: { pid: string; port: number; tcp: boolean; title?: string }[]; wait?: () => Promise<void> } = { previews: [{ pid: 'pv-local', port: 3340, tcp: true, title: 'Sign in' }, { pid: 'pv-dep', port: 3610, tcp: true }] }
-  const asked = autoWorld(on, { roomList })
+  const hold: { until?: Promise<void> } = {}
+  const roomList = { previews: [{ pid: 'pv-local', port: 3340, tcp: true, title: 'Sign in' }, { pid: 'pv-dep', port: 3610, tcp: true }] }
+  const asked = autoWorld(on, { roomList, streamHeld: () => hold.until ?? Promise.resolve() })
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   await $.session.start(START)
   await $.prompt.submit({ text: LINK, origin: { kind: 'composer' }, wait: false })
@@ -8428,44 +8428,42 @@ test("a reload whose room is slow to say what it shares brings its listeners bac
   await eventually(asked.clock, () => asked.externals.length)
   await asked.clock.advance(10)
   // A reload (the helpers go with the old module) while the room is slow to answer.
-  roomList.wait = () => new Promise<void>(done => { release = done })
+  hold.until = new Promise<void>(done => { release = done })
   for (const helper of asked.localHelpers) helper.exit()
   await asked.clock.advance(10)
   await $.session.start(START)
-  await eventually(asked.clock, () => Boolean(release))
   const before = asked.localHelpers.length
   await asked.clock.advance(2_000)
   expect(asked.localHelpers.length).toBe(before)
   await within(asked.clock, () => asked.localHelpers.length > before, 2_000)
   await asked.clock.advance(20)
   expect(asked.localHelpers.filter(h => h.pid === 'pv-local' && !h.stopped)).toHaveLength(1)
-  roomList.wait = undefined
+  hold.until = undefined
   release!()
   await $.command.run({ command: 'stop-sharing', args: '' } as never)
 })
 
-test("a list of what's shared, asked for before the room spoke of a preview, has no say on it", async ($, on) => {
-  let release: (() => void) | undefined
-  const roomList: { previews: { pid: string; port: number; tcp: boolean; title?: string }[]; wait?: () => Promise<void> } = { previews: [{ pid: 'pv-local', port: 3340, tcp: true, title: 'Sign in' }] }
-  const stream: unknown[] = [{ seq: 2, events: [WINDOW_SHOWN], people: PREVIEW_PEOPLE, ended: false, title: 'demo' }]
-  const asked = windowWorld(on, { stream, roomList })
+test("a reload's listeners come back once the room's next page says what it shares: one it ended meanwhile doesn't", async ($, on) => {
+  const roomList = { previews: [{ pid: 'pv-local', port: 3340, tcp: true, title: 'Sign in' }, { pid: 'pv-dep', port: 3610, tcp: true }] }
+  const asked = autoWorld(on, { roomList })
   on('session.start', ($, e) => ({ cwd: e.cwd }))
+  await $.session.start(START)
   await $.prompt.submit({ text: LINK, origin: { kind: 'composer' }, wait: false })
   await asked.clock.advance(10)
-  // A reload asks the room what it shares; its answer, as the room had it then, comes late.
-  roomList.wait = () => new Promise<void>(done => { release = done })
+  const ui = await $.ui.mount(band('desktop'))
+  await ui.press({ key: 'open-preview' })
+  await eventually(asked.clock, () => asked.externals.length)
+  await asked.clock.advance(10)
+  // A reload while the host stopped what the page used, the room's events of it gone past.
+  roomList.previews = [roomList.previews[0]!]
+  for (const helper of asked.localHelpers) helper.exit()
+  await asked.clock.advance(10)
+  const before = asked.localHelpers.length
   await $.session.start(START)
-  await eventually(asked.clock, () => Boolean(release))
-  roomList.wait = undefined
-  // Meanwhile the host shares another page for forwarding.
-  const NEW = { seq: 3, type: 'preview', ts: 950, from: HOST_FROM, body: { state: 'open', pid: 'pv-new', port: 3341, tcp: true, title: 'Admin' } }
-  roomList.previews = [...roomList.previews, { pid: 'pv-new', port: 3341, tcp: true, title: 'Admin' }]
-  stream.push({ seq: 3, events: [NEW], people: PREVIEW_PEOPLE, ended: false, title: 'demo' })
-  await within(asked.clock, () => forwardedPids(asked).includes('pv-new'), 5_000)
-  release!()
+  await within(asked.clock, () => asked.localHelpers.length > before, 1_000)
   await asked.clock.advance(50)
-  // The late list doesn't name it, and has no say on it.
-  expect(forwardedPids(asked)).toEqual(['pv-local', 'pv-new'])
+  expect(asked.localHelpers.slice(before).map(h => h.pid)).toEqual(['pv-local'])
+  expect(asked.state.shown?.find(s => s.pid === 'pv-dep')).toMatchObject({ closed: true, tcp: false })
   await $.command.run({ command: 'stop-sharing', args: '' } as never)
 })
 
@@ -8490,7 +8488,7 @@ test('seated anew, a guest takes what the room shares as the new seat heard it',
   await $.command.run({ command: 'stop-sharing', args: '' } as never)
 })
 
-test('back after a gap in its connection, a guest asks the room what it shares', async ($, on) => {
+test("back after a gap in its connection, a guest takes what the room shares from the room's next page", async ($, on) => {
   const roomList = { previews: [{ pid: 'pv-local', port: 3340, tcp: true, title: 'Sign in' }] }
   const stream: unknown[] = [{ seq: 2, events: [WINDOW_SHOWN], people: PREVIEW_PEOPLE, ended: false, title: 'demo' }]
   const asked = windowWorld(on, { stream, roomList })
@@ -8509,7 +8507,7 @@ test('back after a gap in its connection, a guest asks the room what it shares',
   // Ended as its own end would: the window asking for it again asks the host nothing.
   expect(asked.state.needAsked?.ports).toEqual([3340])
   expect(asked.state.connection).toBe('live')
-  expect(asked.urls.filter(u => u.endsWith('/previews'))).toHaveLength(1)
+  expect(asked.urls.some(u => u.endsWith('/previews'))).toBe(false)
   await $.command.run({ command: 'stop-sharing', args: '' } as never)
 })
 
@@ -8528,12 +8526,20 @@ test("a preview the room ended stays ended for a guest, though an artifact of th
   await $.command.run({ command: 'stop-sharing', args: '' } as never)
 })
 
-test("a need the room answers naming a page shown through its link forwards it as that page, never as what another page uses", async ($, on) => {
+test("a need the room answers as forwarded already takes nothing up itself: the room's next page lists it, forwarded as the page it was shown as", async ($, on) => {
   const LINKED = { seq: 3, type: 'artifact', ts: 901, from: HOST_FROM, body: { kind: 'preview', pid: 'pv-earlier', port: 5555, path: '/docs', title: 'Docs' } }
-  const asked = windowWorld(on, { need: 'shared', needPid: 'pv-earlier', localPreviewByPid: { 'pv-earlier': { port: 45030 } }, stream: [{ seq: 3, events: [WINDOW_SHOWN, LINKED], people: PREVIEW_PEOPLE, ended: false, title: 'demo' }] })
+  const stream: unknown[] = [{ seq: 3, events: [WINDOW_SHOWN, LINKED], people: PREVIEW_PEOPLE, ended: false, title: 'demo' }]
+  const asked = windowWorld(on, { need: 'shared', localPreviewByPid: { 'pv-earlier': { port: 45030 } }, stream })
   await openedInWindow($, asked)
   asked.proxies[0]!.send({ state: 'blocked', port: 5555 })
-  await eventually(asked.clock, () => forwardedPids(asked).includes('pv-earlier'))
+  await eventually(asked.clock, () => asked.sent.some(s => s.path.endsWith('/need')))
+  await asked.clock.advance(50)
+  // Nothing taken up from the answer alone, and nothing said.
+  expect(forwardedPids(asked)).toEqual(['pv-local'])
+  expect(asked.toasted.some(t => t.startsWith('Your preview tried localhost:5555'))).toBe(false)
+  // The host's Allow forwarding, as the room's page says it.
+  stream.push({ seq: 4, events: [{ seq: 4, type: 'preview', ts: 950, from: HOST_FROM, body: { state: 'open', pid: 'pv-earlier', port: 5555, tcp: true, title: 'Docs' } }], people: PREVIEW_PEOPLE, ended: false, title: 'demo' })
+  await within(asked.clock, () => forwardedPids(asked).includes('pv-earlier'), 5_000)
   await asked.clock.advance(20)
   expect(asked.state.shown?.find(s => s.pid === 'pv-earlier')).toMatchObject({ name: 'Docs (preview)', path: '/docs', tcp: true })
   expect(asked.state.shown?.find(s => s.pid === 'pv-earlier')?.dependency).toBeUndefined()
@@ -11446,6 +11452,7 @@ test('a session Claude Desktop reopens under a new id takes its window profile b
     env: { CLAUDE_CODE_HOST_SESSION_ID: PLACE },
     files: { [checkpointPath('joined:session-test-0001')]: JSON.stringify({ version: 1, value: saved }), '/home/scott/.claude/shared-session/browser/.keep': '' },
     stream: [{ seq: 2, events: [], people: PREVIEW_PEOPLE, ended: false, title: 'demo' }],
+    roomList: { previews: [{ pid: 'pv-local', port: 3340, tcp: true }] },
   })
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   await $.session.start(START)
@@ -11453,7 +11460,7 @@ test('a session Claude Desktop reopens under a new id takes its window profile b
   expect(asked.state.previewWindow).toEqual({ room: 'http://share.test/room0000000000000001', port: 47100, opened: [], profile: name })
   const gc = await eventually(asked.clock, () => asked.spawned.find(s => s.input?.startsWith('# shared-session: clean up preview profiles')))
   expect(gc?.input).toContain(`keep='${name}'`)
-  // Nothing more heard from the room: what the place kept is enough to open.
+  // No new events: what the place kept, and the room's list of it, are enough to open.
   const ui = await $.ui.mount(band('desktop'))
   await ui.press({ key: 'open-preview' })
   await eventually(asked.clock, () => asked.launches.length)
@@ -11729,37 +11736,6 @@ test("a refusal Open preview can't reopen points to the Room's Open for it", asy
   await asked.clock.advance(10)
   expect(asked.launches[1]!.at(-1)).toBe('http://localhost:61199/')
   expect(asked.state.previewNeedsOpen).toEqual([])
-  await $.command.run({ command: 'stop-sharing', args: '' } as never)
-})
-
-test("a need the room answers naming its preview takes that preview up: the window reaches it as the host forwards it", async ($, on) => {
-  const asked = windowWorld(on, { need: 'shared', needPid: 'pv-earlier', localPreviewByPid: { 'pv-earlier': { port: 45030 } } })
-  await openedInWindow($, asked)
-  asked.proxies[0]!.send({ state: 'blocked', port: 5555 })
-  await eventually(asked.clock, () => asked.state.shown?.some(s => s.pid === 'pv-earlier'))
-  await asked.clock.advance(20)
-  // Taken up in Shown, as what a page uses: a dependency, at localhost.
-  expect(asked.state.shown?.find(s => s.pid === 'pv-earlier')).toEqual({ key: 'preview:pv-earlier', kind: 'preview', name: 'localhost:5555 · used by previews', ts: expect.any(Number), pid: 'pv-earlier', port: 5555, tcp: true, host: 'localhost', dependency: true })
-  expect(routesOf(asked)?.startable).toContain(5555)
-  asked.proxies[0]!.send({ state: 'want', port: 5555 })
-  await eventually(asked.clock, () => routesOf(asked)?.routes['5555'] === 45030)
-  // Shared, so nothing is said; what a page uses is never offered as a page of its own.
-  expect(asked.toasted.some(t => t.startsWith('Your preview tried localhost:5555'))).toBe(false)
-  const ui = await $.ui.mount(band('desktop'))
-  await asked.clock.advance(10)
-  expect(await ui.find({ key: 'open-preview' })).toBeUndefined()
-  await $.command.run({ command: 'stop-sharing', args: '' } as never)
-})
-
-test('a need answered as shared without its preview (an older server) takes nothing up and says nothing', async ($, on) => {
-  const asked = windowWorld(on, { need: 'shared' })
-  await openedInWindow($, asked)
-  asked.proxies[0]!.send({ state: 'blocked', port: 5555 })
-  await eventually(asked.clock, () => asked.sent.some(s => s.path.endsWith('/need')))
-  await asked.clock.advance(50)
-  expect(forwardedPids(asked)).toEqual(['pv-local'])
-  expect(routesOf(asked)?.startable ?? []).not.toContain(5555)
-  expect(asked.toasted.some(t => t.startsWith('Your preview tried localhost:5555'))).toBe(false)
   await $.command.run({ command: 'stop-sharing', args: '' } as never)
 })
 

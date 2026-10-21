@@ -1110,7 +1110,9 @@ try {
     const joined = await (await w.obj.fetch(req(w, 'join', null, 'POST', { name: 'Late' }))).json()
     assert.deepEqual(joined.previews, [{ pid: w.pid, port: 34567, tcp: true, title: 'localhost:34567' }, { pid: page, port: 43480, tcp: false, title: 'Page' }])
     await reconstruct(w)
-    assert.deepEqual(await api(w, 'previews', joined.token), { previews: joined.previews })
+    // Every page lists it, a reconstructed room's too; there's no list of its own to ask for.
+    assert.deepEqual((await api(w, 'events?after=0&wait=0', joined.token)).previews, joined.previews)
+    assert.equal((await w.obj.fetch(req(w, 'previews', joined.token))).status, 404)
     assert.deepEqual(w.obj.room.events.filter(e => e.type === 'preview').map(e => [e.body.state, e.body.pid, e.body.tcp]), [['open', w.pid, true], ['open', page, false]])
     const pair = await openPublic(w, page, false)
     const preview = (path, init = {}) => new Request(`https://room.internal/${w.key}/__preview${path}`, { ...init, headers: { cookie: pair.cookie, ...init.headers } })
