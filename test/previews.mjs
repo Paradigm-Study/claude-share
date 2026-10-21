@@ -813,8 +813,8 @@ async function admit(w, url, cookie) {
     'on Cloudflare, which can\'t see that, once one side sends more than 4 MB in a second', 'those waiting hold 8 MB per room at most', 'a key of its own, which can\'t join it',
     'A room keeps its newest 5000 events, 16 MB of them at most', '10,240 files at most), 128 open previews, and events of 128 KB each', 'a room its newest 128 links and 256 browser sessions',
     'the browser session it starts (which preview and seat) for 12 hours from the last link that browser opened', 'Signing in finishes only when you press Continue on this server\'s page',
-    'Claude Code\'s token is made when it picks up the sign-in, and the server keeps only its hash']) assert(text.includes(said), said)
-  assert.equal([HISTORY_BYTES, EVENT_BYTES, ROOM_FILES_COUNT, ROOM_PREVIEWS_MAX, PUBLIC_LIMITS.roomTickets, PUBLIC_LIMITS.roomSessions, PUBLIC_LIMITS.pendingBytes, PUBLIC_LIMITS.bytesPerWindow].join(), [16 * 1024 ** 2, 128 * 1024, 10_240, 128, 128, 256, 8 * 1024 ** 2, 4 * 1024 ** 2].join())
+    'Claude Code\'s token is made when it picks up the sign-in, and the server keeps only its hash', 'a connection closes if 1 MiB of control messages to one side goes unacknowledged (each acknowledgement covers everything sent before it), however long it lives']) assert(text.includes(said), said)
+  assert.equal([HISTORY_BYTES, EVENT_BYTES, ROOM_FILES_COUNT, ROOM_PREVIEWS_MAX, PUBLIC_LIMITS.roomTickets, PUBLIC_LIMITS.roomSessions, PUBLIC_LIMITS.pendingBytes, PUBLIC_LIMITS.bytesPerWindow, TCP_LIMITS.bufferBytes].join(), [16 * 1024 ** 2, 128 * 1024, 10_240, 128, 128, 256, 8 * 1024 ** 2, 4 * 1024 ** 2, 1024 ** 2].join())
   console.log('OK the home page says when expired links and sessions go, that a new link renews a session, that clearing needs HTTPS, how a sign-in finishes, and the limits as the server keeps them')
 }
 
@@ -939,17 +939,53 @@ async function nodeChecks() {
     assert.ok(Array.isArray(first.events))
     const cap = await ok(`${base}/previews/${forwarded.pid}/tunnel`, guest.token, 'POST', {})
     assert.equal((await http(`${base}/previews/${page.pid}/tunnel`, guest.token, 'POST', {})).status, 403)
-    // A TCP admission writes the counters' small file before the socket opens,
-    // never every room's snapshot (D6).
+    // A TCP admission writes nothing: the room's minute of opens is memory's,
+    // so neither the counters' small file nor every room's snapshot (D6).
     const stats = () => readFile(`${database}.tcp`, 'utf8').then(text => JSON.parse(text).rooms[room.id]).catch(() => null)
     const snapshot = await readFile(database, 'utf8')
     const tunnel = relay.connect(`${origin.replace('http', 'ws')}${base}/previews/${forwarded.pid}/tunnel`, { authorization: `Bearer ${cap.token}` }, [], { message() {}, close() {} })
     for (let i = 0; i < 300 && !tunnel.isOpen(); i++) await wait(10)
     assert(tunnel.isOpen(), 'the TCP tunnel opened')
-    const counted = await stats()
-    assert.equal(counted.opens.count, 2, 'the grant and the open, in the small file')
+    assert.equal((await stats()) ?? null, null, 'no counters written for the grant or the open')
     assert.equal(await readFile(database, 'utf8'), snapshot, 'the rooms snapshot was not rewritten')
     tunnel.close()
+    // A byte through a paired channel (the host's stream names it, the host's
+    // relay takes it up): the room reserves its byte budget, and the small
+    // file has it before the byte goes on.
+    const carry = async () => {
+      // The host's stream, on a connection of its own; a grant asked while it's open.
+      const asks = [], live = { paged: false, text: '' }
+      const hostStream = httpRequest(`${origin}${base}/stream?tcp=1`, { agent: false, headers: { authorization: `Bearer ${room.token}`, 'x-shared-session-version': PLUGIN_LATEST } }, res => {
+        res.setEncoding('utf8')
+        res.on('data', text => {
+          live.text += text
+          for (let at; (at = live.text.indexOf('\n')) !== -1; live.text = live.text.slice(at + 1)) {
+            const row = JSON.parse(live.text.slice(0, at))
+            live.paged = true
+            if (row.tcp) asks.push(row.tcp)
+          }
+        })
+      })
+      hostStream.on('error', () => {})
+      hostStream.end()
+      for (let i = 0; i < 300 && !live.paged; i++) await wait(10)
+      assert(live.paged, "the host's stream is open")
+      const fresh = await ok(`${base}/previews/${forwarded.pid}/tunnel`, guest.token, 'POST', {})
+      let ready = false, delivered = false
+      const guestWs = relay.connect(`${origin.replace('http', 'ws')}${base}/previews/${forwarded.pid}/tunnel`, { authorization: `Bearer ${fresh.token}` }, [], { message(data, binary) { if (!binary && JSON.parse(data).t === 'ready') ready = true }, close() {} })
+      for (let i = 0; i < 300 && !asks.length; i++) await wait(10)
+      assert(asks.length, 'the host stream names the channel')
+      const hostWs = relay.connect(`${origin.replace('http', 'ws')}${base}/ws/${asks[0].id}`, { authorization: `Bearer ${room.token}` }, [], { message(_data, binary) { if (binary) delivered = true }, close() {} })
+      for (let i = 0; i < 300 && !ready; i++) await wait(10)
+      assert(ready, 'both halves ready')
+      guestWs.send(Buffer.from([1]), true)
+      for (let i = 0; i < 300 && !delivered; i++) await wait(10)
+      assert(delivered, 'the byte went through')
+      guestWs.close(); hostWs.close(); hostStream.destroy()
+      await wait(700) // past the counters' half-second debounce for the refund
+    }
+    await carry()
+    assert.equal((await stats()).used, TCP_LIMITS.reserveBytes, 'its reservation, in the small file')
     // A link minted before a restart still opens after it (D2a).
     const kept = await ok(`${base}/previews/${page.pid}/ticket`, guest.token, 'POST', { path: '/kept' })
     // It names the room by its preview key, which joins nothing (D2-2), and the
@@ -998,12 +1034,13 @@ async function nodeChecks() {
       await live.read()
       try { return (await http(`${base}/previews/${pid}/tunnel`, guest.token, 'POST', {})).status } finally { await live.cancel() }
     }
-    const opens = (await stats()).opens.count
+    const used = (await stats()).used
     await stop(); await start()
     // Shares and grants were saved before their answers.
     assert.equal(await granted(page.pid), 403)
     assert.equal(await granted(forwarded.pid), 200)
-    assert.equal((await stats()).opens.count, opens + 1, 'the counters went on from their own file')
+    await carry()
+    assert.equal((await stats()).used, used + TCP_LIMITS.reserveBytes, 'the byte budget went on from its own file')
     const reopened = await admitted(kept.url)
     assert.equal(reopened.status, 302); assert.equal(reopened.headers.get('location'), '/kept')
     await ok(`${base}/previews`, room.token, 'POST', { port: 43700, tcp: true })

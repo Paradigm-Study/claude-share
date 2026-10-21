@@ -253,7 +253,8 @@ await nodeChecks()
     }
     async delete(keys) { for (const key of Array.isArray(keys) ? keys : [keys]) this.data.delete(key) }
     async deleteAll() { this.data.clear() }
-    async setAlarm(at) { this.alarm = at }
+    async setAlarm(at) { this.alarm = at; this.alarms = (this.alarms ?? 0) + 1 }
+    async getAlarm() { return this.alarm }
     async transaction(fn) { return fn(this) }
   }
   class State {

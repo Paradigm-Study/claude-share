@@ -119,7 +119,7 @@ export const TCP_LIMITS = Object.freeze({
   seatCaps: 2, roomCaps: 128, opensPerMinute: 1200, seatOpensPerMinute: 240, openWindowMs: 60_000,
   pairMs: 10_000, roomBytes: 1024 ** 3, reserveBytes: 1024 ** 2,
   dataBytes: 65_536, creditFrames: 4, creditBytes: 256 * 1024,
-  controlBytes: 256, bufferBytes: 1024 ** 2, messageFragments: 4096,
+  controlBytes: 256, bufferBytes: 1024 ** 2, checkBytes: 16 * 1024, messageFragments: 4096,
   rateWindowMs: 1000, dataPerWindow: 1024, controlPerWindow: 2048, wireFramesPerWindow: 4096,
   closeMs: 1000,
 })
@@ -1659,7 +1659,7 @@ section.more { padding:0 0 72px; }
       <li><b>Accounts, only for teams:</b> sharing and joining need none. If you sign in (GitHub or Google) to use teams, the server keeps your name, username, verified email, which GitHub organizations you're in, the teams you're in and their settings, which open sessions are shared with each team, and invites to a session (who invited whom, until it's joined, dismissed, ends, or 12 hours pass). Signing in finishes only when you press Continue on this server's page. From Shared Sessions 0.11.25 on, the page and Claude Code show the same code, and you continue only if they match; with an older version, the page shows no code. Until you press Continue, the server keeps who GitHub or Google said you are; after ten minutes that sign-in stops working, and it's deleted the next time Claude Code asks for it or anyone signs in. Claude Code's token is made when it picks up the sign-in, and the server keeps only its hash, never the token itself. Sign-ins stay until you delete your account (<code>/team delete-account</code>), which removes them at once. Signed in, a session you share or join also knows your account for as long as it lasts, so your sessions count as one person.</li>
       <li><b>Who can see it:</b> anyone with the room's link, or for a session shared with a team that keeps it to its people, only the people in that team. Links are long and random; forward one only to people you'd hand the session to. Content is encrypted in transit, not end to end: the server can read what passes through it.</li>
       <li><b>What runs where:</b> a teammate's prompt runs on the host's machine. Reads inside the host's project run without asking; everything else asks the host first, by default.</li>
-      <li><b>Limits:</b> new rooms and joins are rate-limited per network; rooms hold up to 20 people, 100 MB of files (10,240 files at most), 128 open previews, and events of 128 KB each. Previews opened through their link limit request bodies to 1 MB and response bodies to 20 MB, and allow 512 requests waiting per room, 32 WebSockets per seat and 128 per room (one the host's Claude Code doesn't take up within 10 seconds closes, and those waiting hold 8 MB per room at most), and 30 new links a minute per seat (120 per room). Such a WebSocket closes once 1 MB sent through it waits unread; on Cloudflare, which can't see that, once one side sends more than 4 MB in a second. TCP previews instead allow 32 connections per seat across all grants and previews, 64 per room, 2 grants per seat and preview, 128 per room, and 1200 new connections or grants per minute (240 for any one seat). Only a port the host chose to forward can be reached this way. A grant lasts 12 hours; unpaired connections close after 10 seconds. A room has a lifetime 1 GiB TCP byte budget, reserved in 1 MiB chunks per direction, unused parts given back when a connection closes. Data messages are at most 64 KiB, with at most 4 messages / 256 KiB outstanding per direction; each half also closes at 1 MiB of cumulative control output, not counting the credit notices it acknowledged. Rooms that are abused get ended.</li>
+      <li><b>Limits:</b> new rooms and joins are rate-limited per network; rooms hold up to 20 people, 100 MB of files (10,240 files at most), 128 open previews, and events of 128 KB each. Previews opened through their link limit request bodies to 1 MB and response bodies to 20 MB, and allow 512 requests waiting per room, 32 WebSockets per seat and 128 per room (one the host's Claude Code doesn't take up within 10 seconds closes, and those waiting hold 8 MB per room at most), and 30 new links a minute per seat (120 per room). Such a WebSocket closes once 1 MB sent through it waits unread; on Cloudflare, which can't see that, once one side sends more than 4 MB in a second. TCP previews instead allow 32 connections per seat across all grants and previews, 64 per room, 2 grants per seat and preview, 128 per room, and 1200 new connections or grants per minute (240 for any one seat). Only a port the host chose to forward can be reached this way. A grant lasts 12 hours; unpaired connections close after 10 seconds. A room has a lifetime 1 GiB TCP byte budget, reserved in 1 MiB chunks per direction, unused parts given back when a connection closes. Data messages are at most 64 KiB, with at most 4 messages / 256 KiB outstanding per direction, and a connection closes if 1 MiB of control messages to one side goes unacknowledged (each acknowledgement covers everything sent before it), however long it lives. Rooms that are abused get ended.</li>
       <li><b>Your own server:</b> teams that want their sessions on their own infrastructure can run the same server on Cloudflare or Node in a few minutes (<a href="https://github.com/Paradigm-Study/claude-share#host-a-server">how</a>), and set it in the plugin.</li>
     </ul>
     <p>Questions or abuse reports: open an issue on <a href="https://github.com/Paradigm-Study/claude-share/issues">GitHub</a>.</p>
@@ -2017,11 +2017,18 @@ export function announceTCP(room, id, target) {
   return room.toHost({ tcp: { id, pid: target.pid, port: target.port } })
 }
 
-export function tcpState(id, target, side, now) {
+// `out`: the control bytes sent to this half; `read`: how far it has proven
+// it read them (chargeControl). `checks`: its helper answers the room's
+// checks (it said so as it connected, answersChecks).
+export function tcpState(id, target, side, now, checks = false) {
   return { id, room: target.room, pid: target.pid, port: target.port, cap: target.cap, ownerSeat: target.ownerSeat, exp: target.exp,
-    side, deadline: now + TCP_LIMITS.pairMs, ready: false, fin: false, credits: [], remaining: 0, controlSent: 0,
+    side, deadline: now + TCP_LIMITS.pairMs, ready: false, fin: false, credits: [], remaining: 0, out: 0, read: 0, checks, check: null,
     rate: { start: now, data: 0, control: 0 } }
 }
+
+// A helper that answers checks says so on its upgrade; an older one, or an
+// older room that never sends one, works as before.
+export const answersChecks = req => req.headers.get('x-tcp-checks') === '1'
 
 // A pid's port never changes (a port shared again is a new preview), so the
 // grant, its seat, its expiry and the preview still forwarded say it all.
@@ -2049,6 +2056,11 @@ export function tcpRefund(room, s) {
   room.tcpStats.refunded = (room.tcpStats.refunded ?? 0) + n
   return n
 }
+
+// What of a room's TCP counters is kept: the byte budget's two totals. Its
+// minute of opens is memory's, as every other minute's is (a restart can let
+// one minute count twice, no more), so no TCP connection waits on a write.
+export const tcpCounted = stats => `${stats.used}/${stats.refunded ?? 0}`
 
 // Two copies of a room's TCP counters as one, whichever was saved later
 // (overlapping writes, a separate file or key beside the room's snapshot):
@@ -2078,6 +2090,7 @@ export function tcpFrame(message) {
   const keys = Object.keys(frame).sort().join(',')
   if (frame.t === 'fin' && keys === 't') return frame
   if (frame.t === 'ack' && keys === 'n,nonce,t' && Number.isSafeInteger(frame.n) && frame.n > 0 && frame.n <= TCP_LIMITS.dataBytes && typeof frame.nonce === 'string' && /^[A-Za-z0-9_-]{16,64}$/.test(frame.nonce)) return frame
+  if (frame.t === 'seen' && keys === 'nonce,t' && typeof frame.nonce === 'string' && /^[A-Za-z0-9_-]{16,64}$/.test(frame.nonce)) return frame
   throw tcpFailure('Invalid TCP control type or fields.')
 }
 
@@ -2094,21 +2107,38 @@ export function tcpCheck(from, to, frame, now) {
     // also keeps the helpers' application writes and returned credit ordered.
     const credit = from.credits[0]
     if (!credit || credit.n !== frame.n || credit.nonce !== frame.nonce) throw tcpFailure('Invalid TCP credit acknowledgement.')
+  } else if (frame.t === 'seen') {
+    // The answer to the one check out: its nonce, which only that check carried.
+    if (!from.check || from.check.nonce !== frame.nonce) throw tcpFailure('Invalid TCP check answer.')
   } else if (from.fin) throw tcpFailure('Duplicate TCP FIN.')
   return rate
 }
 
 // What a half is sent besides data (ready, credit notices, forwarded acks,
-// fin) counts against TCP_LIMITS.bufferBytes: output the Worker can't see
-// read. An ack proves its sender read the credit notice it answers (only that
-// notice carried its nonce), so that notice is given back (tcpRelay); ready,
-// fin and the acks a sender is forwarded stay counted for the half's life.
+// checks, fin) counts against TCP_LIMITS.bufferBytes until it has proven it
+// read it: output the Worker can't see read. A half's messages arrive in
+// order, so an ack (whose nonce only its credit notice carried) proves it
+// read everything sent to it before that notice, and an answer to a check
+// everything before the check (tcpRelay). A half that only sends data hears
+// nothing but the acks it's forwarded, which nothing it sends answers: one
+// whose helper answers checks is asked for one past TCP_LIMITS.checkBytes
+// (checkOf); an older helper's still closes once 1 MiB of them goes unproven,
+// some 20,000 frames on.
 export function chargeControl(s, control) {
   const text = JSON.stringify(control)
   const n = utf8Length(text)
-  if (n > TCP_LIMITS.controlBytes || s.controlSent + n > TCP_LIMITS.bufferBytes) throw tcpFailure('TCP lifetime control output limit exceeded.')
-  s.controlSent += n
+  if (n > TCP_LIMITS.controlBytes || s.out - s.read + n > TCP_LIMITS.bufferBytes) throw tcpFailure('TCP unread control output limit exceeded.')
+  s.out += n
   return text
+}
+
+// A check, for a half whose helper answers them, once what it hasn't proven
+// it read passes TCP_LIMITS.checkBytes: one out at a time, its nonce the proof.
+function checkOf(s) {
+  if (!s.checks || s.check || s.out - s.read < TCP_LIMITS.checkBytes) return []
+  const nonce = token(16), text = chargeControl(s, { t: 'check', nonce })
+  s.check = { nonce, at: s.out }
+  return [text]
 }
 
 // One TCP message, either direction, for both adapters: the messages to send
@@ -2134,14 +2164,19 @@ export function tcpRelay(from, to, frame, now) {
     if (from.remaining < frame.n) throw tcpFailure('TCP room byte budget exhausted.')
     const credit = { n: frame.n, nonce: token(16) }
     const notice = chargeControl(to, creditNotice(credit))
+    // Its ack proves `to` read this far.
+    credit.at = to.out
     from.remaining -= frame.n
     to.credits.push(credit)
     messages = [frame.data, notice]
   } else if (frame.t === 'ack') {
-    const notice = chargeControl(to, frame)
-    // The nonce proves `from` read the notice it answers: not unread now.
-    from.controlSent = Math.max(0, from.controlSent - utf8Length(JSON.stringify(creditNotice(from.credits.shift()))))
-    messages = [notice]
+    // The nonce proves `from` read the notice it answers, and all before it.
+    from.read = Math.max(from.read, from.credits.shift().at ?? 0)
+    messages = [chargeControl(to, frame), ...checkOf(to)]
+  } else if (frame.t === 'seen') {
+    from.read = Math.max(from.read, from.check.at)
+    from.check = null
+    messages = []
   } else {
     const notice = chargeControl(to, frame)
     from.fin = true

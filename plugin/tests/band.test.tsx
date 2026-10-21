@@ -156,6 +156,8 @@ function world(
     beforeSettings?: () => Promise<void>
     /** The next lock probes fail (the shell itself), as many as `count`. */
     lockFails?: { count: number }
+    /** The next lock probes never answer (a look stuck in lsof), as many as `count`, until `release`. */
+    lockHangs?: { count: number; release: Promise<void> }
     /** Another session of this person's holds a host profile's launch lock: the next tries to take it find it held, as many as `count`. */
     launchLockHeld?: { count: number }
     /** The window's proxy can't take the person's own proxy: it starts without it and says so, after it's ready (`upstream`), as many times as this. */
@@ -381,6 +383,11 @@ function world(
       if (input.startsWith('# shared-session: is there a session bus')) return { value: { code: opts.busSocket ? 0 : 1, signal: null } }
       if (input.startsWith('# shared-session: is the preview window open') && opts.lockFails?.count) {
         opts.lockFails.count -= 1
+        return { value: { code: 1, signal: null } }
+      }
+      if (input.startsWith('# shared-session: is the preview window open') && opts.lockHangs?.count) {
+        opts.lockHangs.count -= 1
+        await opts.lockHangs.release
         return { value: { code: 1, signal: null } }
       }
       if (input.startsWith('# shared-session: take a preview profile') && opts.launchLockHeld?.count) {
@@ -6004,6 +6011,30 @@ test("a look at a host's profile that fails once is asked again a moment later: 
   // Taken for the look, and let go.
   expect(lockTakes(asked)).toHaveLength(1)
   expect(lockDone(asked)).toHaveLength(1)
+  await $.command.run({ command: 'stop-sharing', args: '' } as never)
+})
+
+test("a look at the window that never answers is given up in its time: the Open says so, and the next opens the window", async ($, on) => {
+  let release!: () => void
+  const lockHangs = { count: 2, release: new Promise<void>(done => { release = done }) }
+  const asked = windowWorld(on, { stream: [{ seq: 2, events: [WINDOW_SHOWN], people: PREVIEW_PEOPLE, ended: false, title: 'demo' }], lockHangs })
+  await $.prompt.submit({ text: LINK, origin: { kind: 'composer' }, wait: false })
+  await asked.clock.advance(10)
+  const ui = await $.ui.mount(band('desktop'))
+  await ui.press({ key: 'open-preview' })
+  const late = "Couldn't tell whether the preview window is open (the look at its profile took too long). Press Open preview again."
+  await asked.clock.advance(14_000)
+  expect(asked.toasted).not.toContain(late)
+  // Each look given up after 15 s, the second about 300 ms after the first.
+  await within(asked.clock, () => asked.toasted.includes(late), 20_000)
+  expect(lockHangs.count).toBe(0)
+  expect(asked.launches).toHaveLength(0)
+  expect(asked.proxies).toHaveLength(0)
+  // Nothing held the window's queue: pressed again, the look answers and it opens.
+  await ui.press({ key: 'open-preview' })
+  await within(asked.clock, () => asked.launches.length, 3_000)
+  expect(asked.launches[0]).toContain(`--user-data-dir=${await roomProfile()}/chrome`)
+  release()
   await $.command.run({ command: 'stop-sharing', args: '' } as never)
 })
 
