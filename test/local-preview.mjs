@@ -1125,12 +1125,16 @@ async function realChain() {
   const base = `/api/rooms/${room.id}`, guest = await api(`${base}/join`, null, { name: 'Guest' })
   const target = new URL(origin)
   const interruptible = target.protocol === 'http:' && (target.hostname === 'localhost' || target.hostname === '[::1]' || (net.isIP(target.hostname) === 4 && target.hostname.startsWith('127.')))
+  // A stand-in for the network between a helper and the room, which can go
+  // down. It passes each write on at once (no Nagle): holding a second small
+  // write for the first's ACK, which Linux delays 40 ms, made every exchange
+  // past it some 80 ms, and the 20,000-frame check below ran out of time on CI.
   async function faultGate() {
     const active = new Set()
     let online = true, refused = 0
-    const server = track(net.createServer({ allowHalfOpen: true }, client => {
+    const server = track(net.createServer({ allowHalfOpen: true, noDelay: true }, client => {
       if (!online) { refused++; client.destroy(); return }
-      const upstream = net.createConnection({ host: target.hostname.replace(/^\[|\]$/g, ''), port: Number(target.port || 80), allowHalfOpen: true })
+      const upstream = net.createConnection({ host: target.hostname.replace(/^\[|\]$/g, ''), port: Number(target.port || 80), allowHalfOpen: true, noDelay: true })
       const destroy = () => { client.destroy(); upstream.destroy() }
       for (const socket of [client, upstream]) {
         active.add(socket); sockets.add(socket)
