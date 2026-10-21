@@ -319,6 +319,25 @@ export class RoomObject {
       }
       return sent
     }
+    // A message between sessions only to that seat's streams (the host's
+    // or a guest's), and only those that take them (room.toSeat): found by
+    // the seat's tag, and its attachment, which outlives the object sleeping,
+    // says so.
+    room.toSeat = (seat, message) => {
+      let open = false
+      let sent = false
+      for (const ws of this.state.getWebSockets(seat)) {
+        const att = ws.deserializeAttachment()
+        if (this.closed.has(ws) || att?.seat !== seat || att.tcp || att.pb || att.ph) continue
+        open = true
+        if (att.peerSupport !== true) continue
+        try {
+          ws.send(JSON.stringify(message))
+          sent = true
+        } catch {}
+      }
+      return sent ? 'delivered' : open ? 'unsupported' : 'offline'
+    }
     // File bytes in storage, in chunks, with what `files` holds for each
     // beside them (bm:<id>); deleteAll() at expiry takes them too.
     const storage = this.state.storage
@@ -440,9 +459,11 @@ export class RoomObject {
     // Tagged as a stream, so a change goes to streams alone (broadcast), and
     // by seat, for who is connected.
     this.state.acceptWebSocket(server, ['stream', auth.seat])
-    // A host's stream says which asks it takes (room.toHost).
+    // A host's stream says which asks it takes (room.toHost), and either
+    // side's whether it takes messages between sessions (room.toSeat).
     const takes = name => auth.role === 'host' && url.searchParams.get(name) === '1'
-    server.serializeAttachment({ seat: auth.seat, role: auth.role, after: Number(url.searchParams.get('after') ?? 0) || 0, tcpSupport: takes('tcp'), needSupport: takes('need') })
+    const peerSupport = url.searchParams.get('peer') === '1'
+    server.serializeAttachment({ seat: auth.seat, role: auth.role, after: Number(url.searchParams.get('after') ?? 0) || 0, tcpSupport: takes('tcp'), needSupport: takes('need'), peerSupport })
     this.room.touch(auth, now)
     this.send(server, now)
     if (auth.role === 'host') this.broadcast() // the host is back: everyone sees it

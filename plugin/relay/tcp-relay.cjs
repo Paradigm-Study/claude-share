@@ -262,6 +262,8 @@ function controlServer({ token, bodyLimit, sockets: max, timeoutMs, headers, onC
         if (!isUtf8(bytes)) throw failure('INVALID_CONFIG')
         result = onCommand(JSON.parse(bytes.toString('utf8')))
       } catch { return reply(res, 400) }
+      // A command may answer once its work is done (the host's mailboxes'); within the request's time.
+      if (result && typeof result.then === 'function') return void result.then(value => reply(res, value?.status ?? 200, value?.code), () => reply(res, 400))
       reply(res, result?.status ?? 200, result?.code)
     })
   })

@@ -24,6 +24,12 @@ export type ShareRoom = {
    * ignore it.
    */
   fromNow?: true
+  /**
+   * The room's server passes messages between a teammate's own sessions and
+   * the host's session on (its create or join answered `peer`): only then do
+   * they go. Older plugins ignore it.
+   */
+  peer?: true
 }
 
 export type SharePerson = {
@@ -181,6 +187,39 @@ export type ShareHostMemory = {
   askedAt: Record<string, number>
 }
 
+/**
+ * Messages between sessions, by id: whose each is. Guest: a handle, which the
+ * room carries in the place of one of this person's sessions (`to`, its
+ * address, which never leaves this computer; `name`, what it calls itself),
+ * at the seat it was made at. Host: a mailbox (relay/mailbox.cjs), standing
+ * for a teammate's session by the seat and handle the room brought its
+ * message with, that teammate's name (`who`) and the session's (`name`).
+ * `at`: when it was last used.
+ */
+export type SharePeerRoute =
+  | { kind: 'guest'; to: string; name: string; seat: string; at: number }
+  | { kind: 'host'; seat: string; handle: string; who: string; name: string; at: number }
+
+/**
+ * Guest: a message one of this person's sessions wrote here, relayed to the
+ * host's session: the message id its session gave it (`id`, which the host's
+ * Claude Code's receipts name; `native` false when it couldn't be read and
+ * this one is new), the turn it plays in here (`pid`), its handle and that
+ * session's address (`to`), and whether a hold went back to that session.
+ */
+export type SharePeerRelay = { id: string; pid: string; handle: string; to: string; native: boolean; held?: true; at: number }
+
+/**
+ * Guest: a message this session sent one of this person's sessions, in the
+ * order sent: a reply of the host's session's (its `handle` and message id,
+ * `ref`) or a note of this plugin's (neither), and the message id Claude
+ * Code gave it once one of its delivery notices named it.
+ */
+export type SharePeerSend = { to: string; at: number; handle?: string; ref?: string; id?: string }
+
+/** Host: the mailboxes' helper running for a room (detached), which a reload ends by its pid. */
+export type ShareMailboxHelper = { room: string; pid: number; port: number }
+
 /** Guest: the ports the preview window asked the host about in the room it's in (once each), and when (five a minute). */
 export type ShareNeedAsked = { ports: number[]; times: number[] }
 
@@ -321,6 +360,14 @@ declare module 'claude-code' {
       hostMemory: ShareHostMemory | null
       /** Guest: the ports the preview window asked the host about. */
       needAsked: ShareNeedAsked | null
+      /** Messages between sessions: the host's mailboxes, or a guest's handles, by id (the newest 64): whose each is. */
+      peerRoutes: Record<string, SharePeerRoute>
+      /** Guest: messages relayed to the host's session (the newest 64). */
+      peerRelays: SharePeerRelay[]
+      /** Guest: messages sent to this person's other sessions (the newest 64). */
+      peerSends: SharePeerSend[]
+      /** Host: the mailboxes' helper this module started. */
+      mailboxHelper: ShareMailboxHelper | null
       /** Claude Desktop's sidebar row as it was before sharing marked it, to put back. */
       sidebar: { title: string; pinned: boolean; id?: string; /** The pin sharing or joining made took. */ pinOk?: boolean } | null
       /** Share was pressed in a session with history: the row asks whether to include it. */
