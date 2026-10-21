@@ -70,8 +70,9 @@ function answer(result, secrets = []) {
   return row
 }
 
-// Owner mode's one row: who holds the port, never paths, argv or user names.
-function ownerAnswer(result, secrets = []) {
+// Owner mode's one row: who holds the port, never paths, argv or user names;
+// with `web` (a need's look), what the port answers too.
+function ownerAnswer(result, secrets = [], web = false) {
   assert.equal(result.stderr, '', 'nothing on stderr')
   assert.equal(result.code, 0, result.stdout)
   assert.match(result.stdout, /^[^\n]+\n$/, 'exactly one line')
@@ -82,7 +83,7 @@ function ownerAnswer(result, secrets = []) {
   assert.equal(row.platform, process.platform)
   assert.deepEqual(row.related, [])
   if (row.target !== null) {
-    assert.deepEqual(Object.keys(row.target), ['port', 'label', 'relay'])
+    assert.deepEqual(Object.keys(row.target), web ? ['port', 'label', 'relay', 'web', 'devtools'] : ['port', 'label', 'relay'])
     assert.equal(typeof row.target.relay, 'boolean')
     labelOK(row.target.label)
   }
@@ -220,7 +221,9 @@ async function configChecks() {
     `{"port":3000,"pluginRoot":"/${'a'.repeat(20_000)}","exclude":[]}`,
     // Owner mode: `owner` is true or absent, and takes no exclude but an empty one.
     { ...good, owner: false }, { ...good, owner: 'yes' }, { ...good, owner: 1 }, { ...good, owner: true, exclude: [80] }, { ...good, owner: true, exclude: 80 }, { port: 0, pluginRoot: '/opt/plug', owner: true }, { pluginRoot: '/opt/plug', owner: true },
-    { port: 3000, owner: true }, { port: 3000, pluginRoot: 'plug', owner: true }, { port: 3000, pluginRoot: '/opt/plug', owner: true, deadlineMs: 500 }, { port: 3000, pluginRoot: '/opt/plug', owner: true, extra: 1 }]
+    { port: 3000, owner: true }, { port: 3000, pluginRoot: 'plug', owner: true }, { port: 3000, pluginRoot: '/opt/plug', owner: true, deadlineMs: 500 }, { port: 3000, pluginRoot: '/opt/plug', owner: true, extra: 1 },
+    // A need's look: `web` true, and only in owner mode.
+    { ...good, web: true }, { port: 3000, pluginRoot: '/opt/plug', owner: true, web: false }, { port: 3000, pluginRoot: '/opt/plug', owner: true, web: 1 }]
   const results = await Promise.all(bad.map(input => helper(input)))
   for (const [i, result] of results.entries()) {
     assert.equal(result.stdout, '{"state":"error","code":"INVALID_CONFIG"}\n', JSON.stringify(bad[i]).slice(0, 80))
@@ -232,7 +235,7 @@ async function configChecks() {
   await discover.start(good, { emit: row => rows.push(row), platform: 'win32' })
   assert.deepEqual(rows, [{ state: 'done', platform: 'unsupported', target: null, related: [] }], 'other platforms answer, not fail')
   const owner = { port: 3000, pluginRoot: '/opt/plug', owner: true }
-  for (const cfg of [owner, { ...owner, exclude: [] }, { ...owner, deadlineMs: 1000 }]) assert.doesNotThrow(() => discover.configOf(cfg))
+  for (const cfg of [owner, { ...owner, exclude: [] }, { ...owner, deadlineMs: 1000 }, { ...owner, web: true }]) assert.doesNotThrow(() => discover.configOf(cfg))
   assert.equal(discover.configOf(owner).deadlineMs, 2000, "owner mode's own deadline")
   assert.equal(discover.configOf(good).deadlineMs, 8000)
   const ownerRows = []
@@ -450,6 +453,19 @@ async function liveChecks() {
   const ownerSlowest = Math.max(...[guestOwner, workerOwner, otherCopyOwner, webOwner, apiOwner, nobody].map(({ result }) => result.ms))
   assert.ok(ownerSlowest < 2000 + 400, `owner mode answered within its 2 s deadline (process start included): ${ownerSlowest} ms`)
   console.log(`ok owner mode ${process.platform}: a guest's listener (${v6 ? 'both loopbacks' : 'IPv4'}), the caller's own and another copy's helpers are relays; ordinary servers aren't; nobody holds a closed port; slowest ${ownerSlowest} ms`)
+
+  // A need's look (`web`): who holds it, as above, and what the port answers, within the same 2 s.
+  const webRun = port => helper({ port, pluginRoot, owner: true, web: true }).then(result => ({ result, row: ownerAnswer(result, secrets, true) }))
+  const [webPage, webDebugger, webInspector, webSlow, webGuest, webNobody] = await Promise.all([webRun(main), webRun(devtools.ports[0]), webRun(inspector), webRun(slow.ports[0]), webRun(guest.ports[0]), webRun(closed)])
+  assert.deepEqual(webPage.row.target, { port: main, label: 'web.cjs', relay: false, web: 'yes', devtools: false })
+  assert.deepEqual(webDebugger.row.target, { port: devtools.ports[0], label: 'devtools.cjs', relay: false, web: 'yes', devtools: true })
+  assert.deepEqual(webInspector.row.target, { port: inspector, label: 'idle.cjs', relay: false, web: 'yes', devtools: true }, "Node's inspector is a debugger here too")
+  assert.deepEqual(webSlow.row.target, { port: slow.ports[0], label: 'slow.cjs', relay: false, web: 'slow', devtools: false })
+  assert.equal(webGuest.row.target.relay, true, "a guest's listener is still a relay")
+  assert.deepEqual(webNobody.row, { state: 'done', platform: process.platform, target: null, related: [] }, 'a port nobody holds')
+  const webSlowest = Math.max(...[webPage, webDebugger, webInspector, webSlow, webGuest, webNobody].map(({ result }) => result.ms))
+  assert.ok(webSlowest < 2000 + 400, `a need's look answered within its 2 s deadline (process start included): ${webSlowest} ms`)
+  console.log(`ok a need's look ${process.platform}: a page, a debugger and Node's inspector, a slow one, a guest's listener and a closed port, each with who holds it; slowest ${webSlowest} ms`)
 
   const began = Date.now()
   const quick = await run(main, { deadlineMs: 1000 })

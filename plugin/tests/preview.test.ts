@@ -3,7 +3,7 @@
 // `claude plugin test plugin`.
 
 import { expect, test } from 'claude-code/testing'
-import { alsoUses, ASK_PORTS, cleanLabel, debuggerAnswer, dependencyFor, dependencyOf, dependencyTitle, discoverResult, everyName, everyService, pageLook, previewHost, previewScheme, previewUrl, questionsOf, relayedResult, rootMissing, serviceName, servicesOf, shareTooWords, urlHost, urlScheme } from '../hooks/preview'
+import { alsoUses, ASK_PORTS, cleanLabel, debuggerAnswer, dependencyFor, dependencyOf, dependencyTitle, discoverResult, everyName, everyService, heldResult, pageLook, previewHost, previewScheme, previewUrl, questionsOf, relayedResult, rootMissing, serviceName, servicesOf, shareTooWords, urlHost, urlScheme } from '../hooks/preview'
 
 test("the host's spelling of loopback is kept; 0.0.0.0 opens as localhost", () => {
   expect(previewHost('localhost')).toBe('localhost')
@@ -62,6 +62,19 @@ test("who holds a port: one of the plugin's helpers, something else or nothing, 
   expect(relayedResult('not json', 3009)).toBeUndefined()
   // Ordinary discovery's answer (no `relay`) says nothing of it either.
   expect(relayedResult(said({ port: 3009, label: 'next-server', web: 'yes', devtools: false }), 3009)).toBeUndefined()
+})
+
+test("a need's look at a port: what runs there, what it answers, and who holds it when that's known", () => {
+  const said = (target: unknown) => JSON.stringify({ state: 'done', platform: 'darwin', target, related: [] })
+  expect(heldResult(said({ port: 3610, label: 'convex-local-backend', relay: false, web: 'yes', devtools: false }), 3610)).toEqual({ port: 3610, label: 'convex-local-backend', relay: false, web: 'yes', devtools: false })
+  expect(heldResult(said({ port: 3610, label: 'local-preview.cjs', relay: true, web: 'slow', devtools: false }), 3610)).toMatchObject({ relay: true, web: 'slow' })
+  // A holder it couldn't read: no `relay`, the rest as said.
+  expect(heldResult(said({ port: 9222, label: 'Google Chrome\u202e', relay: null, web: 'yes', devtools: true }), 9222)).toEqual({ port: 9222, label: 'Google Chrome', web: 'yes', devtools: true })
+  // Nobody there, another port, or anything else: nothing.
+  expect(heldResult(said(null), 3610)).toBeNull()
+  expect(heldResult(said({ port: 3611, label: 'api', relay: false, web: 'yes', devtools: false }), 3610)).toBeNull()
+  expect(heldResult('{"state":"error","code":"INVALID_CONFIG"}', 3610)).toBeNull()
+  expect(heldResult('not json', 3610)).toBeNull()
 })
 
 test("what discovery found is asked about by service: one process, else one label; every port before the label", () => {

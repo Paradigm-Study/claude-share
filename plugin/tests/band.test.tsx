@@ -279,7 +279,8 @@ function world(
   const proxies: { config: { port: number; controlToken: string; lan?: boolean; upstream: unknown }; send: (message: Record<string, unknown>) => void; output: (text: string) => void; exit: () => void; stopped: boolean; routes: { routes: Record<string, number>; startable: number[] }[]; posts: number }[] = []
   const discovered: { port: number; pluginRoot: string; exclude: number[]; deadlineMs?: number }[] = []
   // Owner-mode looks (who holds a port), apart from discovery's.
-  const owners: { port: number; pluginRoot: string; owner: true; deadlineMs?: number }[] = []
+  const owners: { port: number; pluginRoot: string; owner: true; deadlineMs?: number; web?: true }[] = []
+  const needLooks: typeof owners = []
   // What auto-sharing looked at (`lookAtPage`): `port/path` each time.
   const looks: string[] = []
   // The public link: the host's fetches (their scripts, and whether a Stop
@@ -360,6 +361,15 @@ function world(
     if (e.argv.at(-1)?.endsWith('/relay/discover.cjs') && JSON.parse(e.input!).owner === true) {
       const config = JSON.parse(e.input!)
       owners.push(config)
+      // A guest's need's look (`web`): the port as discovery would find it, and who holds it.
+      if (config.web === true) {
+        needLooks.push(config)
+        const found = (opts.discover?.[config.port] as { target?: { label: string; web: string; devtools: boolean } | null } | undefined)?.target
+        const held = opts.holders?.[config.port]
+        const target = found ? { port: config.port, label: found.label, relay: held ?? false, web: found.web, devtools: found.devtools } : held === undefined ? null : { port: config.port, label: held ? 'local-preview.cjs' : 'next-server', relay: held, web: 'no', devtools: false }
+        yield { stream: 'stdout' as const, text: `${JSON.stringify({ state: 'done', platform: 'darwin', target, related: [] })}\n` }
+        return { value: { code: 0, signal: null } }
+      }
       if (!opts.holders) return { value: { code: 0, signal: null } }
       const held = opts.holders[config.port]
       const target = held === undefined ? null : { port: config.port, label: held ? 'local-preview.cjs' : 'next-server', relay: held }
@@ -901,7 +911,7 @@ function world(
     }
     return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify(body) } }
   })
-  return Object.assign(asked, { state, clock, logged, spawned, posted, peerSends, peerPosts, mailboxes, receipts, killed, versions, written, urls, submitted, sent, opened, files, store, localHelpers, tcpHelpers, blockedControls, blockedTunnels, externals, toasted, copied, checkpointWrites, windowState, firefoxSettings, startsAlive, launches, proxies, discovered, owners, looks, proxyFetches, wsRelays })
+  return Object.assign(asked, { state, clock, logged, spawned, posted, peerSends, peerPosts, mailboxes, receipts, killed, versions, written, urls, submitted, sent, opened, files, store, localHelpers, tcpHelpers, blockedControls, blockedTunnels, externals, toasted, copied, checkpointWrites, windowState, firefoxSettings, startsAlive, launches, proxies, discovered, owners, needLooks, looks, proxyFetches, wsRelays })
 }
 
 // A press settles before work waiting on the runtime's own promises does (a
@@ -5852,7 +5862,7 @@ test("Open preview opens the host's own address in a separate window, through a 
   expect(Object.keys(proxy.config).sort()).toEqual(['controlToken', 'lan', 'port', 'upstream'])
   expect(proxy.config.lan).toBe(false)
   expect(proxy.config.port).toBe(0)
-  expect(proxy.config.controlToken).toMatch(/^[A-Za-z0-9_-]{43}$/)
+  expect(proxy.config.controlToken).toMatch(/^[0-9a-f]{64}$/)
   expect(proxy.config.upstream).toBeNull()
   expect(proxy.routes[0]).toEqual({ routes: {}, startable: [3340] })
   expect(routesOf(asked)).toEqual({ routes: { '3340': 45001 }, startable: [] })
@@ -9322,12 +9332,12 @@ test("a guest's window asking for a web server the host didn't share asks the ho
   await asked.clock.advance(20)
   // Not a web server, or a browser's debugging port: never asked about.
   stream.push(needLine(5432), needLine(9222))
-  await eventually(asked.clock, () => asked.discovered.length === 2, 2000)
+  await eventually(asked.clock, () => asked.needLooks.length === 2, 2000)
   stream.length = 0
   await asked.clock.advance(20)
   expect(await ui.find({ key: 'host-ask-yes' })).toBeUndefined()
   stream.push(needLine(3610))
-  await eventually(asked.clock, () => asked.discovered.some(d => d.port === 3610), 2000)
+  await eventually(asked.clock, () => asked.needLooks.some(d => d.port === 3610), 2000)
   stream.length = 0
   await asked.clock.advance(20)
   expect((await ui.find({ type: 'Text', text: /^Alex$/ }))?.props.bold).toBe(true)
@@ -9351,7 +9361,7 @@ test("Not now to a guest's window is remembered for the room, and a teammate's t
   await ui.press({ key: 'share' })
   await asked.clock.advance(20)
   stream.push(needLine(3610))
-  await eventually(asked.clock, () => asked.discovered.length, 2000)
+  await eventually(asked.clock, () => asked.needLooks.length, 2000)
   stream.length = 0
   await asked.clock.advance(20)
   expect(await ui.find({ key: 'host-ask-yes' })).toBeDefined()
@@ -9372,7 +9382,7 @@ test("Not now to a guest's window is remembered for the room, and a teammate's t
   await asked.clock.advance(40_000)
   stream.length = 0
   await asked.clock.advance(20)
-  expect(asked.discovered).toHaveLength(1)
+  expect(asked.needLooks).toHaveLength(1)
   expect(await again.find({ key: 'host-ask-yes' })).toBeUndefined()
   expect(asked.sent.filter(x => x.path.endsWith('/previews'))).toHaveLength(0)
   await $.command.run({ command: 'stop-sharing', args: '' } as never)
@@ -9385,25 +9395,25 @@ test("a guest's window asking again while its question still waits isn't asked a
   const ui = await $.ui.mount(band('desktop'))
   await ui.press({ key: 'share' })
   await asked.clock.advance(20)
-  const discovered = (port: number) => asked.discovered.filter(d => d.port === port).length
+  const looked = (port: number) => asked.needLooks.filter(d => d.port === port).length
   // 3610's question shows; 3611's waits behind it.
-  await deliver(asked, stream, [needLine(3610), needLine(3611)], () => discovered(3611))
+  await deliver(asked, stream, [needLine(3610), needLine(3611)], () => looked(3611))
   await asked.clock.advance(20)
   expect(await ui.find({ type: 'Text', text: "'s preview needs localhost:3610 · convex-local-backend" })).toBeDefined()
   // 3610's goes unanswered; 3611's shows, ten minutes after it was first asked.
   await asked.clock.advance(10 * 60_000 + 1_000)
   expect(await ui.find({ type: 'Text', text: "'s preview needs localhost:3611 · api" })).toBeDefined()
   // Both asked for again: 3610 is asked about again, 3611 still is.
-  await deliver(asked, stream, [needLine(3610), needLine(3611)], () => discovered(3610) === 2)
+  await deliver(asked, stream, [needLine(3610), needLine(3611)], () => looked(3610) === 2)
   await asked.clock.advance(20)
-  expect(discovered(3611)).toBe(1)
+  expect(looked(3611)).toBe(1)
   await ui.press({ key: 'host-ask-no' })
   await asked.clock.advance(20)
   expect(await ui.find({ type: 'Text', text: "'s preview needs localhost:3610 · convex-local-backend" })).toBeDefined()
   await ui.press({ key: 'host-ask-no' })
   await asked.clock.advance(20)
   expect(await ui.find({ key: 'host-ask-no' })).toBeUndefined()
-  expect(discovered(3611)).toBe(1)
+  expect(looked(3611)).toBe(1)
   await $.command.run({ command: 'stop-sharing', args: '' } as never)
 })
 
@@ -9423,7 +9433,7 @@ for (const without of ['a row to ask in', 'What Claude shows'] as const) {
     await asked.clock.advance(40_000)
     stream.length = 0
     await asked.clock.advance(20)
-    expect(asked.discovered).toHaveLength(0)
+    expect(asked.needLooks).toHaveLength(0)
     expect(await ui.find({ key: 'host-ask-yes' })).toBeUndefined()
     await $.command.run({ command: 'stop-sharing', args: '' } as never)
   })
@@ -9918,12 +9928,13 @@ test("a guest's window needing a port another session's preview holds here asks 
   await deliver(asked, stream, [needLine(3610)], () => asked.owners.length)
   await asked.clock.advance(50)
   expect(await ui.find({ key: 'host-ask-yes' })).toBeUndefined()
+  expect(asked.needLooks).toHaveLength(1)
   expect(asked.discovered).toHaveLength(0)
   expect(asked.state.hostMemory?.askedAt?.['3610']).toBeUndefined()
   // Nothing holds it later: the next need asks; the Share comes after another session's Open took it.
   holders[3610] = false
   await asked.clock.advance(31_000)
-  await deliver(asked, stream, [needLine(3610)], () => asked.discovered.length)
+  await deliver(asked, stream, [needLine(3610)], () => asked.needLooks.length === 2)
   await eventually(asked.clock, async () => Boolean(await ui.find({ key: 'host-ask-yes' })))
   holders[3610] = true
   await asked.clock.advance(6_000)
@@ -10911,7 +10922,7 @@ test("pressing Share twice answers one question, never the next one", async ($, 
   await eventually(asked.clock, () => asked.state.hostAsk?.kind === 'related')
   // A guest's window asks too: its question waits behind the first.
   stream.push(needLine(4000))
-  await eventually(asked.clock, () => asked.discovered.some(d => d.port === 4000), 2000)
+  await eventually(asked.clock, () => asked.needLooks.some(d => d.port === 4000), 2000)
   stream.length = 0
   await asked.clock.advance(20)
   expect(asked.state.hostAsk?.kind).toBe('related')
@@ -10940,7 +10951,7 @@ test("a port the host just stopped isn't asked about for a guest's window, until
   await asked.clock.advance(40_000)
   stream.length = 0
   await asked.clock.advance(20)
-  expect(asked.discovered).toHaveLength(0)
+  expect(asked.needLooks).toHaveLength(0)
   expect(await ui.find({ key: 'host-ask-yes' })).toBeUndefined()
   // Shared again on purpose: that Stop no longer stands.
   await $.command.run({ command: 'share-preview', args: '3610 API' } as never)
@@ -11030,7 +11041,7 @@ test("the host's memory of a room is in its state: a reload still knows Not now"
   await asked.clock.advance(40_000)
   stream.length = 0
   await asked.clock.advance(20)
-  expect(asked.discovered).toHaveLength(1)
+  expect(asked.needLooks).toHaveLength(1)
   expect(await ui.find({ key: 'host-ask-yes' })).toBeUndefined()
   await $.command.run({ command: 'stop-sharing', args: '' } as never)
 })
@@ -11055,26 +11066,30 @@ for (const status of [429, 503] as const) {
   })
 }
 
-test("guests' windows asking for many ports: one discovery at a time, three more waiting, the rest dropped", async ($, on) => {
+test("guests' windows asking for many ports: each port looked at once, one question in the row and three waiting, the rest not asked", async ($, on) => {
   const stream: unknown[] = [{ seq: 1, events: [], people: PREVIEW_PEOPLE, ended: false, title: 'demo' }]
-  let release!: () => void
-  const held = new Promise<void>(done => { release = done })
   const ports = [4001, 4002, 4003, 4004, 4005, 4006]
   const web = (port: number) => ({ state: 'done', platform: 'darwin', target: { port, label: `svc${port}`, web: 'yes', devtools: false }, related: [] })
-  const asked = world(on, { stream, surfaces: ['desktop'], discover: Object.fromEntries(ports.map(p => [p, web(p)])), discoverWait: () => held })
+  const asked = world(on, { stream, surfaces: ['desktop'], discover: Object.fromEntries(ports.map(p => [p, web(p)])) })
   const ui = await $.ui.mount(band('desktop'))
   await ui.press({ key: 'share' })
   await asked.clock.advance(20)
   stream.push(...ports.map(needLine))
-  await eventually(asked.clock, () => asked.discovered.length, 2000)
+  await eventually(asked.clock, () => asked.needLooks.length === 6, 2000)
   stream.length = 0
   await asked.clock.advance(50)
-  expect(asked.discovered.map(d => d.port)).toEqual([4001])
-  release()
-  await eventually(asked.clock, () => asked.discovered.length === 4, 2000)
-  await asked.clock.advance(50)
-  expect(asked.discovered.map(d => d.port)).toEqual([4001, 4002, 4003, 4004])
-  expect(asked.state.hostAsk?.port).toBe(4001)
+  // Each looked at once, in two seconds at most; no full discovery for a need.
+  expect(asked.needLooks.map(d => [d.port, d.deadlineMs])).toEqual(ports.map(p => [p, 2000]))
+  expect(asked.discovered).toHaveLength(0)
+  const questions: number[] = []
+  for (let i = 0; i < 6 && asked.state.hostAsk; i++) {
+    questions.push(asked.state.hostAsk.port)
+    await ui.press({ key: 'host-ask-no' })
+    await asked.clock.advance(50)
+  }
+  expect(questions).toHaveLength(4)
+  expect(new Set(questions).size).toBe(4)
+  expect(asked.state.hostAsk).toBeFalsy()
   await $.command.run({ command: 'stop-sharing', args: '' } as never)
 })
 

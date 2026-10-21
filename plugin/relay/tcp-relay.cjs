@@ -5,7 +5,7 @@ const net = require('net')
 const http = require('http')
 const { timingSafeEqual } = require('crypto')
 const { isUtf8 } = require('buffer')
-const { connect, BUFFER_MAX } = require('./ws-relay.cjs')
+const { connect, BUFFER_MAX } = require('./ws.cjs')
 const DATA_MAX = 65536, WINDOW_FRAMES = 4, WINDOW_BYTES = DATA_MAX * WINDOW_FRAMES
 const notify = row => process.stdout.write(JSON.stringify(row) + '\n')
 const failure = code => Object.assign(new Error('Local preview relay failed'), { code })
@@ -313,25 +313,64 @@ function controlServer({ token, bodyLimit, sockets: max, timeoutMs, headers, onC
   }
 }
 
-// Both executable helpers share the bounded stdin and signal lifecycle.
-function run(start) {
-  let input = '', tooLarge = false, stopped = false, running, starting
-  const controller = new AbortController()
+// The one JSON value a helper's settings come in on stdin, 16 KiB at most:
+// `then` gets it, `bad` runs for anything else (too long, unreadable, not JSON).
+const INPUT_MAX = 16_384
+function readConfig(then, bad) {
+  let input = '', tooLarge = false
   process.stdin.setEncoding('utf8')
   process.stdin.on('data', data => {
     if (tooLarge) return
-    if (Buffer.byteLength(input) + Buffer.byteLength(data) > 16_384) { input = ''; tooLarge = true }
+    if (Buffer.byteLength(input) + Buffer.byteLength(data) > INPUT_MAX) { input = ''; tooLarge = true }
     else input += data
   })
   process.stdin.on('error', () => { tooLarge = true; input = '' })
   process.stdin.on('end', () => {
-    if (stopped) return
     let cfg
-    try { if (tooLarge) throw failure('INVALID_CONFIG'); cfg = JSON.parse(input) } catch { notify({ state: 'error', code: 'INVALID_CONFIG' }); process.exitCode = 1; return }
+    try { if (tooLarge) throw failure('INVALID_CONFIG'); cfg = JSON.parse(input) } catch { return bad() }
     input = ''
+    then(cfg)
+  })
+}
+
+// The settings of a helper that talks to the room (the host's TCP worker,
+// its mailboxes' helper): exactly `keys`, the room's bearer, a control secret
+// of its own (another), the plugin's version, and the room's address, in the
+// clear only to this computer. Checked; a copy comes back.
+function roomSettings(cfg, keys) {
+  if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg) || Object.keys(cfg).sort().join(',') !== keys || !tokenOK(cfg.token) || typeof cfg.controlToken !== 'string' || !/^[A-Za-z0-9_-]{43,128}$/.test(cfg.controlToken) || cfg.controlToken === cfg.token || typeof cfg.version !== 'string' || !/^[\w.-]{0,64}$/.test(cfg.version)) throw failure('INVALID_CONFIG')
+  if (typeof cfg.room !== 'string' || cfg.room.length > 2048 || !/^https?:\/\/[^/\s@?#\\]+(?:\/[^\s@?#\\]*)?\/api\/rooms\/[A-Za-z0-9_-]{16,64}$/.test(cfg.room)) throw failure('INVALID_CONFIG')
+  if (cfg.room.startsWith('http:') && !loopback(new URL(cfg.room).hostname)) throw failure('INVALID_CONFIG')
+  return { ...cfg }
+}
+
+// One POST of JSON to the room (`settings.room`, with its bearer and the
+// plugin's version): its status and what it answered, or null when nothing
+// came (unreachable, `controller` aborted, or past `timeoutMs`).
+async function roomPost(settings, path, body, controller, timeoutMs) {
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
+  try {
+    const res = await fetch(`${settings.room}/${path}`, { method: 'POST', signal: controller.signal, headers: { authorization: `Bearer ${settings.token}`, 'content-type': 'application/json', 'x-shared-session-version': settings.version }, body: JSON.stringify(body) })
+    return { status: res.status, answer: await res.json().catch(() => null) }
+  } catch {
+    return null
+  } finally { clearTimeout(timer) }
+}
+
+// The executable helpers' lifecycle: their settings on stdin, then `start`;
+// SIGTERM, SIGINT or a closed stdout stop it.
+function run(start) {
+  let stopped = false, running, starting
+  const controller = new AbortController()
+  readConfig(cfg => {
+    if (stopped) return
     starting = Promise.resolve().then(() => start(cfg, { signal: controller.signal })).then(value => (running = value)).catch(error => {
       if (!stopped) { if (!error.reported) notify({ state: 'error', code: safeCode(error) }); process.exitCode = 1 }
     })
+  }, () => {
+    if (stopped) return
+    notify({ state: 'error', code: 'INVALID_CONFIG' })
+    process.exitCode = 1
   })
   const stop = async () => {
     if (stopped) return
@@ -346,4 +385,4 @@ function run(start) {
   process.stdout.on('error', stop)
 }
 
-module.exports = { bridge, startHost, controlServer, run, vacant, endpoint, portOK, tokenOK, loopback, notify, failure, safeCode, UNSUPPORTED_V6, DATA_MAX, WINDOW_FRAMES, WINDOW_BYTES }
+module.exports = { bridge, startHost, controlServer, run, readConfig, roomSettings, roomPost, vacant, endpoint, portOK, tokenOK, loopback, notify, failure, safeCode, UNSUPPORTED_V6, DATA_MAX, WINDOW_FRAMES, WINDOW_BYTES }

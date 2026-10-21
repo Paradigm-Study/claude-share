@@ -185,7 +185,7 @@ function upstreamOf(up) {
   return ip || name ? { kind: up.kind, host: ip ? ip.key : name, port: up.port, bypass: rulesOf(up.bypass) } : null
 }
 function configOf(cfg) {
-  if (!plain(cfg) || Object.keys(cfg).filter(key => key !== 'lan').sort().join(',') !== 'controlToken,port,upstream' || (Object.hasOwn(cfg, 'lan') && typeof cfg.lan !== 'boolean') || !(cfg.port === 0 || portOK(cfg.port)) || typeof cfg.controlToken !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(cfg.controlToken)) throw failure('INVALID_CONFIG')
+  if (!plain(cfg) || Object.keys(cfg).filter(key => key !== 'lan').sort().join(',') !== 'controlToken,port,upstream' || (Object.hasOwn(cfg, 'lan') && typeof cfg.lan !== 'boolean') || !(cfg.port === 0 || portOK(cfg.port)) || typeof cfg.controlToken !== 'string' || !/^[A-Za-z0-9_-]{43,128}$/.test(cfg.controlToken)) throw failure('INVALID_CONFIG')
   // An upstream it can't use is left out, never fatal: the window goes on
   // directly, and one row says so (the plugin's note), never what it was.
   const upstream = cfg.upstream === null ? null : upstreamOf(cfg.upstream)

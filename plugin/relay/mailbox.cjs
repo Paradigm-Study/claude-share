@@ -32,7 +32,7 @@ const fs = require('fs')
 const path = require('path')
 const { spawn } = require('child_process')
 const { randomUUID } = require('crypto')
-const { controlServer, notify, failure, tokenOK, loopback } = require('./tcp-relay.cjs')
+const { controlServer, notify, failure, readConfig, roomSettings, roomPost } = require('./tcp-relay.cjs')
 const { receiptLine, writeLine, STATUS, DROPS, UUID } = require('./receipt.cjs')
 
 const LIMITS = Object.freeze({
@@ -53,7 +53,6 @@ const LIMITS = Object.freeze({
   startMs: 5000, detachMs: 2000,
   // The messages whose `held` went into this session, so a `delivered` follows one.
   held: 256,
-  input: 16_384,
 })
 const ID = /^[0-9a-f]{32}$/
 const SEAT = /^[A-Za-z0-9_-]{1,64}$/
@@ -66,20 +65,15 @@ const ENVELOPE = /^<cross-session-message ([^>\n]*)>\n([\s\S]*)\n<\/cross-sessio
 const CLOSING = '</cross-session-message>'
 const CONFIG_KEYS = 'controlToken,dir,own,room,token,version'
 
-function configOf(cfg, served = false) {
-  if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg) || Object.keys(cfg).sort().join(',') !== (served ? `${CONFIG_KEYS.replace('own,', 'own,pid,')}` : CONFIG_KEYS)) throw failure('INVALID_CONFIG')
-  if (!tokenOK(cfg.token) || typeof cfg.controlToken !== 'string' || !/^[A-Za-z0-9_-]{43,128}$/.test(cfg.controlToken) || cfg.controlToken === cfg.token) throw failure('INVALID_CONFIG')
-  if (typeof cfg.version !== 'string' || !/^[\w.-]{0,64}$/.test(cfg.version)) throw failure('INVALID_CONFIG')
-  if (typeof cfg.room !== 'string' || cfg.room.length > 2048 || !/^https?:\/\/[^/\s@?#\\]+(?:\/[^\s@?#\\]*)?\/api\/rooms\/[A-Za-z0-9_-]{16,64}$/.test(cfg.room)) throw failure('INVALID_CONFIG')
-  // A bearer goes in the clear only to this computer, as the TCP worker's does.
-  if (cfg.room.startsWith('http:') && !loopback(new URL(cfg.room).hostname)) throw failure('INVALID_CONFIG')
+function configOf(raw, served = false) {
+  const cfg = roomSettings(raw, served ? CONFIG_KEYS.replace('own,', 'own,pid,') : CONFIG_KEYS)
   // This session's own socket, and the directory its mailboxes go in: the
   // same one, where Claude Code sends its receipts.
   if (typeof cfg.own !== 'string' || !path.isAbsolute(cfg.own) || Buffer.byteLength(cfg.own) > LIMITS.path || /[\0\n"<>]/.test(cfg.own)) throw failure('INVALID_CONFIG')
   if (typeof cfg.dir !== 'string' || cfg.dir !== path.dirname(cfg.own)) throw failure('INVALID_CONFIG')
   // This session's Claude Code (served: the launcher's parent).
   if (served && (!Number.isSafeInteger(cfg.pid) || cfg.pid <= 1)) throw failure('INVALID_CONFIG')
-  return { ...cfg }
+  return cfg
 }
 
 function commandOf(command) {
@@ -199,15 +193,12 @@ async function start(raw, { emit = notify, launcher } = {}) {
     if (posts.size >= LIMITS.posts) return 'busy'
     const controller = new AbortController()
     posts.add(controller)
-    const timer = setTimeout(() => controller.abort(), LIMITS.postMs)
     try {
-      const res = await fetch(`${cfg.room}/peer`, { method: 'POST', signal: controller.signal, headers: { authorization: `Bearer ${cfg.token}`, 'content-type': 'application/json', 'x-shared-session-version': cfg.version }, body: JSON.stringify({ to: box.seat, handle: box.handle, ...body }) })
-      const answer = await res.json().catch(() => null)
-      if (res.status === 200) return answer?.delivered === true ? 'delivered' : answer?.reason === 'unsupported' ? 'unsupported' : 'offline'
-      return res.status === 429 ? 'busy' : res.status === 413 ? 'large' : [401, 403, 404, 410].includes(res.status) ? 'gone' : 'refused'
-    } catch {
-      return 'unreachable'
-    } finally { clearTimeout(timer); posts.delete(controller) }
+      const got = await roomPost(cfg, 'peer', { to: box.seat, handle: box.handle, ...body }, controller, LIMITS.postMs)
+      if (!got) return 'unreachable'
+      if (got.status === 200) return got.answer?.delivered === true ? 'delivered' : got.answer?.reason === 'unsupported' ? 'unsupported' : 'offline'
+      return got.status === 429 ? 'busy' : got.status === 413 ? 'large' : [401, 403, 404, 410].includes(got.status) ? 'gone' : 'refused'
+    } finally { posts.delete(controller) }
   }
 
   // A receipt into this session, from a mailbox: what became of a message it
@@ -376,22 +367,8 @@ async function start(raw, { emit = notify, launcher } = {}) {
 // A last status line, then gone: once it's written (a pipe on macOS takes it later).
 const finish = (row, code) => { try { process.stdout.write(`${JSON.stringify(row)}\n`, () => process.exit(code)) } catch { process.exit(code) } ; setTimeout(() => process.exit(code), 1000).unref() }
 
-// Reads the one config on stdin (bounded), then `then` with it.
-function readConfig(then) {
-  let input = '', tooLarge = false
-  process.stdin.setEncoding('utf8')
-  process.stdin.on('data', data => {
-    if (tooLarge) return
-    if (Buffer.byteLength(input) + Buffer.byteLength(data) > LIMITS.input) { input = ''; tooLarge = true } else input += data
-  })
-  process.stdin.on('error', () => { tooLarge = true; input = '' })
-  process.stdin.on('end', () => {
-    let cfg
-    try { if (tooLarge) throw failure('INVALID_CONFIG'); cfg = JSON.parse(input) } catch { return finish({ state: 'error', code: 'INVALID_CONFIG' }, 1) }
-    then(cfg)
-  })
-}
-
+// Settings that aren't a config, or too long: said, and gone.
+const invalid = () => finish({ state: 'error', code: 'INVALID_CONFIG' }, 1)
 const codeOf = error => (['INVALID_CONFIG', 'UNSUPPORTED'].includes(error?.code) ? error.code : 'STARTUP')
 
 // The helper itself, detached: its parent the launcher, until that's gone.
@@ -408,7 +385,7 @@ function serve() {
       value => { running = value },
       error => finish({ state: 'error', code: codeOf(error) }, 1),
     )
-  })
+  }, invalid)
 }
 
 // The launcher: the helper started detached, its ready line passed on (with
@@ -443,7 +420,7 @@ function launch() {
     })
     child.stdin.on('error', () => {})
     child.stdin.end(JSON.stringify({ ...cfg, pid: process.ppid }))
-  })
+  }, invalid)
 }
 
 module.exports = { start, LIMITS, frameOf, frameRead, attribute, bodyOf, configOf, commandOf }

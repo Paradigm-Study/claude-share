@@ -559,22 +559,10 @@ export function gcScript(browserDir: string, keep: string): string {
   ].join('\n')
 }
 
-/** A 256-bit secret as 43 base64url characters. */
-export function base64url(bytes: Uint8Array): string {
-  let text = ''
-  for (const b of bytes) text += String.fromCharCode(b)
-  return btoa(text).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
-}
-
-/** One line from the window's proxy, checked; anything else is ignored. */
-export function proxyLine(line: string): ProxyLine | null {
-  let m: Record<string, unknown>
-  try {
-    m = JSON.parse(line)
-  } catch {
-    return null
-  }
-  if (!m || typeof m !== 'object') return null
+/** One line from the window's proxy (its JSON, parsed), checked; anything else is ignored. */
+export function proxyLine(said: unknown): ProxyLine | null {
+  if (!said || typeof said !== 'object') return null
+  const m = said as Record<string, unknown>
   const code = (value: unknown, otherwise: string) => (typeof value === 'string' && /^[A-Z_]{1,40}$/.test(value) ? value : otherwise)
   if (m.state === 'ready') return isPort(m.port) && isPort(m.control) ? { state: 'ready', port: m.port, control: m.control } : null
   if (m.state === 'want' || m.state === 'blocked' || m.state === 'seen') return isPort(m.port) ? { state: m.state, port: m.port } : null
