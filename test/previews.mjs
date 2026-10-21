@@ -13,7 +13,7 @@ import relay from '../plugin/relay/ws-relay.cjs'
 import ws from '../plugin/relay/ws.cjs'
 import { spawn } from 'node:child_process'
 import { once } from 'node:events'
-import { Room, PLUGIN_LATEST, roomRequest, token, versionInfo, tcpSocketTarget, NEED_LIMIT, LIMITS, limitOf, streamedRoomBody, previewRequest, previewSocketTarget, publicPairValid, PUBLIC_LIMITS, TCP_LIMITS, SEAT_TIMEOUT_MS, EVENT_BYTES, HISTORY_BYTES, ROOM_FILES_COUNT, ROOM_PREVIEWS_MAX, ROOM_SEATS_MAX, hostHalfClose, homePage } from '../server/core.mjs'
+import { Room, PLUGIN_LATEST, roomRequest, token, versionInfo, tcpSocketTarget, NEED_LIMIT, LIMITS, limitOf, streamedRoomBody, previewRequest, previewSocketTarget, publicPairValid, PUBLIC_LIMITS, TCP_LIMITS, SEAT_TIMEOUT_MS, EVENT_BYTES, HISTORY_BYTES, ROOM_FILES_COUNT, ROOM_PREVIEWS_MAX, ROOM_SEATS_MAX, hostHalfClose, tcpHalfClose, rejectReason, homePage } from '../server/core.mjs'
 import { metaOf, META_FILES } from '../server/worker.mjs'
 
 function world() {
@@ -255,9 +255,10 @@ function held(w, path, bearer = w.host, method = 'POST') {
   console.log('OK need: host stream only, never stored or broadcast; 403/401/400/413/410/429 per seat; shared when forwarded')
 }
 
-// What's shared comes from the room (C-snap): join and GET previews list every
-// open preview, its port, whether it's forwarded and its title, whatever
-// history was pruned. Older plugins ignore the field.
+// What's shared comes from the room (C-snap): join, GET previews and every
+// page (each stream line, each events answer) list every open preview, its
+// port, whether it's forwarded and its title, whatever history was pruned.
+// Older plugins ignore the field.
 {
   const w = world()
   const page = (await api(w, 'previews', w.host, 'POST', { port: 43400, title: 'App' })).pid
@@ -269,13 +270,28 @@ function held(w, path, bearer = w.host, method = 'POST') {
   assert.deepEqual(joined.previews, shared)
   for (const bearer of [joined.token, w.host]) assert.deepEqual(await api(w, 'previews', bearer), { previews: shared })
   assert.equal((await call(w, 'previews', 'invalid')).status, 401)
+  const streamLine = async bearer => {
+    const reader = (await call(w, 'stream?after=0', bearer)).body.getReader()
+    const { value } = await reader.read()
+    await reader.cancel()
+    return JSON.parse(new TextDecoder().decode(value).split('\n')[0])
+  }
+  for (const bearer of [joined.token, w.host]) {
+    assert.deepEqual((await streamLine(bearer)).previews, shared, 'a stream line')
+    assert.deepEqual((await api(w, 'events?after=0&wait=0', bearer)).previews, shared, 'an events answer')
+  }
+  // Forwarding moves the room's seq, so a poll waiting hears it, its answer the list now.
+  const waiting = api(w, `events?after=${w.room.seq}&wait=5000`, joined.token)
   await api(w, 'previews', w.host, 'POST', { port: 43400, tcp: true })
+  assert.deepEqual((await waiting).previews.map(p => [p.pid, p.tcp]), [[page, true], [forwarded.pid, true]])
   assert.deepEqual(w.room.events.filter(e => e.type === 'preview').map(e => [e.body.state, e.body.pid, e.body.tcp]), [['open', page, true]], 'forwarding is said again')
   await api(w, `previews/${page}/end`, w.host, 'POST')
   assert.deepEqual((await api(w, 'previews', w.guest)).previews.map(p => p.pid), [forwarded.pid], 'open previews only')
+  assert.deepEqual((await streamLine(w.guest)).previews.map(p => p.pid), [forwarded.pid])
   await api(w, 'end', w.host, 'POST')
   assert.equal((await call(w, 'previews', w.guest)).status, 410)
-  console.log('OK what is shared: join and GET previews from current state, { pid, tcp } answers, an open event per opening and forwarding')
+  assert.deepEqual((await api(w, 'events?after=0&wait=0', w.guest)).previews, [], 'an ended room shares nothing')
+  console.log('OK what is shared: join, GET previews and every page from current state, { pid, tcp } answers, an open event per opening and forwarding')
 }
 
 const enterLink = async (w, pid, bearer = w.guest, path = '/') => new URL((await api(w, `previews/${pid}/ticket`, bearer, 'POST', { path })).url)
@@ -800,7 +816,10 @@ async function admit(w, url, cookie) {
   assert.match(Room.resume(old, Date.now()).previewKey, /^[A-Za-z0-9_-]{16,}$/, 'one made for a room saved without')
   // A browser half that vanished, a host half that vanished: what each other side sees (C2-wsrelay2).
   assert.deepEqual([1006, 1015, 1000, 1001, 1005, 1011, 4000].map(hostHalfClose), [1011, 1011, 1000, 1001, 1000, 1011, 4000])
-  console.log('OK preview links and cookies carry a key of the room’s own, never its id; a vanished host half is 1011 to the page')
+  // A TCP half that closed before the FINs, plainly or not: a broken stream to the other side.
+  assert.deepEqual([1000, 1006, 1015, 1001, 1005, 1008, 1011, 4000].map(tcpHalfClose), [1011, 1011, 1000, 1001, 1000, 1008, 1011, 4000])
+  assert.deepEqual([[1013, 'TCP'], [1011, 'TCP'], [1013, 'Preview'], [1011, 'Preview']].map(([code, what]) => rejectReason(what, code)), ['TCP host busy', 'TCP local connect failed', 'Preview host busy', 'Preview local connect failed'])
+  console.log('OK preview links and cookies carry a key of the room’s own, never its id; a vanished host half is 1011 to the page, a broken TCP half to its peer')
 }
 
 // What the home page says it keeps and bounds is what this server does: an

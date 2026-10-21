@@ -408,6 +408,14 @@ export class Room {
     return out
   }
 
+  // What's shared now: every open preview, whether it's forwarded, its port
+  // and title. The join answer and every page carry it, so a guest takes
+  // what's shared from it alone. How one shows (its path, host, scheme,
+  // what it's used by) stays the host's artifacts' to say.
+  previewList() {
+    return this.endedAt ? [] : [...this.previews.values()].map(p => ({ pid: p.pid, port: p.port, tcp: p.tcp === true, title: p.title }))
+  }
+
   // Whether this account is here already, by another session (the host's or a seat).
   hasAccount(account, exceptBearer) {
     if (!account) return false
@@ -448,9 +456,10 @@ export class Room {
     this.onChange?.()
   }
 
-  // What a client is sent: everything after its cursor, and the room now.
+  // What a client is sent: everything after its cursor, and the room now:
+  // who's here and what's shared.
   page(after, now) {
-    return { seq: this.seq, events: this.since(after), people: this.people(now), ended: Boolean(this.endedAt), title: this.title, team: this.team?.name }
+    return { seq: this.seq, events: this.since(after), people: this.people(now), previews: this.previewList(), ended: Boolean(this.endedAt), title: this.title, team: this.team?.name }
   }
 
   since(after) {
@@ -939,7 +948,7 @@ async function handleRoom(room, req, rest, now, origin, ctx) {
         hostVersion: room.host.version,
         team: teamOf(room),
         // What's shared now, whatever history was pruned (older plugins ignore it).
-        previews: previewList(room),
+        previews: room.previewList(),
         // This server passes messages between sessions on (POST peer).
         peer: true,
       }),
@@ -999,6 +1008,7 @@ async function handleRoom(room, req, rest, now, origin, ctx) {
         more: page.more || undefined,
         events: page.events,
         people: room.people(at),
+        previews: room.previewList(),
         ended: Boolean(room.endedAt),
         title: room.title,
         team: room.team?.name,
@@ -1209,12 +1219,9 @@ async function fileRoutes(room, req, rest, auth, now) {
 //     body. Before it (0.11.24 hosts): the body alone, x-proxy-status its
 //     status and x-proxy-headers its header block (base64).
 
-// What the room says is shared now: every open preview, whether it's
-// forwarded, its port and title. How a guest shows one (its path, host,
-// scheme, what it's used by) stays the host's artifacts' to say.
-const previewList = room => (room.endedAt ? [] : [...room.previews.values()].map(p => ({ pid: p.pid, port: p.port, tcp: p.tcp === true, title: p.title })))
-// The event a preview's opening appends, and its forwarding again: guests
-// that take what's shared from the room read existence and `tcp` here.
+// The event a preview's opening appends, and its forwarding again: what's
+// shared changing moves the room's seq, so every poll and stream hears it,
+// their pages carrying the list (Room.previewList).
 const previewOpened = p => ({ state: 'open', pid: p.pid, port: p.port, tcp: p.tcp === true, title: p.title })
 const fromHost = room => ({ seat: 'host', name: room.host.name, role: 'host' })
 
@@ -1276,7 +1283,7 @@ async function previewRoutes(room, req, rest, auth, now, ctx) {
   const method = req.method
   if (rest === 'previews' && method === 'GET') {
     if (room.endedAt) return { response: json({ error: 'This session is no longer shared.' }, 410) }
-    return { response: json({ previews: previewList(room) }) }
+    return { response: json({ previews: room.previewList() }) }
   }
   if (rest === 'previews' && method === 'POST') {
     if (auth.role !== 'host') return { response: json({ error: 'Only the host shares previews.' }, 403) }
@@ -1950,6 +1957,11 @@ export function publicPairValid(room, pair, now) {
 // (Vite) see any close frame as clean, 1011 included.
 export const hostHalfClose = code => (code === 1006 || code === 1015 ? 1011 : sendableClose(code))
 
+// How a TCP pair's other half closes when one closed with `code`: a TCP
+// stream ends by its FINs (tcpRelay's `done`), so a half that closed plainly
+// (1000) or vanished (1006) before them broke it, 1011.
+export const tcpHalfClose = code => (code === 1000 || code === 1006 ? 1011 : sendableClose(code))
+
 // Asks the host for a relay; false when the host's Claude Code isn't connected.
 export function announceSocket(room, id, target) {
   return room.toHost({ ws: { id, pid: target.pid, port: target.port, path: target.path, protocols: target.protocols } })
@@ -1970,6 +1982,9 @@ export async function relayRejectCode(req) {
   if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).join(',') !== 'code') return 0
   return body.code === 'BUSY' ? 1013 : body.code === 'CONNECT' ? 1011 : 0
 }
+
+// …and what that socket is closed with, in words (`what`: TCP, or Preview).
+export const rejectReason = (what, code) => `${what} ${code === 1013 ? 'host busy' : 'local connect failed'}`
 
 // TCP admission: grants and new channels share the room's minute of opens
 // (kept with its counters) and each seat's share of it (in memory). TCP

@@ -17,7 +17,7 @@ import { readFileSync, writeFileSync, renameSync } from 'node:fs'
 import { Readable } from 'node:stream'
 
 import { Directory, mapStore, providersFrom, BODY_CHARS } from './teams.mjs'
-import { Room, ROOM_ID, SEAT_TIMEOUT_MS, createRoom, roomRequest, previewRequest, previewRoomOf, notFound, json, publicOrigin, token, missingPage, previewMissing, previewTooLarge, homePage, outdatedClient, versionInfo, limitOf, limitedResponse, closedResponse, Windows, SOCKET_ID, previewSocketTarget, publicPairValid, hostHalfClose, announceSocket, hostSocketAllowed, relayRejectCode, streamedRoomBody, bodyLimit, bodyTooLarge, PROXY_BODY_MAX, sendableClose, TCP_LIMITS, PUBLIC_LIMITS, revokeMatches, tcpSocketTarget, announceTCP, tcpState, answersChecks, tcpCounted, tcpValid, tcpReserve, tcpRefund, tcpFailure, tcpFrame, tcpStep, chargeControl, mergeTCPStats } from './core.mjs'
+import { Room, ROOM_ID, SEAT_TIMEOUT_MS, createRoom, roomRequest, previewRequest, previewRoomOf, notFound, json, publicOrigin, token, missingPage, previewMissing, previewTooLarge, homePage, outdatedClient, versionInfo, limitOf, limitedResponse, closedResponse, Windows, SOCKET_ID, previewSocketTarget, publicPairValid, hostHalfClose, tcpHalfClose, announceSocket, hostSocketAllowed, relayRejectCode, rejectReason, streamedRoomBody, bodyLimit, bodyTooLarge, PROXY_BODY_MAX, sendableClose, TCP_LIMITS, PUBLIC_LIMITS, revokeMatches, tcpSocketTarget, announceTCP, tcpState, answersChecks, tcpCounted, tcpValid, tcpReserve, tcpRefund, tcpFailure, tcpFrame, tcpStep, chargeControl, mergeTCPStats } from './core.mjs'
 
 const PORT = Number(process.env.PORT ?? 8787)
 const PUBLIC_URL = process.env.PUBLIC_URL
@@ -407,8 +407,7 @@ async function rejectRelay(room, req, id) {
   const after = check()
   if (after) return after
   if (!code) return json({ error: 'Expected exactly a BUSY or CONNECT code.' }, 400)
-  const what = pair.scope === 'tcp' ? 'TCP' : 'Preview'
-  closePair(id, pair, code, code === 1013 ? `${what} host busy` : `${what} local connect failed`)
+  closePair(id, pair, code, rejectReason(pair.scope === 'tcp' ? 'TCP' : 'Preview', code))
   return json({ ok: true })
 }
 
@@ -514,7 +513,7 @@ server.on('upgrade', upgrading((nodeReq, socket, head) => {
     }
     pair.guestWs = acceptSocket(nodeReq, socket, head, '', { tcp: true,
       message: data => tcpMessage(id, pair, 'guest', data),
-      close: code => closePair(id, pair, code === 1000 || code === 1006 ? 1011 : sendableClose(code), 'TCP socket closed'),
+      close: code => closePair(id, pair, tcpHalfClose(code), 'TCP socket closed'),
     })
     armTCP(id, pair)
     return
@@ -533,7 +532,7 @@ server.on('upgrade', upgrading((nodeReq, socket, head) => {
     pair.host = tcpState(m[2], pair.target, 'host', Date.now(), answersChecks(req))
     pair.hostWs = acceptSocket(nodeReq, socket, head, '', { tcp: true,
       message: data => tcpMessage(m[2], pair, 'host', data),
-      close: code => closePair(m[2], pair, code === 1000 || code === 1006 ? 1011 : sendableClose(code), 'TCP socket closed'),
+      close: code => closePair(m[2], pair, tcpHalfClose(code), 'TCP socket closed'),
     })
     try {
       pair.guest.ready = pair.host.ready = true
