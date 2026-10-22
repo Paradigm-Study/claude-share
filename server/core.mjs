@@ -169,8 +169,10 @@ export function revokeMatches(filter, s) {
 // someone's reaction to one of Claude's replies, and `seen` the replies that
 // came on someone's screen, each filed under the reply's key.
 const HOST_TYPES = new Set(['row', 'delta', 'turn', 'approval', 'title', 'policy', 'declined', 'chat', 'artifact', 'react', 'seen', 'ask'])
-// `answer`: the cloud host's approver answering an `ask`, from the approver's seats alone.
-const GUEST_TYPES = new Set(['prompt', 'stop', 'chat', 'react', 'seen', 'answer'])
+// `answer`: the cloud host's approver answering an `ask`; `set`: the approver
+// changing the cloud host's settings, which the host's own Room changes at
+// home. Both from the approver's seats alone.
+const GUEST_TYPES = new Set(['prompt', 'stop', 'chat', 'react', 'seen', 'answer', 'set'])
 const REACTIONS = new Set(['👍', '🎉', '👀'])
 const REPLY_KEY = /^[a-z0-9]{1,16}\.\d{1,5}$/
 
@@ -1066,6 +1068,9 @@ async function handleRoom(room, req, rest, now, origin, ctx) {
     const body = await readJson(req)
     const allowed = auth.role === 'host' ? HOST_TYPES : GUEST_TYPES
     const from = { seat: auth.seat, name: auth.name, role: auth.role }
+    // The approver's prompt says so: their own session in the cloud, which
+    // the cloud host's watch-only setting keeps to teammates.
+    const approver = isApprover(room, auth)
     room.touch(auth, now)
     const items = (Array.isArray(body.events) ? body.events.slice(0, 200) : []).filter(item => item && allowed.has(item.type))
     // A guest's event past EVENT_BYTES, clamped, is refused, and the post with
@@ -1083,6 +1088,17 @@ async function handleRoom(room, req, rest, now, origin, ctx) {
         const answer = cloudAnswer(room, auth, item.body)
         if (answer) room.append(from, 'answer', answer, now)
         if (answer) changed = true
+        continue
+      }
+      if (item.type === 'set') {
+        const set = cloudSet(room, auth, item.body)
+        if (set) room.append(from, 'set', set, now)
+        if (set) changed = true
+        continue
+      }
+      if (item.type === 'prompt' && approver) {
+        room.append({ ...from, approver: true }, 'prompt', item.body, now)
+        changed = true
         continue
       }
       if (item.type === 'react' || item.type === 'seen') {
@@ -1193,6 +1209,21 @@ function cloudAnswer(room, auth, body) {
   const asked = room.events.some(e => e.type === 'ask' && e.body?.id === id)
   const answered = room.events.some(e => e.type === 'answer' && e.body?.id === id)
   return asked && !answered ? { id, answer } : null
+}
+
+// A change to the cloud host's settings as the room keeps it: the
+// approver's, of what the host's Room sets (who may prompt, what Claude asks
+// before, where what it shows goes), and Ask again for whom it always
+// allows. Nothing it doesn't name: "ask before nothing" isn't the cloud
+// host's, which holds its approver's Claude sign-in.
+function cloudSet(room, auth, body) {
+  if (!isApprover(room, auth)) return null
+  const set = {}
+  if (body?.prompts === 'everyone' || body?.prompts === 'watch') set.prompts = body.prompts
+  if (body?.approvals === 'all' || body?.approvals === 'edits') set.approvals = body.approvals
+  if (body?.files === 'on' || body?.files === 'off') set.files = body.files
+  if (body?.untrust === true) set.untrust = true
+  return Object.keys(set).length ? set : null
 }
 
 // What the runner is told to sign in with: one shape, nothing else.

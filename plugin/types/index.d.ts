@@ -23,9 +23,13 @@ export type ShareRoom = {
 /** A room's host in the cloud: started, running, or stopped after its week. */
 export type ShareCloud = { state: 'starting' | 'running' | 'stopped'; approver: string; since: number; until?: number; mine: boolean }
 
-/** A question the cloud host put to its approver: a teammate's call, as the host's own dialog would ask it. */
-/** A cloud host's question for its approver: a teammate's call, or (`kind: 'show'`) whether to share a page its Claude gave out, `port`. */
-export type ShareCloudAsk = { id: string; who: string; seat?: string; kind?: 'show'; port?: number; what: string; extent?: string; preview?: string; always: string; options: string[]; ts: number }
+/**
+ * A question the cloud host put to its approver: a teammate's call, as the
+ * host's own dialog would ask it, or (`kind`) one about its localhost, as the
+ * host's row above the prompt would (`ShareHostAsk`): `port` and `related`
+ * are what a yes shares, and `options` its two answers.
+ */
+export type ShareCloudAsk = { id: string; who: string; seat?: string; kind?: ShareHostAsk['kind']; port?: number; label?: string; related?: { port: number; label: string }[]; what: string; extent?: string; preview?: string; always: string; options: string[]; ts: number }
 
 export type SharePerson = {
   id: string
@@ -373,6 +377,8 @@ declare module 'claude-code' {
       cloud: ShareCloud | null
       /** The approver's: the cloud host's questions waiting for an answer, oldest first. */
       cloudAsks: ShareCloudAsk[]
+      /** The approver's: whom the cloud host always allows, as this session knows it (the move's, then each Always allow it gave), until its Ask again. */
+      cloudTrusted: string[]
       /** Where Move to cloud or Bring home is, for the Room to say. */
       cloudMove: { stage: 'idle' | 'token' | 'packing' | 'starting' | 'home' | 'failed'; note?: string } | null
       /** Host: a teammate's calls put to the host and not answered yet, by tool_use_id (the newest 64). A hook whose module ends under it has its `.catch` asked in the module after it, which denies these. */

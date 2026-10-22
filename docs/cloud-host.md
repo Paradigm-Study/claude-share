@@ -30,9 +30,17 @@ prompt. So the room server runs the host itself.
    teammate's call that would ask the host is put to the room (`ask`); only the
    approver's session draws it (the row above the prompt, the Room), and only
    the approver's seats may answer (`answer`). Ten minutes unanswered is a no.
-   A local page the cloud host's Claude gives out (`http://localhost:3000/…`)
-   is asked the same way, **Share** or **Not now**, before anyone can open it:
-   unanswered in ten minutes, it isn't shared, and a later mention asks again.
+   Every question the host's row would ask about its localhost is asked the
+   same way, one at a time: sharing a page its Claude gives out
+   (`http://localhost:3000/…`), letting teammates open it at the same address,
+   what it uses beside it, a teammate's window needing a port. Unanswered in
+   ten minutes, nothing is shared, and it's asked again later. The container's
+   own control port (8080) is never asked about or shared.
+   While it runs, the approver's Room → Settings are the cloud host's: who may
+   prompt (never turning the approver away), what it asks about first (every
+   call, or all but reading the project; never nothing), where what Claude
+   shows goes, and Ask again for whom they always allowed. Only the
+   approver's seats may change them (`set`).
 4. **Bring home** (approver only). The room stops the runner, which answers
    with its changes since the move (a git diff of the repository); the
    approver's session takes the host back with a fresh host token and offers

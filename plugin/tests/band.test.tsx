@@ -12372,7 +12372,7 @@ test("a cloud host asks its approver through the room whether to share a page it
   await asked.clock.advance(20)
   await cloudMention($, 3340, 'a1')
   const question = await eventually(asked.clock, () => asked.posted.find(e => e.type === 'ask'))
-  expect(question?.body).toMatchObject({ kind: 'show', port: 3340, what: 'localhost:3340', options: ['Share', 'Not now'] })
+  expect(question?.body).toMatchObject({ kind: 'show', port: 3340, related: [], options: ['Share', 'Not now'] })
   // Nothing drawn here, nothing shared until the approver says so.
   expect(asked.state.hostAsk ?? null).toBeNull()
   await asked.clock.advance(60_000)
@@ -12429,24 +12429,228 @@ test("the approver is asked whether to share the cloud host's page, above the pr
   on('session.end', ($, e) => ({ sessionId: e.sessionId }))
   await $.session.start(START)
   expect(await within(asked.clock, () => asked.state.cloudAsks?.length === 1, 5_000)).toBe(true)
-  expect(asked.state.cloudAsks?.[0]).toMatchObject({ id: 's1', kind: 'show', port: 3340, what: 'localhost:3340', always: '', options: ['Share', 'Not now'] })
+  expect(asked.state.cloudAsks?.[0]).toMatchObject({ id: 's1', kind: 'show', port: 3340, what: "Share the cloud host's localhost:3340 with the room?", always: '', options: ['Share', 'Not now'] })
   const row = await $.ui.mount(band('desktop'))
   expect((await row.find({ type: 'Text', text: /cloud host's localhost/ }))?.text).toBe("Share the cloud host's localhost:3340 with the room?")
   expect(await row.find({ key: 'cloud-once' })).toBeUndefined()
-  await row.press({ key: 'cloud-share' })
+  expect((await row.find({ key: 'cloud-yes' }))?.props.label).toBe('Share')
+  await row.press({ key: 'cloud-yes' })
   await asked.clock.advance(50)
   expect(asked.posted.filter(e => e.type === 'answer').map(e => e.body)).toEqual([{ id: 's1', answer: 'Share' }])
   expect(asked.state.cloudAsks).toEqual([])
   // The next, in the Room too, said as it comes; taken back, it goes.
   lines.push({ seq: 5, events: [show('s2', 3341, 5)], people: CLOUD_PEOPLE, ended: false, title: 'demo', cloud: IN_CLOUD })
   expect(await within(asked.clock, () => asked.state.cloudAsks?.length === 1, 5_000)).toBe(true)
-  expect(asked.toasted).toContain("The cloud host's Claude gave out localhost:3341: share it with the room? Answer above the prompt")
+  expect(asked.toasted).toContain("Share the cloud host's localhost:3341 with the room? Answer above the prompt")
   const pane = await $.ui.mount({ plugin: 'shared-session', surface: 'desktop', component: 'Pane', requestId: 'shared-room', props: PANE })
-  expect(await pane.find({ key: 'cloud-ask-share-s2' })).toBeDefined()
+  expect(await pane.find({ key: 'cloud-ask-yes-s2' })).toBeDefined()
   expect(await pane.find({ key: 'cloud-ask-not-now-s2' })).toBeDefined()
   lines.push({ seq: 6, events: [{ seq: 6, type: 'ask', ts: 1_100, from: { seat: 'host', name: 'scott', role: 'host' }, body: { id: 's2', done: true } }], people: CLOUD_PEOPLE, ended: false, title: 'demo', cloud: IN_CLOUD })
   expect(await within(asked.clock, () => asked.state.cloudAsks?.length === 0, 5_000)).toBe(true)
   await $.session.end({ reason: 'other', sessionId: 'session-test-0001', resume: {} } as never)
+})
+
+// The approver's session, taken up as Move to cloud leaves it: joined, the
+// cloud host's questions and settings its own.
+async function approverHere($: Parameters<TestBody>[0], on: On, lines: LiveLines) {
+  const saved = {
+    at: 900,
+    room: { server: 'https://share.test', id: 'room0000000000000001', url: LINK, title: 'demo', host: 'scott', token: 'g-cloud', seat: 'seatC', seq: 2, since: 1 },
+    autoOpen: true, policy: { prompts: 'everyone', approvals: 'edits', files: 'on' }, shown: [], activity: [], chat: [], sidebar: null, cloudMine: true,
+  }
+  const asked = world(on, { live: lines, files: { [checkpointPath('joined:session-test-0001')]: JSON.stringify({ version: 1, value: saved }) } })
+  on('session.start', ($, e) => ({ cwd: e.cwd }))
+  on('session.end', ($, e) => ({ sessionId: e.sessionId }))
+  await $.session.start(START)
+  expect(await within(asked.clock, () => asked.state.cloud?.mine === true, 5_000)).toBe(true)
+  return asked
+}
+const FROM_APPROVER = { seat: 'seatC', name: 'scott', role: 'guest', approver: true }
+const cloudPage = (seq: number, events: unknown[]) => ({ seq, events, people: CLOUD_PEOPLE, ended: false, title: 'demo', cloud: IN_CLOUD })
+
+// Everything a host's row asks about its localhost goes to a cloud host's
+// approver, one question at a time: whether to share a page, whether
+// teammates may open it at the same address, what it uses beside it.
+test("a cloud host puts every question its row would ask to its approver, one at a time: Share, the same address, then what the page uses beside it", async ($, on) => {
+  const lines = liveLines(cloudPage(1, []))
+  const asked = world(on, { live: lines, env: { SHARED_SESSION_RUNNER: '1' }, discover: { 3340: DISCOVERED } })
+  const ui = await $.ui.mount(band('desktop'))
+  await ui.press({ key: 'share' })
+  await asked.clock.advance(20)
+  const questions = () => asked.posted.filter(e => e.type === 'ask' && typeof e.body.kind === 'string' && e.body.done !== true)
+  await cloudMention($, 3340, 'a1')
+  await eventually(asked.clock, () => questions().length === 1)
+  expect(questions()[0]!.body).toMatchObject({ kind: 'show', port: 3340, options: ['Share', 'Not now'] })
+  approverSays(lines, 3, String(questions()[0]!.body.id), 'Share')
+  // Shared through its link; then, with a teammate here, the same address, as a question of its own.
+  await eventually(asked.clock, () => questions().length === 2)
+  expect(asked.posted.find(e => e.type === 'artifact')?.body).toMatchObject({ port: 3340, path: '/dash' })
+  expect(asked.posted.find(e => e.type === 'artifact')?.body.tcp).toBeUndefined()
+  expect(questions()[1]!.body).toMatchObject({ kind: 'mention', port: 3340, label: 'next-server', options: ['Allow', 'Not now'] })
+  await asked.clock.advance(60_000)
+  expect(asked.posted.some(e => e.type === 'artifact' && e.body.tcp === true)).toBe(false)
+  approverSays(lines, 4, String(questions()[1]!.body.id), 'Allow')
+  await eventually(asked.clock, () => asked.posted.some(e => e.type === 'artifact' && e.body.tcp === true))
+  // Then the server it uses, which a Share too forwards for that page.
+  await eventually(asked.clock, () => questions().length === 3)
+  expect(questions()[2]!.body).toMatchObject({ kind: 'related', port: 3340, related: [{ port: 3610, label: 'convex-local-backend' }], options: ['Share too', 'Not now'] })
+  approverSays(lines, 5, String(questions()[2]!.body.id), 'Share too')
+  await eventually(asked.clock, () => asked.posted.filter(e => e.type === 'artifact' && e.body.tcp === true).length === 2)
+  expect(asked.sent.filter(x => x.path.endsWith('/previews')).map(x => x.body)).toEqual([{ port: 3340, title: 'localhost:3340' }, { port: 3340, title: 'localhost:3340', tcp: true }, { port: 3610, title: 'localhost:3610 (convex-local-backend)', tcp: true }])
+  expect(asked.posted.filter(e => e.type === 'artifact' && e.body.tcp === true).map(e => [e.body.port, e.body.dependency])).toEqual([[3340, undefined], [3610, 3340]])
+  // Nothing taken back: each was answered.
+  expect(asked.posted.filter(e => e.type === 'ask' && e.body.done === true)).toEqual([])
+  await $.command.run({ command: 'stop-sharing', args: '' } as never)
+})
+
+// A teammate's window reaching a port nobody shared: the approver's to
+// share. The container's own control port (8080) is never asked about.
+test("a cloud host asks its approver about a teammate's window needing a port, and never about its runner's own", async ($, on) => {
+  const CONTROL = { state: 'done', platform: 'linux', target: { port: 8080, label: 'runner.mjs', web: 'yes', devtools: false }, related: [] }
+  const lines = liveLines(cloudPage(1, []))
+  const asked = world(on, { live: lines, env: { SHARED_SESSION_RUNNER: '1' }, discover: { ...NEEDS, 8080: CONTROL }, pages: { 8080: 'exit=0\ncode=200 text/html\n' } })
+  const ui = await $.ui.mount(band('desktop'))
+  await ui.press({ key: 'share' })
+  await asked.clock.advance(20)
+  // The runner's control port, given out or needed: never put to the approver, never shared.
+  await cloudMention($, 8080, 'a1')
+  lines.push(needLine(8080))
+  await eventually(asked.clock, () => asked.needLooks.some(d => d.port === 8080), 2_000)
+  await asked.clock.advance(2_000)
+  expect(asked.posted.filter(e => e.type === 'ask')).toEqual([])
+  expect(asked.sent.filter(x => x.path.endsWith('/previews'))).toEqual([])
+  // A web server of the project's, needed by Alex's window.
+  lines.push(needLine(3610))
+  const need = await eventually(asked.clock, () => asked.posted.find(e => e.type === 'ask' && e.body.kind === 'need'))
+  expect(need?.body).toMatchObject({ kind: 'need', port: 3610, who: 'Alex', label: 'convex-local-backend', options: ['Share', 'Not now'] })
+  approverSays(lines, 3, String(need!.body.id), 'Share')
+  await eventually(asked.clock, () => asked.posted.some(e => e.type === 'artifact' && e.body.port === 3610 && e.body.tcp === true))
+  expect(asked.sent.filter(x => x.path.endsWith('/previews')).map(x => x.body)).toEqual([{ port: 3610, title: 'localhost:3610 (convex-local-backend)', tcp: true }])
+  await $.command.run({ command: 'stop-sharing', args: '' } as never)
+})
+
+// The approver: each question drawn as the host's row draws it, of the
+// cloud host's localhost, with its own yes; one that names nothing a yes
+// would share is no question.
+test("the approver is asked the cloud host's questions about its localhost as the host's row asks them, each with its own yes", async ($, on) => {
+  const ask = (seq: number, body: Record<string, unknown>) => ({ seq, type: 'ask', ts: 1_000, from: { seat: 'host', name: 'scott', role: 'host' }, body })
+  const lines = liveLines(cloudPage(5, [
+    ask(3, { id: 'bad1', kind: 'related', port: 3340, related: [], options: ['Share too', 'Not now'] }),
+    ask(4, { id: 'bad2', kind: 'need', port: 99999, who: 'Alex' }),
+    ask(5, { id: 'm1', kind: 'mention', port: 3340, label: 'next-server', who: '', related: [], options: ['Allow', 'Not now'] }),
+  ]))
+  const asked = await approverHere($, on, lines)
+  expect(await within(asked.clock, () => asked.state.cloudAsks?.length === 1, 5_000)).toBe(true)
+  const row = await $.ui.mount(band('desktop'))
+  expect((await row.find({ type: 'Text', text: /^Let guests open/ }))?.text).toBe("Let guests open the cloud host's localhost:3340 at the same address?")
+  expect((await row.find({ key: 'cloud-yes' }))?.props.label).toBe('Allow')
+  await row.press({ key: 'cloud-yes' })
+  await asked.clock.advance(50)
+  expect(asked.posted.filter(e => e.type === 'answer').map(e => e.body)).toEqual([{ id: 'm1', answer: 'Allow' }])
+  // What the page uses beside it: every port before what may be cut.
+  lines.push(cloudPage(6, [ask(6, { id: 'r1', kind: 'related', port: 3340, related: [{ port: 3610, label: 'convex-local-backend' }, { port: 3611, label: 'convex-local-backend' }], options: ['Share too', 'Not now'] })]))
+  expect(await within(asked.clock, () => asked.state.cloudAsks?.[0]?.id === 'r1', 5_000)).toBe(true)
+  expect((await row.find({ type: 'Text', text: /^Share localhost/ }))?.text).toBe("Share localhost:3610 and 3611 too? convex-local-backend, beside the cloud host's localhost:3340")
+  expect((await row.find({ key: 'cloud-yes' }))?.props.label).toBe('Share too')
+  await row.press({ key: 'cloud-yes' })
+  await asked.clock.advance(50)
+  // A teammate's window: their name in their color, in the Room too.
+  lines.push(cloudPage(7, [ask(7, { id: 'n1', kind: 'need', port: 3610, label: 'convex-local-backend', who: 'Alex', related: [], options: ['Share', 'Not now'] })]))
+  expect(await within(asked.clock, () => asked.state.cloudAsks?.[0]?.id === 'n1', 5_000)).toBe(true)
+  expect((await row.find({ type: 'Text', text: /^Alex$/ }))?.props.bold).toBe(true)
+  expect(await row.find({ type: 'Text', text: "'s preview needs the cloud host's localhost:3610 · convex-local-backend" })).toBeDefined()
+  expect(asked.toasted).toContain("Alex's preview needs the cloud host's localhost:3610 · convex-local-backend: answer above the prompt")
+  const pane = await $.ui.mount({ plugin: 'shared-session', surface: 'desktop', component: 'Pane', requestId: 'shared-room', props: PANE })
+  expect((await pane.find({ key: 'cloud-ask-yes-n1' }))?.props.label).toBe('Share')
+  await pane.press({ key: 'cloud-ask-not-now-n1' })
+  await asked.clock.advance(50)
+  expect(asked.posted.filter(e => e.type === 'answer').map(e => e.body)).toEqual([{ id: 'm1', answer: 'Allow' }, { id: 'r1', answer: 'Share too' }, { id: 'n1', answer: 'Not now' }])
+  expect(asked.state.cloudAsks).toEqual([])
+  await $.session.end({ reason: 'other', sessionId: 'session-test-0001', resume: {} } as never)
+})
+
+// The cloud host's settings are its approver's while it runs: set in their
+// Room, held there (Bring home takes them), and sent to the room as `set`.
+// It asks about every call when told nothing, so Nothing isn't offered.
+test("the approver sets the cloud host's settings in the Room, and asks it again about whom they always allowed", async ($, on) => {
+  const call = { seq: 3, type: 'ask', ts: 1_000, from: { seat: 'host', name: 'scott', role: 'host' }, body: { id: 'q1', who: 'Alex', seat: 'seat2', what: 'Bash npm test', always: 'Always allow Alex', options: ['Allow once', 'Always allow Alex', 'Decline'] } }
+  const lines = liveLines(cloudPage(3, [call]))
+  const asked = await approverHere($, on, lines)
+  expect(await within(asked.clock, () => asked.state.cloudAsks?.length === 1, 5_000)).toBe(true)
+  const pane = await $.ui.mount({ plugin: 'shared-session', surface: 'desktop', component: 'Pane', requestId: 'shared-room', props: PANE })
+  await pane.press({ key: 'tab-settings' })
+  expect(await pane.find({ type: 'Text', text: 'at the cloud host' })).toBeDefined()
+  expect(((await pane.find({ key: 'policy-approvals' }))?.props.options as { value: string }[]).map(o => o.value)).toEqual(['edits', 'all'])
+  await pane.select({ key: 'policy-approvals', value: 'all' })
+  await pane.select({ key: 'policy-prompts', value: 'watch' })
+  await asked.clock.advance(50)
+  expect(asked.posted.filter(e => e.type === 'set').map(e => e.body)).toEqual([{ approvals: 'all' }, { prompts: 'watch' }])
+  expect(asked.posted.filter(e => e.type === 'policy')).toEqual([])
+  expect(asked.state.policy).toEqual({ prompts: 'watch', approvals: 'all', files: 'on' })
+  // Always allow, then Ask again.
+  expect(await pane.find({ key: 'untrust' })).toBeUndefined()
+  const row = await $.ui.mount(band('desktop'))
+  await row.press({ key: 'cloud-always' })
+  await asked.clock.advance(50)
+  expect(asked.state.cloudTrusted).toEqual(['Alex'])
+  expect(await pane.find({ type: 'Text', text: 'Always allowed: Alex' })).toBeDefined()
+  await pane.press({ key: 'untrust' })
+  await asked.clock.advance(50)
+  expect(asked.posted.filter(e => e.type === 'set').map(e => e.body)).toEqual([{ approvals: 'all' }, { prompts: 'watch' }, { untrust: true }])
+  expect(asked.state.cloudTrusted).toEqual([])
+  await $.session.end({ reason: 'other', sessionId: 'session-test-0001', resume: {} } as never)
+})
+
+// At the cloud host: the approver's settings set as its own and said to
+// everyone; watch-only turns teammates away, never the approver (the room
+// says which prompt is theirs).
+test("the cloud host sets its approver's settings as its own and says so; watch-only turns teammates away but never the approver", async ($, on) => {
+  const lines = liveLines(cloudPage(1, []))
+  const asked = world(on, { live: lines, env: { SHARED_SESSION_RUNNER: '1' } })
+  const ui = await $.ui.mount(band('desktop'))
+  await ui.press({ key: 'share' })
+  await asked.clock.advance(20)
+  lines.push(cloudPage(2, [{ seq: 2, type: 'set', ts: 950, from: FROM_APPROVER, body: { prompts: 'watch', approvals: 'all' } }]))
+  await eventually(asked.clock, () => asked.posted.some(e => e.type === 'policy'))
+  expect(asked.posted.filter(e => e.type === 'policy').map(e => e.body)).toEqual([{ prompts: 'watch', approvals: 'all', files: 'on' }])
+  expect(asked.state.policy).toEqual({ prompts: 'watch', approvals: 'all', files: 'on' })
+  const prompt = (seq: number, from: unknown, text: string, pid: string) => ({ seq, type: 'prompt', ts: 960, from, body: { text, pid } })
+  lines.push(cloudPage(4, [prompt(3, { seat: 'seat2', name: 'Alex', role: 'guest' }, 'Run the tests', 'p1'), prompt(4, FROM_APPROVER, 'Fix the build', 'p2')]))
+  await eventually(asked.clock, () => asked.posted.some(e => e.type === 'declined'))
+  expect(asked.posted.filter(e => e.type === 'declined').map(e => e.body.pid)).toEqual(['p1'])
+  expect(await within(asked.clock, () => asked.submitted.some(p => p.text === 'scott: Fix the build'), 5_000)).toBe(true)
+  expect(asked.submitted.some(p => p.text.includes('Run the tests'))).toBe(false)
+  await $.command.run({ command: 'stop-sharing', args: '' } as never)
+})
+
+test("the approver's Ask again reaches the cloud host: a teammate it always allowed is asked about again", async ($, on) => {
+  const prompt = { seq: 2, type: 'prompt', ts: 900, from: { seat: 'seat2', name: 'Alex', role: 'guest' }, body: { text: 'Run the tests', pid: 'p1' } }
+  const lines = liveLines(cloudPage(2, [prompt]))
+  const asked = world(on, { live: lines, env: { SHARED_SESSION_RUNNER: '1' } })
+  on('turn.start', ($, e) => ({ turnId: e.turnId }))
+  on('tool.check', () => ({ decision: 'allow', reason: 'Allowed in this mode' }))
+  const ui = await $.ui.mount(band('desktop'))
+  await ui.press({ key: 'share' })
+  expect(await within(asked.clock, () => asked.submitted.some(p => p.text === 'Alex: Run the tests'), 5_000)).toBe(true)
+  await $.turn.start({ turnId: 'alex-1', text: 'Alex: Run the tests' })
+  const check = (id: string) => {
+    const got: { verdict?: unknown } = {}
+    void $.tool.check({ tool: 'Bash', input: { command: 'npm test' }, tool_use_id: id } as never).then(v => void (got.verdict = v))
+    return got
+  }
+  const first = check('toolu_t1')
+  const question = await eventually(asked.clock, () => asked.posted.find(e => e.type === 'ask'))
+  lines.push(cloudPage(4, [{ seq: 4, type: 'answer', ts: 950, from: FROM_APPROVER, body: { id: question!.body.id, answer: 'Always allow Alex' } }]))
+  expect(await eventually(asked.clock, () => first.verdict)).toMatchObject({ decision: 'allow' })
+  expect(await $.tool.check({ tool: 'Bash', input: { command: 'npm test' }, tool_use_id: 'toolu_t2' } as never)).toMatchObject({ decision: 'allow', reason: 'scott always allows Alex' })
+  // Ask again, from the approver: Alex is asked about again.
+  lines.push(cloudPage(5, [{ seq: 5, type: 'set', ts: 960, from: FROM_APPROVER, body: { untrust: true } }]))
+  expect(await eventually(asked.clock, () => asked.state.trusted?.length === 0)).toBe(true)
+  const third = check('toolu_t3')
+  await eventually(asked.clock, () => asked.posted.filter(e => e.type === 'ask').length === 2)
+  await asked.clock.advance(1_000)
+  expect(third.verdict).toBeUndefined()
+  await $.command.run({ command: 'stop-sharing', args: '' } as never)
 })
 
 // A guest who isn't the approver never sees the cloud host's questions.
