@@ -1074,7 +1074,7 @@ function reseat($: $, room: ShareRoom): Promise<Reseat> {
       // (a refused request then drops what it carried, as for a room gone).
       if (!(s.live && s.key === roomIdentity(room))) return { ok: false, gone: true }
       // The smallest page of history: this seat already has it.
-      const joined = await api<{ token: string; seat: string; previews?: unknown }>($, room.server, `/api/rooms/${room.id}/join?max=64000`, {
+      const joined = await api<{ token: string; seat: string }>($, room.server, `/api/rooms/${room.id}/join?max=64000`, {
         method: 'POST',
         body: { name: await whoami($) },
         account: (await signInFor($, room.server))?.token,
@@ -1084,8 +1084,9 @@ function reseat($: $, room: ShareRoom): Promise<Reseat> {
       if (s.live && s.key === roomIdentity(room)) s.token = joined.token
       await update($, roomA, r => (r && r.id === room.id && s.live ? { ...r, token: joined.token, seat: joined.seat } : r))
       $.ui.log('Shared session: the room let this seat go; took a new one', { to: 'debug' })
-      // What's shared now, as the new seat heard it.
-      await takeRoomList($, room, s, joined.previews).catch(() => {})
+      // Its answer's list isn't taken: the stream or a poll may have brought
+      // a newer one meanwhile, which it would undo (a preview opened since
+      // would end here for good), and the room's next page brings its list.
       return { ok: true }
     } catch (error) {
       const refused = error instanceof ApiError && error.status >= 400 && error.status < 500 && error.status !== 429
