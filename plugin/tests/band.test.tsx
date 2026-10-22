@@ -4100,7 +4100,10 @@ async function alexAsking($: Parameters<TestBody>[0], on: On, opts: { beneath?: 
   const prompt = { seq: 2, type: 'prompt', ts: 900, from: { seat: 'seat2', name: 'Alex', role: 'guest' }, body: { text: 'Fetch the pages', pid: 'p1' } }
   const asked = world(on, { surfaces: opts.surfaces ?? ['desktop'], stream: [{ seq: 2, events: [prompt], people, ended: false, title: 'demo' }], beforeSet: opts.beforeSet, roomIds: opts.roomIds })
   on('turn.start', ($, e) => ({ turnId: e.turnId }))
-  on('tool.check', () => (opts.beneath === 'allow' ? { decision: 'allow', reason: 'Allowed in this mode' } : { decision: 'ask', reason: 'Asked in this mode' }))
+  // The engine's own permissions beneath the plugin. From 2.1.308 the
+  // dialog $.ui.ask opens is checked too, and it's the person's own: let
+  // through, as a real session shows it.
+  on('tool.check', ($, e) => (opts.beneath === 'allow' || e.tool === 'AskUserQuestion' ? { decision: 'allow', reason: 'Allowed in this mode' } : { decision: 'ask', reason: 'Asked in this mode' }))
   const ui = await $.ui.mount(band('desktop'))
   await ui.press({ key: 'share' })
   expect(await within(asked.clock, () => asked.submitted.some(p => p.text === 'Alex: Fetch the pages'), 5_000)).toBe(true)
@@ -4386,8 +4389,8 @@ function dialogs(on: On, refuse: (question: string) => boolean = () => false) {
   const drawn: Asked[] = []
   on('ui.render', { component: 'AskUserQuestion' }, ($, e) => {
     drawn.push(e.props.questions as Asked)
-    const { Text } = $.ui.resolve(e)
-    return <Text>dialog</Text>
+    // The engine's own dialog: from 2.1.308 it must be drawn by exactly one engine node.
+    return { type: 'engine', ref: 0 } as never
   })
   const up: { questions: Asked; answer: (label: string) => void }[] = []
   // Refused (a settings hook on AskUserQuestion) or up until answered.
@@ -5038,7 +5041,8 @@ for (const feed of ['stream', 'polls'] as const) {
     const newer = { on: false }
     const asked = world(on, { surfaces: ['desktop'], ...(feed === 'stream' ? { stream: pages } : { polled: pages }), beforeSet: key => (newer.on && key === 'module' ? { value: 'newer-module' as unknown } : undefined) })
     on('turn.start', ($, e) => ({ turnId: e.turnId }))
-    on('tool.check', () => ({ decision: 'ask', reason: 'Asked in this mode' }))
+    // The dialog $.ui.ask opens is checked too from 2.1.308: let through, as a real session shows it.
+    on('tool.check', ($, e) => (e.tool === 'AskUserQuestion' ? { decision: 'allow', reason: 'Allowed in this mode' } : { decision: 'ask', reason: 'Asked in this mode' }))
     const ui = await $.ui.mount(band('desktop'))
     await ui.press({ key: 'share' })
     expect(await within(asked.clock, () => asked.submitted.some(p => p.text === 'Alex: Fetch the pages'), 5_000)).toBe(true)
