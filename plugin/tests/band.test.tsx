@@ -138,6 +138,8 @@ function world(
     launchFails?: boolean
     /** A saved place comes back to a room that's gone. */
     roomGone?: boolean
+    /** With roomGone: the room is still shared (this seat left it from elsewhere). */
+    leftHere?: boolean
     /** That one room is gone (its events answer 410); others are as ever. */
     goneRoom?: string
     /** That one room let this seat go: its events answer 401. */
@@ -867,6 +869,7 @@ function world(
     }
     if (opts.beforeEvents && path.endsWith('/events') && method === 'GET') await opts.beforeEvents()
     if (opts.beforeTell && method === 'POST' && /^\/api\/rooms\/[^/]+\/(end|leave)$/.test(path)) await opts.beforeTell()
+    if (opts.leftHere && method === 'GET' && /^\/api\/rooms\/[^/]+$/.test(path)) return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify({ ended: false }) } }
     if ((opts.roomGone || (opts.goneRoom && path.startsWith(`/api/rooms/${opts.goneRoom}/`))) && path.endsWith('/events') && method === 'GET') return { value: { status: 410, ok: false, headers: {}, text: '{"error":"This session is no longer shared."}' } }
     if (opts.seatGone && path === `/api/rooms/${opts.seatGone}/events` && method === 'GET') return { value: { status: 401, ok: false, headers: {}, text: '{"error":"Not a member of this session."}' } }
     const refused = method === 'POST' && path.endsWith('/join') ? opts.joinStatus?.[path.split('/')[3] ?? ''] : undefined
@@ -5580,6 +5583,41 @@ test("the Team panel opens a session you're already in, and Join all leaves out 
   await pane.press({ key: 'open-room0000000000000101' })
   await asked.clock.advance(10)
   expect(asked.spawned.some(s => s.input?.includes("claude://claude.ai/epitaxy/local_0000aaaa-0000-4000-8000-000000000001"))).toBe(true)
+})
+
+test('the Team panel leaves a session you are in elsewhere by your sign-in, after asking once', async ($, on) => {
+  const elsewhere = { ...teamSession(3, 'Lee'), accounts: ['acct-Lee', ME.id] }
+  const asked = world(on, { team: { signedIn: true, sessions: [elsewhere, teamSession(2, 'Kim')] } })
+  await $.command.run({ command: 'team' } as never)
+  await asked.clock.advance(10)
+  const pane = await $.ui.mount(TEAM_PANE)
+  // In it elsewhere: Leave beside Join; not in it: no Leave.
+  expect((await pane.find({ key: 'leave-room0000000000000103' }))?.props.label).toBe('Leave')
+  expect(await pane.find({ key: 'join-room0000000000000103' })).toBeDefined()
+  expect(await pane.find({ key: 'leave-room0000000000000102' })).toBeUndefined()
+  await pane.press({ key: 'leave-room0000000000000103' })
+  await asked.clock.advance(10)
+  expect((await pane.find({ key: 'leave-room0000000000000103' }))?.props.label).toBe('Leave everywhere?')
+  expect(asked).not.toContain('POST /api/rooms/room0000000000000103/leave')
+  await pane.press({ key: 'leave-room0000000000000103' })
+  await eventually(asked.clock, () => asked.some(a => a === 'POST /api/rooms/room0000000000000103/leave'))
+  const leave = asked.sent.find(r => r.path === '/api/rooms/room0000000000000103/leave')
+  // The sign-in, not a seat's token: the seats are other sessions'.
+  expect(leave?.headers['x-shared-session-account']).toBe(TEAM_TOKEN)
+  expect(leave?.headers.authorization).toBeUndefined()
+})
+
+test('a guest whose seat was left from the Team panel says so, and is out of the room', async ($, on) => {
+  const opts: NonNullable<Parameters<typeof world>[1]> = { leftHere: true }
+  const asked = world(on, opts)
+  await $.prompt.submit({ text: LINK, origin: { kind: 'composer' }, wait: false })
+  expect(await eventually(asked.clock, () => asked.state.room?.id)).toBe('room0000000000000001')
+  // The room is still shared, and refuses this seat: it was left from elsewhere.
+  opts.roomGone = true
+  expect(await eventually(asked.clock, () => asked.logged.find(line => line.includes('from the Team panel')))).toBe("You left Sam's session from the Team panel.")
+  expect(await eventually(asked.clock, () => (asked.state.room ?? null) === null)).toBe(true)
+  // A seat refused never takes a new one.
+  expect(asked.filter(a => a.endsWith('/join')).length).toBe(1)
 })
 
 test('the Team panel stops a session of yours by your sign-in, after asking once', async ($, on) => {

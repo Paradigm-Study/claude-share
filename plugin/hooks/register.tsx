@@ -141,7 +141,8 @@ const askingA = atom({ plugin: 'shared-session', key: 'asking' } as const, null 
 const connectionA = atom({ plugin: 'shared-session', key: 'connection' } as const, 'live' as 'live' | 'reconnecting')
 const confirmingA = atom({ plugin: 'shared-session', key: 'confirming' } as const, null as 'stop' | null)
 const closingA = atom({ plugin: 'shared-session', key: 'closing' } as const, null as { how: Exit; room: string } | null)
-// The Team panel's Stop pressed once on this room: the next press ends it.
+// The Team panel's Stop or Leave pressed once on a room (`stop:<id>`,
+// `leave:<id>`): the next press does it.
 const stoppingRoomA = atom({ plugin: 'shared-session', key: 'stoppingRoom' } as const, null as string | null)
 const newerA = atom({ plugin: 'shared-session', key: 'newer' } as const, null as string | null)
 const pagesA = atom({ plugin: 'shared-session', key: 'pages' } as const, {} as Record<string, Record<string, unknown>>)
@@ -1115,8 +1116,22 @@ async function stillSeated($: $, room: ShareRoom, status: number): Promise<boole
     return false
   }
   const mode = await read($, modeA)
-  await closeRoom($, 'ended', { room, log: mode === 'guest' ? `${room.host}'s session is no longer shared.` : 'Sharing ended: the room closed on the server. Press Share to start a new one.' })
+  // A room still shared refusing this seat (410): its person left it from
+  // elsewhere (the Team panel's Leave, here or on another computer).
+  const leftHere = mode === 'guest' && status === 410 && (await roomStillShared($, room))
+  await closeRoom($, 'ended', {
+    room,
+    log: leftHere ? `You left ${room.host}'s session from the Team panel.` : mode === 'guest' ? `${room.host}'s session is no longer shared.` : 'Sharing ended: the room closed on the server. Press Share to start a new one.',
+  })
   return false
+}
+
+async function roomStillShared($: $, room: ShareRoom): Promise<boolean> {
+  try {
+    return (await api<{ ended?: boolean }>($, room.server, `/api/rooms/${room.id}`)).ended === false
+  } catch {
+    return false
+  }
 }
 
 // The kind of a live piece: what Claude writes, thinks, or a call it drafts.
@@ -9730,12 +9745,7 @@ async function continueJoins($: $, joined: string) {
 // sign-in, whichever session or computer shared it, even one that closed
 // without saving its token. The first press asks, as the band's Stop does.
 async function stopFromTeam($: $, roomId: string) {
-  if ((await read($, stoppingRoomA)) !== roomId) {
-    await update($, stoppingRoomA, () => roomId)
-    $.clock.after(5_000, () => void update($, stoppingRoomA, r => (r === roomId ? null : r)))
-    return
-  }
-  await update($, stoppingRoomA, () => null)
+  if (!(await pressedTwice($, `stop:${roomId}`))) return
   const server = await serverOf($)
   const saved = await signInFor($, server)
   if (!saved) return void $.ui.toast('Sign in first: /team')
@@ -9750,6 +9760,38 @@ async function stopFromTeam($: $, roomId: string) {
     }
   }
   await refreshTeams($)
+}
+
+// The Team panel's Leave on a session you're in elsewhere: every seat of
+// yours in it leaves by your sign-in, in other sessions here or on another
+// computer, and those sessions hear they left. Asks once, as Stop does.
+async function leaveFromTeam($: $, roomId: string) {
+  if (!(await pressedTwice($, `leave:${roomId}`))) return
+  const server = await serverOf($)
+  const saved = await signInFor($, server)
+  if (!saved) return void $.ui.toast('Sign in first: /team')
+  try {
+    await api($, server, `/api/rooms/${roomId}/leave`, { method: 'POST', account: saved.token })
+    $.ui.toast('You left that session.')
+  } catch (error) {
+    if (!(error instanceof ApiError && (error.status === 404 || error.status === 410))) {
+      $.ui.toast("Couldn't leave it")
+      $.ui.log(`Couldn't leave: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+  await refreshTeams($)
+}
+
+// A button that ends something for everyone, or for you everywhere: the first
+// press asks (its label changes for 5 s), the second goes ahead (true).
+async function pressedTwice($: $, key: string): Promise<boolean> {
+  if ((await read($, stoppingRoomA)) !== key) {
+    await update($, stoppingRoomA, () => key)
+    $.clock.after(5_000, () => void update($, stoppingRoomA, r => (r === key ? null : r)))
+    return false
+  }
+  await update($, stoppingRoomA, () => null)
+  return true
 }
 
 // The Team panel's Open: the session here that's in that room.
@@ -11611,10 +11653,25 @@ export const register: Register = (on, options) => {
             ) : mine ? (
               [
                 here[s.id] ? <Button key={`open-${s.id}`} label="Open" plain onPress={() => void openHere($, s.id)} /> : null,
-                stopping === s.id ? (
+                stopping === `stop:${s.id}` ? (
                   <Button key={`stop-${s.id}`} label="Stop for everyone?" variant="primary" onPress={() => void stopFromTeam($, s.id)} />
                 ) : (
                   <Button key={`stop-${s.id}`} label="Stop" plain dimColor onPress={() => void stopFromTeam($, s.id)} />
+                ),
+              ]
+            ) : inElsewhere ? (
+              // In it in another session here (Open) or on another computer
+              // (Join here too): Leave takes every seat of yours out.
+              [
+                here[s.id] ? (
+                  <Button key={`open-${s.id}`} label="Open" plain onPress={() => void openHere($, s.id)} />
+                ) : (
+                  <Button key={`join-${s.id}`} label="Join" plain dimColor onPress={press => void joinFromTeam($, [s], press.surface)} />
+                ),
+                stopping === `leave:${s.id}` ? (
+                  <Button key={`leave-${s.id}`} label="Leave everywhere?" variant="primary" onPress={() => void leaveFromTeam($, s.id)} />
+                ) : (
+                  <Button key={`leave-${s.id}`} label="Leave" plain dimColor onPress={() => void leaveFromTeam($, s.id)} />
                 ),
               ]
             ) : here[s.id] ? (

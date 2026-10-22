@@ -387,6 +387,20 @@ try {
   ok((await call(`/api/rooms/${ownRoom.id}/end`, { method: 'POST' })).status === 401, 'no sign-in and no token ends nothing')
   ok((await call(`/api/rooms/${ownRoom.id}/end`, { method: 'POST', acct: dave })).status === 200, "the host's sign-in ends it")
   ok((await call(`/api/rooms/${ownRoom.id}`)).data.ended && !(await call(`/api/teams/${ownTeam.id}/sessions`, { tok: dave })).data.sessions.some(s => s.id === ownRoom.id), "and it's off the team's list")
+  // A person leaves by their sign-in (the Team panel's Leave): every seat of
+  // theirs goes, and a session still using one hears it left, never reseated.
+  const linkRoom = (await call('/api/rooms', { method: 'POST', acct: dave, body: { name: 'Dave', title: 'link' } })).data
+  const eve1 = (await call(`/api/rooms/${linkRoom.id}/join`, { method: 'POST', acct: eve, body: { name: 'Eve' } })).data
+  await call(`/api/rooms/${linkRoom.id}/join`, { method: 'POST', acct: eve, body: { name: 'Eve' } })
+  const kimSeat = (await call(`/api/rooms/${linkRoom.id}/join`, { method: 'POST', body: { name: 'Kim' } })).data
+  ok((await call(`/api/rooms/${linkRoom.id}/leave`, { method: 'POST', acct: 'not-a-sign-in' })).status === 403, 'a leave by an unknown sign-in takes nobody')
+  const out = await call(`/api/rooms/${linkRoom.id}/leave`, { method: 'POST', acct: eve })
+  ok(out.status === 200 && out.data.left === 2, "a sign-in's leave takes every seat of theirs")
+  const refused = await call(`/api/rooms/${linkRoom.id}/events?after=0&wait=0`, { tok: eve1.token })
+  ok(refused.status === 410 && refused.data.left === true, 'and a seat that left hears so (410)')
+  ok((await call(`/api/rooms/${linkRoom.id}/join`, { method: 'POST', acct: eve, body: { name: 'Eve' } })).status === 200, 'joining again is still theirs to do')
+  ok((await call(`/api/rooms/${linkRoom.id}/events?after=0&wait=0`, { tok: kimSeat.token })).status === 200, "someone else's seat stays")
+  await call(`/api/rooms/${linkRoom.id}/end`, { method: 'POST', tok: linkRoom.token })
   const solo = (await call('/api/teams', { method: 'POST', tok: dave, body: { name: 'Solo' } })).data.team
   const soloRoom = (await call('/api/rooms', { method: 'POST', acct: dave, body: { name: 'Dave', title: 's', team: solo.id } })).data
   await call(`/api/teams/${solo.id}/members/me`, { method: 'DELETE', tok: dave })

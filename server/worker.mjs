@@ -76,6 +76,7 @@ import {
   tcpStep,
   chargeControl,
   mergeTCPStats,
+  leftResponse,
 } from './core.mjs'
 import { Directory, providersFrom, BODY_CHARS } from './teams.mjs'
 
@@ -445,7 +446,10 @@ export class RoomObject {
   async accept(req, url, now) {
     if (req.headers.get('upgrade')?.toLowerCase() !== 'websocket') return json({ error: 'Expected a WebSocket.' }, 426)
     const seated = this.room.seats.size
-    const auth = this.room.auth((req.headers.get('authorization') ?? '').replace(/^Bearer\s+/i, '').trim(), now)
+    const bearer = (req.headers.get('authorization') ?? '').replace(/^Bearer\s+/i, '').trim()
+    // Left from elsewhere (the Team panel's Leave): told so, never seated again.
+    if (this.room.leftElsewhere.has(bearer)) return leftResponse()
+    const auth = this.room.auth(bearer, now)
     if (!auth) return json({ error: 'Not a member of this session.' }, 401)
     // A seat let go for being quiet came back: kept (storage writes finish
     // before the answer goes out).
