@@ -18,13 +18,13 @@
 import { atom, memberOf, read, update } from 'claude-code'
 import type { Elements, EngineInterface, HookStream, ProcessSpawnChunk, ProcessSpawnResult, Register, RenderChildren, RenderSurface, Timer, TurnStepChunk } from 'claude-code'
 
-import type { HostShare, ShareAccount, ShareActivity, ShareChange, ShareChat, ShareDoing, ShareFileMeta, ShareGuestPrompt, ShareHostAsk, ShareHostMemory, ShareInvite, ShareLocalPreview, ShareMode, ShareNeedAsked, SharePerson, SharePolicy, SharePrefs, SharePreviewWindow, ShareRoom, ShareShown, ShareTeam, ShareTeams, ShareTeamSession, ShareTurn, ShareWorking } from '../types'
+import type { HostShare, ShareAccount, ShareActivity, ShareChange, ShareChat, ShareDoing, ShareFileMeta, ShareGuestPrompt, ShareHostAsk, ShareHostMemory, ShareInvite, ShareLocalPreview, ShareMailboxHelper, ShareMode, ShareNeedAsked, SharePeerRelay, SharePeerRoute, SharePeerSend, SharePerson, SharePolicy, SharePrefs, SharePreviewWindow, ShareRoom, ShareShown, ShareTeam, ShareTeams, ShareTeamSession, ShareTurn, ShareWorking } from '../types'
 import { fit, isModern } from './fit'
 import { BAD, GOOD, ago, avatarSvg, cloverSvg, colorFor, colorsFor, labelsFor, liveSvg, stackSvg, toolGlyph } from './look'
 import { REACTS, diffOf, mentionsOf, patchOf, replyKey, took, writeOf } from './room'
 import type { Patch } from './room'
 import type { Face } from './look'
-import { attachmentsOf, delivered, rowsFromMessage, rowsToMarkdown, splitSpeaker, summarizeTool } from './rows'
+import { attachmentsOf, delivered, neutralize, PEER_ID, rowsFromMessage, rowsToMarkdown, splitSpeaker, summarizeTool } from './rows'
 import type { Media, RoomImage, Row } from './rows'
 import { SERVER_URL } from './server'
 import { readsInside } from './paths'
@@ -129,6 +129,13 @@ const previewNeedsOpenA = atom({ plugin: 'shared-session', key: 'previewNeedsOpe
 const hostAskA = atom({ plugin: 'shared-session', key: 'hostAsk' } as const, null as ShareHostAsk | null)
 const hostMemoryA = atom({ plugin: 'shared-session', key: 'hostMemory' } as const, null as ShareHostMemory | null)
 const needAskedA = atom({ plugin: 'shared-session', key: 'needAsked' } as const, null as ShareNeedAsked | null)
+// Messages between sessions: the host's mailboxes and a guest's handles, by
+// id (whose each is); a guest's relays and the replies it sent on; the host's
+// mailboxes' helper, which a reload ends.
+const peerRoutesA = atom({ plugin: 'shared-session', key: 'peerRoutes' } as const, {} as Record<string, SharePeerRoute>)
+const peerRelaysA = atom({ plugin: 'shared-session', key: 'peerRelays' } as const, [] as SharePeerRelay[])
+const peerSendsA = atom({ plugin: 'shared-session', key: 'peerSends' } as const, [] as SharePeerSend[])
+const mailboxHelperA = atom({ plugin: 'shared-session', key: 'mailboxHelper' } as const, null as ShareMailboxHelper | null)
 const autoOpenA = atom({ plugin: 'shared-session', key: 'autoOpen' } as const, true)
 const askingA = atom({ plugin: 'shared-session', key: 'asking' } as const, null as { prompts: number } | null)
 const connectionA = atom({ plugin: 'shared-session', key: 'connection' } as const, 'live' as 'live' | 'reconnecting')
@@ -613,7 +620,7 @@ let flushFailures = 0
 let singly = 0
 // Prompts typed here the room refused as too large: never run there, so
 // each one's turn here ends saying so, rather than wait for it (`tooLarge`).
-const unsent = new Set<string>()
+const unsent = new Map<string, string | null>()
 let pollGeneration = 0 // the room feed's run; a new one ends the old
 let pollFailures = 0
 let pollDelay = 0 // the wait before the next background poll
@@ -817,8 +824,9 @@ class WindowContext {
 // What runs here for a room, kept with its scope (`RoomScope.children`): a
 // guest's listeners (the window's own tunnels among them: one run a
 // preview) and the window's proxy; the host's TCP worker with its
-// connections, and the public link's socket relays and fetches, with the
-// asks waiting for one. The scope closing stops all of it at once (`stop`),
+// connections, the public link's socket relays and fetches, with the asks
+// waiting for one, and its mailboxes' helper for messages between
+// sessions. The scope closing stops all of it at once (`stop`),
 // a Stop or unshare of a preview its public link's part (`closePublic`), and
 // a room entered next starts with none of it.
 class RoomChildren {
@@ -828,6 +836,8 @@ class RoomChildren {
   windowProxy: BrowserProxy | null = null
   /** Host: the TCP worker, and its connections queued, connecting or open (by `tcpKey`). */
   worker: TcpWorkerRun | null = null
+  /** Host: the mailboxes' helper for messages between sessions (`MailboxRun`). */
+  mailbox: MailboxRun | null = null
   readonly connections = new Map<string, TcpRelayRun>()
   /** Host: the public link's socket relays (by `tcpKey`), the fetches running for it, and the asks waiting for one, oldest first. */
   readonly relays = new Map<string, PublicRelay>()
@@ -863,6 +873,7 @@ class RoomChildren {
       ...[...this.listeners].map(([pid, run]) => (run.stopping ??= finishLocalPreview(pid, run))),
       ...(this.windowProxy ? [finishBrowserProxy(this.windowProxy)] : []),
       ...(worker ? [finishTcpWorker(worker)] : []),
+      ...(this.mailbox ? [finishMailbox(this.mailbox)] : []),
     ]).then(() => {})
   }
 }
@@ -1298,7 +1309,7 @@ function tooLarge($: $, batch: { type: string; body: Record<string, unknown> }[]
   }
   if (singly) singly -= 1
   const pid = batch[0]?.type === 'prompt' ? batch[0].body.pid : undefined
-  if (typeof pid === 'string' && ownPending.delete(pid)) unsent.add(pid)
+  if (typeof pid === 'string' && ownPending.delete(pid)) unsent.set(pid, null)
   noteOnce($, 'too-large', 'A message was too large to send to the room.', scope)
 }
 
@@ -1367,10 +1378,12 @@ async function runStream($: $, generation: number) {
     if ((await $.env.get('SHARED_SESSION_TRANSPORT')) === 'poll') return void startPolls($, generation, 'SHARED_SESSION_TRANSPORT=poll')
     // A host takes raw TCP and guests' needs: the room sends a need only to a
     // host that says so, and tells a guest asking an older one that it
-    // didn't go.
+    // didn't go. Both sides take messages between sessions (`peer`), which
+    // the room sends only to a stream that says so: a poll gets none, and
+    // the other side is told this one isn't connected.
     const host = (await read($, modeA)) === 'host'
     const config = [
-      `url = "${room.server}/api/rooms/${room.id}/stream?after=${room.seq}${host ? '&tcp=1&need=1' : ''}"`,
+      `url = "${room.server}/api/rooms/${room.id}/stream?after=${room.seq}${host ? '&tcp=1&need=1' : ''}&peer=1"`,
       `header = "Authorization: Bearer ${room.token}"`,
       'header = "Accept: application/x-ndjson"',
       // Which plugin this is, so the room knows who needs to update.
@@ -1429,6 +1442,7 @@ async function runStream($: $, generation: number) {
           if (typeof message.httpStatus === 'number') status = message.httpStatus
           else if (typeof message.error === 'string') refusal = message.error
           else if (ask) answerRoomAsk($, room, ask, message[ask] as Record<string, unknown>)
+          else if (message.peer && typeof message.peer === 'object') void takePeer($, room, host, message.peer as Record<string, unknown>).catch(error => $.ui.log(`Shared session: a message between sessions: ${String((error as Error)?.message ?? error)}`, { to: 'debug' }))
           else if (Array.isArray(message.events)) {
             if (!streamUp && !delivered) $.ui.log('Shared session: listening on a stream', { to: 'debug' })
             // Connected: the Stops the room didn't hear are told again.
@@ -1512,13 +1526,10 @@ async function streamPage($: $, generation: number, page: EventsPage) {
 // turn.step dispatch may spend 10 s of its own time, and past that the engine
 // calls the model in its place; the clock stops while a $ call is in flight,
 // but not for a plain timer (nor $.clock.sleep), and a host's Claude can think
-// for much longer than 10 s before a word arrives. So waits are `sleep`s.
+// for much longer than 10 s before a word arrives. So waits are `sleep`s, and
+// where `sleep` doesn't run, a plain timer (`nap`).
 async function pause($: $, ms: number) {
-  try {
-    await $.process.run(['sleep', (ms / 1000).toFixed(2)], { timeoutMs: ms + 2_000 })
-  } catch {
-    await new Promise<void>(resolve => $.clock.after(ms, resolve))
-  }
+  await nap($, ms)
 }
 
 // Guest: the result of a call the host's Claude made, for its card here: read
@@ -1668,6 +1679,11 @@ async function absorb($: $, room: ShareRoom, mode: ShareMode, event: ServerEvent
       break
     case 'stop':
       await note({ ts: event.ts, who, kind: 'stop' })
+      break
+    case 'declined':
+      // A message one of this person's sessions wrote here that the host's
+      // side couldn't take in: that session hears why.
+      if (live && mode === 'guest' && typeof body.pid === 'string' && typeof body.reason === 'string') void declinedRelay($, body.pid, body.reason).catch(() => {})
       break
     case 'approval':
       if (body.pending === false && typeof body.what === 'string') {
@@ -2534,6 +2550,10 @@ async function clearRoomState($: $, opts: { unmark?: string | true } = {}) {
   await update($, hostAskA, () => null)
   await update($, hostMemoryA, () => null)
   await update($, needAskedA, () => null)
+  await update($, peerRoutesA, () => ({}))
+  await update($, peerRelaysA, () => [])
+  await update($, peerSendsA, () => [])
+  relaysHere.length = 0
   await update($, localPreviewsA, () => [])
   hostAsking.clear()
   if (opts.unmark) await unmarkSidebar($, opts.unmark === true ? undefined : opts.unmark)
@@ -3007,7 +3027,7 @@ async function makeRoom($: $, surface: RenderSurface | undefined, opts: { histor
   const signedIn = await signInFor($, server)
   const team = signedIn && opts.team !== false ? await shareTeam($, server) : null
 
-  const created = await api<{ id: string; url: string; token: string; seq: number; title: string; latest?: string; team?: { id: string; name: string } }>(
+  const created = await api<{ id: string; url: string; token: string; seq: number; title: string; latest?: string; team?: { id: string; name: string }; peer?: boolean }>(
     $,
     server,
     '/api/rooms',
@@ -3028,6 +3048,8 @@ async function makeRoom($: $, surface: RenderSurface | undefined, opts: { histor
     team: created.team ?? null,
     // Kept with its place: reopened, it looks back only from `since`.
     ...(opts.history === false ? { fromNow: true as const } : {}),
+    // Its server passes messages between sessions on: kept with the room.
+    ...(created.peer === true ? { peer: true as const } : {}),
   }
   // Its scope, before the room is anyone's to see.
   const s = openScope(room, 'host')
@@ -3112,6 +3134,8 @@ type Hosting = {
   place?: string
   /** What the host said about sharing more here: declined, stopped, when asked; with the room's name. */
   hostMemory?: (ShareHostMemory & { room: string }) | null
+  /** This session's mailboxes, by id: the `from=` addresses Claude may still reply to. */
+  peerRoutes?: Record<string, SharePeerRoute>
 }
 
 // Installed marketplace and inline-folder copies have different $.store
@@ -3253,6 +3277,7 @@ async function hostingPlace($: $, room: ShareRoom): Promise<Hosting> {
     place: (await placeOf($)) || undefined,
     // Saved with its room's name: taken back only for that room.
     hostMemory: memory ? { room: roomIdentity(room), ...memory } : null,
+    peerRoutes: await read($, peerRoutesA),
   }
 }
 
@@ -3282,6 +3307,8 @@ type Joined = {
   previewNeedsOpen?: string[]
   /** Ports the preview window asked the host about. */
   needAsked?: number[]
+  /** This session's handles, by id: where the host's session's messages to this person's sessions go. */
+  peerRoutes?: Record<string, SharePeerRoute>
 }
 
 // What a guest's place keeps, to take its seat back.
@@ -3297,6 +3324,7 @@ async function joinedPlace($: $, room: ShareRoom): Promise<Joined> {
     chat: (await read($, chatA)).slice(-40),
     sidebar: await read($, sidebarA),
     place: (await placeOf($)) || undefined,
+    peerRoutes: await read($, peerRoutesA),
     ...(await windowCheckpoint($, room)),
   }
 }
@@ -3554,6 +3582,7 @@ async function resumeJoined($: $) {
     await update($, previewWindowA, v => (reclaiming === back ? (windowPort === 0 || validPort(windowPort) ? { room: roomIdentity(room), port: windowPort, opened: [], ...profile } : null) : v))
     await update($, previewNeedsOpenA, v => (reclaiming === back ? (Array.isArray(saved.previewNeedsOpen) ? saved.previewNeedsOpen.filter(p => typeof p === 'string').slice(-64) : []) : v))
     await update($, needAskedA, v => (reclaiming === back ? ({ ports: Array.isArray(saved.needAsked) ? saved.needAsked.filter(validPort).slice(-256) : [], times: [] }) : v))
+    await update($, peerRoutesA, v => (reclaiming === back ? peerRoutesSaved(saved.peerRoutes, 'guest') : v))
     if (!current()) return
     // Back in: the room's scope from here, and a session ending saves it as it would any room.
     reclaiming = null
@@ -3638,12 +3667,15 @@ async function resumeHosting($: $) {
     await update($, chatA, v => (reclaiming === back ? (saved.chat ?? []) : v))
     await update($, sidebarA, v => (reclaiming === back ? (saved.sidebar ?? null) : v))
     await update($, hostMemoryA, v => (reclaiming === back ? (hostMemorySaved(saved.hostMemory, roomIdentity(room))) : v))
+    await update($, peerRoutesA, v => (reclaiming === back ? peerRoutesSaved(saved.peerRoutes, 'host') : v))
     if (!current()) return
     // Back: the room's scope from here, and a session ending saves it as it would any room.
     reclaiming = null
     const s = openScope(room, 'host')
     s.tcp = true
     await update($, modeA, m => (s.live ? 'host' : m))
+    // Its mailboxes listen again where they were.
+    void restoreMailboxes($).catch(() => {})
     // Sharing it again: a Share or a Join that waited goes on as in it.
     tookBack($, back)
     if (page) {
@@ -3693,10 +3725,384 @@ async function acceptPrompt($: $, who: string, text: string, pid: string, attach
   const attached = await saveAttachments($, who, attachments)
   const cwd = await $.session.cwd()
   const marks = attached.map(p => `📎 ${p.startsWith(`${cwd}/`) ? p.slice(cwd.length + 1) : p} (attached by ${who}; open it with the Read tool to see it)`).join('\n')
-  const framed = `${who}: ${text}${marks ? `${text ? '\n\n' : ''}${marks}` : ''}`
+  // No `from=` in their words reaches Claude (`neutralize`): only an envelope
+  // Claude Code frames itself carries one, a mailbox's among them.
+  const words = neutralize(text)
+  const framed = `${who}: ${words}${marks ? `${words ? '\n\n' : ''}${marks}` : ''}`
   await update($, guestPromptsA, list => [...list, { who, framed, text: framed.slice(who.length + 2), pid }])
   // Runs once the session is idle, after any turn already running.
   nextGuestPromptSoon($)
+}
+
+// ---------------------------------------------------------------------------
+// Messages between sessions
+//
+// A teammate's own session (A, say an agent of theirs) writes to their
+// joined session (G); the host's Claude answers it; they go on writing to
+// each other, through Claude Code's own messaging at both ends:
+//   Guest: A's message reaches G as any session's does (queued, and held
+//     there while A runs in another permission mode class), and at
+//     `prompt.submit` goes on to the room with the hop chain and message id
+//     A gave it, read from G's transcript (`relayQueued`). G's turn for it
+//     plays the host's turn for it, as a typed prompt's does; G's own Claude
+//     never runs. What the host's session writes back, G sends A itself
+//     (`$.session.send`): A's next message comes to G natively, and Claude
+//     Code gives a plugin's send the hop chain of the session's newest
+//     prompt (A's message, while its turn plays), so A's and G's Claude Code
+//     cut a loop between them as they would any.
+//   Host: one helper a room (relay/mailbox.cjs), started detached (no
+//     descendant of this Claude Code, or a session in bypass mode would take
+//     its frames as its own), whose mailboxes are real Unix sockets beside
+//     this session's own: a mailbox stands for one of a teammate's sessions
+//     (the seat and handle the room brought its message with). A's message
+//     goes into this session from it, with A's chain, mode and id; the host's
+//     Claude's SendMessage to it comes back to it and goes to that seat.
+// Receipts go both ways: where this session holds, releases or drops A's
+// message, Claude Code tells the mailbox, the helper posts it, and G writes
+// it into A (relay/receipt.cjs); where A holds or drops what G sent it,
+// Claude Code tells G (a delivery notice), G posts it, and the helper writes
+// it into this session from the mailbox. The room passes each on to the
+// other side's streams alone and keeps none (POST peer). A message from a
+// mailbox is the host's Claude's like any peer's: the host's mode decides its
+// calls. Where something can't go, the session that wrote hears it: A from G
+// (`tellPeer`), the host's Claude as a receipt.
+const PEER_STATUS = new Set(['held', 'denied', 'delivered', 'expired', 'refused', 'dropped'])
+const PEER_DROPS = new Set(['rate-limited', 'duplicate', 'hop-loop', 'hop-runaway', 'queue-full'])
+type PeerStatus = 'held' | 'denied' | 'delivered' | 'expired' | 'refused' | 'dropped'
+/** A message id as Claude Code gives one (`msg_id`), which its receipts name. */
+const MSG_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+const HOP_TOKEN = /^[0-9a-f]{24}$/
+
+/** A new message id of Claude Code's kind (a version 4 UUID). */
+function newMsgId(): string {
+  const b = crypto.getRandomValues(new Uint8Array(16))
+  b[6] = (b[6]! & 0x0f) | 0x40
+  b[8] = (b[8]! & 0x3f) | 0x80
+  const h = [...b].map(x => x.toString(16).padStart(2, '0')).join('')
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`
+}
+
+// A receipt as the room brings it, checked as the room checks it.
+function peerReceiptOf(value: Record<string, unknown>, key: 'ref' | 'id'): { handle: string; status: PeerStatus; of: string; reason?: string } | null {
+  const { handle, status, reason } = value
+  const of = value[key]
+  if (typeof handle !== 'string' || !PEER_ID.test(handle) || typeof status !== 'string' || !PEER_STATUS.has(status) || typeof of !== 'string' || !MSG_ID.test(of)) return null
+  return { handle, status: status as PeerStatus, of, ...(status === 'dropped' && typeof reason === 'string' && PEER_DROPS.has(reason) ? { reason } : {}) }
+}
+
+// What this computer lacks for messages between sessions: null, or why.
+// Claude Code 2.1.304's messaging (its socket, the ids and hop chains its
+// transcript keeps), and Unix sockets (macOS, Linux).
+let peerPlatform: Promise<boolean> | null = null
+async function peerMissing($: $): Promise<string | null> {
+  const engine = /claude-code_(\d+)-(\d+)-(\d+)/.exec((await $.env.get('AI_AGENT')) ?? '')
+  const older = engine ? Number(engine[1]) * 1e6 + Number(engine[2]) * 1e3 + Number(engine[3]) < 2_001_304 : false
+  if (older || !(await $.env.get('CLAUDE_CODE_MESSAGING_SOCKET'))) return "its Claude Code can't pass messages between sessions (that needs Claude Code 2.1.304 or later)"
+  peerPlatform ??= sh($, 'uname -s\n').then(({ out }) => /^(Darwin|Linux)\s*$/.test(out))
+  if (!(await peerPlatform)) return 'messages between sessions are passed on only on macOS and Linux'
+  return null
+}
+
+// Host: the room's mailboxes' helper, started for the first message that
+// needs it (or a start whose mailboxes must listen again) and kept with the
+// room's scope (`RoomChildren.mailbox`). A launcher starts it detached and
+// is gone; the room, the host's bearer and the helper's own come on stdin,
+// commands in short POSTs (`controlPost`). Its pid and port are kept in the
+// session's state (`mailboxHelperA`), so the module that replaces this one
+// at a reload ends it (`endOldHelper`) and starts its own. It goes with the
+// room, or once this Claude Code is gone; a failure's next message starts
+// another.
+type MailboxRun = {
+  room: ShareRoom
+  scope: RoomScope
+  controlToken: string
+  ready: Promise<boolean>
+  settle: (ready: boolean) => void
+  /** Its commands, one at a time (`mailboxControl`). */
+  queue: Lane
+  stopped: boolean
+  port?: number
+  pid?: number
+  /** Why it never started: no Node here, or a system it can't run on. */
+  error?: 'NODE' | 'UNSUPPORTED' | 'STARTUP'
+  timer?: Timer
+  /** Tells it to go: an exit command, else its process ended. */
+  end?: () => Promise<void>
+  stopping?: Promise<void>
+}
+
+function mailboxOf($: $, room: ShareRoom, s: RoomScope): MailboxRun | null {
+  if (!s.live || !stillInRoom(room, s)) return null
+  const had = s.children.mailbox
+  if (had && !had.stopped) return had
+  let settle!: (ready: boolean) => void
+  const ready = new Promise<boolean>(done => { settle = done })
+  const run: MailboxRun = { room, scope: s, controlToken: randomSecret(), ready, settle, queue: lane(), stopped: false }
+  run.end = () => endMailbox($, run)
+  s.children.mailbox = run
+  run.timer = $.clock.after(6_000, () => {
+    $.ui.log("Shared session: the mailboxes' helper didn't start in 6 s", { to: 'debug' })
+    void finishMailbox(run)
+  })
+  void runMailbox($, run)
+  return run
+}
+
+function finishMailbox(run: MailboxRun): Promise<void> {
+  if (run.stopping) return run.stopping
+  run.stopped = true
+  run.timer?.cancel()
+  run.settle(false)
+  run.stopping = (async () => {
+    try { await run.end?.() } catch {}
+    if (run.scope.children.mailbox === run) run.scope.children.mailbox = null
+  })()
+  return run.stopping
+}
+
+// Gone: told to, else ended as the one process its pid names (`killHelper`).
+async function endMailbox($: $, run: MailboxRun) {
+  const told = run.port ? await controlPost($, run.port, run.controlToken, { op: 'exit' }, { answers: [200], failed: () => {} }) : 0
+  if (told !== 200 && run.pid) await killHelper($, run.pid)
+  if (run.pid) await update($, mailboxHelperA, h => (h?.pid === run.pid ? null : h))
+}
+
+// A helper by its pid, only while that pid is still a mailbox helper: a pid
+// taken since by another process is never signalled.
+async function killHelper($: $, pid: number) {
+  if (!Number.isSafeInteger(pid) || pid <= 1) return
+  await sh($, `case "$(ps -o command= -p ${pid} 2>/dev/null)" in\n  *"/relay/mailbox.cjs --serve"*) kill -TERM ${pid} 2>/dev/null ;;\nesac\n`)
+}
+
+// A reload: the helper the module before this one started goes (its
+// mailboxes with it), and this one's opens them again (`restoreMailboxes`).
+async function endOldHelper($: $) {
+  const old = await read($, mailboxHelperA)
+  if (!old) return
+  await update($, mailboxHelperA, h => (h?.pid === old.pid ? null : h))
+  await killHelper($, old.pid)
+}
+
+async function runMailbox($: $, run: MailboxRun) {
+  try {
+    const own = await $.env.get('CLAUDE_CODE_MESSAGING_SOCKET')
+    const version = await ownVersion($)
+    if (!own || run.stopped || run.scope.children.mailbox !== run || !run.scope.live) return void finishMailbox(run)
+    const input = { room: `${run.room.server}/api/rooms/${run.room.id}`, token: run.room.token, controlToken: run.controlToken, version, own, dir: own.slice(0, own.lastIndexOf('/')) }
+    const child = $.process.spawn({ argv: ['/bin/sh', '-c', FIND_NODE, 'sh', `${$.plugin.root}/relay/mailbox.cjs`], input: JSON.stringify(input) })
+    for await (const line of helperLines(child)) {
+      let message: { state?: string; port?: number; pid?: number; code?: string }
+      try { message = JSON.parse(line) } catch { continue }
+      if (message?.state === 'ready' && validPort(message.port) && Number.isSafeInteger(message.pid) && message.pid! > 1 && !run.port) {
+        run.port = message.port
+        run.pid = message.pid
+        run.timer?.cancel()
+        // A module that replaces this one ends it by this.
+        await update($, mailboxHelperA, () => ({ room: roomIdentity(run.room), pid: message.pid!, port: message.port! }))
+        $.ui.log(`Shared session: the mailboxes' helper (${message.pid}) is ready`, { to: 'debug' })
+        // Stopped meanwhile (the room's end, or a reload): it goes now.
+        if (run.stopped || run.scope.children.mailbox !== run || !run.scope.live) {
+          const first = !run.stopping
+          await finishMailbox(run)
+          if (!first) await endMailbox($, run)
+          return
+        }
+        run.settle(true)
+      } else if (message?.state === 'error') run.error = message.code === 'UNSUPPORTED' ? 'UNSUPPORTED' : 'STARTUP'
+    }
+    // The launcher is gone once the helper is ready; without that, nothing runs.
+    if ((await helperEnded(child)) === 'NODE') run.error = 'NODE'
+    if (!run.port) await finishMailbox(run)
+  } catch (error) {
+    // Its mailboxes go with it; the next message starts another.
+    $.ui.log(`Shared session: the mailboxes' helper: ${String((error as Error)?.message ?? error)}`, { to: 'debug' })
+    await finishMailbox(run)
+  }
+}
+
+// One command to the room's mailboxes' helper, in turn: 200, or why not (404
+// a mailbox it doesn't have, 409 one it couldn't open or a frame it couldn't
+// write, 429 full). Anything else, no answer in two seconds included, ends it.
+async function mailboxControl($: $, run: MailboxRun, body: Record<string, unknown>): Promise<number> {
+  return run.queue.run(async () => {
+    if (!(await run.ready) || run.stopped || run.scope.children.mailbox !== run) return 0
+    const failed = () => {
+      $.ui.log(`Shared session: the mailboxes' helper didn't answer ${String(body.op)}, so it was ended`, { to: 'debug' })
+      void finishMailbox(run)
+    }
+    const status = await controlPost($, run.port!, run.controlToken, body, { answers: [200, 404, 409, 429], failed })
+    return !run.stopped && run.scope.children.mailbox === run ? status : 0
+  })
+}
+
+// Host: a mailbox listening, its helper started as need be; else why not.
+type MailboxOpen = MailboxRun | { error: NonNullable<MailboxRun['error']> | 'OPEN' }
+async function openMailbox($: $, room: ShareRoom, s: RoomScope, box: string, route: Extract<SharePeerRoute, { kind: 'host' }>): Promise<MailboxOpen> {
+  const run = mailboxOf($, room, s)
+  if (!run) return { error: 'STARTUP' }
+  if (!(await run.ready)) return { error: run.error ?? 'STARTUP' }
+  return (await mailboxControl($, run, { op: 'open', box, seat: route.seat, handle: route.handle })) === 200 ? run : { error: 'OPEN' }
+}
+
+// A route, this session's from now (the newest 64; a host's mailbox going
+// out of them is closed), found by what it's for or made: a guest's handle
+// for one of this person's sessions at this seat, a host's mailbox for a
+// seat's handle. Its id is new, 128 random bits. Written only while the
+// room's scope is open.
+async function keepRoute($: $, room: ShareRoom, s: RoomScope, route: SharePeerRoute): Promise<string | null> {
+  if (!stillInRoom(room, s)) return null
+  const got = { id: null as string | null, evicted: [] as string[] }
+  await update($, peerRoutesA, all => {
+    if (!s.live) return all
+    const same = (r: SharePeerRoute) => (r.kind === 'guest' && route.kind === 'guest' ? r.to === route.to && r.seat === route.seat : r.kind === 'host' && route.kind === 'host' && r.seat === route.seat && r.handle === route.handle)
+    const id = Object.entries(all).find(([, r]) => same(r))?.[0] ?? randomSecret().slice(0, 32)
+    got.id = id
+    const entries = [...Object.entries(all).filter(([k]) => k !== id), [id, route] as const]
+    got.evicted = entries.slice(0, -64).filter(([, r]) => r.kind === 'host').map(([k]) => k)
+    return Object.fromEntries(entries.slice(-64))
+  })
+  const run = s.children.mailbox
+  if (run && !run.stopped) for (const box of got.evicted) void mailboxControl($, run, { op: 'close', box }).catch(() => {})
+  return s.live ? got.id : null
+}
+
+// Host, at a start, a reload or a resume: the mailboxes listen again at the
+// same paths, so the `from=` addresses Claude remembers still reach them.
+async function restoreMailboxes($: $) {
+  const room = await read($, roomA)
+  if (!room?.peer || (await read($, modeA)) !== 'host' || (await peerMissing($))) return
+  const routes = Object.entries(await read($, peerRoutesA)).filter((e): e is [string, Extract<SharePeerRoute, { kind: 'host' }>] => e[1].kind === 'host')
+  const s = scope
+  for (const [box, route] of routes) {
+    if (!s.live || 'error' in (await openMailbox($, room, s, box, route))) return
+  }
+}
+
+// Why a message to the host's session didn't reach their Claude, in words for
+// the session that wrote it (and its turn on the joined session).
+function peerRefusal(host: string, result: string | undefined): string {
+  if (result === 'offline') return `${host} isn't connected right now, so this didn't reach their Claude. Send it again later.`
+  if (result === 'unsupported') return `${host}'s Shared Sessions needs an update to take messages from other sessions, so this didn't reach their Claude.`
+  if (result === 'gone') return "The shared session has ended, so this didn't reach anyone's Claude."
+  if (result === 'busy') return `Too many messages went to ${host}'s session this minute, so this one didn't. Send it again in a minute.`
+  if (result === 'large') return `This was too large to send to ${host}'s session, so it didn't reach their Claude.`
+  return `Couldn't reach the share server, so this didn't reach ${host}'s Claude.`
+}
+
+// To the room for the other side (POST peer): what came of it, in a word. A
+// guest's refused bearer takes a new seat and goes once more with it.
+async function postPeer($: $, room: ShareRoom, body: Record<string, unknown>): Promise<'delivered' | 'offline' | 'unsupported' | 'gone' | 'busy' | 'large' | 'unreachable'> {
+  for (let again = room.seat !== 'host'; ; again = false) {
+    const now = await read($, roomA)
+    const token = now?.id === room.id ? now.token : room.token
+    try {
+      const answer = await api<{ delivered?: boolean; reason?: string }>($, room.server, `/api/rooms/${room.id}/peer`, { method: 'POST', token, body })
+      return answer.delivered === true ? 'delivered' : answer.reason === 'unsupported' ? 'unsupported' : 'offline'
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401 && again && (await reseat($, room)).ok) continue
+      if (!(error instanceof ApiError)) return 'unreachable'
+      return error.status === 429 ? 'busy' : error.status === 413 ? 'large' : isGone(error) || error.status === 403 ? 'gone' : 'unreachable'
+    }
+  }
+}
+
+// What the room brought from the other side: a message, or a receipt.
+async function takePeer($: $, room: ShareRoom, host: boolean, value: Record<string, unknown>) {
+  if (!stillInRoom(room, scope)) return
+  if (host) return 'status' in value ? hostReceipt($, room, value) : hostPeer($, room, value)
+  return 'status' in value ? guestReceipt($, room, value) : guestPeer($, room, value)
+}
+
+// Host: the relays delivered here, by mailbox and words, with the guest's id
+// for the turn it plays them in (`pid`), so the turn they start, or the turn
+// they go into, is told by it: the newest 32, in memory.
+const relaysHere: { box: string; pid: string; text: string }[] = []
+const relayPidOf = (box: string, text: string) => relaysHere.findLast(r => r.box === box && r.text === text)?.pid
+
+// Host: a teammate's session's message, into this session natively, from
+// the mailbox for its seat and handle. Where it can't go, the teammate's
+// turn for it is declined, which tells their session why.
+async function hostPeer($: $, room: ShareRoom, value: Record<string, unknown>) {
+  const { seat, handle, name, mode, chain, id, pid, body } = value
+  if (typeof seat !== 'string' || !seat || typeof handle !== 'string' || !PEER_ID.test(handle) || typeof pid !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(pid) || typeof body !== 'string' || !body.trim()) return
+  const who = typeof value.who === 'string' && value.who ? tidySender(value.who) : 'A teammate'
+  const decline = (reason: string) => send($, 'declined', { pid, who, reason })
+  const s = scope
+  if ((await read($, policyA)).prompts === 'watch') return decline(`${room.host} has this shared session on watch-only, so this didn't reach their Claude.`)
+  const missing = await peerMissing($)
+  if (missing) return decline(`${room.host}'s computer can't take this: ${missing}.`)
+  const route: SharePeerRoute = { kind: 'host', seat, handle, who, name: typeof name === 'string' && name ? tidySender(name.replace(/[\r\n<>"]+/g, ' ')) : 'another session', at: await $.clock.now() }
+  const box = await keepRoute($, room, s, route)
+  if (!box) return
+  const run = await openMailbox($, room, s, box, route)
+  if ('error' in run) {
+    return decline(run.error === 'UNSUPPORTED' ? `${room.host}'s computer can't take messages from other sessions, so this didn't reach their Claude.`
+      : run.error === 'NODE' ? `${room.host}'s computer couldn't take this in (it needs Node 20 or later), so this didn't reach their Claude.`
+      : `${room.host}'s computer couldn't take this in, so it didn't reach their Claude.`)
+  }
+  const hops = Array.isArray(chain) ? chain.filter((t): t is string => typeof t === 'string' && HOP_TOKEN.test(t)).slice(-32) : []
+  // Known before it's delivered: its turn may start before the helper answers.
+  const text = body.slice(0, 32_000)
+  const relay = { box, pid, text: text.trim() }
+  relaysHere.push(relay)
+  if (relaysHere.length > 32) relaysHere.shift()
+  const status = await mailboxControl($, run, {
+    op: 'deliver', box, name: `${route.name} · via ${who}`,
+    ...(typeof mode === 'string' && /^[a-z-]{1,32}$/.test(mode) ? { mode } : {}),
+    chain: hops, ...(typeof id === 'string' && MSG_ID.test(id) ? { id } : {}), body: text,
+  })
+  if (status === 200) return
+  relaysHere.splice(relaysHere.indexOf(relay), 1)
+  decline(`${room.host}'s Claude Code didn't take this, so it didn't reach their Claude.`)
+}
+
+// Host: what became of a message this session's Claude wrote to a mailbox,
+// at the session it went to: into this session, from that mailbox, as that
+// session's Claude Code would have said it.
+async function hostReceipt($: $, room: ShareRoom, value: Record<string, unknown>) {
+  const receipt = peerReceiptOf(value, 'ref')
+  if (!receipt || typeof value.seat !== 'string') return
+  const found = Object.entries(await read($, peerRoutesA)).find(([, r]) => r.kind === 'host' && r.seat === value.seat && r.handle === receipt.handle)
+  if (!found || found[1].kind !== 'host') return
+  const run = await openMailbox($, room, scope, found[0], found[1])
+  if (!('error' in run)) await mailboxControl($, run, { op: 'receipt', box: found[0], status: receipt.status, ref: receipt.of, ...(receipt.reason ? { reason: receipt.reason } : {}) })
+}
+
+// Host: whose mailbox an address is, by its id: the route and the id, else null.
+async function mailboxOwner($: $, address: string | undefined): Promise<(Extract<SharePeerRoute, { kind: 'host' }> & { box: string }) | null> {
+  const box = /\/ss-([0-9a-f]{32})\.sock$/.exec(address ?? '')?.[1]
+  const route = box ? (await read($, peerRoutesA))[box] : undefined
+  return route?.kind === 'host' ? { ...route, box: box! } : null
+}
+
+// Host: a peer row from a mailbox, as the room keeps it: under the teammate's
+// name, the session's name and its words, as a relayed prompt is drawn, with
+// the teammate's id for the turn it went into (`pid`); never the mailbox's
+// path. Null: no text of this message came from one.
+async function mailboxRows($: $, message: { role?: string; type?: string; content: unknown }): Promise<Row[] | null> {
+  if ((message.role ?? message.type) !== 'user') return null
+  const blocks = typeof message.content === 'string' ? [{ type: 'text', text: message.content }] : Array.isArray(message.content) ? (message.content as { type?: string; text?: unknown }[]) : []
+  const rows: Row[] = []
+  for (const block of blocks) {
+    const sent = block.type === 'text' && typeof block.text === 'string' ? delivered(block.text) : null
+    const owner = sent?.address ? await mailboxOwner($, sent.address) : null
+    if (!owner || !sent?.text) continue
+    const pid = relayPidOf(owner.box, sent.text)
+    rows.push({ kind: 'user', who: owner.who, text: `<cross-session-message from-name="${owner.name.replaceAll('"', '’')}">\n${sent.text}\n</cross-session-message>`, ...(pid ? { pid } : {}) })
+  }
+  return rows.length ? rows : null
+}
+
+// Host: a row naming a mailbox (Claude's SendMessage to one), as the room
+// keeps it: the session it stands for in its place, never the path.
+function hideMailboxes(row: Row, routes: Record<string, SharePeerRoute>): Row {
+  const text = JSON.stringify(row)
+  if (!text.includes('/ss-')) return row
+  const shown = text.replace(/(?:uds:)?\/[^"\s\\]*\/ss-([0-9a-f]{32})\.sock/g, (whole, id: string) => {
+    const route = routes[id]
+    return route?.kind === 'host' ? `${route.name} (${route.who}'s agent)`.replace(/["\\]/g, '') : 'another session'
+  })
+  try { return JSON.parse(shown) as Row } catch { return row }
 }
 
 // Host: teammates' prompts go to Claude one at a time, each a turn of its
@@ -3995,6 +4401,238 @@ async function replaced($: $): Promise<boolean> {
 // ---------------------------------------------------------------------------
 // Guest
 
+// Guest: why a message from another of this person's sessions can't go on
+// to the host's session now, in words for that session (and for this one's
+// turn for it): null when it can.
+async function relayRefusal($: $, room: ShareRoom): Promise<string | null> {
+  if ((await read($, policyA)).prompts === 'watch') return `${room.host} has this shared session on watch-only, so this didn't reach their Claude.`
+  if ((await read($, peopleA)).some(p => p.role === 'host' && !p.online)) return peerRefusal(room.host, 'offline')
+  if (!room.peer) return `The share server for ${room.host}'s session needs an update to pass messages between sessions, so this didn't reach their Claude.`
+  const missing = await peerMissing($)
+  return missing ? `This computer can't pass this on: ${missing}.` : null
+}
+
+// The row Claude Code wrote this session's transcript for a message from
+// another session: the message id its sender gave it (that session's
+// receipts name it) and the hop chain it came with (the host's Claude Code
+// reads it to cut a loop). It's written a moment after the prompt enters
+// (about 150 ms), so it's looked for every 100 ms, two seconds at most: the
+// newest from that address with those words not taken already.
+const rowsTaken = new Set<string>()
+async function peerRow($: $, sent: { text: string; address: string }): Promise<{ id: string; chain: string[] } | null> {
+  const sid = await $.session.id().catch(() => '')
+  if (!/^[\w-]{8,80}$/.test(sid)) return null
+  const file = (await sh($, `ls -1 "\${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/projects/*/${sid}.jsonl 2>/dev/null | head -1\n`)).out.trim()
+  if (!file) return null
+  for (let tries = 0; tries < 20; tries++) {
+    const { out } = await sh($, `tail -n 200 ${sq(file)} | grep -F '"kind":"peer"'\n`)
+    for (const line of out.split('\n').reverse()) {
+      let row: { message?: { content?: unknown }; origin?: { kind?: unknown; from?: unknown; msg_id?: unknown; hopChain?: unknown } }
+      try { row = JSON.parse(line) } catch { continue }
+      const origin = row?.origin
+      if (origin?.kind !== 'peer' || origin.from !== sent.address || typeof origin.msg_id !== 'string' || !MSG_ID.test(origin.msg_id) || rowsTaken.has(origin.msg_id)) continue
+      const content = row.message?.content
+      const text = typeof content === 'string' ? content : Array.isArray(content) ? content.map(b => (typeof b?.text === 'string' ? b.text : '')).join('') : ''
+      if (delivered(text)?.text !== sent.text) continue
+      rowsTaken.add(origin.msg_id)
+      if (rowsTaken.size > 256) rowsTaken.delete(rowsTaken.values().next().value as string)
+      return { id: origin.msg_id, chain: Array.isArray(origin.hopChain) ? origin.hopChain.filter((t): t is string => typeof t === 'string' && HOP_TOKEN.test(t)).slice(-32) : [] }
+    }
+    await pause($, 100)
+  }
+  return null
+}
+
+// A relay's turn here ends, saying what happened: at once if it's showing no
+// one else's turn, else after it (`unsent`). One whose turn already came, or
+// that went into a turn playing here, has none to end.
+function endRelay(pid: string, note: string) {
+  if (ownPending.delete(pid)) unsent.set(pid, note)
+}
+
+// How long a relay's turn here waits for the host's turn for it before it
+// ends anyway: the host's Claude Code may hold it while the host decides,
+// or take it up only after a long turn of its own.
+const RELAY_WAIT_MS = 10 * 60_000
+
+// Guest: a message from another of this person's sessions (A), on to the
+// host's session, from a timer once its prompt entered here: with A's hop
+// chain and message id from this session's transcript (a new id where that
+// can't be read: then no receipt reaches A), A's name and mode class, and a
+// handle for A at this seat, which the room carries in A's address's place.
+// Where it can't go, A hears why, and its turn here ends saying so.
+async function relayQueued($: $, room: ShareRoom, s: RoomScope, pid: string, sent: { from: string; text: string; address: string; mode?: string }) {
+  const row = await peerRow($, sent)
+  if (!stillInRoom(room, s)) return
+  const name = tidySender(sent.from).replace(/[\x00-\x1f\x7f]+/g, ' ')
+  const handle = await keepRoute($, room, s, { kind: 'guest', to: sent.address, name, seat: room.seat, at: await $.clock.now() })
+  if (!handle) return
+  const id = row?.id ?? newMsgId()
+  const at = await $.clock.now()
+  await update($, peerRelaysA, list => (s.live ? [...list.filter(r => r.id !== id), { id, pid, handle, to: sent.address, native: Boolean(row), at }].slice(-64) : list))
+  const result = await postPeer($, room, { handle, name, ...(sent.mode && /^[a-z-]{1,32}$/.test(sent.mode) ? { mode: sent.mode } : {}), chain: row?.chain ?? [], id, pid, body: sent.text.slice(0, 32_000) })
+  lastActivity = await $.clock.now()
+  if (result === 'delivered') {
+    $.clock.after(RELAY_WAIT_MS, () => endRelay(pid, `Passed on to **${room.host}**'s session; their Claude hasn't taken it up yet.`))
+    return
+  }
+  const words = peerRefusal(room.host, result)
+  endRelay(pid, words)
+  tellPeer($, sent.address, words)
+}
+
+// Guest: what the host's session wrote back to one of this person's
+// sessions, by the handle its message went with: sent to that session from
+// this one (its next message comes here natively, with this send's hop chain
+// on it). A handle this session didn't make goes nowhere: nothing reaches an
+// address no message here came from. Where it can't go, the host's Claude
+// hears it was dropped. The handles are read as a write, so the stream's
+// long dispatch sees them as they are now.
+async function guestPeer($: $, room: ShareRoom, value: Record<string, unknown>) {
+  const { handle, body, ref } = value
+  if (typeof handle !== 'string' || !PEER_ID.test(handle) || typeof body !== 'string' || !body.trim() || typeof ref !== 'string' || !MSG_ID.test(ref)) return
+  const route = (await update($, peerRoutesA, all => all))[handle]
+  const dropped = () => void postPeer($, room, { handle, status: 'dropped', ref }).catch(() => {})
+  if (route?.kind !== 'guest') {
+    $.ui.log("Shared session: a message for a session this one didn't relay went nowhere", { to: 'debug' })
+    return dropped()
+  }
+  $.clock.after(0, () => void sendPeer($, route.to, body.slice(0, 32_000), { handle, ref }).then(ok => (ok ? undefined : dropped())))
+}
+
+// One message from this session to another of this person's: recorded once
+// delivered, in the order sent, so a delivery notice about it is matched to
+// it (`takeNotice`); a reply with the host's message's handle and id.
+// Delivered means queued: a session in another permission mode class than
+// this one holds it until its person lets it in.
+async function sendPeer($: $, to: string, text: string, reply?: { handle: string; ref: string }): Promise<boolean> {
+  const sent = await $.session.send({ to, text }).catch((error: unknown) => ({ isDelivered: false as const, reason: String((error as Error)?.message ?? error) }))
+  if (!sent.isDelivered) {
+    $.ui.log(`Shared session: a message to another session here didn't go: ${sent.reason}`, { to: 'debug' })
+    return false
+  }
+  const at = await $.clock.now()
+  await update($, peerSendsA, list => [...list, { to, at, ...reply }].slice(-64))
+  return true
+}
+
+// Words for one of this person's sessions, from this session, from a timer:
+// a peer's message there, never a prompt here.
+function tellPeer($: $, to: string, text: string) {
+  $.clock.after(0, () => void sendPeer($, to, text).catch(() => {}))
+}
+
+// What became of a session's message at the host's session: its turn here
+// ends where the host's Claude Code holds, drops or refuses it, and the
+// receipt goes into the session that wrote it (relay/receipt.cjs) as the
+// host's Claude Code said it: only for the id that session gave it, and a
+// release only after a hold.
+const DROP_WORDS: Record<string, string> = {
+  'rate-limited': 'too many messages too fast', duplicate: 'it repeated the one before', 'hop-loop': 'a relay loop between sessions was cut',
+  'hop-runaway': 'a relay loop between sessions was cut', 'queue-full': 'too many messages were waiting there',
+}
+async function guestReceipt($: $, room: ShareRoom, value: Record<string, unknown>) {
+  const receipt = peerReceiptOf(value, 'id')
+  if (!receipt) return
+  const relay = (await update($, peerRelaysA, list => list)).find(r => r.id === receipt.of && r.handle === receipt.handle)
+  if (!relay) return
+  if (receipt.status === 'held') endRelay(relay.pid, `**${room.host}**'s Claude Code is holding this until ${room.host} lets it in.`)
+  else if (receipt.status === 'dropped') endRelay(relay.pid, `**${room.host}**'s Claude Code dropped this${receipt.reason ? ` (${DROP_WORDS[receipt.reason]})` : ''}.`)
+  else if (receipt.status === 'refused') endRelay(relay.pid, `**${room.host}**'s Claude Code isn't taking messages from other sessions.`)
+  if (!relay.native || !relay.to.startsWith('uds:') || (receipt.status === 'delivered' && !relay.held)) return
+  if (receipt.status === 'held') await update($, peerRelaysA, list => list.map(r => (r.id === relay.id ? { ...r, held: true as const } : r)))
+  const own = await $.env.get('CLAUDE_CODE_MESSAGING_SOCKET')
+  if (!own) return
+  const input = { path: relay.to.slice(4), status: receipt.status, from: `uds:${own}`, ref: receipt.of, ...(receipt.reason ? { reason: receipt.reason } : {}) }
+  const child = $.process.spawn({ argv: ['/bin/sh', '-c', FIND_NODE, 'sh', `${$.plugin.root}/relay/receipt.cjs`], input: JSON.stringify(input) })
+  let out = ''
+  for await (const chunk of child) if (chunk.stream === 'stdout') out += chunk.text
+  if (!out.includes('"sent"')) $.ui.log(`Shared session: a receipt didn't reach the session it's for (${out.trim().slice(0, 80) || 'no Node'})`, { to: 'debug' })
+}
+
+// A delivery notice Claude Code gives this session about what it sent
+// another session (the host's replies, this plugin's notes): what became of
+// them, the sessions they went to, and the message ids (five at most) it
+// gave them, which a plugin's send never learns.
+const NOTICE = '[Cross-session delivery notice] '
+const NOTICE_STATUS: [RegExp, PeerStatus][] = [
+  [/ dropped at that session's inbox/, 'dropped'], [/ held by that session/, 'held'], [/ denied by the recipient user/, 'denied'],
+  [/ not approved before expiry/, 'expired'], [/ approved and released to that session/, 'delivered'], [/ (?:was|were) refused/, 'refused'],
+]
+const DROP_TEXTS: [string, string][] = [
+  ['you sent faster than that session accepts', 'rate-limited'], ['it repeated your previous message', 'duplicate'],
+  ['a relay loop between sessions was cut', 'hop-loop'], ['its queue of undelivered peer messages was full', 'queue-full'],
+]
+function noticeOf(text: string): { status: PeerStatus; to: string[]; ids: string[]; reason?: string } | null {
+  if (!text.startsWith(NOTICE)) return null
+  const status = NOTICE_STATUS.find(([re]) => re.test(text))?.[1]
+  // " (recipient: <address>; msg_id: <id>)", or "2 recipients: …", three
+  // addresses and five ids at most, "…" after.
+  const detail = /\((?:(?:\d+ )?recipients?: ([^;)]*); )?msg_id: ([^)]*)\)/.exec(text)
+  const ids = (detail?.[2] ?? '').split(', ').filter(id => MSG_ID.test(id))
+  if (!status || !ids.length) return null
+  const to = (detail?.[1] ?? '').split(', ').filter(a => /^(?:uds|bridge):\S/.test(a))
+  const reason = status === 'dropped' ? DROP_TEXTS.find(([words]) => text.includes(words))?.[1] : undefined
+  return { status, to, ids, ...(reason ? { reason } : {}) }
+}
+
+// Guest: a delivery notice, matched to what this session sent: a message id
+// it named before is that send; a first receipt (a hold, a drop, a refusal)
+// names the newest sends to those sessions no receipt named yet, in the
+// order they went. A reply's goes to the host's session, for its helper to
+// write into the host's Claude Code as the session it went to would have.
+async function takeNotice($: $, text: string) {
+  const notice = noticeOf(text)
+  const room = await read($, roomA)
+  if (!notice || !room || (await read($, modeA)) !== 'guest') return
+  const first = notice.status === 'held' || notice.status === 'dropped' || notice.status === 'refused'
+  const now = await $.clock.now()
+  let matched: SharePeerSend[] = []
+  await update($, peerSendsA, list => {
+    const next = list.map(sent => ({ ...sent }))
+    matched = []
+    const unknown: string[] = []
+    for (const id of notice.ids) {
+      const known = next.find(sent => sent.id === id)
+      if (known) matched.push(known)
+      else if (first) unknown.push(id)
+    }
+    const open = next.filter(sent => !sent.id && now - sent.at < RELAY_WAIT_MS && (!notice.to.length || notice.to.includes(sent.to)))
+    const taken = open.slice(Math.max(0, open.length - unknown.length))
+    unknown.slice(unknown.length - taken.length).forEach((id, i) => {
+      taken[i]!.id = id
+      matched.push(taken[i]!)
+    })
+    return next
+  })
+  for (const sent of matched) {
+    if (sent.handle && sent.ref) await postPeer($, room, { handle: sent.handle, status: notice.status, ref: sent.ref, ...(notice.reason ? { reason: notice.reason } : {}) })
+  }
+}
+
+// Guest: the host's side declined a relay (its plugin couldn't take it in):
+// the session that wrote it hears why. Its turn here ends with the same words
+// as the ride reads the event.
+async function declinedRelay($: $, pid: string, reason: string) {
+  const relay = (await update($, peerRelaysA, list => list)).find(r => r.pid === pid)
+  if (relay) tellPeer($, relay.to, reason)
+}
+
+// A saved place's routes of its side, checked: ids of the grammar, a guest's
+// with an address a frame reaches.
+function peerRoutesSaved(value: unknown, kind: SharePeerRoute['kind']): Record<string, SharePeerRoute> {
+  if (!value || typeof value !== 'object') return {}
+  const text = (v: unknown) => (typeof v === 'string' && v ? v : null)
+  const kept: [string, SharePeerRoute][] = []
+  for (const [id, r] of Object.entries(value as Record<string, Record<string, unknown> | null>)) {
+    if (!PEER_ID.test(id) || !r || typeof r !== 'object' || r.kind !== kind || !Number.isFinite(r.at)) continue
+    const at = r.at as number
+    if (kind === 'guest' && text(r.to) && /^(?:uds|bridge):\S/.test(r.to as string) && (r.to as string).length <= 512 && text(r.seat)) kept.push([id, { kind, to: r.to as string, name: tidySender(String(r.name ?? '')), seat: r.seat as string, at }])
+    if (kind === 'host' && text(r.seat) && typeof r.handle === 'string' && PEER_ID.test(r.handle) && text(r.who)) kept.push([id, { kind, seat: r.seat as string, handle: r.handle, who: r.who as string, name: tidySender(String(r.name ?? '')), at }])
+  }
+  return Object.fromEntries(kept.slice(-64))
+}
+
 async function join($: $, server: string, id: string) {
   // A room being left finishes first: its state clears before this one's.
   // A late take-back it gives up is over once this room is joined, and kept
@@ -4024,6 +4662,8 @@ async function joinRoom($: $, server: string, id: string) {
     historySeq?: number
     /** What's shared now, whatever the history no longer holds (newer servers). */
     previews?: unknown
+    /** The server passes messages between sessions on (newer servers). */
+    peer?: boolean
   }>($, server, `/api/rooms/${id}/join?max=${PAGE_BYTES}`, { method: 'POST', body: { name }, account: signedIn?.token })
   try {
     // A long history comes in pages (the engine hands a plugin at most 4 MiB
@@ -4045,6 +4685,7 @@ async function joinRoom($: $, server: string, id: string) {
       seq: joined.seq,
       since: await $.clock.now(),
       team: joined.team ?? null,
+      ...(joined.peer === true ? { peer: true as const } : {}),
     }
     // Its scope, before the room is anyone's to see. In it from here: a late
     // take-back given up for it is over.
@@ -8211,6 +8852,12 @@ function rideStep(ride: Ride, state: RideState, event: ServerEvent, host: string
   }
   if (event.type === 'row') {
     const row = body as unknown as Row
+    // A message relayed from here, gone into a turn already running on the
+    // host's side: that turn is its own from here, and its end ends this.
+    if (row.kind === 'user' && ride.kind === 'own' && row.pid === ride.pid && current.pid !== ride.pid) {
+      current.pid = ride.pid
+      ownPending.delete(ride.pid)
+    }
     if (row.kind === 'user') return ''
     if (row.kind === 'assistant') {
       // Its text already streamed as deltas, unless those were missed.
@@ -9486,6 +10133,9 @@ export const register: Register = (on, options) => {
     if (!hostAskRunning && (await read($, hostAskA))) await update($, hostAskA, () => null)
     void restorePreviewWindow($).catch(() => {})
     void gcPreviewProfiles($).catch(() => {})
+    // The host's mailboxes listen again at the paths they had: a reload's
+    // helper goes first (the module it was started by is gone).
+    void endOldHelper($).then(() => restoreMailboxes($)).catch(() => {})
     void holdRoom($).catch(() => {})
     void refreshStatus($).catch(() => {})
     $.clock.after(2_000, () => void repinMarked($).catch(() => {}))
@@ -9611,7 +10261,7 @@ export const register: Register = (on, options) => {
     if (e.origin.kind === 'plugin') return next(e)
     const fromPerson = GUEST_SENDS.has(e.origin.kind) && !(e as { isMeta?: true }).isMeta
     // A message from another of this person's sessions here, which a guest
-    // relays to the host's Claude, or keeps with a note where they've said
+    // relays to the host's session, or keeps with a note where they've said
     // so (OWN_SESSIONS, `relayPeers`): either way never this session's own
     // Claude's to answer, so it waits for a room coming back as typing does.
     const fromPeer = OWN_SESSIONS.has(e.origin.kind)
@@ -9641,7 +10291,7 @@ export const register: Register = (on, options) => {
     // already playing here starts no turn of its own a note could answer in:
     // a note ride would wait for one never coming, ahead of every later ride.
     // So what it would say is a toast, and the message goes no further.
-    const midTurn = fromPeer && Boolean(delivered(typed)?.midTurn)
+    const midTurn = fromPeer && (e.turnId !== undefined || Boolean(delivered(typed)?.midTurn))
     const keepHere = (text: string) => {
       if (!midTurn) {
         answerWith({ kind: 'note', text, then: [] })
@@ -9650,6 +10300,14 @@ export const register: Register = (on, options) => {
       const plain = text.replaceAll('**', '')
       $.ui.toast(plain)
       return { drop: plain }
+    }
+    // Claude Code's notice of what became of a message this session sent
+    // another (the host's replies, this plugin's notes): on to the host's
+    // session where it was a reply, and nothing here, its own Claude never
+    // asked. Answered without entering: no turn, nothing drawn.
+    if (mode === 'guest' && (e as { isMeta?: true }).isMeta && typed.startsWith(NOTICE)) {
+      $.clock.after(0, () => void takeNotice($, typed).catch(() => {}))
+      return { text: e.text }
     }
     if (link?.[1] && link[2] && mode !== 'host' && PERSON.has(e.origin.kind)) {
       // Already in it in another session here: that one opens. Pasted again
@@ -9685,6 +10343,9 @@ export const register: Register = (on, options) => {
     // for the host's Claude never reaches this session's own. A host's place
     // goes on as typed: its own Claude is the host's.
     if (late && (typed || e.attachments?.length) && !typed.startsWith('/')) {
+      // Another of their sessions' message: that session hears it too.
+      const peer = fromPeer ? delivered(typed) : null
+      if (peer?.address && (await prefsOf($)).relayPeers) tellPeer($, peer.address, `Still getting back into ${late.host}'s session, so this didn't reach their Claude. Send it again in a moment.`)
       return keepHere(`Still getting back into **${late.host}**'s session, so this didn't go to Claude. Send it again in a moment.`)
     }
     // The update command, typed here by a guest (the "is out" line names it):
@@ -9694,15 +10355,40 @@ export const register: Register = (on, options) => {
       void updateHere($)
       return next(e)
     }
-    // Another of this person's sessions wrote to this one: relayed to the
-    // host's Claude as that session's message, if they let it.
+    // Another of this person's sessions wrote to this one: on to the host's
+    // session, if they let it, its turn here the host's turn for it (as a
+    // typed prompt's is) unless it went into one playing here. Where it
+    // can't go, that session hears why, and it stays here with a note.
     const fromOwn = mode === 'guest' && OWN_SESSIONS.has(e.origin.kind) ? delivered(typed) : null
-    if (fromOwn && !(await prefsOf($)).relayPeers) {
+    if (fromOwn) {
       const room = await read($, roomA)
-      return keepHere(`A message from **${tidySender(fromOwn.from)}** stayed here: your **Room**'s Settings keep your other sessions' messages from ${room?.host ?? 'the host'}'s Claude.`)
+      const name = tidySender(fromOwn.from)
+      if (!(await prefsOf($)).relayPeers) return keepHere(`A message from **${name}** stayed here: your **Room**'s Settings keep your other sessions' messages from ${room?.host ?? 'the host'}'s Claude.`)
+      if (!fromOwn.address || !fromOwn.text) return keepHere(`A message from **${name}** stayed here: it didn't say where an answer would go.`)
+      const refusal = room ? await relayRefusal($, room) : "This session isn't in a shared session any more, so this didn't reach anyone's Claude."
+      if (!room || refusal) {
+        tellPeer($, fromOwn.address, refusal!)
+        return keepHere(refusal!)
+      }
+      const pid = newId()
+      const ride: Ride = { kind: 'own', pid, fromSeq: room.seq }
+      if (!midTurn) {
+        ownPending.add(pid)
+        ridesByText.set(typed, [...(ridesByText.get(typed) ?? []), ride])
+      }
+      const s = scope
+      const entered = await next(e)
+      if (entered.drop !== undefined) {
+        ownPending.delete(pid)
+        ridesByText.set(typed, (ridesByText.get(typed) ?? []).filter(r => r !== ride))
+        return entered
+      }
+      const sent = { from: fromOwn.from, text: fromOwn.text, address: fromOwn.address, ...(fromOwn.mode ? { mode: fromOwn.mode } : {}) }
+      $.clock.after(0, () => void relayQueued($, room, s, pid, sent).catch(error => $.ui.log(`Shared session: relaying a message: ${String((error as Error)?.message ?? error)}`, { to: 'debug' })))
+      lastActivity = await $.clock.now()
+      return entered
     }
-    const relay = fromOwn?.text ? `<cross-session-message from-name="${tidySender(fromOwn.from).replaceAll('"', '’')}">\n${fromOwn.text}\n</cross-session-message>` : null
-    if (mode === 'guest' && (fromPerson || relay) && (typed || e.attachments?.length) && !typed.startsWith('/')) {
+    if (mode === 'guest' && fromPerson && (typed || e.attachments?.length) && !typed.startsWith('/')) {
       const room = await read($, roomA)
       if ((await read($, policyA)).prompts === 'watch') {
         return keepHere(`**${room?.host}** has this session on watch-only, so this didn't go to Claude. You can still follow every turn and talk to everyone in the **Room** panel.`)
@@ -9711,23 +10397,16 @@ export const register: Register = (on, options) => {
         return keepHere(`**${room?.host}**'s Claude Code is closed right now, so this didn't go to Claude. The room stays open and carries on when they're back (the **Room** shows them here again); send it then.`)
       }
       const pid = newId()
-      // A message delivered into a turn already playing here starts no turn of
-      // its own to show the answer under: the host's turn then plays after
-      // that one, as anyone's would, rather than waiting for a turn never coming.
-      if (!fromOwn?.midTurn) {
-        ownPending.add(pid)
-        const list = ridesByText.get(typed) ?? []
-        list.push({ kind: 'own', pid, fromSeq: room?.seq ?? 0 })
-        ridesByText.set(typed, list)
-      }
+      ownPending.add(pid)
+      const list = ridesByText.get(typed) ?? []
+      list.push({ kind: 'own', pid, fromSeq: room?.seq ?? 0 })
+      ridesByText.set(typed, list)
       // Only what the person typed (and attached) leaves this machine, never
       // the host app's context. Attachments' bytes come with the stored message.
-      // A relayed message goes as the message alone, at once: its bytes never
-      // come as a person's stored message would.
-      if (e.attachments?.length && !relay) {
+      if (e.attachments?.length) {
         if (heldPrompt) await releaseHeld($, [])
         heldPrompt = { text: typed, pid, names: e.attachments.map(a => a.filename ?? ''), timer: $.clock.after(8_000, () => void releaseHeld($, [])) }
-      } else send($, 'prompt', { text: relay ?? typed, pid })
+      } else send($, 'prompt', { text: typed, pid })
     }
     lastActivity = await $.clock.now()
     return next(e)
@@ -9762,14 +10441,20 @@ export const register: Register = (on, options) => {
     // the host typing "Alex: …" is asked about their own calls.
     const named = known ? undefined : (await read($, peopleA)).find(p => p.role !== 'host' && p.name && said.startsWith(`${p.name}: `))?.name
     const guest = known ?? (named ? { who: named, text: said.slice(named.length + 2), pid: '' } : null)
-    const by = guest?.who ?? room?.host ?? 'host'
+    // A prompt another session delivered is shown as its text, not its markup;
+    // one from a teammate's session's mailbox as their agent's (the host's
+    // turn all the same: its calls are the mode's, as any peer's are), with
+    // the id their joined session plays it under (`pid`).
+    const sent = guest ? null : delivered(said)
+    const agent = sent ? await mailboxOwner($, sent.address) : null
+    const relayPid = agent && sent ? relayPidOf(agent.box, sent.text) : undefined
+    const by = guest?.who ?? (agent ? `${agent.who}'s agent` : room?.host ?? 'host')
     const startedAt = await $.clock.now()
     await update($, workingA, () => ({ turnId: e.turnId, by, byGuest: Boolean(guest), startedAt, tail: '', waitingFor: null }))
-    // A prompt another session delivered is shown as its text, not its markup.
-    const sent = guest ? null : delivered(said)
     const relayed = guest ? delivered(guest.text) : null
     const guestPrompt = guest ? (relayed ? `(from ${relayed.from}) ${relayed.text}` : guest.text) : undefined
-    send($, 'turn', { state: 'start', turnId: e.turnId, by: sent?.from ?? by, prompt: guestPrompt ?? sent?.text ?? (said || startedBy(e.text)), pid: guest?.pid ?? '' })
+    const agentPrompt = agent && sent ? `(from ${agent.name}) ${sent.text}` : undefined
+    send($, 'turn', { state: 'start', turnId: e.turnId, by: agent ? by : sent?.from ?? by, prompt: guestPrompt ?? agentPrompt ?? sent?.text ?? (said || startedBy(e.text)), pid: guest?.pid ?? relayPid ?? '' })
     void refreshStatus($)
     return next(e)
   })
@@ -9927,10 +10612,13 @@ export const register: Register = (on, options) => {
             continue
           }
           if (state.done) break
-          // Typed here and refused by the room as too large: it never runs
-          // there, so its turn ends, once it shows no one else's (`tooLarge`).
-          if (ride.kind === 'own' && !state.current && unsent.delete(ride.pid)) {
-            yield words(`This was too large to send to **${room.host}**'s session, so it didn't go to Claude.`)
+          // Typed here and refused by the room as too large, or relayed and
+          // not taken up there: it never runs there, so its turn ends, once
+          // it shows no one else's (`tooLarge`, `endRelay`).
+          if (ride.kind === 'own' && !state.current && unsent.has(ride.pid)) {
+            const note = unsent.get(ride.pid)
+            unsent.delete(ride.pid)
+            yield words(note ?? `This was too large to send to **${room.host}**'s session, so it didn't go to Claude.`)
             break
           }
           let page: EventsPage
@@ -10112,7 +10800,13 @@ export const register: Register = (on, options) => {
     const fromGuest = e.origin.kind === 'plugin' && 'name' in e.origin && e.origin.name === PLUGIN
     const typed = fromGuest || ['composer', 'sdk', 'bridge', 'unclassified'].includes(e.origin.kind)
     const cwd = await $.session.cwd()
-    for (const row of rowsFromMessage(stored.message ?? e.message, typed ? host : null, cwd)) {
+    // A teammate's session's message, delivered from its mailbox: under the
+    // teammate's name, as a relayed prompt is drawn; and Claude's SendMessage
+    // to one names the session it stands for. Never a mailbox's path.
+    const relayed = await mailboxRows($, (stored.message ?? e.message) as { role?: string; type?: string; content: unknown })
+    const routes = await read($, peerRoutesA)
+    for (const found of relayed ?? rowsFromMessage(stored.message ?? e.message, typed ? host : null, cwd)) {
+      const row = hideMailboxes(found, routes)
       // A guest's prompt reached the model as "Name: text"; show it as theirs.
       const spoken = fromGuest && row.kind === 'user' ? splitSpeaker(row.text) : null
       // An edit's result carries its hunks as the tool reported them.

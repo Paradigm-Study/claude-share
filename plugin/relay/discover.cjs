@@ -27,7 +27,7 @@ const SYSTEM = Object.freeze({ PATH: '/usr/bin:/bin:/usr/sbin:/sbin', LC_ALL: 'C
 // Never suggested: Claude Code, browsers, IDE helpers, tunnels and Docker's port forwarders.
 const NOT_SERVICES = [/^claude(?: helper\b.*)?$/i, /^google chrome/i, /^chrome(?:_crashpad_handler)?$/i, /^chromium/i, /^msedge$/i, /^microsoft edge/i, /^brave/i, /^firefox/i, /^safari$/i, /^code$/i, /^code helper/i, /^cursor$/i, /^cursor helper/i, /^idea/i, /^webstorm/i, /^pycharm/i, /^zed$/i, /^sshd?$/i, /^kubectl$/i, /^docker$/i, /^com\.docker/i, /^vpnkit/i]
 // This plugin's own helpers, from any installed copy, not only the caller's.
-const RELAY = /\/relay\/(?:tcp-worker|local-preview|ws-relay|browser-proxy|discover)\.cjs(?:\s|$)/
+const RELAY = /\/relay\/(?:tcp-worker|local-preview|ws-relay|browser-proxy|discover|mailbox)\.cjs(?:\s|$)/
 // Interpreters, whose label is their script's: node, bun, deno, python, ruby.
 const INTERPRETER = /^(?:node(?:js)?\d*|bun|deno|python(?:\d+(?:\.\d+)*)?[a-z]?|ruby(?:\d+(?:\.\d+)*)?)$/i
 // A word naming a file: a dot or a slash and a letter (not `.`, an address or

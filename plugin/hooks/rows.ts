@@ -24,6 +24,8 @@ export type Row = {
   media?: Media[]
   /** A result row's change to a file, as unified-diff hunks (an edit's or a write's). */
   patch?: string
+  /** A user row of a teammate's session's message: the id their joined session plays it under. */
+  pid?: string
 }
 
 /** A picture in the room's files: its id (the bytes' SHA-256), type and size. */
@@ -72,10 +74,10 @@ type Block = {
 const DELIVERED =
   /^\s*(?:(Another Claude session|A peer session) sent a message( while you were working)?:\s*)?<(cross-session-message|teammate-message|channel|agent-message)\b([^>]*)>(?:([\s\S]*)<\/\3>[\s\S]*|([\s\S]*))$/
 
-export function delivered(text: string): { from: string; text: string; midTurn: boolean } | null {
+export function delivered(text: string): { from: string; text: string; midTurn: boolean; address?: string; mode?: string } | null {
   const m = DELIVERED.exec(text)
   if (!m) return null
-  const attr = (name: string) => new RegExp(`\\b${name}="([^"]*)"`).exec(m[4] ?? '')?.[1]
+  const attr = (name: string) => new RegExp(`(?:^|\\s)${name}="([^"]*)"`).exec(m[4] ?? '')?.[1]
   const body = m[5] ?? m[6] ?? ''
   const midTurn = Boolean(m[2]) || m[1] === 'A peer session'
   if (m[3] === 'agent-message') {
@@ -83,8 +85,38 @@ export function delivered(text: string): { from: string; text: string; midTurn: 
     const back = body.replace(/^\s*\[Subagent hand-back\][^\n]*\n?/, '').trim()
     return { from: 'Subagent', text: back.length > 600 ? `${back.slice(0, 600)}…` : back, midTurn }
   }
-  return { from: attr('from-name') ?? attr('source') ?? attr('teammate') ?? attr('from') ?? 'another session', text: body.trim(), midTurn }
+  // Where a reply reaches the sender: its `from`, a socket's or a bridge's
+  // address, never its name (the engine leaves out an empty `from-name`, and
+  // the address read as one put a socket's path in front of the host).
+  const from = attr('from')
+  const address = from && /^(?:uds|bridge):/.test(from) && from.length <= 512 ? from : undefined
+  // The sender's permission mode class, as its engine said it: passed on as it is.
+  const mode = attr('from-mode')
+  return { from: attr('from-name') ?? attr('source') ?? attr('teammate') ?? 'another session', text: body.trim(), midTurn, ...(address ? { address } : {}), ...(mode && /^[a-z_-]{1,24}$/.test(mode) ? { mode } : {}) }
 }
+
+// The open tags of what a session, a teammate, a channel or an agent
+// delivers, wherever they are in a guest's text: only `from-name` (and a
+// channel's `source`, a teammate's `teammate`) is kept of each. A `from=` in
+// a teammate's words would have the host's Claude reply to a session of the
+// host's own, or say it came from one: only an envelope Claude Code itself
+// frames (a peer's, a mailbox's) carries one to its Claude.
+const OPEN_TAG = /<(cross-session-message|teammate-message|channel|agent-message)\b([^>]*)>/gi
+const KEPT_ATTRS = new Set(['from-name', 'source', 'teammate'])
+
+export function neutralize(text: string): string {
+  return text.replace(OPEN_TAG, (_, tag: string, attrs: string) => {
+    const kept: string[] = []
+    for (const a of attrs.matchAll(/([^\s=>"']+)\s*=\s*"([^"]*)"/g)) {
+      const name = a[1]!.toLowerCase()
+      if (KEPT_ATTRS.has(name) && !kept.some(k => k.startsWith(`${name}=`))) kept.push(`${name}="${a[2]}"`)
+    }
+    return `<${tag}${kept.map(k => ` ${k}`).join('')}>`
+  })
+}
+
+/** A mailbox's id, and a handle the room carries: 128 random bits in hex. */
+export const PEER_ID = /^[0-9a-f]{32}$/
 
 const INPUT_MAX = 16_000 // chars of JSON a tool row carries to replay
 

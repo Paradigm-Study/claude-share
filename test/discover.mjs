@@ -187,6 +187,8 @@ function parserChecks() {
   assert.equal(discover.pluginHelper(discover.commandOf({ argv: ['node', '/opt/plug/relay/worker.cjs'] }, 'node'), markers), true)
   assert.equal(discover.pluginHelper(discover.commandOf({ text: '/opt/homebrew/bin/node /Users/k/.claude/shared-session/plugin/relay/local-preview.cjs' }, 'node'), markers), true)
   assert.equal(discover.pluginHelper(discover.commandOf({ argv: ['node', '/elsewhere/relay/browser-proxy.cjs'] }, 'node'), markers), true)
+  assert.equal(discover.pluginHelper(discover.commandOf({ text: '/usr/bin/node /other/copy/relay/mailbox.cjs --serve' }, 'node'), markers), true, "another copy's mailbox")
+  assert.equal(discover.excludedCommand(discover.commandOf({ text: '/usr/bin/node /other/copy/relay/mailbox.cjs --serve' }, 'node'), markers), true, "another copy's mailbox, never suggested")
   assert.equal(discover.pluginHelper(discover.commandOf({ argv: ['claude', '--resume'] }, 'claude'), markers), false)
   assert.equal(discover.pluginHelper(discover.commandOf({ argv: ['node', '/proj/relay/local-preview.cjs.bak'] }, 'node'), markers), false)
   console.log("ok labels: script (an option's value passed over, an address or code never one), executable, process title, spaces, python -m, bun/deno/ruby, 40 printable chars; Claude Code/browser/IDE/tunnel/relay exclusions")

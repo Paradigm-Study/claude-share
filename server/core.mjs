@@ -257,6 +257,10 @@ export class Room {
     // Each guest seat's minute of asking the host for a port (`need`), in
     // memory only and never saved: seat id → { start, count }.
     this.needs = new Map()
+    // The minute of messages each side sent the other's sessions (`peer`):
+    // the host's and each guest seat's, in memory only and never saved:
+    // 'host' or a seat id → { start, count }.
+    this.peers = new Map()
     this.onTCPRevoke = null
     // Public sockets end with what let them in, by revokeMatches' filter: a
     // preview's Stop (pid), a Leave (seat), one browser session (session), or
@@ -335,6 +339,24 @@ export class Room {
       sent = true
     }
     return sent
+  }
+
+  // A message between sessions (`peer`) for one seat's open streams only,
+  // the host's ('host') or a guest's, and only those that said they take
+  // them (`peer=1`). Never stored or broadcast. `delivered`, or why not: no
+  // stream of that seat (`offline`), or only streams that don't take them
+  // (`unsupported`).
+  toSeat(seat, message) {
+    let open = false
+    let sent = false
+    for (const sub of this.subscribers) {
+      if (sub.seat !== seat) continue
+      open = true
+      if (!sub.peerSupport) continue
+      sub.send(message)
+      sent = true
+    }
+    return sent ? 'delivered' : open ? 'unsupported' : 'offline'
   }
 
   auth(bearer, now = Date.now()) {
@@ -618,7 +640,7 @@ async function readJson(req) {
 // adapters must pass a stream, not buffer it first; a Node request whose body
 // wasn't read closes its socket.
 export const streamedRoomBody = (method, rest) => method === 'POST' &&
-  (rest === 'previews' || rest === 'need' || /^previews\/[^/]+\/(?:end|tunnel|ticket)$/.test(rest) || /^ws\/[^/]+\/reject$/.test(rest) || /^proxy\/[^/]+$/.test(rest))
+  (rest === 'previews' || rest === 'need' || rest === 'peer' || /^previews\/[^/]+\/(?:end|tunnel|ticket)$/.test(rest) || /^ws\/[^/]+\/reject$/.test(rest) || /^proxy\/[^/]+$/.test(rest))
 
 // What an adapter takes of a room route's body (past it, 413): a file's
 // FILE_MAX, a JSON route's JSON_BODY_MAX. Node buffers that much at most; the
@@ -792,6 +814,9 @@ export async function createRoom(req, id, now, origin, ctx = {}) {
       title: room.title,
       latest: PLUGIN_LATEST,
       team: team ? { id: team.id, name: team.name } : undefined,
+      // This server passes messages between a teammate's own sessions and
+      // the host's on (POST peer).
+      peer: true,
     }),
   }
 }
@@ -915,6 +940,8 @@ async function handleRoom(room, req, rest, now, origin, ctx) {
         team: teamOf(room),
         // What's shared now, whatever history was pruned (older plugins ignore it).
         previews: previewList(room),
+        // This server passes messages between sessions on (POST peer).
+        peer: true,
       }),
     }
   }
@@ -944,13 +971,16 @@ async function handleRoom(room, req, rest, now, origin, ctx) {
   const previews = await previewRoutes(room, req, rest, auth, now, ctx)
   if (previews) return previews
   if (rest === 'need' && method === 'POST') return needRoute(room, req, auth, now, ctx)
+  if (rest === 'peer' && method === 'POST') return peerRoute(room, req, auth, now, ctx)
 
   if (rest === 'stream' && method === 'GET') {
     if (room.endedAt) return { response: json({ error: 'This session is no longer shared.' }, 410) }
     const after = Number(url.searchParams.get('after') ?? 0) || 0
     room.touch(auth, now)
     const takes = name => auth.role === 'host' && url.searchParams.get(name) === '1'
-    return { response: streamResponse(room, auth, after, { tcpSupport: takes('tcp'), needSupport: takes('need') }) }
+    // Either side's stream says it takes messages between sessions (toSeat).
+    const peerSupport = url.searchParams.get('peer') === '1'
+    return { response: streamResponse(room, auth, after, { tcpSupport: takes('tcp'), needSupport: takes('need'), peerSupport }) }
   }
 
   if (rest === 'events' && method === 'GET') {
@@ -1059,8 +1089,9 @@ async function unlist(room, ctx) {
 // client went, the room ended, or STREAM_MAX_MS passed) the seat counts as
 // last seen then, and `onDisconnect` lets the host process settle who is still
 // here once the grace period is over. A host's stream says which asks it
-// takes (toHost).
-function streamResponse(room, auth, after, { tcpSupport = false, needSupport = false } = {}) {
+// takes (toHost), and either side's whether it takes messages between
+// sessions (toSeat).
+function streamResponse(room, auth, after, { tcpSupport = false, needSupport = false, peerSupport = false } = {}) {
   const enc = new TextEncoder()
   let sub = null
   let done = false
@@ -1092,6 +1123,7 @@ function streamResponse(room, auth, after, { tcpSupport = false, needSupport = f
         seat: auth.seat,
         tcpSupport,
         needSupport,
+        peerSupport,
         send,
         push: () => {
           const page = room.page(cursor, Date.now())
@@ -1411,6 +1443,118 @@ async function needRoute(room, req, auth, now, ctx) {
   return { changed: false, response: json({ delivered }) }
 }
 
+// Messages between a teammate's own sessions and the host's session. A
+// teammate's joined session passes on what one of their sessions wrote to it,
+// and receipts for what the host's session wrote back; the host's mailboxes'
+// helper (relay/mailbox.cjs) passes on what the host's session wrote to a
+// mailbox, and receipts for what was delivered into it. The room puts each on
+// the other side's streams alone, and only on those that said they take them
+// (`peer=1`). Nothing is kept or put in history, and no one else hears it.
+// Which session a message reaches is each side's to know, by its handle: the
+// room sees only the handle.
+//   POST peer (a guest) { handle, name, mode?, chain?, id, pid, body } → the
+//     host's streams, as { peer: { seat, who, handle, name, mode, chain, id,
+//     pid, body } }: `id` the sender's own message id (a receipt names it),
+//     `pid` the guest's id for the turn it shows the message in
+//   POST peer (a guest) { handle, status, ref, reason? } → the host's streams,
+//     as { peer: { seat, handle, status, ref, reason } }: what became of the
+//     host's message `ref` at the session it went to
+//   POST peer (the host) { to, handle, body, ref } → that guest seat's
+//     streams, as { peer: { handle, body, ref } }
+//   POST peer (the host) { to, handle, status, id, reason? } → that guest
+//     seat's streams, as { peer: { handle, status, id, reason } }: what became
+//     of the message `id` at the host's session
+// Seats and names are stamped here, never taken from a guest's body.
+//   → { delivered: true }, or { delivered: false, reason: 'offline' |
+//     'unsupported' }
+// The host sends PEER_LIMIT.host a minute and each guest seat PEER_LIMIT.seat,
+// counted in memory per room as needs are, before the body is read.
+export const PEER_LIMIT = Object.freeze({ host: 120, seat: 60, periodMs: 60_000, bodyBytes: 128 * 1024, bodyChars: MAX_TEXT, chain: 32, nameChars: 80 })
+export const PEER_HANDLE = /^[0-9a-f]{32}$/
+// What a session's receipt says of a message (Claude Code's own words), and
+// why one was dropped.
+export const PEER_STATUS = new Set(['held', 'denied', 'delivered', 'expired', 'refused', 'dropped'])
+export const PEER_DROPS = new Set(['rate-limited', 'duplicate', 'hop-loop', 'hop-runaway', 'queue-full'])
+const PEER_MODE = /^[a-z-]{1,32}$/
+const PEER_TOKEN = /^[0-9a-f]{24}$/
+const PEER_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+const PEER_PID = /^[A-Za-z0-9_-]{1,64}$/
+const PEER_KEYS = {
+  guest: new Set(['handle', 'name', 'mode', 'chain', 'id', 'pid', 'body']),
+  guestStatus: new Set(['handle', 'status', 'ref', 'reason']),
+  host: new Set(['to', 'handle', 'body', 'ref']),
+  hostStatus: new Set(['to', 'handle', 'status', 'id', 'reason']),
+}
+
+function peerAllowed(room, key, now) {
+  let w = room.peers.get(key)
+  if (!w || now - w.start >= PEER_LIMIT.periodMs) {
+    // Seats come and go: only the ones that sent this past minute are kept.
+    for (const [k, old] of room.peers) if (now - old.start >= PEER_LIMIT.periodMs) room.peers.delete(k)
+    room.peers.set(key, (w = { start: now, count: 0 }))
+  }
+  if (w.count >= (key === 'host' ? PEER_LIMIT.host : PEER_LIMIT.seat)) return false
+  w.count += 1
+  return true
+}
+
+// A message or a receipt as either side sends it, checked: null when well
+// formed, else what's wrong.
+function peerProblem(body, kind) {
+  const keys = Object.keys(body)
+  const allowed = PEER_KEYS[kind]
+  if (keys.some(k => !allowed.has(k))) return `Expected only { ${[...allowed].join(', ')} }.`
+  const { handle, name, mode, chain, id, pid, body: text, status, ref, reason } = body
+  if ((kind === 'host' || kind === 'hostStatus') && (typeof body.to !== 'string' || !body.to || body.to.length > 64)) return "A guest's seat."
+  if (typeof handle !== 'string' || !PEER_HANDLE.test(handle)) return 'A handle of 32 hex characters.'
+  if (kind === 'guestStatus' || kind === 'hostStatus') {
+    if (typeof status !== 'string' || !PEER_STATUS.has(status)) return `A status: ${[...PEER_STATUS].join(', ')}.`
+    const of = kind === 'guestStatus' ? ref : id
+    if (typeof of !== 'string' || !PEER_ID.test(of)) return 'The message id a receipt names, a UUID.'
+    if (reason !== undefined && (status !== 'dropped' || typeof reason !== 'string' || !PEER_DROPS.has(reason))) return `Why a message was dropped: ${[...PEER_DROPS].join(', ')}.`
+    return null
+  }
+  if (kind === 'guest') {
+    if (typeof name !== 'string' || !name || name.length > PEER_LIMIT.nameChars || /[\x00-\x1f\x7f]/.test(name)) return `A name of 1 to ${PEER_LIMIT.nameChars} characters, without control characters.`
+    if (mode !== undefined && (typeof mode !== 'string' || !PEER_MODE.test(mode))) return 'A permission mode class as Claude Code spells it.'
+    if (chain !== undefined && (!Array.isArray(chain) || chain.length > PEER_LIMIT.chain || chain.some(t => typeof t !== 'string' || !PEER_TOKEN.test(t)))) return `A hop chain of at most ${PEER_LIMIT.chain} tokens of 24 hex characters.`
+    if (typeof id !== 'string' || !PEER_ID.test(id)) return "The message's id, a UUID."
+    if (typeof pid !== 'string' || !PEER_PID.test(pid)) return 'An id of 1 to 64 letters, digits, - or _.'
+  }
+  if (kind === 'host' && (typeof ref !== 'string' || !PEER_ID.test(ref))) return "The message's id, a UUID."
+  if (typeof text !== 'string' || !text || text.length > PEER_LIMIT.bodyChars) return `A message of 1 to ${PEER_LIMIT.bodyChars} characters.`
+  return null
+}
+
+async function peerRoute(room, req, auth, now, ctx) {
+  const host = auth.role === 'host'
+  const before = roomAccessError(room, req, ctx, host)
+  if (before) return { response: before }
+  // Counted before the body is read: every message costs, a refused one included.
+  if (!peerAllowed(room, host ? 'host' : auth.seat, now)) return { response: json({ error: 'Too many messages between sessions. Try again in a minute.' }, 429) }
+  let body
+  try { body = await readBoundedJson(req, PEER_LIMIT.bodyBytes) } catch (error) { return bodyFailure(error) }
+  const after = roomAccessError(room, req, ctx, host)
+  if (after) return { response: after }
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return { response: json({ error: 'Expected a JSON object.' }, 400) }
+  const kind = `${host ? 'host' : 'guest'}${'status' in body ? 'Status' : ''}`
+  const problem = peerProblem(body, kind)
+  if (problem) return { response: json({ error: problem }, 400) }
+  const { handle, name, mode, chain, id, pid, body: text, status, ref, reason } = body
+  const receipt = status ? { handle, status, ...(kind === 'guestStatus' ? { ref } : { id }), ...(reason ? { reason } : {}) } : null
+  let result
+  if (host) {
+    // Only a guest seat the room has now: one that left, or was let go, hears nothing.
+    if (body.to === 'host' || ![...room.seats.values()].some(s => s.id === body.to)) return { response: json({ error: 'Not a seat in this session.' }, 403) }
+    result = room.toSeat(body.to, { peer: receipt ?? { handle, body: text, ref } })
+  } else {
+    // Who sent it comes from the seat, never from the body.
+    const message = receipt ?? { who: auth.name, handle, name, ...(mode ? { mode } : {}), chain: chain ?? [], id, pid, body: text }
+    result = room.toSeat('host', { peer: { seat: auth.seat, ...message } })
+  }
+  return { changed: false, response: json(result === 'delivered' ? { delivered: true } : { delivered: false, reason: result }) }
+}
+
 const HOP = new Set(['connection', 'keep-alive', 'transfer-encoding', 'content-length', 'proxy-connection', 'upgrade', 'te', 'trailer', 'alt-svc'])
 
 const NULL_BODY = new Set([204, 205, 304])
@@ -1509,7 +1653,7 @@ section.more { padding:0 0 72px; }
   <section class="more prose" id="privacy">
     <h2>What this server sees and keeps</h2>
     <ul>
-      <li><b>What passes through:</b> while a session is shared, its prompts and the files people attach to them, Claude's replies and, while someone else is in the room, its thinking as it happens (passed along, never kept), the tools it runs with the first lines of their results and the pictures in them (screenshots, images it opens), the side chat, people's reactions to Claude's replies and which replies each person has had on screen, and any files or local previews the host's Claude shows. Sharing a session that already has history asks first whether to include it.</li>
+      <li><b>What passes through:</b> while a session is shared, its prompts and the files people attach to them, Claude's replies and, while someone else is in the room, its thinking as it happens (passed along, never kept), the tools it runs with the first lines of their results and the pictures in them (screenshots, images it opens), the side chat, people's reactions to Claude's replies and which replies each person has had on screen, any files or local previews the host's Claude shows, and messages between a teammate's own other sessions and the host's session, which go to the other side alone (passed along, never kept). Sharing a session that already has history asks first whether to include it.</li>
       <li><b>How long:</b> a room and everything in it is deleted 24 hours after the host stops sharing or was last seen. A room keeps its newest 5000 events, 16 MB of them at most. For TCP previews the room keeps grants (which preview and seat, and when they expire) and coarse connection and byte-budget counters until the room is deleted. For a preview opened through its link, the room keeps the link (which preview, which seat made it, the page it opens) for 10 minutes, and the browser session it starts (which preview and seat) for 12 hours from the last link that browser opened; both end when that seat leaves or the host stops the preview. A seat keeps its newest 4 browser sessions per preview, and a room its newest 128 links and 256 browser sessions. A grant, link or session that expired is removed at the room's next activity, or with the room; one that ended goes at once. Application bytes are relayed, never stored. There are no analytics, and no request logs kept.</li>
       <li><b>Previews share a host name:</b> every shared session's previews are served on one preview host name, and their links name the session by a key of its own, which can't join it. A browser not already in a session's previews has that host name's storage and cache, and its domain's cookies, cleared before it enters; browsers clear them only over HTTPS (or on localhost). No preview can register a service worker there.</li>
       <li><b>Accounts, only for teams:</b> sharing and joining need none. If you sign in (GitHub or Google) to use teams, the server keeps your name, username, verified email, which GitHub organizations you're in, the teams you're in and their settings, which open sessions are shared with each team, and invites to a session (who invited whom, until it's joined, dismissed, ends, or 12 hours pass). Signing in finishes only when you press Continue on this server's page. From Shared Sessions 0.11.25 on, the page and Claude Code show the same code, and you continue only if they match; with an older version, the page shows no code. Until you press Continue, the server keeps who GitHub or Google said you are; after ten minutes that sign-in stops working, and it's deleted the next time Claude Code asks for it or anyone signs in. Claude Code's token is made when it picks up the sign-in, and the server keeps only its hash, never the token itself. Sign-ins stay until you delete your account (<code>/team delete-account</code>), which removes them at once. Signed in, a session you share or join also knows your account for as long as it lasts, so your sessions count as one person.</li>
