@@ -37,6 +37,10 @@ const PLUGIN_VERSION = (() => {
 const MIN_VERSION = [2, 1, 286]
 // 2.1.285 runs the plugin too, with function hooks turned on (early access there).
 const EARLY_VERSION = [2, 1, 285]
+// Claude Code's own folder, CLAUDE_CONFIG_DIR when set and else ~/.claude, as
+// the plugin reads it: its settings and session transcripts are there.
+const CONFIG_DIR = process.env.CLAUDE_CONFIG_DIR?.trim() || join(homedir(), '.claude')
+const SETTINGS = join(CONFIG_DIR, 'settings.json')
 
 const [command, ...rest] = process.argv.slice(2)
 const flag = name => {
@@ -109,18 +113,17 @@ function findClaude() {
 // (2.1.286 and newer have it on): set in the person's settings, nothing else
 // there touched.
 function enableFunctionHooks(version) {
-  const path = join(homedir(), '.claude', 'settings.json')
   let settings = {}
   try {
-    if (existsSync(path)) settings = JSON.parse(readFileSync(path, 'utf8'))
+    if (existsSync(SETTINGS)) settings = JSON.parse(readFileSync(SETTINGS, 'utf8'))
   } catch {
-    return note(`Claude Code ${version} needs CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 for this plugin, and ${path} couldn't be read to set it; set it in your environment, or run \`claude update\``)
+    return note(`Claude Code ${version} needs CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 for this plugin, and ${SETTINGS} couldn't be read to set it; set it in your environment, or run \`claude update\``)
   }
   if (settings.env?.CLAUDE_CODE_ENABLE_FUNCTION_HOOKS === '1') return
   settings.env = { ...(settings.env ?? {}), CLAUDE_CODE_ENABLE_FUNCTION_HOOKS: '1' }
-  mkdirSync(join(homedir(), '.claude'), { recursive: true })
-  writeFileSync(path, `${JSON.stringify(settings, null, 2)}\n`)
-  ok(`Claude Code ${version} runs this plugin with function hooks on: set CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 in ${path} (\`claude update\` to 2.1.286 or newer makes it unnecessary)`)
+  mkdirSync(CONFIG_DIR, { recursive: true })
+  writeFileSync(SETTINGS, `${JSON.stringify(settings, null, 2)}\n`)
+  ok(`Claude Code ${version} runs this plugin with function hooks on: set CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 in ${SETTINGS} (\`claude update\` to 2.1.286 or newer makes it unnecessary)`)
 }
 
 function needClaude() {
@@ -204,19 +207,18 @@ function installPlugin(claude, server) {
 // the marketplace has `autoUpdate` on (off by default): this turns it on in
 // the person's settings, leaving everything else there as it was.
 function enableAutoUpdate() {
-  const path = join(homedir(), '.claude', 'settings.json')
   let settings = {}
   try {
-    if (existsSync(path)) settings = JSON.parse(readFileSync(path, 'utf8'))
+    if (existsSync(SETTINGS)) settings = JSON.parse(readFileSync(SETTINGS, 'utf8'))
   } catch {
-    return note(`couldn't read ${path}, so updates stay manual; turn them on in /plugin → Marketplaces → claude-share`)
+    return note(`couldn't read ${SETTINGS}, so updates stay manual; turn them on in /plugin → Marketplaces → claude-share`)
   }
   const known = settings.extraKnownMarketplaces ?? {}
   const entry = known['claude-share'] ?? { source: { source: 'github', repo: MARKETPLACE } }
   if (entry.autoUpdate === true) return ok('updates install by themselves')
   settings.extraKnownMarketplaces = { ...known, 'claude-share': { ...entry, autoUpdate: true } }
-  mkdirSync(join(homedir(), '.claude'), { recursive: true })
-  writeFileSync(path, `${JSON.stringify(settings, null, 2)}\n`)
+  mkdirSync(CONFIG_DIR, { recursive: true })
+  writeFileSync(SETTINGS, `${JSON.stringify(settings, null, 2)}\n`)
   ok('updates now install by themselves (the marketplace\'s autoUpdate is on)')
 }
 
@@ -308,10 +310,10 @@ async function firstStreamLine(url, token) {
 function configuredServer(claude, plugins) {
   let settings = {}
   try {
-    settings = JSON.parse(readFileSync(join(homedir(), '.claude', 'settings.json'), 'utf8'))
+    settings = JSON.parse(readFileSync(SETTINGS, 'utf8'))
   } catch (error) {
     if (error.code !== 'ENOENT') {
-      fail('could not read the saved server settings from ~/.claude/settings.json')
+      fail(`could not read the saved server settings from ${SETTINGS}`)
       return null
     }
   }
@@ -354,6 +356,27 @@ async function deploy(claude) {
   }
   if (who.code !== 0) return fail(`checking Cloudflare sign-in: ${who.out.trim().split('\n').pop()}`)
   ok('signed in to Cloudflare')
+  // Previews of a host's localhost: the same script as a second Worker, on its
+  // own host name. An update deploys it first: the new rooms name themselves in
+  // preview links by a key only the new preview Worker routes, and it still
+  // routes the links and cookies older rooms made (server/worker.mjs). So a
+  // failed preview deploy then stops before the rooms change. The first time
+  // it goes second: its binding needs the main Worker's rooms to exist.
+  // Whether it deployed is wrangler's exit status: one on a custom domain
+  // prints no workers.dev address.
+  const previews = () => {
+    const { code, out } = run(npx, ['-y', 'wrangler@4', 'deploy', '-c', 'wrangler.preview.toml'], { env, timeout: 300_000 })
+    const url = /https:\/\/[^\s]+\.workers\.dev/.exec(out)?.[0]
+    return { deployed: code === 0, said: url ? `previews deployed to ${url}` : 'previews deployed', why: out.trim().split('\n').slice(-2).join(' | ') }
+  }
+  // An update when the main Worker has deployments (one never deployed has
+  // none: Cloudflare's code 10007); if that can't be told, the first-time order.
+  const update = run(npx, ['-y', 'wrangler@4', 'deployments', 'list'], { env }).code === 0
+  if (update) {
+    const preview = previews()
+    if (!preview.deployed) return fail(`the preview Worker didn't deploy (${preview.why}), so nothing was updated and previews of localhost work as they did; fix that, then run \`node scripts/setup.mjs deploy\` again`)
+    ok(preview.said)
+  }
   const out = run(npx, ['-y', 'wrangler@4', 'deploy'], { env, timeout: 300_000 }).out
   const account = /accounts\/([0-9a-f]{32})/.exec(out)?.[1]
   if (/code: 10063|workers\.dev subdomain/i.test(out)) {
@@ -365,11 +388,11 @@ async function deploy(claude) {
   const url = validServer(/https:\/\/[^\s]+\.workers\.dev/.exec(out)?.[0])
   if (!url) return fail(`deploy: ${out.trim().split('\n').slice(-3).join(' | ')}`)
   ok(`deployed to ${url}`)
-  // Previews of a host's localhost: the same script as a second Worker, on its own host name.
-  const preview = run(npx, ['-y', 'wrangler@4', 'deploy', '-c', 'wrangler.preview.toml'], { env, timeout: 300_000 }).out
-  const previewUrl = /https:\/\/[^\s]+\.workers\.dev/.exec(preview)?.[0]
-  if (previewUrl) ok(`previews deployed to ${previewUrl}`)
-  else note(`previews didn't deploy (${preview.trim().split('\n').slice(-2).join(' | ')}); sharing works, previews of localhost won't until \`npx wrangler deploy -c wrangler.preview.toml\` succeeds`)
+  if (!update) {
+    const preview = previews()
+    if (preview.deployed) ok(preview.said)
+    else note(`previews didn't deploy (${preview.why}); sharing works, previews of localhost won't until \`npx wrangler deploy -c wrangler.preview.toml\` succeeds`)
+  }
   const ready = await health(url, { waitMs: 300_000 }) // a new subdomain's certificate takes a minute or so
   if (ready !== true) return fail(`the server is not answering yet (${ready}); a new workers.dev certificate can take a few minutes — run \`node scripts/setup.mjs check --server ${url}\` shortly`)
   ok('server is up')
@@ -383,7 +406,7 @@ async function deploy(claude) {
 // The session transcripts a check's throwaway sessions leave, removed by the
 // throwaway folder's unique name.
 function forgetSessions(dir) {
-  const projects = join(process.env.HOME || homedir(), '.claude', 'projects')
+  const projects = join(CONFIG_DIR, 'projects')
   if (!existsSync(projects)) return
   for (const entry of readdirSync(projects)) if (entry.includes(basename(dir))) rmSync(join(projects, entry), { recursive: true, force: true })
 }

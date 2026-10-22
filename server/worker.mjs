@@ -45,12 +45,21 @@ import {
   ROOMS_PER_DAY,
   SOCKET_ID,
   previewSocketTarget,
+  publicPairValid,
+  hostHalfClose,
   announceSocket,
   hostSocketAllowed,
-  tcpRejectCode,
+  relayRejectCode,
+  streamedRoomBody,
+  bodyLimit,
+  bodyTooLarge,
+  readBody,
+  badRequest,
   noteVersion,
   sendableClose,
   TCP_LIMITS,
+  PUBLIC_LIMITS,
+  revokeMatches,
   tcpSocketTarget,
   announceTCP,
   tcpState,
@@ -60,14 +69,32 @@ import {
   tcpFailure,
   tcpFrame,
   tcpCheck,
-  tcpControl,
-  tcpRelay,
+  tcpStep,
+  chargeControl,
+  mergeTCPStats,
 } from './core.mjs'
-import { Directory, providersFrom } from './teams.mjs'
+import { Directory, providersFrom, BODY_CHARS } from './teams.mjs'
 
 const ROOM_TTL_MS = 24 * 60 * 60 * 1000
 const pad = seq => String(seq).padStart(12, '0')
 const CHUNK = 512 * 1024 // file bytes per storage value
+// A room's one value (meta, 2 MB at most): the room without its events, which
+// have keys of their own, and with the newest META_FILES of its files, whose
+// records are kept beside their bytes (bm:<id>) too. 0.11.24 kept every file
+// in meta and reads them there alone, so rolled back to, it still finds those;
+// loadFiles takes bm:'s record over meta's. Needed while 0.11.24 may come back.
+export const META_FILES = 512
+export function metaOf(room) {
+  const { events, files, ...meta } = room.toJSON()
+  let newest = Object.values(files)
+  if (newest.length > META_FILES) newest = newest.sort((a, b) => b.ts - a.ts).slice(0, META_FILES)
+  return { events, meta: { ...meta, files: Object.fromEntries(newest.map(f => [f.id, f])) } }
+}
+// The directory reads a body whole, so the Worker reads it first, bounded:
+// its characters at three bytes each, as node.mjs does.
+const DIRECTORY_BODY_MAX = 3 * BODY_CHARS
+// A Durable Object's id as toString() writes it: a room's preview key here.
+const OBJECT_ID = /^[0-9a-f]{64}$/
 
 // Where previews are served: PREVIEW_URL, else this Worker's workers.dev name
 // with "-preview" (claude-share.x.workers.dev → claude-share-preview.x.workers.dev).
@@ -77,17 +104,28 @@ function previewOriginOf(req, env) {
   return m ? `https://${m[1]}-preview.${m[2]}` : ''
 }
 
+// A preview names its room by the room's Durable Object id (its preview key),
+// never by the room's id, which joins it: idFromName can't be undone, so the
+// key leads here and nowhere else. A link made or a cookie set before rooms
+// had keys names the room's id, and goes where 0.11.24's preview Worker sent
+// it (idFromName), so it keeps working whichever Worker a deploy puts first.
+// A key reaches only this version's rooms, so on an update this Worker is
+// deployed first (wrangler.preview.toml, scripts/setup.mjs).
 async function previewFetch(req, env) {
-  const id = previewRoomOf(req)
-  if (!id || !ROOM_ID.test(id)) return previewMissing()
+  const key = previewRoomOf(req) ?? ''
+  let stub = null
+  try { stub = OBJECT_ID.test(key) ? env.ROOMS.get(env.ROOMS.idFromString(key)) : ROOM_ID.test(key) ? env.ROOMS.get(env.ROOMS.idFromName(key)) : null } catch {}
+  if (!stub) return previewMissing()
   const url = new URL(req.url)
-  const stub = env.ROOMS.get(env.ROOMS.idFromName(id))
+  // The body as it comes: the room bounds it (PROXY_BODY_MAX) as it arrives.
+  const body = req.method === 'GET' || req.method === 'HEAD' ? null : req.body
   return stub.fetch(
-    new Request(`https://room.internal/${id}/__preview${url.pathname}${url.search}`, {
+    new Request(`https://room.internal/${key}/__preview${url.pathname}${url.search}`, {
       method: req.method,
       headers: req.headers,
-      body: req.method === 'GET' || req.method === 'HEAD' ? undefined : await req.arrayBuffer(),
+      body,
       redirect: 'manual',
+      ...(body ? { duplex: 'half' } : {}),
     }),
   )
 }
@@ -102,15 +140,22 @@ export default {
     if (url.pathname === '/api/health') return json({ ok: true })
     if (url.pathname === '/api/version') return versionInfo()
     if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/privacy')) return homePage(origin)
+    const bodied = req.method !== 'GET' && req.method !== 'HEAD'
     if (env.DIRECTORY && Directory.owns(url.pathname)) {
       if (Directory.limited(url.pathname, req.method) && !(await env.JOIN_LIMIT.limit({ key: `auth:${req.headers.get('cf-connecting-ip') ?? 'unknown'}` })).success) return limitedResponse('join')
       const headers = new Headers(req.headers)
       headers.set('x-share-origin', origin)
+      // Read here, bounded (a declared length past it refused before any):
+      // the directory takes what it's given whole.
+      let body
+      if (bodied) {
+        try { body = await readBody(req, DIRECTORY_BODY_MAX) } catch (error) { return error.status === 413 ? bodyTooLarge(DIRECTORY_BODY_MAX) : badRequest('The request body did not arrive.') }
+      }
       return directoryStub(env).fetch(
         new Request(`https://directory.internal${url.pathname}${url.search}`, {
           method: req.method,
           headers,
-          body: req.method === 'GET' || req.method === 'HEAD' ? undefined : await req.arrayBuffer(),
+          body,
           redirect: 'manual',
         }),
       )
@@ -141,6 +186,9 @@ export default {
       return notFound()
     }
     if (!ROOM_ID.test(id)) return notFound()
+    // Previews have a host name of their own: this origin serves none, page
+    // or socket (only previewFetch makes these paths, by the room's key).
+    if (rest.startsWith('__preview')) return notFound()
     const limit = limitOf(req, id, rest, req.headers.get('cf-connecting-ip') ?? 'unknown')
     const limiter = limit && { create: env.CREATE_LIMIT, join: env.JOIN_LIMIT, events: env.EVENTS_LIMIT, tunnel: env.TUNNEL_LIMIT }[limit.kind]
     if (limiter && !(await limiter.limit({ key: limit.key })).success) return limitedResponse(limit.kind)
@@ -150,14 +198,18 @@ export default {
     headers.set('x-share-origin', origin)
     headers.set('x-preview-origin', previewOriginOf(req, env))
     if (rest === 'stream' && req.method === 'GET') return bridge(stub, id, url, headers)
-    // The room authenticates this host-only request before reading its small body.
-    const rejecting = req.method === 'POST' && /^ws\/[^/]+\/reject$/.test(rest)
+    // Every body goes on as a stream, never buffered here: the room reads it
+    // through readBody, bounded. A declared length past what the route takes
+    // (bodyLimit, as node.mjs bounds it) is refused first; the streamed
+    // routes authenticate before reading and bound themselves.
+    const max = bodyLimit(url.pathname)
+    if (bodied && !streamedRoomBody(req.method, rest) && Number(req.headers.get('content-length')) > max) return bodyTooLarge(max)
     return stub.fetch(
       new Request(`https://room.internal/${id}/${rest}${url.search}`, {
         method: req.method,
         headers,
-        body: req.method === 'GET' || req.method === 'HEAD' ? undefined : rejecting ? req.body : await req.arrayBuffer(),
-        ...(rejecting ? { duplex: 'half' } : {}),
+        body: bodied ? req.body : undefined,
+        ...(bodied ? { duplex: 'half' } : {}),
       }),
     )
   },
@@ -208,17 +260,24 @@ export class RoomObject {
     this.env = env
     this.room = null
     this.savedSeq = 0
+    this.persisting = Promise.resolve()
     // A socket stays in getWebSockets() while its close is being handled.
     this.closed = new WeakSet()
-    // Legacy public previews only. TCP never queues pre-ready payload.
+    // Public-link pairs (previews not forwarded): what a browser sends before
+    // the host's relay pairs, in memory, and never past PUBLIC_LIMITS.pairMs,
+    // the room's all together PUBLIC_LIMITS.pendingBytes at most (an isolate's
+    // 128 MB is shared). TCP never queues pre-ready payload.
     this.pending = new Map()
+    this.pendingBytes = 0
     state.blockConcurrencyWhile(async () => {
       const meta = await state.storage.get('meta')
-      if (!meta) return
+      if (!meta) { this.cleanupPublic(Date.now()); return }
       const stored = await state.storage.list({ prefix: 'e:' })
       const tcpStats = (await state.storage.get('tcp:stats')) ?? meta.tcpStats
       this.tcpSaved = tcpStats ? JSON.stringify(tcpStats) : ''
-      this.attach(Room.resume({ ...meta, tcpStats, events: [...stored.values()] }, Date.now()))
+      const files = await this.loadFiles(meta.files)
+      this.attach(Room.resume({ ...meta, tcpStats, files, events: [...stored.values()] }, Date.now()))
+      this.cleanupPublic(Date.now())
       if (this.cleanupTCP(Date.now())) await this.persist()
       await this.schedule()
     })
@@ -229,19 +288,30 @@ export class RoomObject {
   attach(room) {
     this.room = room
     this.savedSeq = room.seq
+    // Previews name the room by this object's own id (previewFetch).
+    room.previewKey = this.state.id?.toString() ?? room.previewKey
     room.connected = seat => this.state.getWebSockets(seat).some(ws => !this.closed.has(ws))
     room.onChange = () => this.broadcast()
     room.tcpSupported = () => this.state.getWebSockets('host').some(ws => !this.closed.has(ws) && ws.deserializeAttachment()?.tcpSupport === true)
+    // A revocation closes the channels it covers (revokeMatches): a TCP pair
+    // by its grant, a public one by its browser session, seat or preview.
     room.onTCPRevoke = filter => {
       for (const ws of this.tcpSockets()) {
         const s = ws.deserializeAttachment().tcp
-        if ((!filter.cap || s.cap === filter.cap) && (!filter.pid || s.pid === filter.pid) && (!filter.seat || s.ownerSeat === filter.seat)) this.closeTCP(s.id, 1008, 'TCP grant revoked')
+        if (revokeMatches(filter, s)) this.closeTCP(s.id, 1008, 'TCP grant revoked')
       }
     }
+    room.onPreviewRevoke = filter => {
+      for (const ws of this.publicSockets()) {
+        const att = ws.deserializeAttachment()
+        if (revokeMatches(filter, att)) this.unpair(ws, att, 1008, 'Preview ended')
+      }
+    }
+    // A TCP channel or a guest's need only to a host stream that takes them.
     room.toHost = message => {
       let sent = false
       for (const ws of this.state.getWebSockets('host')) {
-        if (this.closed.has(ws) || (message.tcp && ws.deserializeAttachment()?.tcpSupport !== true)) continue
+        if (this.closed.has(ws) || (message.tcp && ws.deserializeAttachment()?.tcpSupport !== true) || (message.need && ws.deserializeAttachment()?.needSupport !== true)) continue
         try {
           ws.send(JSON.stringify(message))
           sent = true
@@ -249,11 +319,12 @@ export class RoomObject {
       }
       return sent
     }
-    // File bytes in storage, in chunks; deleteAll() at expiry takes them too.
+    // File bytes in storage, in chunks, with what `files` holds for each
+    // beside them (bm:<id>); deleteAll() at expiry takes them too.
     const storage = this.state.storage
     room.store = {
-      put: async (id, data, type) => {
-        const entries = { [`bm:${id}`]: { type, size: data.length, chunks: Math.ceil(data.length / CHUNK) || 1 } }
+      put: async (id, data, file) => {
+        const entries = { [`bm:${id}`]: { ...file, size: data.length, chunks: Math.ceil(data.length / CHUNK) || 1 } }
         for (let i = 0, n = 0; i < Math.max(1, data.length); i += CHUNK, n++) entries[`b:${id}:${n}`] = data.slice(i, i + CHUNK)
         await storage.put(entries)
       },
@@ -274,6 +345,23 @@ export class RoomObject {
     }
   }
 
+  // A room's files as `files` holds them, from beside their bytes (bm:<id>),
+  // where this version keeps every record: so how many a room keeps isn't
+  // bounded by what one value holds. Meta's records (`saved`: the newest,
+  // metaOf, or all of a room 0.11.24 saved) count only for a file whose bm:
+  // has none, one 0.11.24 uploaded (before this version, or rolled back to),
+  // and move beside its bytes here, once: a record in bm: wins.
+  async loadFiles(saved = {}) {
+    const storage = this.state.storage
+    const kept = await storage.list({ prefix: 'bm:' })
+    const files = {}
+    for (const { chunks, ...file } of kept.values()) if (file.id) files[file.id] = file
+    const moved = Object.values(saved).filter(f => f?.id && !files[f.id] && kept.has(`bm:${f.id}`))
+    for (let i = 0; i < moved.length; i += 100) await storage.put(Object.fromEntries(moved.slice(i, i + 100).map(f => [`bm:${f.id}`, { ...kept.get(`bm:${f.id}`), ...f }])))
+    for (const f of moved) files[f.id] = f
+    return files
+  }
+
   async fetch(req) {
     const url = new URL(req.url)
     const origin = req.headers.get('x-share-origin') ?? url.origin
@@ -292,25 +380,33 @@ export class RoomObject {
       return response
     }
 
+    // A preview's request names the room by its preview key (the preview
+    // Worker's only way here), or by its id for a link made or a cookie set
+    // before rooms had keys (core's namesRoom); everything else, by its id.
+    const preview = rest === '__preview' || rest.startsWith('__preview/')
     if (!this.room) {
-      return rest === 'page'
+      return preview ? previewMissing() : rest === 'page'
         ? missingPage()
         : json({ error: 'This shared session does not exist.' }, 404)
     }
 
-    const reject = req.method === 'POST' && /^ws\/([^/]+)\/reject$/.exec(rest)
-    if (reject && id !== this.room.id) return notFound()
-    if (this.cleanupTCP(now)) await this.persist()
-    if (reject) return this.rejectTCP(req, reject[1])
+    const room = this.room
+    if (preview ? id !== room.previewKey && id !== room.id : id !== room.id) return preview ? previewMissing() : notFound()
+    // What expired is swept by the alarm, and by roomRequest for ordinary
+    // requests; upgrades check what they need where they admit.
+    if (req.method === 'POST') {
+      const reject = /^ws\/([^/]+)\/reject$/.exec(rest)
+      if (reject) return this.rejectRelay(req, reject[1])
+    }
     if (rest === 'socket') return this.accept(req, url, now)
 
     const upgrade = req.headers.get('upgrade')?.toLowerCase() === 'websocket'
     const tunnel = /^previews\/([A-Za-z0-9_-]+)\/tunnel$/.exec(rest)
     if (upgrade && tunnel) return this.tunnelSocket(req, tunnel[1], now)
-    if (upgrade && (rest === '__preview' || rest.startsWith('__preview/'))) return this.previewSocket(req, url, id, now)
+    if (upgrade && preview) return this.previewSocket(req, url, id, now)
     if (upgrade && rest.startsWith('ws/')) return this.relaySocket(req, rest.slice(3), now)
 
-    if (rest === '__preview' || rest.startsWith('__preview/')) {
+    if (preview) {
       const path = url.pathname.slice(`/${id}/__preview`.length) || '/'
       const inner = new Request(new URL(`${path}${url.search}`, 'https://preview.local'), req)
       const { response, changed } = await previewRequest(this.room, inner, now)
@@ -319,9 +415,12 @@ export class RoomObject {
     }
 
     const admin = Boolean(this.env?.ADMIN_TOKEN) && req.headers.get('authorization') === `Bearer ${this.env.ADMIN_TOKEN}`
-    const ctx = { previewOrigin: req.headers.get('x-preview-origin') ?? '', admin, directory: directoryClient(this.env) }
-    const { response, changed } = await roomRequest(this.room, req, rest, now, origin, ctx)
+    const ctx = { previewOrigin: req.headers.get('x-preview-origin') ?? '', admin, directory: directoryClient(this.env), isCurrent: () => this.room === room }
+    const counters = JSON.stringify(room.tcpStats)
+    const { response, changed } = await roomRequest(room, req, rest, now, origin, ctx)
     if (changed) await this.persist()
+    // A grant the room's minute refused still counted in it: its key alone.
+    else if (this.room === room && JSON.stringify(room.tcpStats) !== counters) await this.persistTCPStats()
     // A grant made is something to sweep when it expires; a refused one isn't.
     if (changed) await this.schedule()
     return response
@@ -338,8 +437,12 @@ export class RoomObject {
     if (noteVersion(this.room, req, auth) || this.room.seats.size !== seated) await this.persist()
     if (this.room.endedAt) return json({ error: 'This session is no longer shared.' }, 410)
     const [client, server] = Object.values(new WebSocketPair())
-    this.state.acceptWebSocket(server, [auth.seat])
-    server.serializeAttachment({ seat: auth.seat, role: auth.role, after: Number(url.searchParams.get('after') ?? 0) || 0, tcpSupport: auth.role === 'host' && url.searchParams.get('tcp') === '1' })
+    // Tagged as a stream, so a change goes to streams alone (broadcast), and
+    // by seat, for who is connected.
+    this.state.acceptWebSocket(server, ['stream', auth.seat])
+    // A host's stream says which asks it takes (room.toHost).
+    const takes = name => auth.role === 'host' && url.searchParams.get(name) === '1'
+    server.serializeAttachment({ seat: auth.seat, role: auth.role, after: Number(url.searchParams.get('after') ?? 0) || 0, tcpSupport: takes('tcp'), needSupport: takes('need') })
     this.room.touch(auth, now)
     this.send(server, now)
     if (auth.role === 'host') this.broadcast() // the host is back: everyone sees it
@@ -349,17 +452,43 @@ export class RoomObject {
 
   // A guest's browser opens a socket on a preview: the host is asked for a
   // relay, and the two are paired by the socket's id (tags pb:/ph:), so the
-  // pairing outlives the object sleeping between messages.
-  previewSocket(req, url, id, now) {
+  // pairing outlives the object sleeping between messages. Both halves carry
+  // what let the browser in (its session, seat, preview, expiry), and the
+  // browser's its pairing deadline.
+  async previewSocket(req, url, id, now) {
+    // Halves past their deadline hold no place: checked right before admission.
+    this.cleanupPublic(now)
     const path = url.pathname.slice(`/${id}/__preview`.length) || '/'
-    const target = previewSocketTarget(this.room, new Request(new URL(`${path}${url.search}`, 'https://preview.local'), { headers: req.headers }), now)
-    if (!target.ok) return new Response('This preview has ended', { status: target.status })
+    const active = this.publicSockets().map(ws => ws.deserializeAttachment()).filter(att => att.pb)
+    const target = previewSocketTarget(this.room, new Request(new URL(`${path}${url.search}`, 'https://preview.local'), { headers: req.headers }), now, active)
+    if (!target.ok) return new Response(target.error ?? 'This preview has ended', { status: target.status })
     const wsId = token(12)
     if (!announceSocket(this.room, wsId, target)) return new Response(`${this.room.host.name}'s Claude Code isn't connected right now.`, { status: 503 })
     const [client, server] = Object.values(new WebSocketPair())
-    this.state.acceptWebSocket(server, [`pb:${wsId}`])
-    server.serializeAttachment({ pb: wsId })
+    this.state.acceptWebSocket(server, ['public', `pb:${wsId}`])
+    server.serializeAttachment({ pb: wsId, pid: target.pid, session: target.session, ownerSeat: target.ownerSeat, exp: target.exp, deadline: now + PUBLIC_LIMITS.pairMs })
+    await this.schedule()
     return new Response(null, { status: 101, webSocket: client, headers: target.protocols[0] ? { 'sec-websocket-protocol': target.protocols[0] } : undefined })
+  }
+
+  publicValid(att) {
+    return publicPairValid(this.room, att, Date.now())
+  }
+
+  publicSockets() {
+    return this.state.getWebSockets('public').filter(ws => !this.closed.has(ws) && !ws.deserializeAttachment()?.closed)
+  }
+
+  // A public pair whose preview, browser session or room went closes (an
+  // attachment that doesn't name them all proves nothing, so it closes too),
+  // and so does a browser's half the host didn't take up by its deadline.
+  // From the constructor, the alarm and right before admission.
+  cleanupPublic(now) {
+    for (const ws of this.publicSockets()) {
+      const att = ws.deserializeAttachment()
+      if (!this.publicValid(att)) this.unpair(ws, att, 1008, 'Preview ended')
+      else if (att.pb && !att.paired && !(att.deadline > now)) this.unpair(ws, att, 1011, 'Preview relay timeout')
+    }
   }
 
   tcpSockets() {
@@ -374,11 +503,7 @@ export class RoomObject {
   // the transcript snapshot. Monotonic merge also protects overlapping writes.
   async persistTCPStats() {
     await this.state.storage.transaction(async storage => {
-      const before = await storage.get('tcp:stats')
-      const current = this.room.tcpStats
-      const older = before?.opens
-      const opens = older && older.start > current.opens.start ? older : older?.start === current.opens.start ? { start: older.start, count: Math.max(older.count, current.opens.count) } : current.opens
-      const stats = { used: Math.max(before?.used ?? 0, current.used), refunded: Math.max(before?.refunded ?? 0, current.refunded ?? 0), opens }
+      const stats = mergeTCPStats(await storage.get('tcp:stats'), this.room.tcpStats)
       await storage.put('tcp:stats', stats)
       this.room.tcpStats = stats
       this.tcpSaved = JSON.stringify(stats)
@@ -390,6 +515,9 @@ export class RoomObject {
     // Block only admission/storage, not established channels. No process-local
     // pending queue, HTTP stream or timer survives this short upgrade request.
     return this.state.blockConcurrencyWhile(async () => {
+      // A half past its pairing deadline holds no place: checked right before
+      // admission, the one check outside the alarm.
+      this.closeStaleTCP(now)
       const active = this.tcpSockets().map(ws => ws.deserializeAttachment().tcp).filter(s => s.side === 'guest')
       const count = this.room.tcpStats.opens.count, start = this.room.tcpStats.opens.start
       const target = tcpSocketTarget(this.room, req, pid, now, active)
@@ -429,88 +557,112 @@ export class RoomObject {
     if (refunded) void this.persistTCPStats().catch(() => {})
   }
 
-  async rejectTCP(req, id) {
+  // The host turning away a socket it was asked to relay, while that socket
+  // waits for its host half: a TCP guest half (its worker busy, the port
+  // refusing) or a public browser (more relays than it runs, the port
+  // refusing). Never one already paired.
+  async rejectRelay(req, id) {
     const room = this.room
+    const live = ws => !this.closed.has(ws) && !ws.deserializeAttachment()?.closed && !ws.deserializeAttachment()?.tcp?.closed
     const guest = SOCKET_ID.test(id) ? this.tcpSockets().find(ws => {
       const s = ws.deserializeAttachment().tcp
       return s.id === id && s.room === room.id && s.side === 'guest'
     }) : null
+    const browser = SOCKET_ID.test(id) && !guest ? this.publicSockets().find(ws => ws.deserializeAttachment().pb === id) : null
     const check = () => {
       if (this.room !== room) return notFound()
-      if (!hostSocketAllowed(room, req)) return json({ error: 'Only the host rejects a TCP relay.' }, 401)
-      if (!guest || !this.tcpSockets().includes(guest)) return notFound()
-      const s = guest.deserializeAttachment().tcp
-      if (s.id !== id || s.room !== room.id || s.side !== 'guest') return notFound()
-      if (s.ready || this.tcpPeer(s)) return json({ error: 'That socket already has a host relay.' }, 409)
+      if (!hostSocketAllowed(room, req)) return json({ error: 'Only the host rejects a relay.' }, 401)
+      if (guest) {
+        if (!this.tcpSockets().includes(guest)) return notFound()
+        const s = guest.deserializeAttachment().tcp
+        if (s.id !== id || s.room !== room.id || s.side !== 'guest') return notFound()
+        if (s.ready || this.tcpPeer(s)) return json({ error: 'That socket already has a host relay.' }, 409)
+        return null
+      }
+      if (!browser || !this.publicSockets().includes(browser)) return notFound()
+      if (browser.deserializeAttachment().paired || this.state.getWebSockets(`ph:${id}`).some(live)) return json({ error: 'That socket already has a host relay.' }, 409)
       return null
     }
     const before = check()
     if (before) return before
-    const code = await tcpRejectCode(req)
+    const code = await relayRejectCode(req)
     return this.state.blockConcurrencyWhile(async () => {
       const after = check()
       if (after) return after
       if (!code) return json({ error: 'Expected exactly a BUSY or CONNECT code.' }, 400)
-      this.closeTCP(id, code, code === 1013 ? 'TCP host busy' : 'TCP local connect failed')
+      if (guest) this.closeTCP(id, code, code === 1013 ? 'TCP host busy' : 'TCP local connect failed')
+      else this.unpair(browser, browser.deserializeAttachment(), code, code === 1013 ? 'Preview host busy' : 'Preview local connect failed')
       await this.schedule()
       return json({ ok: true })
     })
   }
 
+  // Expired grants, browser sessions and links go (their channels with
+  // them); from the constructor and the alarm.
   cleanupTCP(now) {
-    const changed = this.room.sweepTCP(now)
+    const changed = this.room.sweepGrants(now)
+    this.closeStaleTCP(now)
+    return changed
+  }
+
+  // TCP halves whose grant went, and guest halves past their pairing deadline.
+  closeStaleTCP(now) {
     for (const ws of this.tcpSockets()) {
       const s = ws.deserializeAttachment().tcp
       if (!tcpValid(this.room, s, now)) this.closeTCP(s.id, 1008, 'TCP grant revoked or expired')
       else if (!s.ready && s.deadline <= now) this.closeTCP(s.id, 1008, 'TCP relay timeout')
     }
-    return changed
   }
 
+  // One message through tcpStep, both halves' attachments saved before any of
+  // it is sent on: 'reserve' when the sender's budget must grow first, 'done'
+  // when it finished the channel, else 'sent'.
   forwardTCP(ws, peer, frame, now) {
-    const from = ws.deserializeAttachment().tcp, to = peer.deserializeAttachment().tcp
-    if (this.closed.has(ws) || this.closed.has(peer) || from.closed || to.closed || !tcpValid(this.room, from, now)) throw tcpFailure('TCP grant revoked.')
-    const result = tcpRelay(from, to, frame, now)
+    const from = ws.deserializeAttachment().tcp, to = peer?.deserializeAttachment()?.tcp
+    if (this.closed.has(ws) || (peer && this.closed.has(peer)) || from.closed || to?.closed) throw tcpFailure('TCP grant revoked.')
+    const step = tcpStep(this.room, from, to, frame, now)
+    if (step.reserve) return 'reserve'
     ws.serializeAttachment({ tcp: from })
     peer.serializeAttachment({ tcp: to })
-    for (const data of result.messages) this.sendTCP(peer, data)
-    if (result.done) this.closeTCP(from.id, 1000, 'TCP finished')
-    return result.done
+    for (const data of step.messages) this.sendTCP(peer, data)
+    if (!step.done) return 'sent'
+    this.closeTCP(from.id, 1000, 'TCP finished')
+    return 'done'
   }
 
   async tcpMessage(ws, message) {
     const s = ws.deserializeAttachment()?.tcp
     if (!s || s.closed || this.closed.has(ws)) return
     try {
-      const frame = tcpFrame(message), peer = this.tcpPeer(s), now = Date.now()
-      if (!tcpValid(this.room, s, now)) throw tcpFailure('TCP grant revoked or expired.')
-      tcpCheck(s, peer?.deserializeAttachment()?.tcp, frame, now)
-      if (frame.t === 'data' && s.remaining < frame.n) {
-        // Only a refill awaits I/O. Input gating prevents another frame from
-        // spending the same attachment remainder while its reservation commits.
-        const failure = await this.state.blockConcurrencyWhile(async () => {
-          // Throwing out of blockConcurrencyWhile resets the entire object.
-          // Protocol/budget failures close just this pair, not everyone's room.
-          try {
-            const from = ws.deserializeAttachment().tcp
-            if (from.closed || !tcpValid(this.room, from, Date.now())) throw tcpFailure('TCP grant revoked.')
-            tcpCheck(from, peer.deserializeAttachment().tcp, frame, Date.now())
-            if (!tcpReserve(this.room, from)) throw tcpFailure('TCP room byte budget exhausted.')
-            await this.persistTCPStats()
-            ws.serializeAttachment({ tcp: from })
-            this.forwardTCP(ws, peer, frame, Date.now())
-            return null
-          } catch (error) { return error }
-        })
-        if (failure) throw failure
-      } else if (this.forwardTCP(ws, peer, frame, now)) await this.schedule()
+      const frame = tcpFrame(message), peer = this.tcpPeer(s)
+      const step = this.forwardTCP(ws, peer, frame, Date.now())
+      if (step === 'done') await this.schedule()
+      if (step !== 'reserve') return
+      // Only a refill awaits I/O. Input gating prevents another frame from
+      // spending the same attachment remainder while its reservation commits.
+      const failure = await this.state.blockConcurrencyWhile(async () => {
+        // Throwing out of blockConcurrencyWhile resets the entire object.
+        // Protocol/budget failures close just this pair, not everyone's room.
+        try {
+          const from = ws.deserializeAttachment().tcp
+          if (from.closed || !tcpValid(this.room, from, Date.now())) throw tcpFailure('TCP grant revoked.')
+          tcpCheck(from, peer.deserializeAttachment().tcp, frame, Date.now())
+          if (!tcpReserve(this.room, from)) throw tcpFailure('TCP room byte budget exhausted.')
+          await this.persistTCPStats()
+          ws.serializeAttachment({ tcp: from })
+          // A reservation is larger than any frame: the step now relays.
+          if (this.forwardTCP(ws, peer, frame, Date.now()) === 'reserve') throw tcpFailure('TCP room byte budget exhausted.')
+          return null
+        } catch (error) { return error }
+      })
+      if (failure) throw failure
     } catch (error) {
       this.closeTCP(s.id, error.code ?? 1011, error.message)
       await this.schedule()
     }
   }
 
-  // The same host-only endpoint pairs TCP and legacy public previews. Tags
+  // The same host-only endpoint pairs TCP and public-link previews. Tags
   // distinguish their purposes, and a second host half is always refused.
   async relaySocket(req, wsId, now = Date.now()) {
     if (req.method !== 'GET' || !SOCKET_ID.test(wsId) || !hostSocketAllowed(this.room, req)) return json({ error: 'Only the host relays a preview.' }, 401)
@@ -527,7 +679,7 @@ export class RoomObject {
       const host = tcpState(wsId, s, 'host', now)
       try {
         s.ready = host.ready = true
-        const guestReady = tcpControl(s, { t: 'ready' }), hostReady = tcpControl(host, { t: 'ready' })
+        const guestReady = chargeControl(s, { t: 'ready' }), hostReady = chargeControl(host, { t: 'ready' })
         guest.serializeAttachment({ tcp: s })
         server.serializeAttachment({ tcp: host })
         this.sendTCP(guest, guestReady)
@@ -536,16 +688,38 @@ export class RoomObject {
       await this.schedule()
       return new Response(null, { status: 101, webSocket: client })
     }
-    if (!this.state.getWebSockets(`pb:${wsId}`).some(ws => !this.closed.has(ws))) return json({ error: 'That socket has closed.' }, 410)
-    if (this.state.getWebSockets(`ph:${wsId}`).some(ws => !this.closed.has(ws))) return json({ error: 'That socket already has a host relay.' }, 409)
-    const [client, server] = Object.values(new WebSocketPair())
-    this.state.acceptWebSocket(server, [`ph:${wsId}`])
-    server.serializeAttachment({ ph: wsId })
-    for (const message of this.pending.get(wsId)?.messages ?? []) {
-      try { server.send(message) } catch { this.unpair(server, { ph: wsId }, 1011, '') }
+    const browser = this.state.getWebSockets(`pb:${wsId}`).find(ws => !this.closed.has(ws) && !ws.deserializeAttachment()?.closed)
+    if (!browser) return json({ error: 'That socket has closed.' }, 410)
+    const att = browser.deserializeAttachment()
+    if (!this.publicValid(att)) {
+      this.unpair(browser, att, 1008, 'Preview ended')
+      return json({ error: 'That preview has ended.' }, 410)
     }
-    this.pending.delete(wsId)
+    if (this.state.getWebSockets(`ph:${wsId}`).some(ws => !this.closed.has(ws) && !ws.deserializeAttachment()?.closed)) return json({ error: 'That socket already has a host relay.' }, 409)
+    // Taken up too late: the alarm closes it at its deadline, this before.
+    if (!(att.deadline > now)) {
+      this.unpair(browser, att, 1011, 'Preview relay timeout')
+      return json({ error: 'That socket has closed.' }, 410)
+    }
+    // No await between the current pid check and installing/draining its half.
+    const [client, server] = Object.values(new WebSocketPair())
+    this.state.acceptWebSocket(server, ['public', `ph:${wsId}`])
+    const binding = { ph: wsId, pid: att.pid, session: att.session, ownerSeat: att.ownerSeat, exp: att.exp }
+    server.serializeAttachment(binding)
+    browser.serializeAttachment({ ...att, paired: true })
+    for (const message of this.takePending(wsId)?.messages ?? []) {
+      try { server.send(message) } catch { this.unpair(server, binding, 1011, ''); break }
+    }
+    await this.schedule()
     return new Response(null, { status: 101, webSocket: client })
+  }
+
+  // A browser socket's waiting messages, out of the room's total.
+  takePending(id) {
+    const queue = this.pending.get(id)
+    if (queue) this.pendingBytes -= queue.bytes
+    this.pending.delete(id)
+    return queue
   }
 
   // One socket's line: everything after its cursor, and the room now.
@@ -560,29 +734,51 @@ export class RoomObject {
     } catch {}
   }
 
+  // A change goes to the streams alone: TCP and public channels never read
+  // room JSON, so their attachments aren't even opened for it.
   broadcast() {
     const now = Date.now()
-    for (const ws of this.state.getWebSockets()) if (!this.closed.has(ws)) this.send(ws, now)
+    for (const ws of this.state.getWebSockets('stream')) if (!this.closed.has(ws)) this.send(ws, now)
   }
 
   // Streams send nothing; data channels never receive room JSON.
   async webSocketMessage(ws, message) {
     const att = ws.deserializeAttachment()
     if (att?.tcp) return this.tcpMessage(ws, message)
-    const id = att?.pb ?? att?.ph
-    if (!id || this.closed.has(ws)) return
+    if (!(att?.pb ?? att?.ph) || this.closed.has(ws) || att.closed) return
+    this.publicMessage(ws, att, message)
+  }
+
+  // An app's own message on a public pair, passed on as it is, bounded as
+  // Node's parser bounds its sockets: so many a second per socket (counted in
+  // its attachment, which outlives the object sleeping), and no more output a
+  // peer hasn't taken than a megabyte where the runtime says how much.
+  // workerd doesn't report bufferedAmount, so there each socket sends at
+  // most PUBLIC_LIMITS.bytesPerWindow a second (counted beside its rate): a
+  // fast sender can't fill the isolate's memory behind a slow reader.
+  publicMessage(ws, att, message) {
+    const id = att.pb ?? att.ph
+    if (!this.publicValid(att)) return this.unpair(ws, att, 1008, 'Preview ended')
     const n = typeof message === 'string' ? new TextEncoder().encode(message).byteLength : message.byteLength
-    if (n > TCP_LIMITS.bufferBytes) return this.unpair(ws, att, 1009, 'Preview message limit')
-    const peers = this.state.getWebSockets(att.pb ? `ph:${id}` : `pb:${id}`).filter(p => !this.closed.has(p))
+    if (n > PUBLIC_LIMITS.bufferBytes) return this.unpair(ws, att, 1009, 'Preview message limit')
+    const now = Date.now()
+    const rate = att.rate && now - att.rate.start < PUBLIC_LIMITS.rateWindowMs ? { ...att.rate } : { start: now, count: 0, bytes: 0 }
+    if (++rate.count > PUBLIC_LIMITS.framesPerWindow) return this.unpair(ws, att, 1008, 'WebSocket frame rate exceeded')
+    if ((rate.bytes = (rate.bytes ?? 0) + n) > PUBLIC_LIMITS.bytesPerWindow) return this.unpair(ws, att, 1009, 'WebSocket byte rate exceeded')
+    ws.serializeAttachment({ ...att, rate })
+    const peers = this.state.getWebSockets(att.pb ? `ph:${id}` : `pb:${id}`).filter(p => !this.closed.has(p) && !p.deserializeAttachment()?.closed)
+    if (peers.some(p => p.deserializeAttachment()?.pid !== att.pid)) return this.unpair(ws, att, 1008, 'Preview identity changed')
     if (!peers.length && att.pb) {
       const queue = this.pending.get(id) ?? { messages: [], bytes: 0 }
-      if (queue.messages.length >= 500 || queue.bytes + n > TCP_LIMITS.bufferBytes) return this.unpair(ws, att, 1009, 'Preview queue limit')
+      if (queue.messages.length >= PUBLIC_LIMITS.queueMessages || queue.bytes + n > PUBLIC_LIMITS.queueBytes || this.pendingBytes + n > PUBLIC_LIMITS.pendingBytes) return this.unpair(ws, att, 1009, 'Preview queue limit')
       queue.messages.push(message)
       queue.bytes += n
+      this.pendingBytes += n
       this.pending.set(id, queue)
       return
     }
     for (const peer of peers) {
+      if (typeof peer.bufferedAmount === 'number' && peer.bufferedAmount + n > PUBLIC_LIMITS.bufferBytes) return this.unpair(ws, att, 1009, 'WebSocket output limit')
       try { peer.send(message) } catch { this.unpair(ws, att, 1011, '') }
     }
   }
@@ -594,7 +790,8 @@ export class RoomObject {
       await this.schedule()
       return
     }
-    if (att?.pb || att?.ph) return this.unpair(ws, att, code, reason)
+    // A host half that vanished (no close frame) is a failure the page sees.
+    if (att?.pb || att?.ph) return this.unpair(ws, att, att.ph ? hostHalfClose(code) : code, reason)
     await this.disconnected(ws)
   }
 
@@ -613,17 +810,18 @@ export class RoomObject {
   unpair(ws, att, code, reason) {
     const id = att.pb ?? att.ph
     const close = sendableClose(code)
-    this.closed.add(ws)
-    for (const peer of this.state.getWebSockets(att.pb ? `ph:${id}` : `pb:${id}`)) {
+    for (const peer of [ws, ...this.state.getWebSockets(att.pb ? `ph:${id}` : `pb:${id}`)]) {
       this.closed.add(peer)
+      const binding = peer.deserializeAttachment()
+      if (binding?.closed) continue
+      // Closing sockets can still be listed after hibernation. Keep the fence
+      // in their attachments as well as the object-local WeakSet.
+      peer.serializeAttachment({ ...binding, closed: true })
       try {
         peer.close(close, String(reason ?? '').slice(0, 120))
       } catch {}
     }
-    try {
-      ws.close(close, 'closed')
-    } catch {}
-    this.pending.delete(id)
+    this.takePending(id)
   }
 
   // A seat counts as last seen when its socket closed; look again once its
@@ -640,18 +838,29 @@ export class RoomObject {
     await this.schedule()
   }
 
-  async persist() {
+  persist() {
+    // Body reads may overlap, but an older metadata save must never finish
+    // after a newer one (a preview's Stop, a revoked grant). Capture each
+    // snapshot only when the previous save has finished.
+    const saving = this.persisting.catch(() => {}).then(() => this.saveRoom())
+    this.persisting = saving
+    return saving
+  }
+
+  async saveRoom() {
     const room = this.room
+    if (!room) return
     // The counters' own key only when they changed: most rooms never use TCP.
     if (JSON.stringify(room.tcpStats) !== this.tcpSaved) await this.persistTCPStats()
-    const { events, ...meta } = room.toJSON()
+    // Files are kept beside their bytes (store.put), the newest in meta too.
+    const { events, meta } = metaOf(room)
     const entries = { meta }
     for (const event of events) if (event.seq > this.savedSeq) entries[`e:${pad(event.seq)}`] = event
     const keys = Object.keys(entries)
     for (let i = 0; i < keys.length; i += 100) {
       await this.state.storage.put(Object.fromEntries(keys.slice(i, i + 100).map(k => [k, entries[k]])))
     }
-    this.savedSeq = room.seq
+    this.savedSeq = meta.seq
     const oldest = events[0]?.seq
     if (oldest) {
       const stale = await this.state.storage.list({ prefix: 'e:', end: `e:${pad(oldest)}`, limit: 500 })
@@ -659,8 +868,9 @@ export class RoomObject {
     }
   }
 
-  // The next thing due: a disconnected seat's grace running out, or the
-  // room's expiry.
+  // The next thing due: a disconnected seat's grace running out, a grant or
+  // browser session expiring, a socket's pairing deadline, or the room's
+  // expiry.
   async schedule() {
     const room = this.room
     if (!room) return
@@ -677,6 +887,11 @@ export class RoomObject {
       due.push(s.exp)
       if (!s.ready) due.push(s.deadline)
     }
+    for (const ws of this.publicSockets()) {
+      const att = ws.deserializeAttachment()
+      if (att.exp) due.push(att.exp)
+      if (att.pb && !att.paired && att.deadline) due.push(att.deadline)
+    }
     await this.state.storage.setAlarm(Math.max(now + 1, Math.min(...due)))
   }
 
@@ -692,12 +907,14 @@ export class RoomObject {
     const now = Date.now()
     if (now - this.lastActive(now) > ROOM_TTL_MS) {
       this.room.revokeTCP()
+      this.room.revokePublic()
       for (const ws of this.state.getWebSockets()) ws.close(1000, 'expired')
       await this.state.storage.deleteAll()
       this.room = null
       return
     }
     const expired = this.cleanupTCP(now)
+    this.cleanupPublic(now)
     if (this.room.sweep(now) || expired) await this.persist()
     this.broadcast() // seats that left, and the host coming and going
     await this.schedule()

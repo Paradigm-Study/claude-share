@@ -2,14 +2,41 @@
 'use strict'
 
 const net = require('net')
+const http = require('http')
+const { timingSafeEqual } = require('crypto')
+const { isUtf8 } = require('buffer')
 const { connect, BUFFER_MAX } = require('./ws-relay.cjs')
 const DATA_MAX = 65536, WINDOW_FRAMES = 4, WINDOW_BYTES = DATA_MAX * WINDOW_FRAMES
 const notify = row => process.stdout.write(JSON.stringify(row) + '\n')
 const failure = code => Object.assign(new Error('Local preview relay failed'), { code })
-const safeCode = error => ['INVALID_CONFIG', 'EADDRINUSE', 'EXPIRED', 'AUTH', 'BUSY', 'CONNECT', 'TIMEOUT', 'PROTOCOL', 'BUFFER_LIMIT'].includes(error?.code) ? error.code : 'STARTUP'
+// DENIED: a bind the system refuses this user (a port below 1024 on Linux, a
+// sandbox), which the plugin treats as a taken port, never as STARTUP.
+const safeCode = error => ['INVALID_CONFIG', 'EADDRINUSE', 'DENIED', 'EXPIRED', 'AUTH', 'BUSY', 'CONNECT', 'TIMEOUT', 'PROTOCOL', 'BUFFER_LIMIT'].includes(error?.code) ? error.code : 'STARTUP'
 const portOK = port => Number.isInteger(port) && port >= 1 && port <= 65535
 const tokenOK = token => typeof token === 'string' && /^[A-Za-z0-9_.-]{16,512}$/.test(token)
 const loopback = hostname => hostname === 'localhost' || hostname === '[::1]' || (net.isIP(hostname) === 4 && hostname.startsWith('127.'))
+const UNSUPPORTED_V6 = new Set(['EAFNOSUPPORT', 'EADDRNOTAVAIL', 'EPROTONOSUPPORT'])
+const NOBODY = new Set(['ECONNREFUSED', 'EADDRNOTAVAIL', 'ENETUNREACH'])
+const KNOCK_MS = 300
+
+// True when nothing answers at host:port, before an exact bind there (the
+// guest's listener, the window's proxy). macOS (SO_REUSEADDR) lets a specific
+// bind sit beside another process's wildcard listener (`listen(P)`, 0.0.0.0,
+// an IPv6-only [::]) and silently take its localhost traffic, so the port is
+// knocked on first: no data, closed at once. Only a refusal, or no IPv6 at
+// all, is free; a connection, or no answer within KNOCK_MS, is taken.
+function vacant(host, port, connect = net.connect) {
+  return new Promise(resolve => {
+    let socket, timer
+    const finish = free => { clearTimeout(timer); socket?.destroy(); resolve(free) }
+    const failed = error => finish(NOBODY.has(error?.code) || (host === '::1' && UNSUPPORTED_V6.has(error?.code)))
+    try { socket = connect({ host, port }) } catch (error) { return failed(error) }
+    socket.on('error', () => {})
+    timer = setTimeout(() => finish(false), KNOCK_MS)
+    socket.once('connect', () => finish(false))
+    socket.once('error', failed)
+  })
+}
 
 function endpoint(value, tcp = false) {
   const scheme = tcp ? 'wss?' : 'https?'
@@ -149,8 +176,10 @@ function bridge(socket, url, headers, { emit = notify, timeoutMs = 10_000, onRea
   return { close: () => { finish(1001); ws?.close(1001) }, closed }
 }
 
+// The Host's half of one stream (tcp-worker.cjs runs one per channel): its
+// loopback port, dialled before the room pairs it.
 function startHost(cfg, { emit = notify, signal, timeoutMs = 10_000, onReady = () => {} } = {}) {
-  if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg) || Object.keys(cfg).some(k => !['tcp', 'port', 'room', 'token', 'version'].includes(k)) || cfg.tcp !== true || !portOK(cfg.port) || !tokenOK(cfg.token) || typeof cfg.version !== 'string' || !/^[\w.-]{0,64}$/.test(cfg.version)) throw failure('INVALID_CONFIG')
+  if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg) || Object.keys(cfg).some(k => !['port', 'room', 'token', 'version'].includes(k)) || !portOK(cfg.port) || !tokenOK(cfg.token) || typeof cfg.version !== 'string' || !/^[\w.-]{0,64}$/.test(cfg.version)) throw failure('INVALID_CONFIG')
   const url = endpoint(cfg.room, true), began = Date.now()
   let socket, relay, done = false, resolveClosed
   const closed = new Promise(resolve => (resolveClosed = resolve))
@@ -187,6 +216,94 @@ function startHost(cfg, { emit = notify, signal, timeoutMs = 10_000, onReady = (
   return { close: abort, closed }
 }
 
+// The helpers' loopback command port (the Host's TCP worker, the preview
+// window's proxy): POST / with exactly this Host, no Origin, the bearer and
+// one JSON body. 403 for a wrong token, Host or Origin; 413 over the body
+// limit; 400 for anything else malformed; 503 while every socket is taken (as
+// many again get that answer at once, the rest are dropped) or it's closing.
+// Each socket has a hard lifetime, which also bounds slow-drip headers and
+// bodies. onCommand gets the parsed JSON and throws for a bad command; it may
+// answer { status, code }. The caller's own bounds come in; none are defaults.
+const FULL = 'HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nContent-Length: 12\r\nConnection: close\r\n\r\n{"ok":false}'
+function controlServer({ token, bodyLimit, sockets: max, timeoutMs, headers, onCommand }) {
+  const authorization = Buffer.from(`Bearer ${token}`), working = new Set(), refused = new Set()
+  let port, binding, stopped = false
+  function reply(res, status, code) {
+    if (res.writableEnded || res.destroyed) return
+    const body = JSON.stringify({ ok: status === 200, ...(code ? { code } : {}) })
+    res.writeHead(status, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body), connection: 'close' })
+    res.end(body)
+  }
+  const single = (req, name) => req.rawHeaders.filter((value, i) => !(i % 2) && value.toLowerCase() === name).length === 1
+  const server = http.createServer({ maxHeaderSize: headers }, (req, res) => {
+    req.on('error', () => {})
+    // Answered at connection already; its request gets nothing more.
+    if (refused.has(req.socket)) return
+    if (stopped) return reply(res, 503)
+    const supplied = Buffer.from(req.headers.authorization ?? '')
+    if (supplied.length !== authorization.length || !timingSafeEqual(supplied, authorization) || req.headers.host !== `127.0.0.1:${port}` || 'origin' in req.headers) return reply(res, 403)
+    const length = req.headers['content-length']
+    if (req.method !== 'POST' || req.url !== '/' || req.headers['content-type'] !== 'application/json' || req.headers['content-encoding'] || !['host', 'authorization', 'content-type'].every(name => single(req, name)) || (length !== undefined && !/^[0-9]+$/.test(length))) return reply(res, 400)
+    if (Number(length) > bodyLimit) return reply(res, 413)
+    let chunks = [], size = 0, failed = false
+    req.on('data', chunk => {
+      if (failed) return
+      size += chunk.length
+      if (size > bodyLimit) { failed = true; chunks = []; reply(res, 413) }
+      else chunks.push(chunk)
+    })
+    req.on('end', () => {
+      if (failed) return
+      if (stopped) return reply(res, 503)
+      let result
+      try {
+        const bytes = Buffer.concat(chunks, size)
+        chunks = []
+        if (!isUtf8(bytes)) throw failure('INVALID_CONFIG')
+        result = onCommand(JSON.parse(bytes.toString('utf8')))
+      } catch { return reply(res, 400) }
+      reply(res, result?.status ?? 200, result?.code)
+    })
+  })
+  server.requestTimeout = server.headersTimeout = timeoutMs
+  server.maxRequestsPerSocket = 1
+  server.on('connection', socket => {
+    socket.on('error', () => {})
+    if (stopped || refused.size >= max) return socket.destroy()
+    const full = working.size >= max, set = full ? refused : working
+    set.add(socket)
+    const timer = setTimeout(() => socket.destroy(), timeoutMs)
+    socket.once('close', () => { clearTimeout(timer); set.delete(socket) })
+    // A half-close after the answer, so a request already sent doesn't turn it into a reset.
+    if (full) socket.end(FULL)
+  })
+  server.on('clientError', (_error, socket) => {
+    if (socket.writable) socket.end('HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 0\r\n\r\n')
+    else socket.destroy()
+  })
+  server.on('error', () => {}) // Never print native errors or addresses.
+  return {
+    get port() { return port },
+    listen() {
+      binding = new Promise((resolve, reject) => {
+        const failed = error => { server.removeListener('listening', listening); reject(error) }
+        const listening = () => { server.removeListener('error', failed); port = server.address().port; resolve(port) }
+        server.once('error', failed)
+        server.once('listening', listening)
+        server.listen({ host: '127.0.0.1', port: 0 })
+      })
+      return binding
+    },
+    // Synchronous up to its first await: nothing is answered 200 once it's called.
+    async close() {
+      stopped = true
+      for (const socket of [...working, ...refused]) socket.destroy()
+      await binding?.catch(() => {})
+      await new Promise(resolve => server.listening ? server.close(() => resolve()) : resolve())
+    },
+  }
+}
+
 // Both executable helpers share the bounded stdin and signal lifecycle.
 function run(start) {
   let input = '', tooLarge = false, stopped = false, running, starting
@@ -220,4 +337,4 @@ function run(start) {
   process.stdout.on('error', stop)
 }
 
-module.exports = { bridge, startHost, run, endpoint, portOK, tokenOK, notify, failure, safeCode, DATA_MAX, WINDOW_FRAMES, WINDOW_BYTES }
+module.exports = { bridge, startHost, controlServer, run, vacant, endpoint, portOK, tokenOK, loopback, notify, failure, safeCode, UNSUPPORTED_V6, DATA_MAX, WINDOW_FRAMES, WINDOW_BYTES }

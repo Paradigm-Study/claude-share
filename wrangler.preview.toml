@@ -1,6 +1,11 @@
 # The preview host name: the same script as wrangler.toml, every path served
-# as the host's app (see server/worker.mjs). Deploy after the main Worker:
+# as the host's app (see server/worker.mjs):
 #   npx wrangler deploy -c wrangler.preview.toml
+# On an update, deploy this before the main Worker: the main Worker's rooms
+# name themselves in preview links by a key only this version routes, and
+# this version still routes what older rooms made. The first time, deploy it
+# after: its ROOMS binding needs the main Worker's rooms to exist.
+# scripts/setup.mjs deploy does both in that order.
 name = "claude-share-preview"
 main = "server/worker.mjs"
 compatibility_date = "2026-04-01"
