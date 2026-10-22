@@ -3449,14 +3449,15 @@ async function resumeJoined($: $) {
     if ((await $.clock.now()) - saved.at > HOSTING_KEEP_MS) return
     const current = () => reclaiming === back
     // Over while this was closed: only now does the sidebar row go back, and
-    // the room's preview window profile goes.
-    const over = async () => {
+    // the room's preview window profile goes. Its person may have left it
+    // from elsewhere meanwhile (the Team panel's Leave), said as such.
+    const over = async (left = false) => {
       if (!current()) return
       reclaiming = null
       await update($, sidebarA, () => saved.sidebar ?? null)
       await unmarkSidebar($, `${saved.room.host}'s session · ${saved.room.title}`.slice(0, 120))
       if (saved.previewWindow) await endPreviewWindow($, saved.room, saved.previewWindow).catch(() => {})
-      $.ui.log(`${saved.room.host}'s session ended while this one was closed.`)
+      $.ui.log(left ? `You left ${saved.room.host}'s session from the Team panel while this one was closed.` : `${saved.room.host}'s session ended while this one was closed.`)
     }
     let room = saved.room
     let missed: ServerEvent[] = []
@@ -3471,7 +3472,7 @@ async function resumeJoined($: $) {
       listed = page.previews
       room = { ...room, seq: page.seq }
     } catch (error) {
-      if (error instanceof ApiError && (error.status === 404 || error.status === 410)) return void (await over())
+      if (error instanceof ApiError && (error.status === 404 || error.status === 410)) return void (await over(error.status === 410 && error.data.left === true))
       if (error instanceof ApiError && error.status === 401) {
         // Given up meanwhile (a room made or joined here, the session's end):
         // no seat is taken in it.
