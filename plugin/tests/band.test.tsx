@@ -200,6 +200,8 @@ function world(
     wsRelays?: true | 'missing' | 'connect' | 'invalid' | 'ended'
     /** The next preview ends the host posts answer 503, as many as `count`: the room didn't hear the Stop. */
     endFail?: { count: number }
+    /** Holds each preview end the host posts (by its pid) until it resolves. */
+    beforeEnd?: (pid: string) => Promise<void> | void
     /** What a poll of the room's events reads: the first of these pages past its `after`, else nothing new. */
     polled?: unknown[]
     /**
@@ -812,6 +814,7 @@ function world(
       if (opts.need === 'old') return { value: { status: 404, ok: false, headers: {}, text: '{"error":"Not found"}' } }
       return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify(opts.need === 'shared' ? { shared: true, ...(opts.needPid ? { pid: opts.needPid } : {}) } : { delivered: opts.need !== 'undelivered' }) } }
     }
+    if (opts.beforeEnd && method === 'POST' && /\/previews\/[^/]+\/end$/.test(path)) await opts.beforeEnd(path.split('/')[5] ?? '')
     if (opts.endFail?.count && method === 'POST' && /\/previews\/[^/]+\/end$/.test(path)) {
       opts.endFail.count -= 1
       return { value: { status: 503, ok: false, headers: {}, text: '{"error":"unavailable"}' } }
@@ -10335,6 +10338,69 @@ test("a Stop the room didn't hear keeps its Stop in the Room and is told again a
   expect(await pane.find({ key: 'stop-preview:pv1' })).toBeUndefined()
   await asked.clock.advance(10 * 60_000)
   expect(ends()).toHaveLength(2)
+  await $.command.run({ command: 'stop-sharing', args: '' } as never)
+})
+
+// A second preview the host shares through its link, as the room's stream says it.
+const LINKED_API = { seq: 3, events: [{ seq: 3, type: 'artifact', ts: 901, from: { seat: 'host', name: 'scott', role: 'host' }, body: { kind: 'preview', pid: 'pv2', port: 3341, path: '/', title: 'localhost:3341', host: '127.0.0.1' } }], people: HOST_ONLY, ended: false, title: 'demo' }
+
+test("Stops told again each look at what's shared as they go: one shared again while another was told stands", async ($, on) => {
+  // Both Stops unheard; then the first told again waits on the room.
+  const endFail = { count: 2 }, ended: string[] = []
+  let release = () => {}
+  const held = new Promise<void>(done => (release = done))
+  const beforeEnd = async (pid: string) => {
+    ended.push(pid)
+    if (ended.length === 3) await held
+  }
+  const { asked, stream } = await sharingLink($, on, 'http://localhost:3340/', { endFail, beforeEnd })
+  await $.session.append({ message: { type: 'assistant', role: 'assistant', content: [{ type: 'text', text: 'And the API at http://localhost:3341/' }] }, door: 'response', origin: { kind: 'composer' }, uuid: 'a2' } as never)
+  await eventually(asked.clock, () => asked.state.shares?.['3341']?.pid === 'pv2')
+  const pane = await stopInRoom($, asked, stream)
+  await deliver(asked, stream, [LINKED_API], () => asked.state.shown?.some(s => s.pid === 'pv2'))
+  await pane.press({ key: 'stop-preview:pv2' })
+  await asked.clock.advance(50)
+  expect(ended).toEqual(['pv1', 'pv2'])
+  expect(asked.state.shares?.['3340']).toBeUndefined()
+  expect(asked.state.shares?.['3341']).toBeUndefined()
+  // Connected again: the first told again waits on the room.
+  await within(asked.clock, () => ended.length === 3, 60_000)
+  const first = ended[2]!, other = first === 'pv1' ? { pid: 'pv2', port: 3341 } : { pid: 'pv1', port: 3340 }
+  // Meanwhile the host shares the other's port again: the room gives it the same preview back.
+  await $.command.run({ command: 'share-preview', args: `${other.port} Again` } as never)
+  await eventually(asked.clock, () => asked.state.shares?.[String(other.port)]?.pid === other.pid)
+  release()
+  await eventually(asked.clock, () => asked.state.shown?.find(s => s.pid === first)?.closed)
+  await asked.clock.advance(100)
+  // Only the first is told again: the one shared again stands.
+  expect(ended).toEqual(['pv1', 'pv2', first])
+  expect(asked.state.shares?.[String(other.port)]?.pid).toBe(other.pid)
+  expect(asked.state.shown?.find(s => s.pid === other.pid)?.closed).toBeUndefined()
+  await $.command.run({ command: 'stop-sharing', args: '' } as never)
+})
+
+test('a share of a port waits for the room to hear its Stop told again, so it never takes back the preview the room then ends', async ($, on) => {
+  const endFail = { count: 1 }, ended: string[] = []
+  let release = () => {}
+  const held = new Promise<void>(done => (release = done))
+  const beforeEnd = async (pid: string) => {
+    ended.push(pid)
+    if (ended.length === 2) await held
+  }
+  const { asked, stream } = await sharingLink($, on, 'http://localhost:3340/', { endFail, beforeEnd })
+  await stopInRoom($, asked, stream)
+  // Connected again: the Stop is told again, and the room takes its time.
+  await within(asked.clock, () => ended.length === 2, 60_000)
+  const posts = () => asked.sent.filter(x => x.path.endsWith('/previews')).length
+  const before = posts()
+  const sharing = $.command.run({ command: 'share-preview', args: '3340 App' } as never)
+  await asked.clock.advance(1_000)
+  expect(posts()).toBe(before)
+  // Heard: the room is asked for the share's preview only now.
+  release()
+  await within(asked.clock, () => posts() > before, 5_000)
+  await sharing
+  expect(asked.sent.filter(x => x.path.endsWith('/previews')).at(-1)?.body).toEqual({ port: 3340, title: 'App', tcp: true })
   await $.command.run({ command: 'stop-sharing', args: '' } as never)
 })
 
