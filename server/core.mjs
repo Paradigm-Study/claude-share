@@ -957,6 +957,8 @@ async function handleRoom(room, req, rest, now, origin, ctx) {
     if (!who || (who !== room.host.account && who !== room.team?.account)) return { response: json({ error: 'Only the host can stop sharing.' }, 403) }
     room.end(now)
     await unlist(room, ctx)
+    // A session in the cloud: its runner goes with the room.
+    await endCloud(room, ctx)
     return { changed: true, response: json({ ok: true }) }
   }
 
