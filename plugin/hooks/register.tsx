@@ -876,6 +876,10 @@ class RoomScope {
   readonly revoking = new Set<string>()
   /** Host: when the Stops the room didn't hear were last told again (`endUnheard`). */
   toldEnds = -Infinity
+  /** Host: ports a share is being made for now (`ensurePreview`): a Stop told again leaves them alone. */
+  readonly sharingPorts = new Map<number, number>()
+  /** Host: ports whose preview's end the room is being told now (`endPreview`): a share of one waits for it. */
+  readonly endingPorts = new Map<number, number>()
   /** Guest: one Open of a preview at a time (`openShownPreview`). */
   readonly previewOpens = new Map<string, Promise<void>>()
   /** Guest: the room's preview window (`WindowContext`). */
@@ -4980,12 +4984,18 @@ function shareOver(old: HostShare | undefined, pid: string, said: Omit<HostShare
 // whatever happens to listen there (a database).
 async function ensurePreview($: $, room: ShareRoom, port: number, title: string, said: Omit<HostShare, 'pid'>): Promise<HostShare | null> {
   const s = scope
-  // A Stop being taken in finishes first: its old preview is never shared again.
-  await sharesLane.idle()
-  const known = (await read($, sharesA))[String(port)]
-  let pid = known && (!said.tcp || known.tcp) ? known.pid : ''
-  const made = !pid
+  // A Stop told again meanwhile leaves this port alone (`endUnheard`).
+  const done = markPort(s.sharingPorts, port)
   try {
+    // A Stop being taken in finishes first: its old preview is never shared again.
+    await sharesLane.idle()
+    // The room still being told of a Stop of this port: once it has heard,
+    // it answers with a preview of this share's own, never one it then ends
+    // (a few seconds at most, in naps the hook's budget doesn't pay for).
+    for (let waited = 0; s.endingPorts.has(port) && waited < 5_000; waited += 100) await nap($, 100)
+    const known = (await read($, sharesA))[String(port)]
+    let pid = known && (!said.tcp || known.tcp) ? known.pid : ''
+    const made = !pid
     if (made) pid = (await api<{ pid: string }>($, room.server, `/api/rooms/${room.id}/previews`, { method: 'POST', token: room.token, body: { port, title, ...(said.tcp ? { tcp: true } : {}) } })).pid
     if (!sameRoom(room, s)) return null
     const share = await writeShare($, s, port, old => shareOver(old, pid, said, made))
@@ -4993,6 +5003,19 @@ async function ensurePreview($: $, room: ShareRoom, port: number, title: string,
   } catch (error) {
     if (sameRoom(room, s)) $.ui.log(`Couldn't share localhost:${port}: ${String((error as Error)?.message ?? error)}`)
     return null
+  } finally {
+    done()
+  }
+}
+
+// Host: work under way on a port (a share being made, a Stop being told),
+// counted, so one of two at once finishing leaves the other's mark.
+function markPort(marks: Map<number, number>, port: number): () => void {
+  marks.set(port, (marks.get(port) ?? 0) + 1)
+  return () => {
+    const left = (marks.get(port) ?? 1) - 1
+    if (left > 0) marks.set(port, left)
+    else marks.delete(port)
   }
 }
 
@@ -5079,7 +5102,7 @@ async function stopPreview($: $, pid: string) {
   if (validPort(port)) await stopPorts($, room, [port])
   // Nothing reaches it through this session from now on, whatever the server hears.
   await unshare($, room, pid)
-  if (!sameRoom(room, s) || (await endPreview($, room, s, pid))) return
+  if (!sameRoom(room, s) || (await endPreview($, room, s, pid, port))) return
   if (sameRoom(room, s)) $.ui.toast(`Stopped sharing ${validPort(port) ? `localhost:${port}` : 'that preview'}. The server couldn't be told yet, so guests may still see it listed, but nothing reaches it. The server is told again when this session reconnects, or when you press Stop again.`)
 }
 
@@ -5088,15 +5111,21 @@ async function stopPreview($: $, pid: string) {
 // there with its Stop, which, with nothing here sharing it, is a Stop the
 // room didn't hear (`endUnheard`), so guests don't see a preview listed that
 // nothing reaches for long.
-async function endPreview($: $, room: ShareRoom, s: RoomScope, pid: string): Promise<boolean> {
+async function endPreview($: $, room: ShareRoom, s: RoomScope, pid: string, port?: number): Promise<boolean> {
+  // A share of its port meanwhile waits for the room to hear it (`ensurePreview`).
+  const done = validPort(port) ? markPort(s.endingPorts, port) : () => {}
   try {
-    await api($, room.server, `/api/rooms/${room.id}/previews/${pid}/end`, { method: 'POST', token: room.token })
-  } catch (error) {
-    // The room has no such preview (404) or is gone (410): nothing to tell.
-    if (!(error instanceof ApiError && (error.status === 404 || error.status === 410))) return false
+    try {
+      await api($, room.server, `/api/rooms/${room.id}/previews/${pid}/end`, { method: 'POST', token: room.token })
+    } catch (error) {
+      // The room has no such preview (404) or is gone (410): nothing to tell.
+      if (!(error instanceof ApiError && (error.status === 404 || error.status === 410))) return false
+    }
+    await update($, shownA, list => (!s.live ? list : list.map(x => (x.pid === pid ? { ...x, closed: true } : x))))
+    return true
+  } finally {
+    done()
   }
-  await update($, shownA, list => (!s.live ? list : list.map(x => (x.pid === pid ? { ...x, closed: true } : x))))
-  return true
 }
 
 // Host, connected: the Stops the room didn't hear (a preview open in Shown
@@ -5108,10 +5137,17 @@ async function endUnheard($: $, room: ShareRoom, s: RoomScope) {
   const now = await $.clock.now()
   if (!sameRoom(room, s) || now - s.toldEnds < 60_000) return
   s.toldEnds = now
-  const shared = new Set(Object.values(await read($, sharesA)).map(share => share.pid))
   for (const x of await read($, shownA)) {
     if (!sameRoom(room, s)) return
-    if (x.kind === 'preview' && x.pid && !x.closed && !shared.has(x.pid) && !s.revoking.has(x.pid)) await endPreview($, room, s, x.pid)
+    if (x.kind !== 'preview' || !x.pid || x.closed) continue
+    // What's shared as it is now, not as this began: one told before may
+    // have waited long, and the host may have shared its port again
+    // meanwhile, which the room answers with the same preview. The look is
+    // a write (`update`): a read would see this dispatch's first moment.
+    await sharesLane.idle()
+    const shares = await update($, sharesA, v => v)
+    if (Object.values(shares).some(share => share.pid === x.pid) || s.revoking.has(x.pid) || (validPort(x.port) && s.sharingPorts.has(x.port))) continue
+    await endPreview($, room, s, x.pid, x.port)
   }
 }
 
