@@ -4270,8 +4270,19 @@ function settleCloudAnswer(body: Record<string, unknown>) {
 // computer slept), never once it's past its ten minutes.
 async function takeCloudAsk($: $, event: ServerEvent, live: boolean) {
   const b = event.body
-  // Taken back by the cloud host (a question about its localhost, unanswered).
-  if (b.done === true && typeof b.id === 'string') return void (await update($, cloudAsksA, list => list.filter(a => a.id !== b.id)))
+  // Done at the cloud host: taken back (unanswered), or what a yes came to
+  // there, said as it comes.
+  if (b.done === true && typeof b.id === 'string') {
+    await update($, cloudAsksA, list => list.filter(a => a.id !== b.id))
+    const ports = (v: unknown) => (Array.isArray(v) ? v.filter(validPort).slice(0, 8) : [])
+    const shared = ports(b.shared), failed = ports(b.failed), link = b.kind === 'show'
+    const said = [
+      ...(shared.length ? [link ? `The cloud host is sharing ${portList(shared)} with the room through its link.` : `Teammates can reach the cloud host's ${portList(shared)} now.`] : []),
+      ...(failed.length ? [link ? `The cloud host couldn't share ${portList(failed)} with the room.` : `The cloud host couldn't forward ${portList(failed)} to teammates.`] : []),
+    ]
+    if (live && said.length) $.ui.toast(said.join(' '))
+    return
+  }
   if (typeof b.id !== 'string') return
   if ((await $.clock.now()) - event.ts > 10 * 60_000) return
   // About its localhost: drawn from what a yes shares, never from its words.
@@ -7621,10 +7632,10 @@ const forwardedPort = async ($: $, port: number) => Boolean((await read($, share
 
 // One question at a time (three more wait, at most), below a teammate's tool
 // approval; unanswered in ten minutes, it goes.
-function askHost($: $, room: ShareRoom, ask: Omit<ShareHostAsk, 'id'>): Promise<HostAnswer> {
+function askHost($: $, room: ShareRoom, ask: Omit<ShareHostAsk, 'id'>, id = newId()): Promise<HostAnswer> {
   if (hostAskQueue.length >= 3) return Promise.resolve('later')
   return new Promise<HostAnswer>(resolve => {
-    hostAskQueue.push({ ask: { ...ask, id: newId() }, key: roomIdentity(room), resolve })
+    hostAskQueue.push({ ask: { ...ask, id }, key: roomIdentity(room), resolve })
     void pumpHostAsks($).catch(() => {})
   })
 }
@@ -7697,10 +7708,14 @@ const approverAsk = (ask: ShareHostAsk) => ({
 
 // One question to the host about ports claimed for it (`claimAsks`) and held
 // meanwhile by its caller (`hostAsking`): Not now declines them for the
-// room; a yes forwards them (`forward`), and what that came to is said.
+// room; a yes forwards them (`forward`), and what that came to is said. A
+// cloud host's approver hears it through the room: the question's ports
+// shared now (through the link, or forwarded), and those that couldn't be,
+// as its shares say, whatever the yes said (`takeCloudAsk`).
 // `asked`: once the question is in the row, or waiting for it.
 async function offer($: $, room: ShareRoom, ask: Omit<ShareHostAsk, 'id'>, ports: readonly number[], forward: () => Promise<{ shared: number[]; refused: string[] }>, asked?: () => void): Promise<HostAnswer> {
-  const answering = askHost($, room, ask)
+  const id = newId()
+  const answering = askHost($, room, ask, id)
   asked?.()
   const answer = await answering
   if (!hostHere(room)) return 'later'
@@ -7708,6 +7723,11 @@ async function offer($: $, room: ShareRoom, ask: Omit<ShareHostAsk, 'id'>, ports
   if (answer !== 'yes') return answer
   const { shared, refused } = await forward()
   if ((shared.length || refused.length) && hostHere(room)) $.ui.toast([...(shared.length ? [forwardedSaid(shared)] : []), ...refused].join(' '))
+  if ((await isRunner($)) && hostHere(room)) {
+    const now = await read($, sharesA)
+    const done = ports.filter(p => (ask.kind === 'show' ? Boolean(now[String(p)]) : Boolean(now[String(p)]?.tcp)))
+    send($, 'ask', { id, done: true, kind: ask.kind, shared: done, failed: ports.filter(p => !done.includes(p)) })
+  }
   return answer
 }
 

@@ -34,8 +34,10 @@ prompt. So the room server runs the host itself.
    same way, one at a time: sharing a page its Claude gives out
    (`http://localhost:3000/…`), letting teammates open it at the same address,
    what it uses beside it, a teammate's window needing a port. Unanswered in
-   ten minutes, nothing is shared, and it's asked again later. The container's
-   own control port (8080) is never asked about or shared.
+   ten minutes, nothing is shared, and it's asked again later. After a yes,
+   the approver is told what it came to: shared, or that the cloud host
+   couldn't share or forward it. The container's own control port (8080) is
+   never asked about or shared.
    While it runs, the approver's Room → Settings are the cloud host's: who may
    prompt (never turning the approver away), what it asks about first (every
    call, or all but reading the project; never nothing), where what Claude

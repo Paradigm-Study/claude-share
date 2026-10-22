@@ -12391,7 +12391,7 @@ test("a cloud host's question about a page: the approver's Not now holds for the
   const ui = await $.ui.mount(band('desktop'))
   await ui.press({ key: 'share' })
   await asked.clock.advance(20)
-  const questions = () => asked.posted.filter(e => e.type === 'ask' && e.body.kind === 'show')
+  const questions = () => asked.posted.filter(e => e.type === 'ask' && e.body.kind === 'show' && e.body.done !== true)
   await cloudMention($, 3340, 'a1')
   await eventually(asked.clock, () => questions().length === 1)
   approverSays(lines, 3, String(questions()[0]!.body.id), 'Not now')
@@ -12498,8 +12498,12 @@ test("a cloud host puts every question its row would ask to its approver, one at
   await eventually(asked.clock, () => asked.posted.filter(e => e.type === 'artifact' && e.body.tcp === true).length === 2)
   expect(asked.sent.filter(x => x.path.endsWith('/previews')).map(x => x.body)).toEqual([{ port: 3340, title: 'localhost:3340' }, { port: 3340, title: 'localhost:3340', tcp: true }, { port: 3610, title: 'localhost:3610 (convex-local-backend)', tcp: true }])
   expect(asked.posted.filter(e => e.type === 'artifact' && e.body.tcp === true).map(e => [e.body.port, e.body.dependency])).toEqual([[3340, undefined], [3610, 3340]])
-  // Nothing taken back: each was answered.
-  expect(asked.posted.filter(e => e.type === 'ask' && e.body.done === true)).toEqual([])
+  // Each yes said what it came to, to the approver; none taken back.
+  expect(asked.posted.filter(e => e.type === 'ask' && e.body.done === true).map(e => ({ ...e.body, id: undefined }))).toEqual([
+    { id: undefined, done: true, kind: 'show', shared: [3340], failed: [] },
+    { id: undefined, done: true, kind: 'mention', shared: [3340], failed: [] },
+    { id: undefined, done: true, kind: 'related', shared: [3610], failed: [] },
+  ])
   await $.command.run({ command: 'stop-sharing', args: '' } as never)
 })
 
@@ -12526,7 +12530,53 @@ test("a cloud host asks its approver about a teammate's window needing a port, a
   approverSays(lines, 3, String(need!.body.id), 'Share')
   await eventually(asked.clock, () => asked.posted.some(e => e.type === 'artifact' && e.body.port === 3610 && e.body.tcp === true))
   expect(asked.sent.filter(x => x.path.endsWith('/previews')).map(x => x.body)).toEqual([{ port: 3610, title: 'localhost:3610 (convex-local-backend)', tcp: true }])
+  expect(await eventually(asked.clock, () => asked.posted.find(e => e.type === 'ask' && e.body.done === true)?.body)).toEqual({ id: need!.body.id, done: true, kind: 'need', shared: [3610], failed: [] })
   await $.command.run({ command: 'stop-sharing', args: '' } as never)
+})
+
+// A yes the cloud host couldn't carry out (the room refused to forward it)
+// is said to the approver, as one it did: nobody's at the cloud host's
+// screen to see its own word.
+test("the cloud host tells its approver what their yes came to, and that one couldn't be done", async ($, on) => {
+  const refuse = { now: false }
+  const lines = liveLines(cloudPage(1, []))
+  const asked = world(on, { live: lines, env: { SHARED_SESSION_RUNNER: '1' }, discover: { 3340: DISCOVERED }, refuseForward: refuse })
+  const ui = await $.ui.mount(band('desktop'))
+  await ui.press({ key: 'share' })
+  await asked.clock.advance(20)
+  const questions = () => asked.posted.filter(e => e.type === 'ask' && typeof e.body.kind === 'string' && e.body.done !== true)
+  const outcome = (id: unknown) => asked.posted.find(e => e.type === 'ask' && e.body.done === true && e.body.id === id)?.body
+  await cloudMention($, 3340, 'a1')
+  await eventually(asked.clock, () => questions().length === 1)
+  const share = questions()[0]!.body.id
+  approverSays(lines, 3, String(share), 'Share')
+  expect(await eventually(asked.clock, () => outcome(share))).toEqual({ id: share, done: true, kind: 'show', shared: [3340], failed: [] })
+  // The room won't forward now: the Allow comes to nothing, and the approver is told so.
+  await eventually(asked.clock, () => questions().length === 2)
+  refuse.now = true
+  const allow = questions()[1]!.body.id
+  approverSays(lines, 4, String(allow), 'Allow')
+  expect(await eventually(asked.clock, () => outcome(allow))).toEqual({ id: allow, done: true, kind: 'mention', shared: [], failed: [3340] })
+  expect(asked.posted.some(e => e.type === 'artifact' && e.body.tcp === true)).toBe(false)
+  await $.command.run({ command: 'stop-sharing', args: '' } as never)
+})
+
+test("the approver hears what their yes came to at the cloud host: shared, or that it couldn't be", async ($, on) => {
+  const done = (seq: number, body: Record<string, unknown>) => ({ seq, type: 'ask', ts: 1_000, from: { seat: 'host', name: 'scott', role: 'host' }, body })
+  const lines = liveLines(cloudPage(2, []))
+  const asked = await approverHere($, on, lines)
+  lines.push(cloudPage(3, [done(3, { id: 's1', done: true, kind: 'show', shared: [3340], failed: [] })]))
+  expect(await eventually(asked.clock, () => asked.toasted.includes('The cloud host is sharing localhost:3340 with the room through its link.'))).toBe(true)
+  lines.push(cloudPage(4, [done(4, { id: 'm1', done: true, kind: 'mention', shared: [], failed: [3340] })]))
+  expect(await eventually(asked.clock, () => asked.toasted.includes("The cloud host couldn't forward localhost:3340 to teammates."))).toBe(true)
+  lines.push(cloudPage(5, [done(5, { id: 'r1', done: true, kind: 'related', shared: [3610], failed: [3611] })]))
+  expect(await eventually(asked.clock, () => asked.toasted.includes("Teammates can reach the cloud host's localhost:3610 now. The cloud host couldn't forward localhost:3611 to teammates."))).toBe(true)
+  // Taken back unanswered: nothing to say.
+  const before = asked.toasted.length
+  lines.push(cloudPage(6, [done(6, { id: 'n1', done: true })]))
+  await asked.clock.advance(1_000)
+  expect(asked.toasted.length).toBe(before)
+  await $.session.end({ reason: 'other', sessionId: 'session-test-0001', resume: {} } as never)
 })
 
 // The approver: each question drawn as the host's row draws it, of the
