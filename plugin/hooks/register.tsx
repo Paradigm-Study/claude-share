@@ -18,7 +18,7 @@
 import { atom, memberOf, read, update } from 'claude-code'
 import type { Elements, EngineInterface, HookStream, ProcessSpawnChunk, ProcessSpawnResult, Register, RenderChildren, RenderSurface, Timer, TurnStepChunk } from 'claude-code'
 
-import type { HostShare, ShareAccount, ShareActivity, ShareChange, ShareChat, ShareDoing, ShareFileMeta, ShareGuestPrompt, ShareHostAsk, ShareHostMemory, ShareInvite, ShareLocalPreview, ShareMailboxHelper, ShareMode, ShareNeedAsked, SharePeerRelay, SharePeerRoute, SharePeerSend, SharePerson, SharePolicy, SharePrefs, SharePreviewWindow, ShareRoom, ShareShown, ShareTeam, ShareTeams, ShareTeamSession, ShareTurn, ShareWorking } from '../types'
+import type { HostShare, ShareAccount, ShareActivity, ShareChange, ShareChat, ShareCloud, ShareCloudAsk, ShareDoing, ShareFileMeta, ShareGuestPrompt, ShareHostAsk, ShareHostMemory, ShareInvite, ShareLocalPreview, ShareMailboxHelper, ShareMode, ShareNeedAsked, SharePeerRelay, SharePeerRoute, SharePeerSend, SharePerson, SharePolicy, SharePrefs, SharePreviewWindow, ShareRoom, ShareShown, ShareTeam, ShareTeams, ShareTeamSession, ShareTurn, ShareWorking } from '../types'
 import { fit, isModern } from './fit'
 import { BAD, GOOD, ago, avatarSvg, cloverSvg, colorFor, colorsFor, labelsFor, liveSvg, stackSvg, toolGlyph } from './look'
 import { REACTS, diffOf, mentionsOf, patchOf, replyKey, took, writeOf } from './room'
@@ -97,6 +97,12 @@ const liveUpdatesA = atom({ plugin: 'shared-session', key: 'liveUpdates' } as co
 const replayRunF = atom({ plugin: 'shared-session', key: 'replayRun' } as const, null as { tools?: string[]; hidden?: true } | null)
 const toolRowsA = atom({ plugin: 'shared-session', key: 'toolRows' } as const, 'grouped' as 'grouped' | 'each')
 const approvingA = atom({ plugin: 'shared-session', key: 'approving' } as const, null as { id: string; who: string; what: string; extent?: string; always: string; more: number } | null)
+// The room's host in the cloud (docs/cloud-host.md), its approver's questions, and a move under way.
+const cloudA = atom({ plugin: 'shared-session', key: 'cloud' } as const, null as ShareCloud | null)
+const cloudAsksA = atom({ plugin: 'shared-session', key: 'cloudAsks' } as const, [] as ShareCloudAsk[])
+const cloudMoveA = atom({ plugin: 'shared-session', key: 'cloudMove' } as const, null as { stage: 'idle' | 'token' | 'packing' | 'starting' | 'home' | 'failed'; note?: string } | null)
+type CloudMove = { stage: 'idle' | 'token' | 'packing' | 'starting' | 'home' | 'failed'; note?: string }
+const cloudMove = (stage: CloudMove['stage'], note?: string): CloudMove => (note ? { stage, note } : { stage })
 // Host: a teammate's calls put to the host and not answered yet, by
 // tool_use_id. In the state, not the module: a hook whose module ends under
 // it has its `.catch` asked in the one that replaces it, which denies these.
@@ -213,7 +219,23 @@ type ServerEvent = {
   body: Record<string, unknown>
 }
 
-type EventsPage = { seq: number; events: ServerEvent[]; people: SharePerson[]; previews?: unknown; ended: boolean; title: string; more?: boolean }
+type EventsPage = { seq: number; events: ServerEvent[]; people: SharePerson[]; previews?: unknown; ended: boolean; title: string; more?: boolean; cloud?: CloudSummary }
+// What a room's pages say of its host in the cloud.
+type CloudSummary = { state: ShareCloud['state']; approver: string; since: number; until?: number }
+
+// This session is a cloud host's (cloud/runner.mjs starts it so): nobody is
+// at its screen, so a teammate's call goes to the room's approver.
+let runnerMode: boolean | null = null
+async function isRunner($: $): Promise<boolean> {
+  runnerMode ??= (await $.env.get('SHARED_SESSION_RUNNER')) === '1'
+  return runnerMode
+}
+
+// The room's word on its cloud host, this session's part in it kept.
+function cloudFrom(summary: CloudSummary | undefined, was: ShareCloud | null): ShareCloud | null {
+  if (!summary) return null
+  return { state: summary.state, approver: summary.approver, since: summary.since, ...(summary.until ? { until: summary.until } : {}), mine: was?.mine ?? false }
+}
 
 // The engine hands a plugin at most 4 MiB of a response body, in bytes, cut
 // without a word (measured), and a long session's history is many times
@@ -1654,6 +1676,18 @@ async function absorb($: $, room: ShareRoom, mode: ShareMode, event: ServerEvent
       if (body.pending === false && typeof body.what === 'string') {
         await note({ ts: event.ts, who: room.host, kind: body.allowed ? 'allowed' : 'denied', text: body.what })
       }
+      // Settled at the cloud host (answered, its ten minutes, given up): no longer its approver's to answer.
+      if (body.pending === false && typeof body.id === 'string' && mode === 'guest') await update($, cloudAsksA, list => list.filter(a => a.id !== body.id))
+      break
+    // The cloud host's question, for its approver (taken in history too: one
+    // asked while their computer slept is still theirs to answer); the
+    // approver's answer, for the cloud host, and off every approver's list.
+    case 'ask':
+      if (mode === 'guest' && (await read($, cloudA))?.mine) await takeCloudAsk($, event, live)
+      break
+    case 'answer':
+      if (mode === 'host' && live) settleCloudAnswer(body)
+      else if (mode === 'guest') await update($, cloudAsksA, list => list.filter(a => a.id !== body.id))
       break
     case 'chat':
       if (typeof body.text === 'string') {
@@ -2166,6 +2200,7 @@ async function receive($: $, mode: ShareMode, room: ShareRoom, page: EventsPage)
   if (!stillInRoom(room, s)) return
   const hostWas = (await read($, peopleA)).find(p => p.role === 'host')?.online
   await update($, peopleA, p => (s.live ? page.people : p))
+  await update($, cloudA, c => (s.live ? cloudFrom(page.cloud, c) : c))
   if (mode === 'host') await noteBehind($, page.people)
   const hostIs = page.people.find(p => p.role === 'host')?.online
   if (mode === 'guest' && hostWas !== undefined && hostIs !== undefined && hostWas !== hostIs) {
@@ -2188,6 +2223,9 @@ async function receive($: $, mode: ShareMode, room: ShareRoom, page: EventsPage)
         break
       case 'stop':
         if (mode === 'host') await stopTurn($, event.from.name)
+        break
+      case 'cloud':
+        await noteCloud($, room, mode, event)
         break
       case 'artifact':
         // Shown during a host turn: that turn's ride makes the call. Otherwise
@@ -2526,6 +2564,8 @@ async function clearRoomState($: $, opts: { unmark?: string | true } = {}) {
   await update($, approvingA, () => null)
   await update($, turnsA, () => [])
   await update($, changesA, () => [])
+  await update($, cloudA, () => null)
+  await update($, cloudAsksA, () => [])
   await update($, reactionsA, () => ({}))
   await update($, seenA, () => ({}))
   await update($, replyForA, () => ({}))
@@ -3192,6 +3232,8 @@ type Joined = {
   needAsked?: number[]
   /** This session's handles, by id: where the host's session's messages to this person's sessions go. */
   peerRoutes?: Record<string, SharePeerRoute>
+  /** This session moved the room's host to the cloud: its approver. */
+  cloudMine?: boolean
 }
 
 // What a guest's place keeps, to take its seat back.
@@ -3208,6 +3250,7 @@ async function joinedPlace($: $, room: ShareRoom): Promise<Joined> {
     sidebar: await read($, sidebarA),
     place: (await placeOf($)) || undefined,
     peerRoutes: await read($, peerRoutesA),
+    ...((await read($, cloudA))?.mine ? { cloudMine: true } : {}),
     ...(await windowCheckpoint($, room)),
   }
 }
@@ -3460,6 +3503,8 @@ async function resumeJoined($: $) {
     await update($, previewNeedsOpenA, v => (reclaiming === back ? (Array.isArray(saved.previewNeedsOpen) ? saved.previewNeedsOpen.filter(p => typeof p === 'string').slice(-64) : []) : v))
     await update($, needAskedA, v => (reclaiming === back ? ({ ports: Array.isArray(saved.needAsked) ? saved.needAsked.filter(validPort).slice(-256) : [], times: [] }) : v))
     await update($, peerRoutesA, v => (reclaiming === back ? peerRoutesSaved(saved.peerRoutes, 'guest') : v))
+    // The approver of the room's cloud host, as it was: its questions come here.
+    await update($, cloudA, v => (reclaiming === back ? (saved.cloudMine ? { state: 'running' as const, approver: saved.room.host, since: saved.at, mine: true } : null) : v))
     if (!current()) return
     // Back in: the room's scope from here, and a session ending saves it as it would any room.
     reclaiming = null
@@ -3561,6 +3606,11 @@ async function resumeHosting($: $) {
       for (const event of page.events) {
         if (!s.live) return
         if (event.type === 'prompt' && event.from.role === 'guest') {
+          // A cloud host taking the room up: a prompt sent while it moved runs now.
+          if ((await isRunner($)) && typeof event.body.text === 'string') {
+            await acceptPrompt($, event.from.name, event.body.text, typeof event.body.pid === 'string' ? event.body.pid : '', Array.isArray(event.body.attachments) ? (event.body.attachments as ShareFileMeta[]) : [])
+            continue
+          }
           send($, 'declined', { pid: typeof event.body.pid === 'string' ? event.body.pid : '', who: event.from.name, reason: `${room.host}'s Claude Code was closed when you sent this, so it didn't run. Send it again.` })
           continue
         }
@@ -4136,6 +4186,269 @@ function answerBandAsk(id: string, label: string) {
 function answerFor(ask: Approval, label: string) {
   const all = label === ask.always ? approvals.filter(a => a.who === ask.who && (a === ask || a.stage !== 'dialog')) : [ask]
   for (const a of all) a.answer(label)
+}
+
+// ---------------------------------------------------------------------------
+// The cloud host (docs/cloud-host.md). Move to cloud hands this session's host
+// to a runner the room server starts, with the person's own Claude sign-in
+// (`claude setup-token`); this session goes on as a guest and the room's
+// approver: the runner's questions are put to it. Bring home takes the host
+// back, with the cloud's changes.
+
+// A cloud host's answer, from the approver: settles the call it was asked for.
+function settleCloudAnswer(body: Record<string, unknown>) {
+  const ask = approvals.find(a => a.id === body.id && a.stage === 'row')
+  const label = typeof body.answer === 'string' ? body.answer : ''
+  if (ask && ['Allow once', ask.always, 'Decline'].includes(label)) answerFor(ask, label)
+}
+
+// Approver: a question from the cloud host, drawn above the prompt and in the
+// Room; said as it comes, kept quietly from history (one asked while this
+// computer slept), never once it's past its ten minutes.
+async function takeCloudAsk($: $, event: ServerEvent, live: boolean) {
+  const b = event.body
+  if (typeof b.id !== 'string' || typeof b.what !== 'string') return
+  if ((await $.clock.now()) - event.ts > 10 * 60_000) return
+  const options = Array.isArray(b.options) ? b.options.filter((o): o is string => typeof o === 'string').slice(0, 3) : []
+  const always = typeof b.always === 'string' ? b.always : ''
+  const ask: ShareCloudAsk = {
+    id: b.id,
+    who: typeof b.who === 'string' ? b.who : 'Someone',
+    what: b.what.slice(0, 200),
+    ...(typeof b.extent === 'string' && b.extent ? { extent: b.extent.slice(0, 80) } : {}),
+    ...(typeof b.preview === 'string' && b.preview ? { preview: b.preview.slice(0, 4000) } : {}),
+    always,
+    options: options.length ? options : ['Allow once', 'Decline'],
+    ts: event.ts,
+  }
+  await update($, cloudAsksA, list => (list.some(a => a.id === ask.id) ? list : [...list, ask].slice(-20)))
+  if (!live) return
+  $.ui.toast(`${ask.who} wants Claude to run ${ask.what.slice(0, 80)}: answer above the prompt`)
+  void cue($, 'mention', `${ask.who} wants Claude to run ${ask.what.slice(0, 60)}`)
+  nudgeSidebar($)
+}
+
+// Approver: an answer for the cloud host. Always allow answers that person's
+// other questions too: the cloud host trusts them from there.
+async function answerCloudAsk($: $, id: string, label: string) {
+  const list = await read($, cloudAsksA)
+  const ask = list.find(a => a.id === id)
+  if (!ask) return
+  send($, 'answer', { id, answer: label })
+  const gone = label !== '' && label === ask.always ? list.filter(a => a.who === ask.who) : [ask]
+  await update($, cloudAsksA, now => now.filter(a => !gone.some(g => g.id === a.id)))
+  await flushOut($)
+}
+
+// The room's word on its cloud host, said where people look.
+async function noteCloud($: $, room: ShareRoom, mode: ShareMode, event: ServerEvent) {
+  const b = event.body
+  const by = typeof b.by === 'string' ? b.by : room.host
+  if (b.state === 'home' || b.state === 'stopped') await update($, cloudAsksA, () => [])
+  if (mode !== 'guest') return
+  const mine = (await read($, cloudA))?.mine
+  const said =
+    b.state === 'starting' ? (mine ? '' : `${by} moved this session to the cloud: it keeps running when their computer sleeps.`)
+    : b.state === 'running' ? (mine ? 'Your session runs in the cloud now. Teammates’ calls come to you to approve, here and in the Room.' : '')
+    : b.state === 'stopped' ? `The cloud host stopped${b.why === 'expired' ? ' after its week' : ''}. ${mine ? 'Press Bring home in the Room to take the session back.' : `${room.host} brings it home to go on.`}`
+    : b.state === 'home' && !mine ? `${by} brought this session home.`
+    : ''
+  if (said) $.ui.log(said)
+}
+
+// The Claude sign-in a cloud host runs with: the person's own, made by
+// `claude setup-token` (model use only, a year), kept here (0600) for the
+// next move. Taken from the clipboard on their press, never shown.
+const CLOUD_TOKEN = /^sk-ant-oat01-[A-Za-z0-9_-]{20,400}$/
+async function cloudTokenPath($: $): Promise<string> {
+  const dir = await configDirOf($)
+  if (!dir) throw new Error('No Claude configuration folder')
+  return `${dir}/shared-session/cloud-token`
+}
+async function savedCloudToken($: $): Promise<string | null> {
+  const path = await cloudTokenPath($)
+  if (!(await $.fs.exists(path))) return null
+  const token = (await $.fs.read(path)).trim()
+  return CLOUD_TOKEN.test(token) ? token : null
+}
+async function takeCopiedToken($: $): Promise<boolean> {
+  const pasted = await sh($, 'if command -v pbpaste >/dev/null 2>&1; then pbpaste; elif command -v wl-paste >/dev/null 2>&1; then wl-paste -n; elif command -v xclip >/dev/null 2>&1; then xclip -o -selection clipboard; fi\n', 5_000)
+  const token = pasted.out.trim()
+  if (!CLOUD_TOKEN.test(token)) {
+    await update($, cloudMoveA, () => cloudMove('token', "That isn't a token from claude setup-token (it starts sk-ant-oat01-). Copy the token it printed, then press again."))
+    return false
+  }
+  const path = await cloudTokenPath($)
+  const tag = fence(token)
+  const tmp = `${path}.${randomSecret()}.tmp`
+  const saved = await sh($, `umask 077\nset -e\nmkdir -p ${sq(path.slice(0, path.lastIndexOf('/')))}\ncat > ${sq(tmp)} <<'${tag}'\n${token}\n${tag}\nchmod 600 ${sq(tmp)}\nmv ${sq(tmp)} ${sq(path)}\n`)
+  if (saved.code !== 0) {
+    await update($, cloudMoveA, () => cloudMove('failed', "Couldn't keep the token on this computer."))
+    return false
+  }
+  // Not on the clipboard any longer than needed.
+  void sh($, 'if command -v pbcopy >/dev/null 2>&1; then printf "" | pbcopy; fi\n', 5_000).catch(() => {})
+  return true
+}
+async function forgetCloudToken($: $) {
+  await sh($, `rm -f ${sq(await cloudTokenPath($))}\n`)
+}
+
+// The packed session: the project as git sees it (tracked, and untracked not
+// ignored; else every file but .git and node_modules), never what this plugin
+// saved under .shared-session/, and this session's conversation. Outer tar:
+// project.tgz (paths from the project's root) and transcript.jsonl.
+const CLOUD_BUNDLE_BYTES = 95 * 1024 * 1024
+async function packSession($: $): Promise<{ path: string; dir: string; size: number }> {
+  const cwd = await $.session.cwd()
+  const config = await configDirOf($)
+  const session = await $.session.id()
+  const r = await sh(
+    $,
+    [
+      'set -e',
+      'umask 077',
+      `cwd=${sq(cwd)}`,
+      'dir=$(mktemp -d)',
+      'cd "$cwd"',
+      'if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then git ls-files -co --exclude-standard; else find . -type f -not -path "./.git/*" -not -path "./node_modules/*" | sed "s,^\\./,,"; fi \\',
+      '  | grep -v -e "^\\.shared-session/" | while IFS= read -r f; do if [ -f "$f" ] || [ -L "$f" ]; then printf "%s\\n" "$f"; fi; done > "$dir/list"',
+      'tar -czf "$dir/project.tgz" -T "$dir/list"',
+      config ? `t=$(ls ${sq(config)}/projects/*/${sq(`${session}.jsonl`)} 2>/dev/null | head -1)` : 't=""',
+      'if [ -n "$t" ]; then cp "$t" "$dir/transcript.jsonl"; set -- project.tgz transcript.jsonl; else set -- project.tgz; fi',
+      'tar -czf "$dir/session.tgz" -C "$dir" "$@"',
+      'rm -f "$dir/list" "$dir/project.tgz" "$dir/transcript.jsonl"',
+      'echo "dir=$dir"',
+      'echo "size=$(wc -c < "$dir/session.tgz" | tr -d " ")"',
+      '',
+    ].join('\n'),
+    120_000,
+  )
+  const dir = /dir=(\S+)/.exec(r.out)?.[1]
+  const size = Number(/size=(\d+)/.exec(r.out)?.[1])
+  if (r.code !== 0 || !dir || !Number.isFinite(size)) throw new Error("Couldn't pack the project")
+  return { path: `${dir}/session.tgz`, dir, size }
+}
+
+// Move to cloud: the host's own press. Packs, hands the room over, streams
+// the packed session to the runner, and goes on here as the approver.
+async function moveToCloud($: $) {
+  const room = await read($, roomA)
+  if (!room || (await read($, modeA)) !== 'host' || (await isRunner($))) return
+  const signIn = await savedCloudToken($)
+  if (!signIn) return void (await update($, cloudMoveA, () => cloudMove('token')))
+  await update($, cloudMoveA, () => cloudMove('packing'))
+  let packed: { path: string; dir: string; size: number } | null = null
+  try {
+    packed = await packSession($)
+    if (packed.size > CLOUD_BUNDLE_BYTES) throw new Error(`This project is ${Math.round(packed.size / 1024 / 1024)} MB packed; a move takes up to ${CLOUD_BUNDLE_BYTES / 1024 / 1024} MB.`)
+    // What only this computer serves can't come along: its previews end first.
+    for (const share of Object.values(await read($, sharesA))) await stopPreview($, share.pid)
+    await update($, cloudMoveA, () => cloudMove('starting'))
+    const state = {
+      policy: await read($, policyA),
+      trusted: await read($, trustedA),
+      shown: keptShown(await read($, shownA), 20).filter(x => x.kind !== 'preview'),
+      activity: (await read($, activityA)).slice(-40),
+      chat: (await read($, chatA)).slice(-40),
+    }
+    const moved = await api<{ token: string; seat: string; ticket: string }>($, room.server, `/api/rooms/${room.id}/cloud`, {
+      method: 'POST',
+      token: room.token,
+      body: { session: await $.session.id(), cwd: await $.session.cwd(), state, auth: { oauthToken: signIn } },
+    })
+    // The packed session, as it is, to the runner: the ticket on stdin, never argv.
+    const sent = await sh(
+      $,
+      `curl -sS -o /dev/null -w "%{http_code}" -X PUT --data-binary @${sq(packed.path)} -K - <<'CS_CFG'\nurl = ${cfg(`${room.server}/api/rooms/${room.id}/cloud/bundle`)}\nheader = ${cfg(`Authorization: Bearer ${moved.ticket}`)}\nheader = "Content-Type: application/gzip"\nCS_CFG\n`,
+      300_000,
+    )
+    if (sent.out.trim() !== '200') {
+      // Nothing to run on: the host comes straight back here.
+      await api($, room.server, `/api/rooms/${room.id}/cloud/home`, { method: 'POST', token: moved.token, body: {} }).catch(() => {})
+      throw new Error("The packed session didn't reach the cloud host, so the session stays here.")
+    }
+    // On here as the approver: this session's place as a guest, taken up as
+    // a reopened session takes its seat back.
+    const now = await $.clock.now()
+    const place: Joined = {
+      at: now,
+      room: { ...room, token: moved.token, seat: moved.seat, since: now },
+      autoOpen: await read($, autoOpenA),
+      policy: state.policy,
+      shown: state.shown,
+      activity: state.activity,
+      chat: state.chat,
+      sidebar: await read($, sidebarA),
+      place: (await placeOf($)) || undefined,
+      cloudMine: true,
+    }
+    await closeRoom($, 'ended', { room })
+    await writeRoomCheckpoint($, `${JOINED_KEY}${await $.session.id()}`, place)
+    await resumeJoined($)
+    await update($, cloudMoveA, () => null)
+  } catch (error) {
+    await update($, cloudMoveA, () => cloudMove('failed', String((error as Error)?.message ?? error).slice(0, 300)))
+  } finally {
+    if (packed) void sh($, `rm -rf ${sq(packed.dir)}\n`).catch(() => {})
+  }
+}
+
+// Bring home: the approver's press. The runner stops, and this session takes
+// the host back as a reopened host session does, with the cloud's changes.
+async function bringHome($: $) {
+  const room = await read($, roomA)
+  if (!room || (await read($, modeA)) !== 'guest' || !(await read($, cloudA))?.mine) return
+  await update($, cloudMoveA, () => cloudMove('home'))
+  try {
+    const home = await api<{ token: string; changes: ShareFileMeta | null }>($, room.server, `/api/rooms/${room.id}/cloud/home`, { method: 'POST', token: room.token, body: {} })
+    const now = await $.clock.now()
+    const place: Hosting = {
+      at: now,
+      room: { ...room, token: home.token, seat: 'host', since: now },
+      policy: await read($, policyA),
+      trusted: [],
+      shares: {},
+      shown: keptShown(await read($, shownA), 20).filter(x => x.kind !== 'preview'),
+      activity: (await read($, activityA)).slice(-40),
+      chat: (await read($, chatA)).slice(-40),
+      sidebar: await read($, sidebarA),
+      place: (await placeOf($)) || undefined,
+    }
+    await closeRoom($, 'ended', { room })
+    await writeRoomCheckpoint($, `${HOSTING_KEY}${await $.session.id()}`, place)
+    await resumeHosting($)
+    await update($, cloudMoveA, () => null)
+    if (home.changes) await applyCloudChanges($, { ...room, token: home.token }, home.changes)
+    else $.ui.log('Back home. The cloud host changed no files.')
+  } catch (error) {
+    await update($, cloudMoveA, () => cloudMove('failed', String((error as Error)?.message ?? error).slice(0, 300)))
+  }
+}
+
+// The cloud's changes, into the project: applied when they apply cleanly,
+// else kept beside it with how to apply them.
+async function applyCloudChanges($: $, room: ShareRoom, changes: ShareFileMeta) {
+  const cwd = await $.session.cwd()
+  const stamp = new Date(await $.clock.now()).toISOString().replace(/[:.]/g, '-')
+  const rel = `.shared-session/cloud/changes-${stamp}.patch`
+  const r = await sh(
+    $,
+    [
+      'set -e',
+      'umask 077',
+      `cd ${sq(cwd)}`,
+      'mkdir -p .shared-session/cloud',
+      `curl -sS -f -o ${sq(rel)} -K - <<'CS_CFG'\nurl = ${cfg(`${room.server}/api/rooms/${room.id}/files/${changes.id}`)}\nheader = ${cfg(`Authorization: Bearer ${room.token}`)}\nCS_CFG`,
+      `if git apply --check ${sq(rel)} 2>/dev/null; then git apply ${sq(rel)}; echo applied=$(grep -c "^diff --git" ${sq(rel)}); else echo kept; fi`,
+      '',
+    ].join('\n'),
+    120_000,
+  )
+  const applied = /applied=(\d+)/.exec(r.out)?.[1]
+  if (applied) $.ui.log(`Back home, with the cloud host's changes to ${applied} file${applied === '1' ? '' : 's'} in your project (also kept in ${rel}).`)
+  else if (/kept/.test(r.out)) $.ui.log(`Back home. The cloud host's changes don't apply cleanly over your files, so they're kept in ${rel}: apply them with git apply --3way ${rel}`)
+  else $.ui.log("Back home. The cloud host's changes couldn't be downloaded; they're in the Room's files for a while.")
 }
 
 function wakeApprovals() {
@@ -10667,7 +10980,8 @@ export const register: Register = (on, options) => {
     const who = await callOwner($, e.agentId)
     if (who === null) return verdict
     const policy = await read($, policyA)
-    if (policy.approvals === 'none') return verdict
+    // A cloud host holds its approver's Claude sign-in: a teammate's call is never let through unasked there.
+    if (policy.approvals === 'none' && !(await isRunner($))) return verdict
     if (policy.approvals === 'edits' && READ_ONLY.has(e.tool) && readsInside(e.tool, (e.input ?? {}) as Record<string, unknown>, await $.session.cwd())) return verdict
     // "Always allow" is the host's answer for this person's later calls too, so
     // it settles them the way "Allow once" settles one, not back to the host's
@@ -10731,7 +11045,13 @@ export const register: Register = (on, options) => {
       await approvalWait($, ask, answered, () => over || (!approvals.some(a => a.stage === 'dialog') && approvals.find(a => a.stage === 'waiting') === ask))
       // Trusted meanwhile (Always allow, in a dialog, for another of theirs): it goes unasked.
       if (!over && (await read($, trustedA)).includes(who)) ask.answer(always)
-      if (!over) {
+      // A cloud host: asked of its approver through the room, wherever they are.
+      if (!over && (await isRunner($))) {
+        ask.stage = 'row'
+        timer = $.clock.after(10 * 60_000, giveUp)
+        send($, 'ask', { id: ask.id, who, what, ...(extent ? { extent } : {}), preview: ask.whole.slice(0, 4000), always, options: ['Allow once', always, 'Decline'] })
+        await approvalWait($, ask, answered, () => over)
+      } else if (!over) {
         ask.stage = 'dialog'
         const options = ['Allow once', always, 'Decline']
         const askedAt = await $.clock.now()
@@ -10798,7 +11118,8 @@ export const register: Register = (on, options) => {
       // Given in the dialog too: their calls still waiting go with it.
       answerFor(ask, always)
     }
-    send($, 'approval', { pending: false, what, allowed, by: who })
+    // A cloud host's says which question settled, so its approver's list drops it.
+    send($, 'approval', { pending: false, what, allowed, by: who, ...((await isRunner($)) ? { id: ask.id } : {}) })
     if (isReplaced) await flushOut($)
     else {
       // The oldest call still waiting (in the dialog, the row or for its turn)
@@ -11518,6 +11839,90 @@ export const register: Register = (on, options) => {
         </Box>
       </Box>
     ) : null
+    // The cloud host: its approver's status, questions and Bring home; the
+    // host's Move to cloud, step by step.
+    const cloud = await read($, cloudA)
+    const cloudMove = await read($, cloudMoveA)
+    const cloudAsks = !isHost && cloud?.mine ? await read($, cloudAsksA) : []
+    const runnerHere = await isRunner($)
+    const hhmm = (ts: number) => {
+      const d = new Date(ts)
+      return `${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')}`
+    }
+    const cloudBlock =
+      !isHost && cloud?.mine ? (
+        <Box key="cloud" flexDirection="column" gap={1} borderStyle="round" borderDimColor paddingX={1}>
+          <Text wrap="truncate-end">
+            <Text weight="semibold" color="claude">
+              In the cloud
+            </Text>
+            <Text dimColor>
+              {` · ${cloud.state === 'starting' ? 'starting' : cloud.state === 'stopped' ? 'stopped' : `since ${hhmm(cloud.since)}`} · you approve teammates’ calls`}
+            </Text>
+          </Text>
+          {cloudAsks.map(ask => (
+            <Box key={`cloud-ask-${ask.id}`} flexDirection="column" gap={1}>
+              <Text wrap="truncate-end">
+                <Text bold color={colorOf(ask.who)}>
+                  {ask.who}
+                </Text>
+                <Text>{' wants the cloud host to run '}</Text>
+                <Text bold>{ask.what}</Text>
+              </Text>
+              {ask.preview ? <Markdown key={`cloud-ask-whole-${ask.id}`} text={ask.preview} /> : null}
+              <Box flexDirection="row" gap={1}>
+                <Button key={`cloud-ask-once-${ask.id}`} label="Allow once" variant="primary" onPress={() => void answerCloudAsk($, ask.id, 'Allow once')} />
+                {ask.always ? <Button key={`cloud-ask-always-${ask.id}`} label={ask.always} plain onPress={() => void answerCloudAsk($, ask.id, ask.always)} /> : null}
+                <Button key={`cloud-ask-no-${ask.id}`} label="Decline" plain dimColor onPress={() => void answerCloudAsk($, ask.id, 'Decline')} />
+              </Box>
+            </Box>
+          ))}
+          <Box flexDirection="row" gap={1} alignItems="center">
+            <Button key="cloud-home" label={cloudMove?.stage === 'home' ? 'Bringing it home…' : 'Bring home'} variant={cloudAsks.length ? 'secondary' : 'primary'} onPress={() => void bringHome($)} />
+            <Box flexShrink={1} minWidth={0}>
+              {cloudMove?.stage === 'failed' ? <Text color="error">{cloudMove.note ?? "Couldn't bring it home."}</Text> : <Text dimColor>Takes the session back here, with the cloud host's changes to your files.</Text>}
+            </Box>
+          </Box>
+        </Box>
+      ) : null
+    const cloudMoveBlock =
+      !isHost || runnerHere ? null : cloudMove?.stage === 'token' ? (
+        <Box key="cloud-token" flexDirection="column" gap={1} borderStyle="round" borderDimColor paddingX={1}>
+          <Text weight="semibold">Move to cloud signs in to Claude as you</Text>
+          <Box flexDirection="row" gap={1} alignItems="center" justifyContent="space-between">
+            <Box flexShrink={1} minWidth={0}>
+              <Text>1. In a terminal, run claude setup-token and approve it in your browser.</Text>
+            </Box>
+            <Button key="cloud-copy-command" label="Copy command" plain onPress={press => void copyText($, 'claude setup-token', 'Command copied: run it in a terminal', press.surface)} />
+          </Box>
+          <Text>2. Copy the token it prints, then press Use copied token.</Text>
+          <Text dimColor>The token stays on this computer and goes to the cloud host when you move; it's never shown. Teammates' prompts there use your Claude plan, and every call of theirs asks you first. Revoke it any time at claude.ai.</Text>
+          {cloudMove.note ? <Text color="error">{cloudMove.note}</Text> : null}
+          <Box flexDirection="row" gap={1}>
+            <Button key="cloud-use-token" label="Use copied token" variant="primary" onPress={() => void takeCopiedToken($).then(ok => (ok ? moveToCloud($) : undefined))} />
+            <Button key="cloud-cancel" label="Cancel" plain dimColor onPress={() => void update($, cloudMoveA, () => null)} />
+          </Box>
+        </Box>
+      ) : cloudMove?.stage === 'packing' || cloudMove?.stage === 'starting' ? (
+        <Text key="cloud-moving" dimColor>
+          {cloudMove.stage === 'packing' ? 'Packing the project…' : 'Starting the cloud host. The first time can take a minute or two…'}
+        </Text>
+      ) : cloudMove?.stage === 'failed' ? (
+        <Box key="cloud-failed" flexDirection="column" gap={1}>
+          <Text color="error">{cloudMove.note ?? "Couldn't move the session."}</Text>
+          <Box flexDirection="row" gap={1}>
+            <Button key="cloud-retry" label="Try again" variant="secondary" onPress={() => void moveToCloud($)} />
+            <Button key="cloud-dismiss" label="Cancel" plain dimColor onPress={() => void update($, cloudMoveA, () => null)} />
+          </Box>
+        </Box>
+      ) : (
+        <Box key="cloud-move" flexDirection="row" gap={1} alignItems="center">
+          <Button key="cloud-move" label="Move to cloud" variant="secondary" onPress={() => void moveToCloud($)} />
+          <Box flexShrink={1} minWidth={0}>
+            <Text dimColor>Keeps the session running for everyone when this computer sleeps. You approve teammates' calls from wherever you are.</Text>
+          </Box>
+        </Box>
+      )
     const refusedHere = isHost ? [] : await read($, previewNeedsOpenA)
     // Ports are a guest's concern only once the room forwards one: before
     // that, no Previews setting, and no browser is looked for.
@@ -12206,6 +12611,7 @@ export const register: Register = (on, options) => {
             <Text dimColor>{updatesNote}</Text>
           ) : null}
         </Box>
+        {cloudMoveBlock}
         {isHost ? (
           <Box flexDirection="row" gap={1} alignItems="center">
             <Button key="room-stop" label={v.confirming === 'stop' ? 'Stop for everyone' : 'Stop sharing'} variant={v.confirming === 'stop' ? 'primary' : 'secondary'} onPress={() => void confirmStop($)} />
@@ -12222,6 +12628,7 @@ export const register: Register = (on, options) => {
     return fit(
       <Box flexDirection="column" gap="lg">
         {header}
+        {cloudBlock}
         {approvalBlock ?? nowBlock}
         {tabs}
         {tab === 'chat' ? chatPage : tab === 'timeline' ? timelinePage : tab === 'changes' ? changesPage : tab === 'shown' ? shownPage : tab === 'settings' ? settingsPage : peoplePage}
@@ -12357,6 +12764,33 @@ export const register: Register = (on, options) => {
           <Button key="approve-once" label="Allow once" variant="primary" onPress={() => answerBandAsk(approving.id, 'Allow once')} />,
           <Button key="approve-always" label={approving.always} plain onPress={() => answerBandAsk(approving.id, approving.always)} />,
           <Button key="approve-no" label="Decline" plain dimColor onPress={() => answerBandAsk(approving.id, 'Decline')} />,
+        ],
+      )
+    }
+
+    // The cloud host's approver: its oldest question takes the row, as a
+    // teammate's call takes the host's.
+    const cloudAsks = isHost ? [] : await read($, cloudAsksA)
+    const cloudAsk = cloudAsks[0]
+    if (cloudAsk) {
+      const color = colors.get(cloudAsk.who) ?? colorFor(cloudAsk.who)
+      return row(
+        [
+          faceOf(el, e.surface, { name: cloudAsk.who, online: true, color, active: true }),
+          <Text key="what" wrap="truncate-end">
+            <Text bold color={color}>
+              {cloudAsk.who}
+            </Text>
+            <Text>{' wants the cloud host to run '}</Text>
+            <Text bold>{cloudAsk.what}</Text>
+            {cloudAsks.length > 1 ? <Text dimColor>{` · ${cloudAsks.length - 1} more waiting`}</Text> : null}
+          </Text>,
+        ],
+        [
+          ...(cloudAsk.extent ? [<Button key="cloud-whole" label={cloudAsk.extent} plain dimColor onPress={() => void openRoom($)} />] : []),
+          <Button key="cloud-once" label="Allow once" variant="primary" onPress={() => void answerCloudAsk($, cloudAsk.id, 'Allow once')} />,
+          ...(cloudAsk.always ? [<Button key="cloud-always" label={cloudAsk.always} plain onPress={() => void answerCloudAsk($, cloudAsk.id, cloudAsk.always)} />] : []),
+          <Button key="cloud-no" label="Decline" plain dimColor onPress={() => void answerCloudAsk($, cloudAsk.id, 'Decline')} />,
         ],
       )
     }

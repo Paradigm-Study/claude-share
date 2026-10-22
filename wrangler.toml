@@ -66,3 +66,23 @@ new_sqlite_classes = ["GateObject"]
 [[migrations]]
 tag = "v5"
 new_sqlite_classes = ["DirectoryObject"]
+
+# Sessions kept running in the cloud (docs/cloud-host.md): a container a room,
+# running Claude Code with the plugin. The image (cloud/Dockerfile) is built
+# once and kept in this account's registry, so deploying needs no Docker:
+# `node scripts/push-image.mjs` builds, pushes and names a new one after
+# cloud/ changes. Deploying to another account, scripts/setup.mjs builds it
+# from cloud/Dockerfile instead (Docker with buildx). Needs Workers Paid.
+[[containers]]
+class_name = "HostContainer"
+image = "registry.cloudflare.com/831c9975a9f88831d7644e488ced7c79/claude-share-host:r-475eb1dda4"
+max_instances = 20
+instance_type = "standard-1"
+
+[[durable_objects.bindings]]
+name = "HOSTS"
+class_name = "HostContainer"
+
+[[migrations]]
+tag = "v6"
+new_sqlite_classes = ["HostContainer"]

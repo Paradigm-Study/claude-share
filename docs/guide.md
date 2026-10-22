@@ -98,6 +98,8 @@ Out of the box, Share uses `https://claude-share.proud-limit-da0a.workers.dev`, 
 
 To keep sessions on your own infrastructure, run your own server (below) and set it in the plugin's `server` option or `SHARED_SESSION_SERVER`.
 
+
+**In the cloud.** A host's **Move to cloud** sends the session's project (the files git tracks, and untracked ones it doesn't ignore), its conversation, and the host's Claude token (from `claude setup-token`) to a container the server starts for that room, over its own connection, never a public address. The server passes them on and keeps none of them; the container's Claude Code runs as the host on the host's Claude plan. The container, and everything in it, is deleted when the host brings the session home, the room ends, or a week after the move; what it changed is kept as a room file for Bring home (deleted with the room). Revoke the token at claude.ai to stop it anywhere.
 ## Host a server
 
 Teams can run their own room server instead of the public one. Rooms are short-lived: they expire 24 hours after the host was last seen, and nothing is kept after that.

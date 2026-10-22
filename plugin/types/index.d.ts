@@ -20,6 +20,12 @@ export type ShareRoom = {
   team?: { id: string; name: string } | null
 }
 
+/** A room's host in the cloud: started, running, or stopped after its week. */
+export type ShareCloud = { state: 'starting' | 'running' | 'stopped'; approver: string; since: number; until?: number; mine: boolean }
+
+/** A question the cloud host put to its approver: a teammate's call, as the host's own dialog would ask it. */
+export type ShareCloudAsk = { id: string; who: string; what: string; extent?: string; preview?: string; always: string; options: string[]; ts: number }
+
 export type SharePerson = {
   id: string
   name: string
@@ -354,6 +360,12 @@ declare module 'claude-code' {
       replayRun: StateFamily<{ tools?: string[]; hidden?: true } | null>
       /** Host: a teammate's tool call waiting for an answer in the row above the prompt (the question dialog didn't show): the oldest waiting there, its id (what its buttons answer), whose, what its one line leaves out (`extent`: a command's lines after its first, an edit's or a new file's size; the Room shows it whole), and how many more wait after it. */
       approving: { id: string; who: string; what: string; extent?: string; always: string; more: number } | null
+      /** The room's host in the cloud (docs/cloud-host.md), as its pages say; `mine` in the session that moved it, its approver. */
+      cloud: ShareCloud | null
+      /** The approver's: the cloud host's questions waiting for an answer, oldest first. */
+      cloudAsks: ShareCloudAsk[]
+      /** Where Move to cloud or Bring home is, for the Room to say. */
+      cloudMove: { stage: 'idle' | 'token' | 'packing' | 'starting' | 'home' | 'failed'; note?: string } | null
       /** Host: a teammate's calls put to the host and not answered yet, by tool_use_id (the newest 64). A hook whose module ends under it has its `.catch` asked in the module after it, which denies these. */
       unanswered: string[]
       /** The hooks module that started last in this session, by its own id. A module a reload replaced finds another here, declines the calls still waiting in its row, whose buttons are now the new module's, and stops hearing the room. */

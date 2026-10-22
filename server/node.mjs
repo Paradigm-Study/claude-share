@@ -11,6 +11,7 @@
 // second port (PREVIEW_PORT, default PORT + 1), a host name of their own so an
 // app's root-relative paths work; PREVIEW_URL says how people reach it.
 
+import { dockerCloud } from './cloud-docker.mjs'
 import { createServer } from 'node:http'
 import { createHash } from 'node:crypto'
 import { readFileSync, writeFileSync, renameSync } from 'node:fs'
@@ -149,6 +150,8 @@ setInterval(() => {
 }, 60_000).unref()
 
 const windows = new Windows()
+// Sessions kept running in the cloud, in Docker (docs/cloud-host.md), when CLOUD_IMAGE names the runner's image.
+const cloud = process.env.CLOUD_IMAGE ? dockerCloud({ image: process.env.CLOUD_IMAGE, serverUrl: process.env.CLOUD_SERVER_URL }) : null
 const clientIp = req => req.headers.get('x-client-ip') ?? 'unknown'
 
 // What a team's list shows of a room: what its own info says.
@@ -212,10 +215,11 @@ async function route(req) {
 
   const reject = /^ws\/([^/]+)\/reject$/.exec(rest)
   if (req.method === 'POST' && reject) return rejectRelay(room, req, reject[1])
+  if (req.method === 'PUT' && rest === 'cloud/bundle') return cloud ? cloud.bundle(id, req) : notFound()
 
   const admin = Boolean(process.env.ADMIN_TOKEN) && req.headers.get('authorization') === `Bearer ${process.env.ADMIN_TOKEN}`
   const counters = tcpCounted(room.tcpStats)
-  const { response, changed } = await roomRequest(room, req, rest, now, origin, { previewOrigin: previewOrigin(req), admin, directory, isCurrent: () => rooms.get(id) === room })
+  const { response, changed } = await roomRequest(room, req, rest, now, origin, { previewOrigin: previewOrigin(req), admin, directory, isCurrent: () => rooms.get(id) === room, cloud, pluginSource: process.env.PLUGIN_SOURCE })
   // Forwarding approvals and revocations are durable before a successful
   // response.
   if (changed) save(/^previews(?:$|\/[^/]+\/end$)/.test(rest) || rest === 'end' || rest === 'admin-end')
