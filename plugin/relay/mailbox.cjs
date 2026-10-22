@@ -196,7 +196,7 @@ async function start(raw, { emit = notify, launcher } = {}) {
     try {
       const got = await roomPost(cfg, 'peer', { to: box.seat, handle: box.handle, ...body }, controller, LIMITS.postMs)
       if (!got) return 'unreachable'
-      if (got.status === 200) return got.answer?.delivered === true ? 'delivered' : got.answer?.reason === 'unsupported' ? 'unsupported' : 'offline'
+      if (got.status === 200) return got.answer?.delivered === true ? 'delivered' : 'offline'
       return got.status === 429 ? 'busy' : got.status === 413 ? 'large' : [401, 403, 404, 410].includes(got.status) ? 'gone' : 'refused'
     } finally { posts.delete(controller) }
   }
@@ -231,8 +231,7 @@ async function start(raw, { emit = notify, launcher } = {}) {
       void post(box, read.message).then(result => {
         // Where it didn't go, this session hears so as it would from that session.
         if (result === 'delivered' || result === 'stopped') return
-        const refused = result === 'unsupported' || result === 'gone'
-        void receiptHere(box, refused ? 'refused' : 'dropped', read.message.ref, result === 'busy' ? 'rate-limited' : undefined)
+        void receiptHere(box, result === 'gone' ? 'refused' : 'dropped', read.message.ref, result === 'busy' ? 'rate-limited' : undefined)
       })
     }
     socket.setEncoding('utf8')

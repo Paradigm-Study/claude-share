@@ -14,12 +14,14 @@ import ws from '../plugin/relay/ws.cjs'
 import { spawn } from 'node:child_process'
 import { once } from 'node:events'
 import { Room, PLUGIN_LATEST, roomRequest, token, versionInfo, tcpSocketTarget, NEED_LIMIT, LIMITS, limitOf, streamedRoomBody, previewRequest, previewSocketTarget, publicPairValid, PUBLIC_LIMITS, TCP_LIMITS, SEAT_TIMEOUT_MS, EVENT_BYTES, HISTORY_BYTES, ROOM_FILES_COUNT, ROOM_PREVIEWS_MAX, ROOM_SEATS_MAX, hostHalfClose, tcpHalfClose, rejectReason, homePage } from '../server/core.mjs'
-import { metaOf, META_FILES } from '../server/worker.mjs'
+import { metaOf } from '../server/worker.mjs'
 
 function world() {
   const room = Room.create({ id: token(16), name: 'Host', now: Date.now(), version: PLUGIN_LATEST })
   const joined = room.join('Guest', Date.now(), PLUGIN_LATEST)
-  room.tcpSupported = () => true
+  // The host's stream is connected, as a grant wants.
+  const connected = room.connected
+  room.connected = seat => seat === 'host' || connected(seat)
   return { room, host: room.host.token, guest: joined.token, current: true }
 }
 function request(w, path, bearer = w.host, method = 'GET', body) {
@@ -174,13 +176,8 @@ function held(w, path, bearer = w.host, method = 'POST') {
   let saved = JSON.stringify(w.room.toJSON())
   assert.deepEqual(await answer({ port: 43800 }), { status: 200, body: { delivered: false }, changed: false }, 'no host stream: nowhere to go')
   assert.equal(JSON.stringify(w.room.toJSON()), saved, 'an undelivered need is not kept for later')
-  // A host stream that didn't say need=1 (a 0.11.24 host, which drops the
-  // line) is not one to tell: the guest hears it wasn't delivered (C2-need).
-  const old = []
-  w.room.subscribers.add({ seat: 'host', tcpSupport: true, send: m => old.push(m), push() {} })
-  assert.deepEqual(await answer({ port: 43800 }), { status: 200, body: { delivered: false }, changed: false }, 'a host stream without need=1')
   const heard = { host: [], guest: [] }, woken = { host: 0, guest: 0 }
-  const listen = (name, who) => w.room.subscribers.add({ seat: who, tcpSupport: who === 'host', needSupport: who === 'host', send: m => heard[name].push(m), push: () => { woken[name]++ } })
+  const listen = (name, who) => w.room.subscribers.add({ seat: who, send: m => heard[name].push(m), push: () => { woken[name]++ } })
   listen('host', 'host'); listen('guest', seat)
   const seq = w.room.seq, events = w.room.events.length
   saved = JSON.stringify(w.room.toJSON())
@@ -235,14 +232,13 @@ function held(w, path, bearer = w.host, method = 'POST') {
   assert.deepEqual((await answer({ port: 43840 })).body, { delivered: true })
   assert.deepEqual(heard.host.slice(asked).map(m => m.need.port), [43841, 43840])
   assert.deepEqual(heard.guest, [])
-  assert.deepEqual(old.filter(m => m.need), [], 'never a need line to a stream that takes none')
   await api(w, 'end', w.host, 'POST')
   const late = held(w, 'need', w.guest)
   assert.equal((await send(w, late.req)).status, 410); assert.equal(late.reads, 0)
   // The room changing while the body arrives: nothing reaches the host.
   for (const race of ['room end', 'leave', 'room identity']) {
     const r = world(), lines = []
-    r.room.subscribers.add({ seat: 'host', needSupport: true, send: m => lines.push(m), push() {} })
+    r.room.subscribers.add({ seat: 'host', send: m => lines.push(m), push() {} })
     const pending = held(r, 'need', r.guest), sending = send(r, pending.req)
     await pending.reading
     if (race === 'room end') r.room.end(Date.now())
@@ -385,8 +381,9 @@ async function admit(w, url, cookie) {
   assert(live(cookieOf(await admit(w, await enterLink(w, b)))), 'another preview counts apart')
   const hostCookie = cookieOf(await admit(w, await enterLink(w, a, w.host)))
   const peer = w.room.join('Peer', Date.now(), PLUGIN_LATEST), peerCookie = cookieOf(await admit(w, await enterLink(w, a, peer.token)))
-  w.room.previewSessions.set('legacy', { pid: a, exp: Date.now() + 60_000 })
-  const legacy = `cs_pv=${w.room.previewKey}.legacy`
+  // A session without a seat (no link makes one) serves nothing.
+  w.room.previewSessions.set('seatless', { pid: a, exp: Date.now() + 60_000 })
+  assert.equal(live(`cs_pv=${w.room.previewKey}.seatless`), false, 'a session without a seat serves nothing')
   // Made before the Leave: its links go with it, unused or used (D2-4).
   const pending = await enterLink(w, a)
   const pair = previewSocketTarget(w.room, new Request('https://preview.test/live', { headers: { cookie: cookies[1] } }), Date.now())
@@ -394,13 +391,13 @@ async function admit(w, url, cookie) {
   await api(w, 'leave', w.guest, 'POST')
   assert.deepEqual(cookies.map(live), [false, false, false, false, false])
   assert.equal(publicPairValid(w.room, pair, Date.now()), false, "the seat's sockets end with its sessions")
-  assert(live(hostCookie)); assert(live(peerCookie)); assert(live(legacy), 'a session without a seat stays until it expires')
+  assert(live(hostCookie)); assert(live(peerCookie))
   assert.equal([...w.room.tickets.values()].some(t => t.seat === seat), false, "the seat's links went with it")
   const sessions = w.room.previewSessions.size
   assert.equal((await enter(w, pending)).response.status, 403, 'a link made before its seat left opens nothing')
   assert.equal(w.room.previewSessions.size, sessions, 'and makes no session')
   w.room.sweepGrants(Date.now() + 60_001)
-  assert.equal(live(legacy), false); assert(w.room.previewSessions.size > 0)
+  assert.equal(w.room.previewSessions.has('seatless'), false, 'it goes as it expires'); assert(w.room.previewSessions.size > 0)
   // A seat dropped from the away list for good takes its browsers too.
   const r = world(), rpid = (await api(r, 'previews', r.host, 'POST', { port: 43422 })).pid, away = cookieOf(await admit(r, await enterLink(r, rpid)))
   for (let i = 0; i < 100; i++) r.room.join(`Away ${i}`, Date.now(), PLUGIN_LATEST)
@@ -522,25 +519,23 @@ async function admit(w, url, cookie) {
   }
   const same = (await enter(w, await enterLink(w, pid), `${own}; app=1`)).response
   assert.equal(same.status, 302); assert.equal(same.headers.get('clear-site-data'), null, "this room's own state stays")
-  // A cookie set before rooms had keys names this room by its id (S3-3): it's
-  // this room's state, not cleared, and the session goes on under one that
-  // names the key; nothing new carries the id.
+  // A cookie naming the room by its id, not its key, isn't this room's: what
+  // it carries is cleared for, as another room's is, and it opens nothing.
   const r = world(), rpid = (await api(r, 'previews', r.host, 'POST', { port: 43431 })).pid, mine = cookieOf(await admit(r, await enterLink(r, rpid)))
-  const legacy = `cs_pv=${r.room.id}.${mine.split('.')[1]}`
-  const kept = (await enter(r, await enterLink(r, rpid), `${legacy}; app=1`)).response
-  assert.equal(kept.status, 302); assert.equal(kept.headers.get('clear-site-data'), null)
-  assert.equal(kept.headers.get('set-cookie').split(';')[0], mine, 'its session, under the key')
-  console.log('OK the shared preview host name: no service workers; anything but this room’s cookie cleared before a cookie, by a second single-use link; one naming the room id from before keys is this room’s')
+  const byId = `cs_pv=${r.room.id}.${mine.split('.')[1]}`
+  assert(clears((await enter(r, await enterLink(r, rpid), `${byId}; app=1`)).response), 'a cookie naming the room id is cleared for')
+  assert.equal(previewSocketTarget(r.room, new Request('https://preview.test/live', { headers: { cookie: byId } }), Date.now()).ok, false, 'and opens nothing')
+  console.log('OK the shared preview host name: no service workers; anything but this room’s cookie (one naming its id included) cleared before a cookie, by a second single-use link')
 }
 
-// Proxied answers: format 2 (one JSON line, then the body) when the ask says
-// `answer: 2`, the 0.11.24 headers otherwise. Malformed, or over what a
-// preview carries: the host hears 400/413 and the browser gets a 502 page at
-// once. A room has PUBLIC_LIMITS.proxied requests waiting at most.
+// Proxied answers: one JSON line (the status and headers), then the body.
+// Malformed, or over what a preview carries: the host hears 400/413 and the
+// browser gets a 502 page at once. A room has PUBLIC_LIMITS.proxied requests
+// waiting at most.
 {
   const w = world(), pid = (await api(w, 'previews', w.host, 'POST', { port: 43440 })).pid
   const lines = []
-  w.room.subscribers.add({ seat: 'host', tcpSupport: true, send: m => lines.push(m), push() {} })
+  w.room.subscribers.add({ seat: 'host', send: m => lines.push(m), push() {} })
   const cookie = cookieOf(await admit(w, await enterLink(w, pid)))
   const ask = (path = '/', init = {}) => {
     const pending = previewRequest(w.room, new Request(`https://preview.test${path}`, { ...init, headers: { cookie, ...init.headers } }), Date.now())
@@ -552,19 +547,15 @@ async function admit(w, url, cookie) {
   let q = ask('/x?a=1', { method: 'POST', body: 'ping' })
   await new Promise(resolve => setImmediate(resolve))
   const proxy = asked()
-  assert.equal(proxy.answer, 2); assert.equal(proxy.path, '/x?a=1'); assert.equal(Buffer.from(proxy.body, 'base64').toString(), 'ping')
-  assert.equal((await answer(proxy.id, two({ status: 201, headers: [['Content-Type', 'text/plain'], ['set-cookie', 'a=1'], ['set-cookie', 'b=2'], ['location', 'http://localhost:43440/next'], ['connection', 'close'], ['content-length', '99'], ['bad name', 'x']] }, 'hé\nllo'), { 'x-proxy-format': '2' })).status, 200)
+  assert.deepEqual(Object.keys(proxy).sort(), ['body', 'headers', 'id', 'method', 'path', 'pid', 'port'])
+  assert.equal(proxy.path, '/x?a=1'); assert.equal(Buffer.from(proxy.body, 'base64').toString(), 'ping')
+  assert.equal((await answer(proxy.id, two({ status: 201, headers: [['Content-Type', 'text/plain'], ['set-cookie', 'a=1'], ['set-cookie', 'b=2'], ['location', 'http://localhost:43440/next'], ['connection', 'close'], ['content-length', '99'], ['bad name', 'x']] }, 'hé\nllo'))).status, 200)
   let res = await q.pending
   assert.equal(res.status, 201); assert.equal(await res.text(), 'hé\nllo')
   assert.deepEqual(res.headers.getSetCookie(), ['a=1', 'b=2']); assert.equal(res.headers.get('location'), '/next'); assert.equal(res.headers.get('connection'), null)
-  q = ask('/old')
-  const block = Buffer.from('HTTP/1.1 302 Found\r\nLocation: http://localhost:1/a\r\n\r\nHTTP/1.1 200 OK\r\nContent-Type: text/html\r\nX-App: 1\r\n\r\n').toString('base64')
-  assert.equal((await answer(asked().id, 'page', { 'x-proxy-status': '200', 'x-proxy-headers': block })).status, 200, 'a 0.11.24 host still answers')
-  res = await q.pending
-  assert.equal(res.status, 200); assert.equal(res.headers.get('x-app'), '1'); assert.equal(await res.text(), 'page')
   for (const [status, expected] of [[205, 205], [99, 502], [600, 502]]) {
     q = ask('/s')
-    await answer(asked().id, two({ status, headers: [] }, 'body'), { 'x-proxy-format': '2' })
+    await answer(asked().id, two({ status, headers: [] }, 'body'))
     res = await q.pending
     assert.equal(res.status, expected); if (status === 205) assert.equal(await res.text(), '')
   }
@@ -572,23 +563,24 @@ async function admit(w, url, cookie) {
   for (const bad of [Buffer.from('{"status":200,"headers":[]}'), two('not json'), two('[]'), two({ status: '200', headers: [] }), two({ status: 200, headers: [['a']] }), two({ status: 200, headers: [['a', 1]] }), two({ status: 200 }),
     Buffer.concat([Buffer.from(JSON.stringify({ status: 200, headers: [['x', 'y'.repeat(70_000)]] })), Buffer.from('\nbody')]), Buffer.from([0xff, 0x0a, 0x41])]) {
     q = ask('/bad')
-    const posted = await answer(asked().id, bad, { 'x-proxy-format': '2' })
+    const posted = await answer(asked().id, bad)
     assert.equal(posted.status, 400)
     res = await q.pending
     assert.equal(res.status, 502); assert.match(await res.text(), /could not be read/)
   }
-  // Over what a preview carries, either format: 413 to the host, 502 at once.
-  for (const [body, headers] of [[new Uint8Array(20 * 1024 * 1024 + 1), {}], [two(head, Buffer.alloc(20 * 1024 * 1024 + 1)), { 'x-proxy-format': '2' }]]) {
+  // Over what a preview carries, past the whole bound as it arrives or in the
+  // body its first line heads: 413 to the host, 502 at once.
+  for (const body of [new Uint8Array(20 * 1024 * 1024 + 64 * 1024 + 2), two(head, Buffer.alloc(20 * 1024 * 1024 + 1))]) {
     q = ask('/big')
     const started = Date.now()
-    assert.equal((await answer(asked().id, body, headers)).status, 413)
+    assert.equal((await answer(asked().id, body)).status, 413)
     res = await q.pending
     assert.equal(res.status, 502); assert.match(await res.text(), /over 20 MB/); assert(Date.now() - started < 5000)
   }
   q = ask('/declared')
   const declared = new Request(`https://room.test/api/rooms/${w.room.id}/proxy/${asked().id}`, { method: 'POST', headers: { authorization: `Bearer ${w.host}`, 'content-length': String(21 * 1024 * 1024) }, body: new ReadableStream({ pull() { throw new Error('read past a declared length') } }), duplex: 'half' })
   assert.equal((await send(w, declared)).status, 413); assert.equal((await q.pending).status, 502)
-  assert.equal((await answer('nobody', two(head), { 'x-proxy-format': '2' })).status, 410)
+  assert.equal((await answer('nobody', two(head))).status, 410)
   q = ask('/guest')
   assert.equal((await send(w, new Request(`https://room.test/api/rooms/${w.room.id}/proxy/${asked().id}`, { method: 'POST', headers: { authorization: `Bearer ${w.guest}` }, body: two(head) }))).status, 403)
   w.room.proxied.get(asked().id)(new Response('done'))
@@ -598,12 +590,11 @@ async function admit(w, url, cookie) {
   const before = lines.length
   res = (await previewRequest(w.room, new Request('https://preview.test/one-more', { headers: { cookie } }), Date.now())).response
   assert.equal(res.status, 503); assert.match(await res.text(), /busy/); assert.equal(lines.length, before)
-  console.log('OK proxied answers: format 2 and the 0.11.24 form; malformed or oversized give the browser a 502 at once; 512 waiting per room')
+  console.log('OK proxied answers: a JSON line, then the body; malformed or oversized give the browser a 502 at once; 512 waiting per room')
 }
 
 // Public sockets: PUBLIC_LIMITS.seatPairs per cookie session's seat and
-// roomPairs per room, pending and paired alike; a session from before seats
-// counts as one of its own.
+// roomPairs per room, pending and paired alike.
 {
   const w = world(), pid = (await api(w, 'previews', w.host, 'POST', { port: 43450 })).pid, seat = w.room.auth(w.guest).seat
   const cookie = cookieOf(await admit(w, await enterLink(w, pid)))
@@ -615,11 +606,8 @@ async function admit(w, url, cookie) {
   assert.deepEqual(target(mine(PUBLIC_LIMITS.seatPairs)), { ok: false, status: 429, error: 'Too many preview connections.' })
   assert.equal(target(others(PUBLIC_LIMITS.roomPairs - 1)).ok, true)
   assert.equal(target(others(PUBLIC_LIMITS.roomPairs)).status, 429)
-  w.room.previewSessions.set('legacy', { pid, exp: Date.now() + 60_000 })
-  const legacy = target(mine(PUBLIC_LIMITS.seatPairs), `cs_pv=${w.room.previewKey}.legacy`)
-  assert.equal(legacy.ok, true); assert.equal(legacy.ownerSeat, 'session:legacy')
   assert.equal(PUBLIC_LIMITS.seatPairs, 32); assert.equal(PUBLIC_LIMITS.roomPairs, 128); assert.equal(PUBLIC_LIMITS.pairMs, 10_000); assert.equal(PUBLIC_LIMITS.proxied, 512)
-  console.log('OK public sockets: 32 per seat and 128 per room, pending and paired; a seatless session counts alone')
+  console.log('OK public sockets: 32 per seat and 128 per room, pending and paired')
 }
 
 // A grant refused for the seat's minute changes nothing to save (the
@@ -711,10 +699,6 @@ async function admit(w, url, cookie) {
     const entered = await admit(w, url)
     assert.equal(entered.response.status, 302); assert.equal(entered.response.headers.get('location'), stored)
   }
-  // One saved before (any path at all): encoded as it's used, never a throw.
-  w.room.tickets.set('legacy-link', { pid, exp: Date.now() + 60_000, path: '/日本', seat: w.room.auth(w.guest).seat })
-  const legacy = await admit(w, new URL(`https://preview.test/__share/enter?room=${w.room.previewKey}&ticket=legacy-link&pid=${pid}`))
-  assert.equal(legacy.response.headers.get('location'), '/%E6%97%A5%E6%9C%AC')
   // Should the answer fail to be made (a guest's browser entering the host's
   // link: a session of its own), the link stays unspent and no session is made.
   const cookie = cookieOf(await admit(w, await enterLink(w, pid)))
@@ -732,16 +716,14 @@ async function admit(w, url, cookie) {
 // counted like any), browser sessions (256 a room) and TCP grants (128),
 // previews (128), seats and the away list, names and titles at their
 // longest, measured as the Worker writes it (metaOf). The Worker keeps each
-// file's record beside its bytes (tcp-worker.mjs checks that it does), so a
-// room takes them past round 2's 512, up to as many as 100 MB of 10 KB files
-// (S3-2), and meta the newest 512 of them as well, for a rollback to 0.11.24:
-// those at their longest too, a name's 120 characters of three bytes and a
+// file's record beside its bytes, never in meta (tcp-worker.mjs checks that
+// it does), so a room takes as many as 100 MB of 10 KB files (S3-2), their
+// records at their longest: a name's 120 characters of three bytes and a
 // type's 100 of two (a type's control characters, six bytes each in JSON, go).
 {
   const worst = n => '\ud800'.repeat(n) // a lone surrogate: six bytes in JSON
   const room = Room.create({ id: token(16), name: worst(80), title: worst(200), now: Date.now(), version: PLUGIN_LATEST, account: 'a'.repeat(64) })
   const w = { room, host: room.host.token, current: true }
-  room.tcpSupported = () => true
   for (let round = 0; round < 7; round++) {
     for (let i = room.seats.size; i < ROOM_SEATS_MAX; i++) room.join(worst(80), Date.now(), PLUGIN_LATEST, 'b'.repeat(64))
     if (round < 6) room.sweep(Date.now() + SEAT_TIMEOUT_MS + 1) // all away, kept to the newest 100
@@ -766,12 +748,14 @@ async function admit(w, url, cookie) {
   for (let i = 0; i < PUBLIC_LIMITS.roomSessions; i++) room.previewSessions.set(token(18), { pid: pids[i % pids.length], exp: Date.now() + 60_000, seat: room.seats.get(guest).id })
   for (let i = 0; i < TCP_LIMITS.roomCaps; i++) room.previewSessions.set(token(24), { pid: pids[i % pids.length], seat: room.seats.get(guest).id, scope: 'tcp', exp: Date.now() + 60_000 })
   room.tcpStats = { used: 2 ** 40, refunded: 2 ** 40, opens: { start: Date.now(), count: TCP_LIMITS.opensPerMinute } }
-  const { meta } = metaOf(room), kept = Object.values(meta.files ?? {})
-  const bytes = Buffer.byteLength(JSON.stringify(meta)), records = Buffer.byteLength(JSON.stringify(meta.files ?? {}))
-  assert.equal(kept.length, META_FILES)
+  const { meta } = metaOf(room)
+  const bytes = Buffer.byteLength(JSON.stringify(meta))
+  assert.equal(meta.files, undefined, 'no file records in meta')
   assert(bytes < 1024 ** 2, `worst-case meta is ${bytes} bytes`)
-  assert(kept.every(f => /^[0-9a-f]{64}$/.test(f.id) && f.name === '日'.repeat(120) && f.type === 'é'.repeat(100)), "the newest files' records, at their longest")
-  console.log(`OK a worst-case room's meta is ${(bytes / 1024).toFixed(0)} KiB, under 1 MiB: 128 previews, links, sessions and grants at their caps, and the records of the newest ${META_FILES} of its ${ROOM_FILES_COUNT} files (${(records / 1024).toFixed(0)} KiB)`)
+  const uploaded = [...room.files.values()].filter(f => /^[0-9a-f]{64}$/.test(f.id))
+  assert.equal(uploaded.length, 600)
+  assert(uploaded.every(f => f.name === '日'.repeat(120) && f.type === 'é'.repeat(100)), "the files' records, at their longest")
+  console.log(`OK a worst-case room's meta is ${(bytes / 1024).toFixed(0)} KiB, under 1 MiB: 128 previews, links, sessions and grants at their caps, and none of its ${ROOM_FILES_COUNT} files' records`)
 }
 
 // A room keeps its newest 256 browser sessions: the oldest goes, its sockets
@@ -830,7 +814,7 @@ async function admit(w, url, cookie) {
   for (const said of ['A grant, link or session that expired is removed at the room\'s next activity, or with the room', 'browsers clear them only over HTTPS (or on localhost)',
     'on Cloudflare, which can\'t see that, once one side sends more than 4 MB in a second', 'those waiting hold 8 MB per room at most', 'a key of its own, which can\'t join it',
     'A room keeps its newest 5000 events, 16 MB of them at most', '10,240 files at most), 128 open previews, and events of 128 KB each', 'a room its newest 128 links and 256 browser sessions',
-    'the browser session it starts (which preview and seat) for 12 hours from the last link that browser opened', 'Signing in finishes only when you press Continue on this server\'s page',
+    'the browser session it starts (which preview and seat) for 12 hours from the last link that browser opened', 'Signing in finishes only when you press Continue on this server\'s page', 'The page and Claude Code show the same code, and you continue only if they match.',
     'Claude Code\'s token is made when it picks up the sign-in, and the server keeps only its hash', 'a connection closes if 1 MiB of control messages to one side goes unacknowledged (each acknowledgement covers everything sent before it), however long it lives']) assert(text.includes(said), said)
   assert.equal([HISTORY_BYTES, EVENT_BYTES, ROOM_FILES_COUNT, ROOM_PREVIEWS_MAX, PUBLIC_LIMITS.roomTickets, PUBLIC_LIMITS.roomSessions, PUBLIC_LIMITS.pendingBytes, PUBLIC_LIMITS.bytesPerWindow, TCP_LIMITS.bufferBytes].join(), [16 * 1024 ** 2, 128 * 1024, 10_240, 128, 128, 256, 8 * 1024 ** 2, 4 * 1024 ** 2, 1024 ** 2].join())
   console.log('OK the home page says when expired links and sessions go, that a new link renews a session, that clearing needs HTTPS, how a sign-in finishes, and the limits as the server keeps them')
@@ -951,7 +935,7 @@ async function nodeChecks() {
     assert.equal(await utf8.response, 413); utf8.req.destroy()
     const page = await ok(`${base}/previews`, room.token, 'POST', { port: 43700 })
     const forwarded = await ok(`${base}/previews`, room.token, 'POST', { port: 43701, tcp: true })
-    const response = await http(`${base}/stream?tcp=1`, room.token)
+    const response = await http(`${base}/stream`, room.token)
     stream = response.body.getReader()
     const first = JSON.parse(new TextDecoder().decode((await stream.read()).value).split('\n')[0])
     assert.ok(Array.isArray(first.events))
@@ -973,7 +957,7 @@ async function nodeChecks() {
     const carry = async () => {
       // The host's stream, on a connection of its own; a grant asked while it's open.
       const asks = [], live = { paged: false, text: '' }
-      const hostStream = httpRequest(`${origin}${base}/stream?tcp=1`, { agent: false, headers: { authorization: `Bearer ${room.token}`, 'x-shared-session-version': PLUGIN_LATEST } }, res => {
+      const hostStream = httpRequest(`${origin}${base}/stream`, { agent: false, headers: { authorization: `Bearer ${room.token}`, 'x-shared-session-version': PLUGIN_LATEST } }, res => {
         res.setEncoding('utf8')
         res.on('data', text => {
           live.text += text
@@ -1014,12 +998,10 @@ async function nodeChecks() {
     assert.equal((await http(`/api/rooms/${key}`)).status, 404)
     const onMain = await fetch(`${origin}${base}/__preview${keyed.pathname}${keyed.search}`, { redirect: 'manual' })
     assert.notEqual(onMain.status, 302); assert.equal(onMain.headers.get('set-cookie'), null)
-    // A link this server made before rooms had keys names the room by its id,
-    // and still opens on the preview port (S3-3), through the clearing hop,
-    // whose second link names the key; a name that's neither is no room.
+    // A link naming the room by its id, not its key, opens nothing on the
+    // preview port, as a name that's neither.
     const byId = new URL((await ok(`${base}/previews/${page.pid}/ticket`, guest.token, 'POST', { path: '/before' })).url); byId.searchParams.set('room', room.id)
-    const asId = await admitted(byId)
-    assert.equal(asId.status, 302); assert.equal(asId.headers.get('location'), '/before'); assert(asId.headers.get('set-cookie').startsWith(`cs_pv=${key}.`))
+    assert.equal((await fetch(byId, { redirect: 'manual' })).status, 404)
     const byNone = new URL(byId); byNone.searchParams.set('room', token(16))
     assert.equal((await fetch(byNone, { redirect: 'manual' })).status, 404)
     // Node bounds every body it buffers as the bytes arrive, per route (D7a):
@@ -1048,7 +1030,7 @@ async function nodeChecks() {
     await stream.cancel(); stream = null
     // A grant needs the host's TCP stream: it's open while one is asked for.
     const granted = async pid => {
-      const live = (await http(`${base}/stream?tcp=1`, room.token)).body.getReader()
+      const live = (await http(`${base}/stream`, room.token)).body.getReader()
       await live.read()
       try { return (await http(`${base}/previews/${pid}/tunnel`, guest.token, 'POST', {})).status } finally { await live.cancel() }
     }
@@ -1147,7 +1129,7 @@ async function publicSocketChecks(http, ok, origin, previewPort) {
     }
     const room = await ok('/api/rooms', null, 'POST', { name: 'Public WS test host' }), base = `/api/rooms/${room.id}`
     const guest = await ok(`${base}/join`, null, 'POST', { name: 'Public WS test guest' })
-    const response = await http(`${base}/stream?tcp=1`, room.token)
+    const response = await http(`${base}/stream`, room.token)
     assert.equal(response.status, 200)
     const reader = response.body.getReader(), notices = []
     streams.push(reader)
@@ -1219,7 +1201,7 @@ async function publicSocketChecks(http, ok, origin, previewPort) {
 }
 // Real Node, the public link's bounds and answers: a seat's 32 sockets (the
 // next refused 429), the host turning away a waiting one (C-reject) but never
-// a paired one, Leave ending a seat's sockets, a format 2 answer, the shared
+// a paired one, Leave ending a seat's sockets, a proxied answer, the shared
 // host name's protections, and the 32 the host never took up closed at their
 // 10 s deadline with 1011.
 async function publicLimitChecks(http, ok, origin, previewPort) {
@@ -1277,13 +1259,13 @@ async function publicLimitChecks(http, ok, origin, previewPort) {
     assert.equal((await http(`${base}/ws/${pairedId}/reject`, room.token, 'POST', { code: 'BUSY' })).status, 409)
     paired.client.send('through')
     await until(() => host.messages.includes('through'), 'a paired message')
-    // A format 2 answer, through the real servers.
+    // An answer, through the real servers.
     const asking = fetch(`http://127.0.0.1:${previewPort}/hello?x=1`, { headers: { cookie } })
     await until(() => notices.some(n => n.proxy?.path === '/hello?x=1'), 'the proxied ask')
     const ask = notices.find(n => n.proxy?.path === '/hello?x=1').proxy
-    assert.equal(ask.answer, 2)
+    assert.equal('answer' in ask, false, 'the ask says nothing of formats')
     const head = JSON.stringify({ status: 200, headers: [['content-type', 'text/plain'], ['set-cookie', 'app=1']] })
-    const posted = await fetch(`${origin}${base}/proxy/${ask.id}`, { method: 'POST', headers: { authorization: `Bearer ${room.token}`, 'x-proxy-format': '2', 'x-shared-session-version': PLUGIN_LATEST }, body: Buffer.concat([Buffer.from(`${head}\n`), Buffer.from('from the host')]) })
+    const posted = await fetch(`${origin}${base}/proxy/${ask.id}`, { method: 'POST', headers: { authorization: `Bearer ${room.token}`, 'x-shared-session-version': PLUGIN_LATEST }, body: Buffer.concat([Buffer.from(`${head}\n`), Buffer.from('from the host')]) })
     assert.equal(posted.status, 200)
     const got = await asking
     assert.equal(got.status, 200); assert.equal(await got.text(), 'from the host'); assert.equal(got.headers.get('set-cookie'), 'app=1')
@@ -1300,7 +1282,7 @@ async function publicLimitChecks(http, ok, origin, previewPort) {
     await until(() => waiting.every(p => p.closes.length), 'sockets the host never took up close', 15_000)
     assert(waiting.every(p => p.closes[0].code === 1011)); assert(Date.now() - started >= PUBLIC_LIMITS.pairMs)
     await reader.cancel(); await pump
-    console.log('OK Node public link: 32 sockets a seat, host reject of a waiting socket, Leave, format 2, shared host name, 10 s pairing deadline')
+    console.log('OK Node public link: 32 sockets a seat, host reject of a waiting socket, Leave, a proxied answer, shared host name, 10 s pairing deadline')
   } finally {
     for (const client of clients) client.close()
     for (const reader of readers) await reader.cancel().catch(() => {})
@@ -1427,13 +1409,8 @@ async function needChecks(http, ok, uploading, origin) {
     const guest = await join('Need guest'), prober = await join('Need prober'), busy = await join('Need busy')
     const answer = async (bearer, body) => { const r = await http(`${base}/need`, bearer, 'POST', body); return [r.status, await r.json()] }
     assert.deepEqual(await answer(guest.token, { port: 43900 }), [200, { delivered: false }])
-    // A host stream that didn't say need=1 (0.11.24's) isn't told (C2-need).
-    const older = await listen(`${base}/stream?tcp=1`, room.token)
-    await older(x => Array.isArray(x.events))
-    assert.deepEqual(await answer(guest.token, { port: 43900 }), [200, { delivered: false }])
-    await ok(`${base}/events`, room.token, 'POST', { events: [{ type: 'chat', body: { text: 'older marker' } }] })
-    assert.equal((await older(x => x.events?.some(e => e.body?.text === 'older marker'))).some(x => x.need), false, 'no need line to it')
-    const viewer = await listen(`${base}/stream`, guest.token), host = await listen(`${base}/stream?tcp=1&need=1`, room.token)
+    // Any host stream is told: it says nothing of what it takes.
+    const viewer = await listen(`${base}/stream`, guest.token), host = await listen(`${base}/stream`, room.token)
     // A host event both streams see; a need, if one came, is before it.
     let markers = 0
     const mark = async () => {

@@ -17,7 +17,7 @@ import { readFileSync, writeFileSync, renameSync } from 'node:fs'
 import { Readable } from 'node:stream'
 
 import { Directory, mapStore, providersFrom, BODY_CHARS } from './teams.mjs'
-import { Room, ROOM_ID, SEAT_TIMEOUT_MS, createRoom, roomRequest, previewRequest, previewRoomOf, notFound, json, publicOrigin, token, missingPage, previewMissing, previewTooLarge, homePage, outdatedClient, versionInfo, limitOf, limitedResponse, closedResponse, Windows, SOCKET_ID, previewSocketTarget, publicPairValid, hostHalfClose, tcpHalfClose, announceSocket, hostSocketAllowed, relayRejectCode, rejectReason, streamedRoomBody, bodyLimit, bodyTooLarge, PROXY_BODY_MAX, sendableClose, TCP_LIMITS, PUBLIC_LIMITS, revokeMatches, tcpSocketTarget, announceTCP, tcpState, answersChecks, tcpCounted, tcpValid, tcpReserve, tcpRefund, tcpFailure, tcpFrame, tcpStep, chargeControl, mergeTCPStats } from './core.mjs'
+import { Room, ROOM_ID, SEAT_TIMEOUT_MS, createRoom, roomRequest, previewRequest, previewRoomOf, notFound, json, publicOrigin, token, missingPage, previewMissing, previewTooLarge, homePage, outdatedClient, versionInfo, limitOf, limitedResponse, closedResponse, Windows, SOCKET_ID, previewSocketTarget, publicPairValid, hostHalfClose, tcpHalfClose, announceSocket, hostSocketAllowed, relayRejectCode, rejectReason, streamedRoomBody, bodyLimit, bodyTooLarge, PROXY_BODY_MAX, sendableClose, TCP_LIMITS, PUBLIC_LIMITS, revokeMatches, tcpSocketTarget, announceTCP, tcpState, tcpCounted, tcpValid, tcpReserve, tcpRefund, tcpFailure, tcpFrame, tcpStep, chargeControl, mergeTCPStats } from './core.mjs'
 
 const PORT = Number(process.env.PORT ?? 8787)
 const PUBLIC_URL = process.env.PUBLIC_URL
@@ -224,12 +224,10 @@ async function route(req) {
   return response
 }
 
-// The room a preview request names by its preview key, or by its id for a
-// link made or a cookie set before rooms had keys (core's namesRoom): one this
-// server made before an update still opens. Nothing new names the id.
+// The room a preview request names by its preview key, never by its id.
 const previewRoomFor = req => {
   const key = previewRoomOf(req)
-  return key && ROOM_ID.test(key) ? previewRooms.get(key) ?? rooms.get(key) : undefined
+  return key && ROOM_ID.test(key) ? previewRooms.get(key) : undefined
 }
 
 async function previewRoute(req) {
@@ -505,7 +503,7 @@ server.on('upgrade', upgrading((nodeReq, socket, head) => {
     const target = tcpSocketTarget(room, req, tunnel[2], Date.now(), pairsOf(room, 'tcp').map(p => p.target))
     if (!target.ok) return refuse(socket, target.status, target.error)
     const id = token(12)
-    const pair = { roomId: room.id, pid: target.pid, scope: 'tcp', target, guest: tcpState(id, target, 'guest', Date.now(), answersChecks(req)), host: null, guestWs: null, hostWs: null }
+    const pair = { roomId: room.id, pid: target.pid, scope: 'tcp', target, guest: tcpState(id, target, 'guest', Date.now()), host: null, guestWs: null, hostWs: null }
     pairs.set(id, pair)
     if (!announceTCP(room, id, target)) {
       pairs.delete(id)
@@ -529,7 +527,7 @@ server.on('upgrade', upgrading((nodeReq, socket, head) => {
       closePair(m[2], pair, 1008, 'TCP grant expired or relay timed out')
       return refuse(socket, 410)
     }
-    pair.host = tcpState(m[2], pair.target, 'host', Date.now(), answersChecks(req))
+    pair.host = tcpState(m[2], pair.target, 'host', Date.now())
     pair.hostWs = acceptSocket(nodeReq, socket, head, '', { tcp: true,
       message: data => tcpMessage(m[2], pair, 'host', data),
       close: code => closePair(m[2], pair, tcpHalfClose(code), 'TCP socket closed'),

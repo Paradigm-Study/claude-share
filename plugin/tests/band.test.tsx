@@ -44,7 +44,6 @@ function world(
     env?: Record<string, string>
     store?: Record<string, unknown>
     files?: Record<string, string>
-    checkpointWriteFail?: boolean
     people?: { id: string; name: string; role: string; online: boolean; version?: string }[]
     /** Transcript files by path: the shell's ls, cat/head | tac | grep, and grep -l over them. */
     transcripts?: Record<string, string>
@@ -76,8 +75,6 @@ function world(
     detectFails?: { count: number }
     /** Holds each browser detection until it resolves. */
     detectWait?: Promise<void>
-    /** State keys an older version never wrote: writes to them go nowhere while listed (changed live). */
-    unwritten?: Set<string>
     /** Sees each of the plugin's state writes before it lands: it may hold the write, or say what's written instead. */
     beforeSet?: (key: string, value: unknown) => Promise<{ value: unknown } | void> | { value: unknown } | void
     /** Delay grant validation, as when the server is still reading its body. */
@@ -86,7 +83,7 @@ function world(
     replacementPreviewPid?: string
     tunnelWait?: string[]
     tunnelStatus?: Record<string, number>
-    tunnel?: 'unsupported' | 'host-old'
+    tunnel?: 404 | 503
     tcpRelays?: boolean
     /** The host's TCP worker: `wait` holds its ready line; `missing`, no Node to run it (exit 127). */
     tcpWorker?: 'wait' | 'missing'
@@ -123,7 +120,7 @@ function world(
      */
     pages?: Record<string, string>
     /** The share server's answer to a preview window's need. */
-    need?: 'delivered' | 'undelivered' | 'shared' | 'old'
+    need?: 'delivered' | 'undelivered' | 'shared'
     /** Where the session draws; the host's questions need one. */
     surfaces?: string[]
     /** What `scutil --proxy` prints. */
@@ -211,8 +208,6 @@ function world(
     streamHeld?: () => Promise<void>
     /** The ids new rooms get, in turn; then `room0000000000000002`, every time. */
     roomIds?: string[]
-    /** `false`: an older server, whose rooms (made or joined) don't say they pass messages between sessions on. */
-    peer?: boolean
     /** What the room answers a POST peer (`{ delivered: true }` unless said), or the status it refuses it with (429, 410…). */
     peerAnswer?: Record<string, unknown> | number
     /** The host's mailboxes' helper: no Node to run it, a system it can't run on, or what its commands answer (200 unless said). */
@@ -226,7 +221,6 @@ function world(
   const asked: string[] = []
   const state: Partial<PluginState['shared-session']> = {}
   on('state.set', async ($, e, next) => {
-    if (e.plugin === 'shared-session' && opts.unwritten?.has(e.key)) return { value: { isSet: true, version: 1 } } as never
     const instead = opts.beforeSet && e.plugin === 'shared-session' ? await opts.beforeSet(e.key, e.value) : undefined
     const written = instead ? ({ ...e, value: instead.value } as typeof e) : e
     const result = await next(written)
@@ -234,7 +228,7 @@ function world(
     return result
   })
   const spawned: { argv: readonly string[]; input?: string }[] = []
-  const checkpointWrites = { fail: opts.checkpointWriteFail ?? false }
+  const checkpointWrites = { fail: false }
   let refusedStreams = 0
   let joins = 0
   const localHelpers: { pid?: string; send: (message: { state: string; code?: string; port?: number; id?: string; ipv6?: boolean }) => void; output: (text: string) => void; exit: () => void; stopped: boolean }[] = []
@@ -582,14 +576,17 @@ function world(
     }
     if (e.argv[0] === '/bin/sh' && e.input?.startsWith('umask 077')) {
       if (opts.beforeProfile && e.input.includes('mkdir -p "$p"')) await opts.beforeProfile()
-      // Private files: normal writes rename, checkpoint migration links only
-      // if absent. Both use the same stdin-only here-document as production.
+      // Private files: written to a temporary file on stdin, then renamed, as in production.
       const body = /cat > '[^']+' <<'(\w+)'\n([\s\S]*?)\n\1\n/.exec(e.input)
       const to = /mv '[^']+' '([^']+)'/.exec(e.input)
-      const migration = /if ln '[^']+' '([^']+)'/.exec(e.input)
       if (e.input.includes('/shared-session/rooms/') && checkpointWrites.fail) return { value: { code: 1, signal: null } }
       if (body && to) files.set(to[1]!, body[2]!)
-      if (body && migration && !files.has(migration[1]!)) files.set(migration[1]!, body[2]!)
+      return { value: { code: 0, signal: null } }
+    }
+    // A saved place deleted.
+    const gone = /^rm -f -- '([^']+\/shared-session\/rooms\/[^']+)'\n$/.exec(e.argv[0] === '/bin/sh' ? (e.input ?? '') : '')
+    if (gone) {
+      files.delete(gone[1]!)
       return { value: { code: 0, signal: null } }
     }
     if (e.argv[0] === '/bin/sh') {
@@ -681,7 +678,7 @@ function world(
   // The files the plugin reads: its own manifest, and the person's settings.
   const files = new Map<string, string>()
   if (opts.settings !== undefined) files.set('/home/scott/.claude/settings.json', opts.settings)
-  if (opts.team?.signedIn) files.set(ACCOUNT_FILE, JSON.stringify({ servers: { 'http://localhost:8787': { token: TEAM_TOKEN, account: ME } } }))
+  if (opts.team?.signedIn) files.set(`${opts.env?.CLAUDE_CONFIG_DIR ?? '/home/scott/.claude'}/shared-session/account.json`, JSON.stringify({ servers: { 'http://localhost:8787': { token: TEAM_TOKEN, account: ME } } }))
   for (const [path, text] of Object.entries(opts.files ?? {})) files.set(path, text)
   const written: { path: string; text: string }[] = []
   on('fs.read', ($, e) => {
@@ -833,7 +830,6 @@ function world(
     if (method === 'POST' && /^\/api\/rooms\/[^/]+\/need$/.test(path)) {
       if (opts.needWait) await opts.needWait
       if (opts.needStatus) return { value: { status: opts.needStatus, ok: false, headers: {}, text: '{"error":"Too many preview port requests. Try again in a minute."}' } }
-      if (opts.need === 'old') return { value: { status: 404, ok: false, headers: {}, text: '{"error":"Not found"}' } }
       return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify(opts.need === 'shared' ? { shared: true } : { delivered: opts.need !== 'undelivered' }) } }
     }
     if (opts.endFail?.count && method === 'POST' && /\/previews\/[^/]+\/end$/.test(path)) {
@@ -886,7 +882,7 @@ function world(
       if (opts.createStatus) return { value: { status: opts.createStatus, ok: false, headers: {}, text: '{"error":"Too many new shared sessions from your network. Try again in a minute."}' } }
       const forTeam = sent.at(-1)?.body.team === 'team0001' && headers['x-shared-session-account'] === TEAM_TOKEN
       const id = opts.roomIds?.shift() ?? 'room0000000000000002'
-      body = { id, url: `http://localhost:8787/s/${id}`, token: 't', seq: 0, title: 'demo', ...(forTeam ? { team: { id: 'team0001', name: 'Acme' } } : {}), ...(opts.peer === false ? {} : { peer: true }) }
+      body = { id, url: `http://localhost:8787/s/${id}`, token: 't', seq: 0, title: 'demo', ...(forTeam ? { team: { id: 'team0001', name: 'Acme' } } : {}) }
     } else if (path.endsWith('/join') && opts.team?.refuseJoin && headers['x-shared-session-account'] !== TEAM_TOKEN) {
       return { value: { status: 403, ok: false, headers: {}, text: JSON.stringify({ error: 'This session is for Acme.', team: 'Acme', signIn: true }) } }
     } else if (path.endsWith('/join') && opts.paged) {
@@ -901,14 +897,14 @@ function world(
       joins += 1
       const history = opts.joinHistory ?? []
       served({ events: history })
-      body = { token: joins === 1 ? 'g' : `g${joins}`, seat: joins === 1 ? 'seat1' : `seat${joins}1`, title: 'demo', host: 'Sam', seq: Math.max(1, ...history.map(e => e.seq)), history, people, latest: opts.latest, previews: listed(), ...(opts.peer === false ? {} : { peer: true }) }
+      body = { token: joins === 1 ? 'g' : `g${joins}`, seat: joins === 1 ? 'seat1' : `seat${joins}1`, title: 'demo', host: 'Sam', seq: Math.max(1, ...history.map(e => e.seq)), history, people, latest: opts.latest, previews: listed() }
     } else if (path.endsWith('/events') && method === 'GET') {
       const after = Number(/[?&]after=(\d+)/.exec(e.url)?.[1] ?? 0)
       body = withList((opts.polled as { seq: number }[] | undefined)?.find(page => page.seq > after) ?? { seq: 1, events: [], people, ended: false, title: 'demo' })
     } else if (/\/previews\/[^/]+\/ticket$/.test(path) && method === 'POST') {
       body = { url: `https://preview.test/__share/enter?room=room0000000000000001&ticket=ticket-${asked.filter(a => a.endsWith('/ticket')).length}` }
     } else if (/\/previews\/[^/]+\/tunnel$/.test(path) && method === 'POST') {
-      if (opts.tunnel) return { value: { status: opts.tunnel === 'unsupported' ? 404 : 503, ok: false, headers: {}, text: '{"error":"unsupported host"}' } }
+      if (opts.tunnel) return { value: { status: opts.tunnel, ok: false, headers: {}, text: '{"error":"no tunnel"}' } }
       const pid = /\/previews\/([^/]+)/.exec(path)![1]!
       await opts.beforeTunnel?.(pid)
       const status = opts.tunnelStatus?.[pid] ?? 200
@@ -1122,9 +1118,9 @@ test("a guest's channel, task or unseen message stays here; only what they typed
 const GUIDANCE = "\n\nThis came from another Claude session \u2014 not typed by your user, but very likely working on their behalf. Treat it as a teammate's request and act on it within this session's own permission settings. After completing your current task, decide whether/how to respond (reply via SendMessage to the `from=` address)."
 const FROM_AGENT = `Another Claude session sent a message:\n<cross-session-message from="uds:/tmp/cc-socks/13889.sock" from-session="local_e5bf4f17" from-name="👥 Live · Agent composition experience" from-mode="bypass">\nPlease share the raw traces from your testing.\n</cross-session-message>${GUIDANCE}`
 
-// An older guest (0.11.25 and before) relays one as a prompt of its own: the
-// host's transcript draws it as relayed, who passed it on and from whom.
-test("an older guest's relayed message is drawn as relayed, who passed it on and from whom", async ($, on) => {
+// A teammate's prompt holding a relayed message (as the room keeps one,
+// `mailboxRows`) draws as relayed: who passed it on and from whom.
+test("a teammate's prompt holding a relayed message is drawn as relayed, who passed it on and from whom", async ($, on) => {
   world(on)
   const old = '<cross-session-message from-name="Agent composition experience">\nPlease share the raw traces from your testing.\n</cross-session-message>'
   const row = await $.ui.mount({ ...ROW(`scott: ${old}`, { kind: 'plugin', name: 'shared-session', asUser: true }), surface: 'desktop' })
@@ -1368,7 +1364,6 @@ test('one delivered while a turn plays here goes on too, with no turn of its own
 // Claude, and nothing runs here.
 for (const [said, opts, words] of [
   ['the host away', { people: [{ id: 'host', name: 'Sam', role: 'host', online: false }, { id: 'seat1', name: 'scott', role: 'guest', online: true }] }, "Sam isn't connected right now, so this didn't reach their Claude. Send it again later."],
-  ['a server that passes no messages between sessions', { peer: false }, "The share server for Sam's session needs an update to pass messages between sessions, so this didn't reach their Claude."],
   ['a Claude Code without a messaging socket', { env: { CLAUDE_CODE_MESSAGING_SOCKET: '' } }, "This computer can't pass this on: its Claude Code can't pass messages between sessions (that needs Claude Code 2.1.304 or later)."],
   ['a Claude Code older than 2.1.304', { env: { AI_AGENT: 'claude-code_2-1-300_agent' } }, "This computer can't pass this on: its Claude Code can't pass messages between sessions (that needs Claude Code 2.1.304 or later)."],
   ['a system without Unix sockets', { env: { UNAME: 'MINGW64_NT' } }, "This computer can't pass this on: messages between sessions are passed on only on macOS and Linux."],
@@ -1391,7 +1386,6 @@ for (const [said, opts, words] of [
 // takes a new seat and goes once more with it.
 for (const [said, answer, words] of [
   ['the host not connected', { delivered: false, reason: 'offline' }, "Sam isn't connected right now, so this didn't reach their Claude. Send it again later."],
-  ["the host's plugin too old to take it", { delivered: false, reason: 'unsupported' }, "Sam's Shared Sessions needs an update to take messages from other sessions, so this didn't reach their Claude."],
   ['too many this minute', 429, "Too many messages went to Sam's session this minute, so this one didn't. Send it again in a minute."],
   ['too large', 413, "This was too large to send to Sam's session, so it didn't reach their Claude."],
   ['the room ended', 410, "The shared session has ended, so this didn't reach anyone's Claude."],
@@ -1483,7 +1477,7 @@ test("a guest's handles go with its place, and its session is found again once t
   expect(await within(asked.clock, () => asked.peerPosts.length > 0, 5_000)).toBe(true)
   const handle = String(asked.peerPosts[0]!.handle)
   await $.session.end({ reason: 'other', sessionId: 'session-test-0001', resume: {} } as never)
-  const saved = JSON.parse(asked.files.get(checkpointPath('joined:session-test-0001'))!).value
+  const saved = savedAt(asked, 'joined:session-test-0001')
   expect(saved.peerRoutes).toEqual({ [handle]: expect.objectContaining({ kind: 'guest', to: AGENT_SOCKET, seat: 'seat1' }) })
   await $.session.start(START)
   expect(await within(asked.clock, () => asked.state.mode === 'guest', 5_000)).toBe(true)
@@ -1627,7 +1621,7 @@ test("a receipt for Claude's message comes back into this session from its mailb
 test("a reload ends the helper the module before started and opens the same mailboxes in its own", async ($, on) => {
   const box = 'b0'.repeat(16)
   const stored = {
-    room: { ...CUT_HOST, peer: true }, mode: 'host',
+    room: CUT_HOST, mode: 'host',
     peerRoutes: { [box]: { kind: 'host', seat: 'seat2', handle: HANDLE_A, who: 'Alex', name: 'Agent composition', at: 1 } },
     mailboxHelper: { room: 'http://localhost:8787/room0000000000000002', pid: 999, port: 43000 },
   }
@@ -1708,21 +1702,19 @@ test("a joined session hears the room through curl's stream, and never polls it"
   expect(asked.spawned[0]?.input).toContain('Authorization: Bearer g')
 })
 
-test("a host's stream says it takes raw TCP and guests' needs, so the room sends it both; a guest's says neither; both take messages between sessions", async ($, on) => {
+test("a host's stream and a guest's ask the room for what's new and nothing more: every stream takes all the room sends it", async ($, on) => {
   const asked = world(on, { stream: [{ seq: 1, events: [], people: [{ id: 'host', name: 'Sam', role: 'host', online: true }, { id: 'seat1', name: 'scott', role: 'guest', online: true }], ended: false, title: 'demo' }] })
   const streams = (room: string) => asked.spawned.filter(s => s.argv[0] === 'curl' && s.input?.includes(`/api/rooms/${room}/stream?after=`)).map(s => s.input!)
   const ui = await $.ui.mount(band('desktop'))
   await ui.press({ key: 'share' })
   await asked.clock.advance(10)
-  expect(streams('room0000000000000002')[0]).toContain('/stream?after=0&tcp=1&need=1&peer=1"')
+  expect(streams('room0000000000000002')[0]).toContain('/stream?after=0"')
   await $.command.run({ command: 'stop-sharing', args: '' } as never)
   await $.prompt.submit({ text: LINK, origin: { kind: 'composer' }, wait: false })
   await asked.clock.advance(10)
   const guest = streams('room0000000000000001')
   expect(guest.length).toBeGreaterThan(0)
-  expect(guest.some(s => s.includes('need=1') || s.includes('tcp=1'))).toBe(false)
-  // …and says it takes the host's side's messages to its person's other sessions.
-  expect(guest[0]).toContain('/stream?after=1&peer=1"')
+  expect(guest[0]).toContain('/stream?after=1"')
   await $.command.run({ command: 'stop-sharing', args: '' } as never)
 })
 
@@ -2018,8 +2010,8 @@ for (const invalid of [0, 65536]) {
   })
 }
 
-for (const tunnel of ['unsupported', 'host-old'] as const) {
-  test(`a ${tunnel} TCP endpoint reports the boundary without public fallback`, async ($, on) => {
+for (const tunnel of [404, 503] as const) {
+  test(`a TCP endpoint answering ${tunnel} reports the boundary without public fallback`, async ($, on) => {
     const asked = world(on, { tunnel, env: { CLAUDE_CODE_ENTRYPOINT: 'cli' }, stream: [{ seq: 2, events: [LOCAL_SHOWN], people: PREVIEW_PEOPLE, ended: false, title: 'demo' }] })
     await $.prompt.submit({ text: LINK, origin: { kind: 'composer' }, wait: false })
     await asked.clock.advance(10)
@@ -2027,7 +2019,7 @@ for (const tunnel of ['unsupported', 'host-old'] as const) {
     await pane.press({ key: 'tab-shown' })
     await pane.press({ key: 'open-preview:pv-local' })
     await eventually(asked.clock, () => asked.toasted.length)
-    expect(asked.toasted.some(t => /TCP forwarding|updated plugin/.test(t))).toBe(true)
+    expect(asked.toasted.some(t => t.includes('Local forwarding is unavailable'))).toBe(true)
     expect(asked.localHelpers).toHaveLength(0)
     expect(asked.copied).toHaveLength(0)
     expect(asked.filter(a => a.endsWith('/ticket'))).toHaveLength(0)
@@ -2208,7 +2200,7 @@ test('saved localhost listeners resume and restore after helper loss without ope
     shown: [{ key: 'preview:pv-local', kind: 'preview', name: 'Sign in (preview)', ts: 900, pid: 'pv-local', port: 3340, path: '/login?next=%2Faccount', tcp: true }],
     localPreviews: [{ pid: 'pv-local', port: 3340 }], activity: [], chat: [], sidebar: null,
   }
-  const asked = world(on, { env: { CLAUDE_CODE_ENTRYPOINT: 'cli' }, store: { 'joined:session-test-0001': saved }, roomList: { previews: [{ pid: 'pv-local', port: 3340, tcp: true }] } })
+  const asked = world(on, { env: { CLAUDE_CODE_ENTRYPOINT: 'cli' }, files: { [checkpointPath('joined:session-test-0001')]: JSON.stringify({ version: 1, value: saved }) }, roomList: { previews: [{ pid: 'pv-local', port: 3340, tcp: true }] } })
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   on('session.end', ($, e) => ({ sessionId: e.sessionId }))
   await $.session.start(START)
@@ -2222,7 +2214,7 @@ test('saved localhost listeners resume and restore after helper loss without ope
   expect(asked.localHelpers).toHaveLength(2)
   expect(asked.copied).toHaveLength(0)
   await $.session.end({ reason: 'other', sessionId: 'session-test-0001', resume: {} } as never)
-  const kept = JSON.parse(asked.files.get(checkpointPath('joined:session-test-0001'))!).value as typeof saved
+  const kept = savedAt(asked, 'joined:session-test-0001') as typeof saved
   expect(kept.localPreviews).toEqual([{ pid: 'pv-local', port: 3340, localPort: 3340 }])
   expect(JSON.stringify(kept.localPreviews)).not.toContain('tcp_cap')
   expect(JSON.stringify(kept.localPreviews)).not.toContain('ticket')
@@ -2258,7 +2250,7 @@ test('the host advertises TCP, rejects mismatched targets, deduplicates connecti
   )
   await asked.clock.advance(5000)
   expect(asked.tcpHelpers).toHaveLength(1)
-  expect(asked.spawned.some(s => s.argv[0] === 'curl' && s.input?.includes('&tcp=1'))).toBe(true)
+  expect(asked.spawned.some(s => s.argv[0] === 'curl' && s.input?.includes('/stream?after='))).toBe(true)
   const spawn = asked.spawned.find(s => s.argv.at(-1)?.endsWith('/relay/tcp-worker.cjs'))!
   const config = JSON.parse(spawn.input!)
   expect(config).toMatchObject({ room: 'http://localhost:8787/api/rooms/room0000000000000002', token: 't', version: '0.7.1' })
@@ -2279,7 +2271,7 @@ test('the host automatically retries an ordinary curl stream exit in the same ro
   await asked.clock.advance(10)
   const first = asked.spawned.filter(s => s.argv[0] === 'curl' && s.argv.includes('-K'))
   expect(first).toHaveLength(1)
-  expect(first[0]!.input).toContain('url = "http://localhost:8787/api/rooms/room0000000000000002/stream?after=0&tcp=1&need=1&peer=1"')
+  expect(first[0]!.input).toContain('url = "http://localhost:8787/api/rooms/room0000000000000002/stream?after=0"')
   expect(asked.tcpHelpers).toHaveLength(0)
   // The mock curl ended with HTTP 200 and EOF. Only the retry timer reconnects;
   // these notifications weren't present on its first connection.
@@ -2929,7 +2921,7 @@ test("the Room's Updates setting turns on auto-update in the person's settings, 
   expect(after.theme).toBe('dark')
 })
 
-test('automatic updates chosen earlier move to updates in place, keeping other plugin folders', async ($, on) => {
+test('automatic updates chosen outside the Room (setup.mjs) load in place, keeping other plugin folders', async ($, on) => {
   const asked = world(on, {
     settings: JSON.stringify({ env: { CLAUDE_CODE_PLUGIN_DIRS: '/home/scott/mods/other' }, extraKnownMarketplaces: { 'claude-share': { source: { source: 'github', repo: 'Paradigm-Study/claude-share' }, autoUpdate: true } } }),
   })
@@ -2947,7 +2939,7 @@ function savedRoom(id: string, at: number, where: { sidebar?: string; place?: st
     room: { server: 'http://localhost:8787', id, url: `http://localhost:8787/s/${id}`, title: 'demo', host: 'scott', token: `t-${id}`, seat: 'host', seq: 3, since: 1 },
     policy: { prompts: 'everyone', approvals: 'edits', files: 'on' },
     trusted: [],
-    previews: {},
+    shares: {},
     shown: [],
     activity: [],
     chat: [],
@@ -2960,9 +2952,14 @@ const START = { cwd: '/tmp/demo', surface: 'desktop', isInteractive: true } as c
 function checkpointPath(key: string, config = '/home/scott/.claude') {
   return `${config}/shared-session/rooms/${encodeURIComponent(key)}.json`
 }
+// The place saved under `key`, or null once there's none.
+function savedAt(asked: { files: Map<string, string> }, key: string, config?: string) {
+  const text = asked.files.get(checkpointPath(key, config))
+  return text === undefined ? null : JSON.parse(text).value
+}
 
 for (const role of ['host', 'guest'] as const) {
-  test(`${role} checkpoint survives a loader store change and cannot return after Stop or Leave`, async ($, on) => {
+  test(`${role} checkpoint survives a loader store change and is gone after Stop or Leave`, async ($, on) => {
     const asked = world(on)
     on('session.start', ($, e) => ({ cwd: e.cwd }))
     on('session.end', ($, e) => ({ sessionId: e.sessionId }))
@@ -2971,69 +2968,40 @@ for (const role of ['host', 'guest'] as const) {
     else await $.prompt.submit({ text: LINK, origin: { kind: 'composer' }, wait: false })
     await $.session.end({ reason: 'other', sessionId: 'session-test-0001', resume: {} } as never)
     const key = `${role === 'host' ? 'hosting' : 'joined'}:session-test-0001`
-    const saved = JSON.parse(asked.files.get(checkpointPath(key))!).value
-    expect(saved.room.seat === 'host').toBe(role === 'host')
+    expect(savedAt(asked, key).room.seat === 'host').toBe(role === 'host')
     // The next loader identity has none of this identity's plugin store.
     asked.store.clear()
     await $.session.start(START)
     const ui = await $.ui.mount(band('desktop'))
     expect(await ui.find({ key: role === 'host' ? 'stop-sharing' : 'leave' })).toBeDefined()
     await $.command.run({ command: 'stop-sharing', args: '' } as never)
-    expect(JSON.parse(asked.files.get(checkpointPath(key))!).value).toBe(null)
-    // Switching back may encounter an unmigrated old snapshot. A consumed
-    // canonical file is still authoritative, so it cannot resurrect a room.
-    asked.store.set(key, saved)
+    expect(asked.files.has(checkpointPath(key))).toBe(false)
     await $.session.start(START)
     expect(await ui.find({ key: 'share' })).toBeDefined()
-    expect(asked.store.has(key)).toBe(false)
-    expect(JSON.parse(asked.files.get(checkpointPath(key))!).value).toBe(null)
     expect(asked.spawned.filter(s => s.input?.includes('/shared-session/rooms/')).every(s => JSON.stringify(s.argv) === '["/bin/sh","-s"]')).toBe(true)
   })
 }
 
-test('migration respects canonical state and keeps unrelated sessions in a custom configuration', async ($, on) => {
+test("a custom configuration's places are its own, and an unrelated session's stays", async ($, on) => {
   const config = '/home/scott/claude-work'
-  const newest = savedRoom('room0000000000000009', 950)
+  const mine = savedRoom('room0000000000000009', 950)
   const other = savedRoom('room0000000000000007', 900)
   const asked = world(on, {
     env: { CLAUDE_CONFIG_DIR: config }, sessionId: 'mine',
-    store: { 'hosting:mine': savedRoom('room0000000000000008', 500), 'hosting:other': other, unrelated: 'keep' },
-    files: { [checkpointPath('hosting:mine', config)]: JSON.stringify({ version: 1, value: newest }) },
+    files: { [checkpointPath('hosting:mine', config)]: JSON.stringify({ version: 1, value: mine }), [checkpointPath('hosting:other', config)]: JSON.stringify({ version: 1, value: other }) },
   })
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   await $.session.start(START)
-  expect(asked.logged).toContain(`Still sharing this session: ${newest.room.url}`)
-  expect(JSON.parse(asked.files.get(checkpointPath('hosting:other', config))!).value).toEqual(other)
-  expect(asked.store.get('unrelated')).toBe('keep')
-  expect(asked.store.has('hosting:other')).toBe(false)
+  expect(asked.logged).toContain(`Still sharing this session: ${mine.room.url}`)
+  expect(savedAt(asked, 'hosting:other', config)).toEqual(other)
   expect([...asked.files.keys()].some(path => path.startsWith('/home/scott/.claude/shared-session/rooms/'))).toBe(false)
 })
 
-test('failed checkpoint migration preserves its source and defers the loader change', async ($, on) => {
-  const saved = savedRoom('room0000000000000009', 900)
-  const asked = world(on, {
-    sessionId: 'mine', store: { 'hosting:mine': saved }, checkpointWriteFail: true,
-    settings: JSON.stringify({ extraKnownMarketplaces: { 'claude-share': { autoUpdate: true } } }),
-  })
-  on('session.start', ($, e) => ({ cwd: e.cwd }))
-  await $.session.start(START)
-  await asked.clock.advance(20)
-  expect(asked.store.get('hosting:mine')).toEqual(saved)
-  expect(asked.files.has(checkpointPath('hosting:mine'))).toBe(false)
-  expect(asked.written.some(write => write.text.includes('CLAUDE_CODE_PLUGIN_DIRS'))).toBe(false)
-  expect(asked.logged.some(line => line.includes("Couldn't preserve saved shared sessions"))).toBe(true)
-})
-
-test('an unreadable canonical checkpoint does not discard the legacy source', async ($, on) => {
-  const saved = savedRoom('room0000000000000009', 900)
+test('an unreadable checkpoint is left as it is, and nothing of it is logged', async ($, on) => {
   const corrupt = 'private-checkpoint-token is not JSON'
-  const asked = world(on, {
-    sessionId: 'mine', store: { 'hosting:mine': saved },
-    files: { [checkpointPath('hosting:mine')]: corrupt },
-  })
+  const asked = world(on, { sessionId: 'mine', files: { [checkpointPath('hosting:mine')]: corrupt } })
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   await $.session.start(START)
-  expect(asked.store.get('hosting:mine')).toEqual(saved)
   expect(asked.files.get(checkpointPath('hosting:mine'))).toBe(corrupt)
   expect(asked.logged.join('\n')).not.toContain('private-checkpoint-token')
 })
@@ -3052,7 +3020,7 @@ test('a failed new checkpoint write leaves the previous file intact and reports 
 })
 
 test('a host session reopened takes its room back, on the same link', async ($, on) => {
-  const asked = world(on, { store: { 'hosting:cli-1': savedRoom('room0000000000000009', 900) }, sessionId: 'cli-1' })
+  const asked = world(on, { files: { [checkpointPath('hosting:cli-1')]: JSON.stringify({ version: 1, value: savedRoom('room0000000000000009', 900) }) }, sessionId: 'cli-1' })
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   await $.session.start(START)
   await asked.clock.advance(10)
@@ -3085,12 +3053,12 @@ for (const role of ['guest', 'host'] as const) {
       const starting = $.session.start(START)
       expect(await eventually(asked.clock, () => Boolean(answer))).toBe(true)
       // Taken: no other session takes it meanwhile.
-      expect(JSON.parse(asked.files.get(checkpointPath(key))!).value).toBeNull()
+      expect(savedAt(asked, key)).toBeNull()
       await $.session.end({ reason, sessionId: 'session-test-0001', resume: {} } as never)
       answer!()
       await starting
       await asked.clock.advance(50)
-      const now = JSON.parse(asked.files.get(checkpointPath(key))!).value
+      const now = savedAt(asked, key)
       if (reason === 'other') expect(now).toEqual(saved)
       else {
         expect(now).toBeNull()
@@ -3182,7 +3150,7 @@ test("a room whose take-back hasn't come back in 10 s is ended for /share-sessio
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   const starting = $.session.start(START)
   await eventually(asked.clock, () => Boolean(held.release))
-  expect(JSON.parse(asked.files.get(checkpointPath(key))!).value).toBeNull()
+  expect(savedAt(asked, key)).toBeNull()
   let reply: unknown
   void $.command.run({ command: 'share-session', args: '' } as never).then(r => { reply = r })
   await asked.clock.advance(9_000)
@@ -3194,7 +3162,7 @@ test("a room whose take-back hasn't come back in 10 s is ended for /share-sessio
   // Given up, it's over: the room ends (one bounded request, its token on
   // stdin), and its place isn't saved again for a start to take back.
   expect(toldOver(asked, saved.room)).toHaveLength(1)
-  expect(JSON.parse(asked.files.get(checkpointPath(key))!).value).toBeNull()
+  expect(savedAt(asked, key)).toBeNull()
   held.release!()
   await starting
   await asked.clock.advance(50)
@@ -3333,7 +3301,7 @@ for (const role of ['host', 'guest'] as const) {
       await typed
       // Still being taken back, its place still taken: not given up.
       await asked.clock.advance(1_500)
-      expect(JSON.parse(asked.files.get(checkpointPath(key))!).value).toBeNull()
+      expect(savedAt(asked, key)).toBeNull()
       held.release!()
       await starting
       await asked.clock.advance(50)
@@ -3362,7 +3330,7 @@ test("a link pasted while this session's place in a room is slow to come back wa
   await pasted
   expect(asked.state.mode).toBe('guest')
   expect(toldOver(asked, JOINED_PLACE.room, 'leave')).toHaveLength(1)
-  expect(JSON.parse(asked.files.get(checkpointPath(key))!).value).toBeNull()
+  expect(savedAt(asked, key)).toBeNull()
   const trash = await eventually(asked.clock, () => asked.spawned.find(s => s.input?.startsWith('# shared-session: remove a preview profile')))
   expect(trash?.input).toContain(`p='${await roomProfile()}'`)
   held.release!()
@@ -3403,7 +3371,7 @@ for (const which of ['team', 'invite'] as const) {
     expect(asked.externals).toEqual([`claude://code/new?q=${encodeURIComponent(`http://localhost:8787/s/${room}`)}`])
     expect(asked.some(a => a.includes(`${room}/join`))).toBe(false)
     // Still being taken back, its place still taken: not given up.
-    expect(JSON.parse(asked.files.get(checkpointPath(key))!).value).toBeNull()
+    expect(savedAt(asked, key)).toBeNull()
     held.release!()
     await starting
     await asked.clock.advance(50)
@@ -3447,7 +3415,7 @@ for (const invited of [false, true] as const) {
     expect(asked).toContain(invited ? `POST /api/rooms/${id}/join` : 'POST /api/rooms')
     // Given up, it's over: the room ends, and its place isn't saved again.
     expect(toldOver(asked, saved.room)).toHaveLength(1)
-    expect(JSON.parse(asked.files.get(checkpointPath(key))!).value).toBeNull()
+    expect(savedAt(asked, key)).toBeNull()
     held.release!()
     await starting
     await asked.clock.advance(50)
@@ -3614,7 +3582,7 @@ test("a link pasted while this session's place in a room is late coming back, wh
   expect(asked.state.room ?? null).toBeNull()
   expect(toldOver(asked, JOINED_PLACE.room, 'leave')).toHaveLength(0)
   expect(asked.spawned.some(s => s.input?.startsWith('# shared-session: remove a preview profile'))).toBe(false)
-  expect(JSON.parse(asked.files.get(checkpointPath(key))!).value).toEqual(saved)
+  expect(savedAt(asked, key)).toEqual(saved)
   held.release!()
   await starting
   await asked.clock.advance(50)
@@ -3622,7 +3590,7 @@ test("a link pasted while this session's place in a room is late coming back, wh
   expect(asked.logged).not.toContain("Back in Sam's session.")
   expect(asked.filter(a => a.includes('room0000000000000001'))).toEqual(['GET /api/rooms/room0000000000000001/events'])
   expect(toldOver(asked, JOINED_PLACE.room, 'leave')).toHaveLength(0)
-  expect(JSON.parse(asked.files.get(checkpointPath(key))!).value).toEqual(saved)
+  expect(savedAt(asked, key)).toEqual(saved)
 })
 
 // The same for a join whose seat comes but not its history: its seat goes
@@ -3640,12 +3608,12 @@ test("a link pasted while this session's place in a room is late coming back, wh
   await asked.clock.advance(50)
   expect(asked.state.room ?? null).toBeNull()
   expect(toldOver(asked, JOINED_PLACE.room, 'leave')).toHaveLength(0)
-  expect(JSON.parse(asked.files.get(checkpointPath(key))!).value).toEqual(JOINED_PLACE)
+  expect(savedAt(asked, key)).toEqual(JOINED_PLACE)
   held.release!()
   await starting
   await asked.clock.advance(50)
   expect(asked.filter(a => a.includes('room0000000000000001'))).toEqual(['GET /api/rooms/room0000000000000001/events'])
-  expect(JSON.parse(asked.files.get(checkpointPath(key))!).value).toEqual(JOINED_PLACE)
+  expect(savedAt(asked, key)).toEqual(JOINED_PLACE)
 })
 
 test("/share-session in a fresh session whose room is late coming back, its new room refused, gives nothing up: that room isn't ended, and the next start takes it back", async ($, on) => {
@@ -3662,7 +3630,7 @@ test("/share-session in a fresh session whose room is late coming back, its new 
   expect(asked).toContain('POST /api/rooms')
   expect(asked.state.room ?? null).toBeNull()
   expect(toldOver(asked, saved.room)).toHaveLength(0)
-  expect(JSON.parse(asked.files.get(checkpointPath(key))!).value).toEqual(saved)
+  expect(savedAt(asked, key)).toEqual(saved)
   held.release!()
   await starting
   await asked.clock.advance(50)
@@ -3700,7 +3668,7 @@ for (const reason of ['other', 'clear'] as const) {
       expect(await within(asked.clock, () => Boolean(making.release), 11_000)).toBe(true)
       // Given up, its new room not made yet: nothing told, the place taken.
       expect(toldOver(asked, saved.room)).toHaveLength(0)
-      const now = () => JSON.parse(asked.files.get(checkpointPath(key))!).value
+      const now = () => savedAt(asked, key)
       expect(now()).toBeNull()
       await $.session.end({ reason, sessionId: 'session-test-0001', resume: {} } as never)
       const ended = () => asked.filter(a => a === 'POST /api/rooms/room0000000000000009/end')
@@ -3769,7 +3737,7 @@ for (const role of ['guest', 'host'] as const) {
     expect(await turn('mine-2', 'And the linter')).toBe(role === 'guest' ? note : 'Ran them here.')
     expect(own).toBe(role === 'guest' ? 0 : 2)
     // Still being taken back: not given up for a prompt, and back once it answers.
-    expect(JSON.parse(asked.files.get(checkpointPath(key))!).value).toBeNull()
+    expect(savedAt(asked, key)).toBeNull()
     held.release!()
     await starting
     await asked.clock.advance(50)
@@ -3787,7 +3755,7 @@ for (const role of ['guest', 'host'] as const) {
 test("another of the guest's sessions' message while their place comes back waits, then goes on to the host's session", async ($, on) => {
   const held = holding()
   const key = 'joined:session-test-0001'
-  const place = { ...JOINED_PLACE, room: { ...JOINED_PLACE.room, peer: true } }
+  const place = JOINED_PLACE
   const transcripts = { [PEER_TRANSCRIPT]: `${peerRow(FROM_AGENT, MSG)}\n` }
   const asked = world(on, { files: { [checkpointPath(key)]: JSON.stringify({ version: 1, value: place }) }, beforeEvents: held.wait, env: PEER_ENV, transcripts })
   on('session.start', ($, e) => ({ cwd: e.cwd }))
@@ -4895,10 +4863,10 @@ test("a teammate's prompt set aside for not starting is still theirs when its tu
   await $.command.run({ command: 'stop-sharing', args: '' } as never)
 })
 
-// A teammate's prompt a module from before this queue submitted (0.11.24
-// sent each at once and kept nothing through a reload) can start after an
-// update in place, with nothing here to know it by: framed as a current
-// teammate's, it's theirs, and its calls are put to the host.
+// A teammate's prompt nothing here knows any more (set aside past the
+// queue's newest 8, or submitted by the module before this one) can still
+// start: framed as a current teammate's, it's theirs, and its calls are put
+// to the host.
 test("a turn framed as a current teammate's prompt that nothing here knows is theirs: its calls are put to the host", async ($, on) => {
   const people = [{ id: 'host', name: 'scott', role: 'host', online: true }, { id: 'seat2', name: 'Alex', role: 'guest', online: true }]
   const asked = world(on, { surfaces: ['desktop'], beforeSet: reloaded(on, { room: CUT_HOST, mode: 'host', people }) })
@@ -5082,12 +5050,11 @@ for (const feed of ['stream', 'polls'] as const) {
 test('a Desktop session reopened under a new id (a rewind) takes its room back; rooms it left before end', async ($, on) => {
   const asked = world(on, {
     env: { CLAUDE_CODE_HOST_SESSION_ID: 'local_0000d351-0000-4000-8000-000000000001' },
-    store: {
+    files: Object.fromEntries(Object.entries({
       'hosting:cli-old': savedRoom('room0000000000000009', 900, { place: 'local_0000d351-0000-4000-8000-000000000001' }),
-      // Saved before places were: the sidebar row's id is Desktop's.
-      'hosting:cli-older': savedRoom('room0000000000000008', 500, { sidebar: 'local_0000d351-0000-4000-8000-000000000001' }),
+      'hosting:cli-older': savedRoom('room0000000000000008', 500, { place: 'local_0000d351-0000-4000-8000-000000000001' }),
       'hosting:cli-other': savedRoom('room0000000000000007', 950, { place: 'local_0000d352-0000-4000-8000-000000000002' }),
-    },
+    }).map(([key, value]) => [checkpointPath(key), JSON.stringify({ version: 1, value })])),
     sessionId: 'cli-new',
   })
   on('session.start', ($, e) => ({ cwd: e.cwd }))
@@ -5204,35 +5171,14 @@ for (const config of [undefined, OWN_CONFIG] as const) {
   })
 }
 
-test("with CLAUDE_CONFIG_DIR set and no sign-in there yet, ~/.claude's is copied there once, privately, and stays where it was", async ($, on) => {
-  const asked = world(on, { env: { CLAUDE_CONFIG_DIR: OWN_CONFIG }, team: { signedIn: true } })
-  const old = asked.files.get(ACCOUNT_FILE)
-  expect(await $.command.run({ command: 'team', args: 'signin' } as never)).toEqual({ text: `Signed in as ${ME.name}. /team signout to sign out.` })
-  expect(JSON.parse(asked.files.get(CONFIG_ACCOUNT)!).servers['http://localhost:8787'].token).toBe(TEAM_TOKEN)
-  // As a sign-in is written: a umask, the token on stdin, never in arguments.
-  const writes = accountWrites(asked, CONFIG_ACCOUNT)
-  expect(writes).toHaveLength(1)
-  expect(writes[0]!.argv).toEqual(['/bin/sh', '-s'])
-  expect(writes[0]!.input).toContain('chmod 600')
-  expect(asked.files.get(ACCOUNT_FILE)).toBe(old)
-  // Once: read again, it's read from there, and nothing is copied again.
-  await $.command.run({ command: 'team', args: 'signin' } as never)
-  const ui = await $.ui.mount(band('desktop'))
-  expect((await ui.find({ key: 'share' }))?.props.label).toBe('Share with Acme')
-  expect(accountWrites(asked, CONFIG_ACCOUNT)).toHaveLength(1)
-  expect(accountWrites(asked, ACCOUNT_FILE)).toHaveLength(0)
-})
-
 for (const how of ['signout', 'delete-account'] as const) {
-  test(`/team ${how} with CLAUDE_CONFIG_DIR set clears the sign-in of that folder and leaves ~/.claude's alone`, async ($, on) => {
+  test(`/team ${how} with CLAUDE_CONFIG_DIR set clears that folder's sign-in, and writes nothing in ~/.claude`, async ($, on) => {
     const asked = world(on, { env: { CLAUDE_CONFIG_DIR: OWN_CONFIG }, team: { signedIn: true } })
-    const old = asked.files.get(ACCOUNT_FILE)
     await $.command.run({ command: 'team', args: how } as never)
     expect(asked).toContain(how === 'signout' ? 'POST /api/auth/logout' : 'DELETE /api/me')
     expect(JSON.parse(asked.files.get(CONFIG_ACCOUNT)!).servers).toEqual({})
-    expect(asked.files.get(ACCOUNT_FILE)).toBe(old)
-    expect(accountWrites(asked, ACCOUNT_FILE)).toHaveLength(0)
-    // Signed out here for good: ~/.claude's isn't taken again.
+    expect(asked.files.has(ACCOUNT_FILE)).toBe(false)
+    // Signed out: a sign-in starts over.
     const again = await $.command.run({ command: 'team', args: 'signin' } as never)
     expect(JSON.stringify(again)).toContain('Sign in with: /team signin github or /team signin google')
     expect(JSON.parse(asked.files.get(CONFIG_ACCOUNT)!).servers).toEqual({})
@@ -5252,8 +5198,7 @@ test('/team signin says the code the browser will show, from the hash it sends, 
   const reply = await $.command.run({ command: 'team', args: 'signin github' } as never)
   const { login, said } = codeOf(asked.spawned.find(s => s.input?.includes('/auth/github/start?login='))?.input)
   expect(login).toMatch(/^[0-9a-f]{64}$/)
-  // `code=1`: this version shows the code, so the page asks that the two match.
-  expect(reply).toEqual({ text: `Sign in with GitHub in your browser; this session picks it up when you're done. ${said} If no browser opened: http://localhost:8787/auth/github/start?login=${login}&code=1` })
+  expect(reply).toEqual({ text: `Sign in with GitHub in your browser; this session picks it up when you're done. ${said} If no browser opened: http://localhost:8787/auth/github/start?login=${login}` })
   expect(asked.toasted.some(t => t.includes('Your browser will show the code'))).toBe(false)
 })
 
@@ -5265,7 +5210,7 @@ test("the Team panel's sign-in says the code the browser will show, as it opens 
   await pane.press({ key: 'signin-github' })
   const opened = (await eventually(asked.clock, () => asked.spawned.find(s => s.input?.includes('/auth/github/start?login='))))?.input
   const { login, code, said } = codeOf(opened)
-  expect(opened).toContain(`/auth/github/start?login=${login}&code=1'`)
+  expect(opened).toContain(`/auth/github/start?login=${login}'`)
   expect(asked.toasted).toContain(said)
   expect(await pane.find({ type: 'Text', text: 'Finish signing in with GitHub in your browser…' })).toBeDefined()
   expect(await pane.find({ type: 'Text', text: said })).toBeDefined()
@@ -6573,6 +6518,7 @@ test("Leave while Open moves the page puts nothing back: no mapping is left save
   const asked = localWorld(on, {
     localPreviewByPid: { 'pv-local': { taken: [3340, 44321], port: 45555 } },
     files: { [checkpointPath('joined:session-test-0001')]: JSON.stringify({ version: 1, value: saved }) },
+    roomList: { previews: [{ pid: 'pv-local', port: 3340, tcp: true }] },
     beforeTunnel: pid => (pid === 'pv-local' && ++grants === 3 ? new Promise<void>(done => { hold = done }) : Promise.resolve()),
   })
   on('session.start', ($, e) => ({ cwd: e.cwd }))
@@ -6657,71 +6603,7 @@ test("seated anew between a listener's grant and its start, the Open stops what 
   await $.command.run({ command: 'stop-sharing', args: '' } as never)
 })
 
-test("a Local port 0.11.24 saved is only where the listener was: a reload binds it there, and an Open moves it rather than fail there", async ($, on) => {
-  const saved = {
-    at: 900,
-    room: { server: 'http://share.test', id: 'room0000000000000001', url: LINK, title: 'demo', host: 'Sam', token: 'g', seat: 'seat1', seq: 2, since: 1 },
-    autoOpen: true, policy: { prompts: 'everyone', approvals: 'edits', files: 'on' },
-    shown: [{ key: 'preview:pv-local', kind: 'preview', name: 'Sign in (preview)', ts: 900, pid: 'pv-local', port: 3340, path: '/login?next=%2Faccount', tcp: true, host: '127.0.0.1' }],
-    // The person chose localhost:4000 for the host's 3340, in 0.11.24's Room.
-    localPreviews: [{ pid: 'pv-local', port: 3340, localPort: 4000, requestedPort: 4000 }], activity: [], chat: [], sidebar: null,
-  }
-  const asked = world(on, { browser: { platform: 'Darwin', path: null }, env: { CLAUDE_CODE_ENTRYPOINT: 'cli' }, localPreviewByPid: { 'pv-local': { taken: [3340, 4000], port: 44321 } }, files: { [checkpointPath('joined:session-test-0001')]: JSON.stringify({ version: 1, value: saved }) }, stream: [{ seq: 2, events: [], people: PREVIEW_PEOPLE, ended: false, title: 'demo' }], roomList: { previews: [{ pid: 'pv-local', port: 3340, tcp: true }] } })
-  on('session.start', ($, e) => ({ cwd: e.cwd }))
-  await $.session.start(START)
-  // Back exactly where it was, or not at all: 4000 is taken now.
-  await eventually(asked.clock, () => asked.toasted.some(t => t.includes('forwarded again')))
-  expect(tunnels(asked).map(t => [t.port, t.strict])).toEqual([[4000, true]])
-  expect(asked.toasted).toContain("localhost:3340 of Sam's wasn't forwarded again: localhost:4000 is in use here now. Press Open in the Room when ready.")
-  // Open: the host's number taken, no window: the page moves from 4000 to a free port.
-  const ui = await $.ui.mount(band('terminal'))
-  await ui.press({ key: 'open-preview' })
-  await eventually(asked.clock, () => asked.externals.length)
-  await asked.clock.advance(10)
-  expect(tunnels(asked).slice(1).map(t => [t.port, t.strict])).toEqual([[3340, true], [4000, false]])
-  expect(asked.externals).toEqual(['http://127.0.0.1:44321/login?next=%2Faccount'])
-  expect(asked.toasted.some(t => t.includes('already in use'))).toBe(false)
-  await $.command.run({ command: 'stop-sharing', args: '' } as never)
-})
-
-test("a Local port 0.11.24 kept in its state comes back where it was after an update in place, and Open moves it rather than fail there", async ($, on) => {
-  // As 0.11.24 wrote it: the person chose localhost:4000 for the host's 3340.
-  const legacy = { pid: 'pv-local', port: 3340, localPort: 4000, requestedPort: 4000 }
-  let rewritten = false
-  const beforeSet = (key: string, value: unknown) => {
-    if (rewritten || key !== 'localPreviews' || !Array.isArray(value) || !value.length) return
-    rewritten = true
-    return { value: [legacy] }
-  }
-  const byPid: Record<string, { taken?: number[]; port?: number }> = {}
-  const asked = world(on, { beforeSet, browser: { platform: 'Darwin', path: null }, env: { CLAUDE_CODE_ENTRYPOINT: 'cli' }, localPreviewByPid: byPid, stream: [{ seq: 2, events: [LOCAL_SHOWN], people: PREVIEW_PEOPLE, ended: false, title: 'demo' }] })
-  on('session.start', ($, e) => ({ cwd: e.cwd }))
-  await $.session.start(START)
-  await $.prompt.submit({ text: LINK, origin: { kind: 'composer' }, wait: false })
-  await asked.clock.advance(10)
-  const ui = await $.ui.mount(band('terminal'))
-  await ui.press({ key: 'open-preview' })
-  await eventually(asked.clock, () => rewritten)
-  expect(rewritten).toBe(true)
-  // The update loads in place (its helpers went with the old module); 3340 and 4000 are taken now.
-  byPid['pv-local'] = { taken: [3340, 4000], port: 44321 }
-  for (const helper of asked.localHelpers) helper.exit()
-  await asked.clock.advance(10)
-  await $.session.start(START)
-  await eventually(asked.clock, () => asked.toasted.some(t => t.includes('forwarded again')))
-  expect(tunnels(asked).slice(1).map(t => [t.port, t.strict])).toEqual([[4000, true]])
-  expect(asked.toasted).toContain("localhost:3340 of Sam's wasn't forwarded again: localhost:4000 is in use here now. Press Open in the Room when ready.")
-  // Open: the host's number taken, no window: the page moves from 4000 to a free port.
-  await ui.press({ key: 'open-preview' })
-  await eventually(asked.clock, () => asked.externals.length === 2)
-  await asked.clock.advance(10)
-  expect(tunnels(asked).slice(2).map(t => [t.port, t.strict])).toEqual([[3340, true], [4000, false]])
-  expect(asked.externals.at(-1)).toBe('http://localhost:44321/login?next=%2Faccount')
-  expect(asked.toasted.some(t => t.includes('already in use'))).toBe(false)
-  await $.command.run({ command: 'stop-sharing', args: '' } as never)
-})
-
-test("a host's showing without forwarding (a 0.11.24 host's Claude mentioning the address) takes nothing from a guest's listener: a reload brings it back", async ($, on) => {
+test("a host's showing that doesn't say it's forwarded takes nothing from a guest's listener: a reload brings it back", async ($, on) => {
   const stream: unknown[] = [{ seq: 3, events: [WINDOW_SHOWN, DEP_SHOWN], people: PREVIEW_PEOPLE, ended: false, title: 'demo' }]
   const asked = autoWorld(on, { stream })
   on('session.start', ($, e) => ({ cwd: e.cwd }))
@@ -7115,7 +6997,7 @@ test("a listener this computer no longer lets Claude Code listen on stays closed
     room: { server: 'http://share.test', id: 'room0000000000000001', url: LINK, title: 'demo', host: 'Sam', token: 'g', seat: 'seat1', seq: 2, since: 1 },
     autoOpen: true, policy: { prompts: 'everyone', approvals: 'edits', files: 'on' },
     shown: [{ key: 'preview:pv-low', kind: 'preview', name: 'App (preview)', ts: 900, pid: 'pv-low', port: 80, path: '/', tcp: true }],
-    localPreviews: [{ pid: 'pv-low', port: 80, localPort: 80, requestedPort: 80 }], activity: [], chat: [], sidebar: null,
+    localPreviews: [{ pid: 'pv-low', port: 80, localPort: 80 }], activity: [], chat: [], sidebar: null,
   }
   const asked = world(on, { browser: { platform: 'Darwin', path: null }, env: { CLAUDE_CODE_ENTRYPOINT: 'cli' }, localPreviewByPid: { 'pv-low': { denied: [80] } }, files: { [checkpointPath('joined:session-test-0001')]: JSON.stringify({ version: 1, value: saved }) }, stream: [{ seq: 2, events: [LOW_SHOWN], people: PREVIEW_PEOPLE, ended: false, title: 'demo' }], roomList: { previews: [{ pid: 'pv-low', port: 80, tcp: true }] } })
   on('session.start', ($, e) => ({ cwd: e.cwd }))
@@ -7195,7 +7077,7 @@ test('a page asking for another port the host forwards gets its own tunnel, and 
   expect(asked.localHelpers.every(h => h.stopped)).toBe(true)
 })
 
-for (const need of ['delivered', 'undelivered', 'old', 'shared'] as const) {
+for (const need of ['delivered', 'undelivered', 'shared'] as const) {
   test(`a page asking for a port nobody shared asks the host once (${need})`, async ($, on) => {
     const asked = windowWorld(on, { need })
     await openedInWindow($, asked)
@@ -7208,7 +7090,7 @@ for (const need of ['delivered', 'undelivered', 'old', 'shared'] as const) {
     expect(needs[0]!.headers.authorization).toBe('Bearer g')
     const said = asked.toasted.filter(t => t.startsWith('Your preview tried localhost:5555'))
     expect(said).toEqual(need === 'shared' ? [] : [`Your preview tried localhost:5555, which Sam hasn't shared. ${need === 'delivered' ? 'The request went to Sam.' : 'Ask Sam to share it.'}`])
-    // Answered (or nowhere to ask): asked once for the room, kept through a reload.
+    // Answered: asked once for the room, kept through a reload.
     expect(asked.state.needAsked).toEqual({ ports: [5555], times: [expect.any(Number)] })
     // A port the host forwards isn't asked about: it's there to start.
     asked.proxies[0]!.send({ state: 'blocked', port: 3340 })
@@ -7449,9 +7331,9 @@ test('a session closing closes its window first and keeps the profile with its p
   await $.session.end({ reason: 'other', sessionId: 'session-test-0001', resume: {} } as never)
   expect(asked.windowState.alive).toBe(false)
   expect(asked.spawned.some(s => s.input?.startsWith('# shared-session: remove a preview profile'))).toBe(false)
-  const kept = JSON.parse(asked.files.get(checkpointPath('joined:session-test-0001'))!).value
+  const kept = savedAt(asked, 'joined:session-test-0001')
   expect(kept.previewWindow).toEqual({ port: 47100, profile: (await roomProfile()).split('/').pop() })
-  // What the host forwards goes with the place in its Shown, where 0.11.24 reads it too.
+  // What the host forwards goes with the place in its Shown.
   expect(kept.forwarded).toBeUndefined()
   expect(kept.shown).toEqual([{ key: 'preview:pv-local', kind: 'preview', name: 'Sign in (preview)', title: 'Sign in', ts: 900, pid: 'pv-local', port: 3340, path: '/login?next=%2Faccount', tcp: true, host: '127.0.0.1' }])
   expect(kept.localPreviews).toEqual([])
@@ -7494,7 +7376,7 @@ test("a /clear leaves the room and moves the window's profile aside before it wa
   expect(await eventually(asked.clock, () => asked.includes('POST /api/rooms/room0000000000000001/leave'))).toBe(true)
   expect(asked.windowState.alive).toBe(false)
   expect(removedProfiles(asked).some(s => s.input?.includes(`p='${profile}'`))).toBe(true)
-  expect(JSON.parse(asked.files.get(checkpointPath('joined:session-test-0001'))!).value).toBeNull()
+  expect(savedAt(asked, 'joined:session-test-0001')).toBeNull()
   gone?.()
   await ending
   expect(asked.state.mode).toBe('idle')
@@ -8297,29 +8179,6 @@ test("a reload that finds the window closed forgets its port: a window on the ho
   await $.command.run({ command: 'stop-sharing', args: '' } as never)
 })
 
-test('updated in place from a version that kept no record of what the host forwards, a guest still opens it', async ($, on) => {
-  // As 0.11.24 ran: Shown alone, no `forwarded` written. Shown is the record, as the room's list keeps it.
-  const unwritten = new Set(['forwarded'])
-  const stream: unknown[] = [{ seq: 2, events: [WINDOW_SHOWN], people: PREVIEW_PEOPLE, ended: false, title: 'demo' }]
-  const asked = windowWorld(on, { stream, unwritten })
-  on('session.start', ($, e) => ({ cwd: e.cwd }))
-  await $.prompt.submit({ text: LINK, origin: { kind: 'composer' }, wait: false })
-  await asked.clock.advance(10)
-  const ui = await $.ui.mount(band('desktop'))
-  expect((await ui.find({ key: 'open-preview' }))?.props.label).toBe('Open preview')
-  // A quiet room from here on (its artifact went before), and the update loads in place.
-  stream.length = 0
-  unwritten.clear()
-  await $.session.start(START)
-  await asked.clock.advance(10)
-  expect(Object.keys(asked.state)).not.toContain('forwarded')
-  expect((await ui.find({ key: 'open-preview' }))?.props.label).toBe('Open preview')
-  await ui.press({ key: 'open-preview' })
-  await eventually(asked.clock, () => asked.launches.length)
-  expect(asked.launches[0]!.at(-1)).toBe(WINDOW_URL)
-  await $.command.run({ command: 'stop-sharing', args: '' } as never)
-})
-
 // One source of what the host forwards: Shown, as the room says (its preview
 // events, and the list of what's shared it gives), shown as the artifacts say.
 
@@ -8385,18 +8244,18 @@ test('joining, a guest lists what the room shares though its history lost the ar
   await $.command.run({ command: 'stop-sharing', args: '' } as never)
 })
 
-// A place as 0.11.24 could save it, its host's Claude having shown the app's
-// address again: Shown without the forwarding (0.11.24 kept no earlier say).
+// A place with two forwarded previews and their listeners, saved as the
+// session closed.
 const placeShown = (pid: string, port: number, tcp: boolean) => ({ key: `preview:${pid}`, kind: 'preview', name: 'App (preview)', ts: 900, pid, port, path: '/', ...(tcp ? { tcp: true } : {}) })
 const LOST_PLACE = {
   at: 900,
   room: { server: 'http://share.test', id: 'room0000000000000001', url: LINK, title: 'demo', host: 'Sam', token: 'g', seat: 'seat1', seq: 3, since: 1 },
   autoOpen: true, policy: { prompts: 'everyone', approvals: 'edits', files: 'on' }, activity: [], chat: [], sidebar: null,
-  shown: [placeShown('pv-local', 3340, false), placeShown('pv-ended', 3341, true)],
-  localPreviews: [{ pid: 'pv-local', port: 3340, localPort: 3340, requestedPort: 3340 }, { pid: 'pv-ended', port: 3341, localPort: 3341, requestedPort: 3341 }],
+  shown: [placeShown('pv-local', 3340, true), placeShown('pv-ended', 3341, true)],
+  localPreviews: [{ pid: 'pv-local', port: 3340, localPort: 3340 }, { pid: 'pv-ended', port: 3341, localPort: 3341 }],
 }
 
-test("a reopened place takes what the room shares from its answer before its listeners come back: one Shown lost the forwarding of comes back, one ended meanwhile stays closed", async ($, on) => {
+test("a reopened place takes what the room shares from its answer before its listeners come back: one ended meanwhile stays closed", async ($, on) => {
   const asked = localWorld(on, {
     roomList: { previews: [{ pid: 'pv-local', port: 3340, tcp: true, title: 'App' }] },
     files: { [checkpointPath('joined:session-test-0001')]: JSON.stringify({ version: 1, value: LOST_PLACE }) },
@@ -8547,7 +8406,7 @@ test("a need the room answers as forwarded already takes nothing up itself: the 
   await $.command.run({ command: 'stop-sharing', args: '' } as never)
 })
 
-test('a closing place keeps every preview the host shares, however much was shown since, where 0.11.24 reads them too', async ($, on) => {
+test('a closing place keeps every preview the host shares, however much was shown since', async ($, on) => {
   const links = Array.from({ length: 30 }, (_, i) => ({ seq: 4 + i, type: 'artifact', ts: 901 + i, from: HOST_FROM, body: { kind: 'link', url: `https://example.test/${i}` } }))
   const asked = windowWorld(on, { joinHistory: [WINDOW_SHOWN, DEP_SHOWN, ...links], stream: [{ seq: 33, events: [], people: PREVIEW_PEOPLE, ended: false, title: 'demo' }] })
   on('session.start', ($, e) => ({ cwd: e.cwd }))
@@ -8557,7 +8416,7 @@ test('a closing place keeps every preview the host shares, however much was show
   await asked.clock.advance(10)
   await eventually(asked.clock, () => (asked.state.shown ?? []).length === 32)
   await $.session.end({ reason: 'other', sessionId: 'session-test-0001', resume: {} } as never)
-  const kept = JSON.parse(asked.files.get(checkpointPath('joined:session-test-0001'))!).value as { shown: { kind: string; pid?: string; tcp?: boolean; dependency?: unknown }[] }
+  const kept = savedAt(asked, 'joined:session-test-0001') as { shown: { kind: string; pid?: string; tcp?: boolean; dependency?: unknown }[] }
   // Both previews, older than every link kept, and the newest 20 links.
   expect(kept.shown.filter(s => s.kind === 'link')).toHaveLength(20)
   expect(kept.shown.slice(0, 2)).toMatchObject([{ pid: 'pv-local', tcp: true }, { pid: 'pv-dep', tcp: true, dependency: 3340 }])
@@ -10016,14 +9875,12 @@ test("a page shared through its link whose port another session's preview holds 
   const { asked, stream } = await sharingLink($, on, 'http://localhost:3340/', { holders, wsRelays: true })
   holders[3340] = true
   await asked.clock.advance(6_000)
-  await deliver(asked, stream, [proxyAsk(1), proxyAsk(2, { answer: 2 })], () => proxyPages(asked).length === 2)
+  await deliver(asked, stream, [proxyAsk(1)], () => proxyPages(asked).length === 1)
   expect(asked.proxyFetches).toHaveLength(0)
-  const [old, two] = proxyPages(asked).map(s => s.input!)
-  expect(old).toContain('header = "x-proxy-status: 403"')
-  expect(old).toContain('another shared session')
-  expect(old).toMatch(/forwarded to [^ ]+ computer, so it can/)
-  expect(two).toContain('header = "x-proxy-format: 2"')
-  expect(two).toContain('403')
+  const said = proxyPages(asked)[0]!.input!
+  expect(said).toContain('\\"status\\":403')
+  expect(said).toContain('another shared session')
+  expect(said).toMatch(/forwarded to [^ ]+ computer, so it can/)
   const refusals = () => asked.spawned.filter(s => s.argv[0] === 'curl' && s.input?.includes('/ws/socket00000001/reject"'))
   await deliver(asked, stream, [{ ws: { id: 'socket00000001', pid: 'pv1', port: 3340, path: '/', protocols: [] } }], () => refusals().length)
   expect(refusals()[0]!.input).toContain('data = "{\\"code\\":\\"CONNECT\\"}"')
@@ -10191,7 +10048,7 @@ test('a room shared Only from now on keeps that with its place: reopened, it sha
   expect(previews()).toEqual([])
   expect(asked.state.room?.fromNow).toBe(true)
   await $.session.end({ reason: 'other', sessionId: 'session-test-0001', resume: {} } as never)
-  expect(JSON.parse(asked.files.get(checkpointPath('hosting:session-test-0001'))!).value.room.fromNow).toBe(true)
+  expect(savedAt(asked, 'hosting:session-test-0001').room.fromNow).toBe(true)
   await $.session.start(START)
   await asked.clock.advance(500)
   expect(asked.logged.some(l => l.startsWith('Still sharing this session'))).toBe(true)
@@ -10231,7 +10088,7 @@ test("the public link asks the host's localhost at its scheme, the guest's path 
   const headers = 'HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 201 Created\r\ncontent-type: text/html\r\nset-cookie: app=2\r\nx-name: cafÃ©\r\n\r\n'
   const { asked, stream } = await sharingLink($, on, 'https://localhost:3340/app', { proxyFetch: { status: 201, headers } })
   const browser = [['Origin', 'https://preview.test'], ['Referer', 'https://preview.test/app?x=1'], ['cookie', 'app=1']]
-  await deliver(asked, stream, [proxyAsk(1, { method: 'POST', path: '/a/[1-100000000]?q={a,b}', headers: browser, body: btoa('x=1'), answer: 2 })], () => proxyAnswers(asked).length)
+  await deliver(asked, stream, [proxyAsk(1, { method: 'POST', path: '/a/[1-100000000]?q={a,b}', headers: browser, body: btoa('x=1') })], () => proxyAnswers(asked).length)
   const fetch = asked.proxyFetches[0]!.input.split('\n')
   expect(fetch).toContain('url = "https://localhost:3340/a/[1-100000000]?q={a,b}"')
   // One request, never curl's pattern of a hundred million; a TLS dev
@@ -10248,16 +10105,15 @@ test("the public link asks the host's localhost at its scheme, the guest's path 
   expect(fetch).toContain('header = "cookie: app=1"')
   expect(fetch.join('\n')).not.toContain('preview.test')
   expect(fetch).toContain(`printf '%s' '${btoa('x=1')}' | base64 --decode > "$d/body" 2>/dev/null || : > "$d/body"`)
-  // Format 2: the last response's status and headers in the body's first line, each byte kept.
+  // The last response's status and headers in the body's first line, each byte kept.
   const answer = proxyAnswers(asked)[0]!.input!.split('\n')
   expect(answer).toContain("d='/tmp/cs-proxy.Fetch001'")
   expect(answer).toContain('url = "http://localhost:8787/api/rooms/room0000000000000002/proxy/proxyask00000001"')
-  expect(answer).toContain('header = "x-proxy-format: 2"')
   expect(answer).toContain('globoff')
   expect(answer).toContain('max-time = 60')
   expect(answer).toContain('{"status":201,"headers":[["content-type","text/html"],["set-cookie","app=2"],["x-name","caf\\u00c3\\u00a9"]]}')
   expect(answer).toContain('cat "$d/pre" "$d/b" | curl -K "$d/up" -X POST --data-binary @- -o /dev/null & c=$!')
-  expect(answer.some(l => l.includes('x-proxy-status'))).toBe(false)
+  expect(answer.some(l => l.includes('x-proxy-'))).toBe(false)
   expect(proxyPages(asked)).toHaveLength(0)
   // What the preview's server speaks is kept with its share, apart from Shown, and goes with the room.
   expect(asked.state.shares).toEqual({ '3340': { pid: 'pv1', scheme: 'https' } })
@@ -10267,7 +10123,7 @@ test("the public link asks the host's localhost at its scheme, the guest's path 
 
 test("a HEAD through the public link is curl's own head: no body is waited for or sent, and the answer has none", async ($, on) => {
   const { asked, stream } = await sharingLink($, on, 'http://localhost:3340/')
-  await deliver(asked, stream, [proxyAsk(1, { method: 'HEAD', path: '/health', body: btoa('x=1'), answer: 2 })], () => proxyAnswers(asked).length)
+  await deliver(asked, stream, [proxyAsk(1, { method: 'HEAD', path: '/health', body: btoa('x=1') })], () => proxyAnswers(asked).length)
   const head = asked.proxyFetches[0]!.input.split('\n')
   expect(head).toContain('url = "http://localhost:3340/health"')
   // Asked as a method of its own, curl waits out its 25 s for the body the length says.
@@ -10279,7 +10135,7 @@ test("a HEAD through the public link is curl's own head: no body is waited for o
   expect(emptied).toBeGreaterThan(head.indexOf('if [ $e -ne 0 ]; then rm -rf "$d"; echo "exit=$e"; exit 0; fi'))
   expect(emptied).toBeLessThan(head.findIndex(l => l.startsWith("printf 'exit=0")))
   // Any other method goes as itself, its body as fetched.
-  await deliver(asked, stream, [proxyAsk(2, { method: 'GET', answer: 2 })], () => proxyAnswers(asked).length === 2)
+  await deliver(asked, stream, [proxyAsk(2, { method: 'GET' })], () => proxyAnswers(asked).length === 2)
   const get = asked.proxyFetches[1]!.input.split('\n')
   expect(get).toContain('request = "GET"')
   expect(get).not.toContain('head')
@@ -10302,7 +10158,7 @@ test("a public socket or request asked for while a Stop is taken in starts nothi
   armed = true
   await stopInRoom($, asked, stream)
   await eventually(asked.clock, () => holding)
-  await deliver(asked, stream, [{ ws: { id: 'socket00000009', pid: 'pv1', port: 3340, path: '/', protocols: [] } }, proxyAsk(1, { method: 'POST', path: '/api/delete-all', body: btoa('x=1'), answer: 2 })], () => proxyPages(asked).length)
+  await deliver(asked, stream, [{ ws: { id: 'socket00000009', pid: 'pv1', port: 3340, path: '/', protocols: [] } }, proxyAsk(1, { method: 'POST', path: '/api/delete-all', body: btoa('x=1') })], () => proxyPages(asked).length)
   await asked.clock.advance(100)
   expect(asked.wsRelays).toHaveLength(0)
   expect(asked.proxyFetches).toHaveLength(0)
@@ -10329,7 +10185,7 @@ test("a Stop the room didn't hear keeps its Stop in the Room and is told again a
   expect(asked.state.shown?.find(s => s.pid === 'pv1')?.closed).toBeUndefined()
   expect(await pane.find({ key: 'stop-preview:pv1' })).toBeDefined()
   // The room still sends its link's requests here: each hears it ended, at once, and nothing is fetched.
-  await deliver(asked, stream, [proxyAsk(7, { answer: 2 })], () => proxyPages(asked).length)
+  await deliver(asked, stream, [proxyAsk(7)], () => proxyPages(asked).length)
   expect(asked.proxyFetches).toHaveLength(0)
   expect(proxyPages(asked)[0]!.input).toContain('\\"status\\":404')
   expect(proxyPages(asked)[0]!.input).toContain('This preview has ended')
@@ -10420,32 +10276,24 @@ test("a preview shared again while its Stop went unheard stays shared: the room 
   await $.command.run({ command: 'stop-sharing', args: '' } as never)
 })
 
-test('a 0.11.24 room gets its own answer; past 20 MB, too slow or nothing there, a page says so in the room\'s format', async ($, on) => {
+test("an answer's head goes first in its body; past 20 MB, too slow or nothing there, a page says so in the same form", async ($, on) => {
   const said: NonNullable<NonNullable<Parameters<typeof world>[1]>['proxyFetch']> = {}
   const { asked, stream } = await sharingLink($, on, 'http://localhost:3340/', { proxyFetch: said })
-  // No `answer: 2` in the ask: status and headers ride in request headers, as before.
   await deliver(asked, stream, [proxyAsk(1)], () => proxyAnswers(asked).length)
-  const old = proxyAnswers(asked)[0]!.input!.split('\n')
-  expect(old).toContain('header = "x-proxy-status: 200"')
-  expect(old).toContain(`header = "x-proxy-headers: ${btoa('HTTP/1.1 200 OK\r\ncontent-type: text/html\r\n\r\n')}"`)
-  expect(old).toContain(': > "$d/pre"')
-  expect(old.some(l => l.includes('x-proxy-format'))).toBe(false)
+  const answer = proxyAnswers(asked)[0]!.input!.split('\n')
+  expect(answer).toContain('{"status":200,"headers":[["content-type","text/html"]]}')
+  expect(answer.some(l => l.includes('x-proxy-'))).toBe(false)
   expect(asked.proxyFetches[0]!.input.split('\n')).toContain('url = "http://localhost:3340/"')
   expect(asked.proxyFetches[0]!.input.split('\n')).not.toContain('insecure')
   for (const [n, exit, status, words] of [[2, 63, 502, 'over 20 MB'], [3, 28, 504, 'took too long'], [4, 7, 502, "Nothing answered on scott's localhost:3340."]] as const) {
     said.exit = exit
-    await deliver(asked, stream, [proxyAsk(n, { answer: 2 })], () => proxyPages(asked).length === n - 1)
+    await deliver(asked, stream, [proxyAsk(n)], () => proxyPages(asked).length === n - 1)
     const page = proxyPages(asked).at(-1)!.input!
     expect(page).toContain(`/proxy/proxyask0000000${n}"`)
-    expect(page).toContain('header = "x-proxy-format: 2"')
+    expect(page).not.toContain('x-proxy-')
     expect(page).toContain(`data-binary = "{\\"status\\":${status},\\"headers\\":[[\\"content-type\\",\\"text/html; charset=utf-8\\"]]}\\n<!doctype html>`)
     expect(page).toContain(words)
   }
-  // The same in a 0.11.24 room's own form.
-  await deliver(asked, stream, [proxyAsk(5)], () => proxyPages(asked).length === 4)
-  const oldPage = proxyPages(asked).at(-1)!.input!.split('\n')
-  expect(oldPage).toContain('header = "x-proxy-status: 502"')
-  expect(oldPage).toContain(`header = "x-proxy-headers: ${btoa('HTTP/1.1 502 \r\ncontent-type: text/html; charset=utf-8\r\n\r\n')}"`)
   // Nothing else went back for them.
   expect(proxyAnswers(asked)).toHaveLength(1)
   await $.command.run({ command: 'stop-sharing', args: '' } as never)
@@ -10455,7 +10303,7 @@ test('the public link fetches 16 at once and holds 256 more, past that a busy pa
   let release!: () => void
   const hold = new Promise<void>(done => { release = done })
   const { asked, stream } = await sharingLink($, on, 'http://localhost:3340/', { proxyFetch: { hold } })
-  await deliver(asked, stream, Array.from({ length: 300 }, (_, i) => proxyAsk(i, { answer: 2 })), () => asked.proxyFetches.length >= 16 && proxyPages(asked).length)
+  await deliver(asked, stream, Array.from({ length: 300 }, (_, i) => proxyAsk(i)), () => asked.proxyFetches.length >= 16 && proxyPages(asked).length)
   await asked.clock.advance(100)
   expect(asked.proxyFetches).toHaveLength(16)
   const busy = proxyPages(asked)
@@ -10477,7 +10325,7 @@ test("past the room's own 30 s, an ask is neither fetched nor answered: its brow
   let release!: () => void
   const hold = new Promise<void>(done => { release = done })
   const { asked, stream } = await sharingLink($, on, 'http://localhost:3340/', { proxyFetch: { hold } })
-  await deliver(asked, stream, Array.from({ length: 17 }, (_, i) => proxyAsk(i, { answer: 2 })), () => asked.proxyFetches.length >= 16)
+  await deliver(asked, stream, Array.from({ length: 17 }, (_, i) => proxyAsk(i)), () => asked.proxyFetches.length >= 16)
   await asked.clock.advance(31_000)
   release()
   const discarded = () => asked.spawned.filter(s => s.argv[0] === '/bin/sh' && s.input?.startsWith("rm -rf -- '/tmp/cs-proxy.Fetch"))
@@ -10866,7 +10714,7 @@ for (const [step, waits] of WINDOW_WAITS) {
       const removed = removedProfiles(asked).filter(s => s.input?.includes(`p='${profile}'`)).length
       if (exit === 'keep') {
         expect(removed).toBe(0)
-        const kept = JSON.parse(asked.files.get(checkpointPath('joined:session-test-0001'))!).value
+        const kept = savedAt(asked, 'joined:session-test-0001')
         expect(kept.previewWindow?.profile).toBe(step === 'its profile is made' ? undefined : profile.split('/').pop())
       } else expect(removed).toBe((step === 'its profile is made' ? 0 : exit === 'clear' ? 2 : 1) + 1)
     })
@@ -11101,7 +10949,7 @@ test("guests' windows asking for many ports: each port looked at once, one quest
 
 test('discovery is given 64 of the forwarded ports at most, and what it finds is checked against them all', async ($, on) => {
   const forwarded = Array.from({ length: 70 }, (_, i) => 5000 + i)
-  const saved = { ...savedRoom('room0000000000000001', 900), previews: Object.fromEntries(forwarded.map((p, i) => [String(p), `pv-f${i}`])), forwardPorts: forwarded.map(String) }
+  const saved = { ...savedRoom('room0000000000000001', 900), shares: Object.fromEntries(forwarded.map((p, i) => [String(p), { pid: `pv-f${i}`, tcp: true }])) }
   const found = { state: 'done', platform: 'darwin', target: { port: 3340, label: 'next-server', web: 'yes', devtools: false }, related: [{ port: 5000, label: 'old-api', web: 'yes', devtools: false }, { port: 3610, label: 'convex-local-backend', web: 'yes', devtools: false }] }
   const asked = world(on, { discover: { 3340: found }, files: { [checkpointPath('hosting:session-test-0001')]: JSON.stringify({ version: 1, value: saved }) } })
   on('session.start', ($, e) => ({ cwd: e.cwd }))
@@ -11432,7 +11280,7 @@ test("each session in a room has a window profile of its own, named for its last
   expect(profile).not.toBe(await roomProfile())
   expect(asked.launches[0]).toContain(`--user-data-dir=${profile}/chrome`)
   await $.session.end({ reason: 'other', sessionId: 'session-test-0001', resume: {} } as never)
-  const kept = JSON.parse(asked.files.get(checkpointPath('joined:session-test-0001'))!).value
+  const kept = savedAt(asked, 'joined:session-test-0001')
   expect(kept.place).toBe(PLACE)
   expect(kept.previewWindow.profile).toBe(profile.split('/').pop())
 })
@@ -11528,7 +11376,7 @@ for (const [how, start] of [
 ] as const) {
   test(`a host ${how} still forwards what it shared itself`, async ($, on) => {
     const stream: unknown[] = []
-    const saved = { ...savedRoom('room0000000000000001', 900), previews: { '3340': 'pv1' }, forwardPorts: ['3340'] }
+    const saved = { ...savedRoom('room0000000000000001', 900), shares: { '3340': { pid: 'pv1', tcp: true } } }
     const opts: Parameters<typeof world>[1] = { stream, tcpRelays: true, ...(start === 'resume' ? { files: { [checkpointPath('hosting:session-test-0001')]: JSON.stringify({ version: 1, value: saved }) } } : {}) }
     const asked = world(on, opts)
     on('session.start', ($, e) => ({ cwd: e.cwd }))
@@ -11580,9 +11428,9 @@ test("a page Claude opens on a forwarded dependency goes out still a dependency,
 
 test('a host back from a restart keeps what each forwarded preview was shared as', async ($, on) => {
   const shown = { key: 'preview:pv2', kind: 'preview', name: 'localhost:3610 (convex-local-backend)', ts: 900, pid: 'pv2', port: 3610, path: '/', tcp: true, host: 'localhost', dependency: 3340 }
-  // As this version saves a place: its shares, and what 0.11.24 reads beside them.
+  // As this version saves a place: its shares.
   const shares = { '3610': { pid: 'pv2', tcp: true, host: 'localhost', dependency: 3340 }, '3611': { pid: 'pv 3', tcp: true }, '70000': { pid: 'pv4' } }
-  const saved = { ...savedRoom('room0000000000000001', 900), previews: { '3610': 'pv2' }, forwardPorts: ['3610'], shares, shown: [shown] }
+  const saved = { ...savedRoom('room0000000000000001', 900), shares, shown: [shown] }
   const asked = world(on, { stream: [], files: { [checkpointPath('hosting:session-test-0001')]: JSON.stringify({ version: 1, value: saved }) } })
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   on('tool.call', { tool: 'mcp__Claude_Browser__navigate' }, () => ({ result: [], text: 'navigated' }) as never)
@@ -11596,7 +11444,7 @@ test('a host back from a restart keeps what each forwarded preview was shared as
   await $.command.run({ command: 'stop-sharing', args: '' } as never)
 })
 
-test("a host's saved place keeps its shares, and what 0.11.24 reads beside them", async ($, on) => {
+test("a host's saved place keeps its shares, its TLS ones too", async ($, on) => {
   const asked = world(on, { stream: [{ seq: 1, events: [], people: HOST_ONLY, ended: false, title: 'demo' }] })
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   on('session.end', ($, e) => ({ sessionId: e.sessionId }))
@@ -11609,43 +11457,14 @@ test("a host's saved place keeps its shares, and what 0.11.24 reads beside them"
   const shares = { '3340': { pid: 'pv1', scheme: 'https' }, '3610': { pid: 'pv2', tcp: true } }
   expect(asked.state.shares).toEqual(shares)
   await $.session.end({ reason: 'other', sessionId: 'session-test-0001', resume: {} } as never)
-  const saved = JSON.parse(asked.files.get(checkpointPath('hosting:session-test-0001'))!).value
+  const saved = savedAt(asked, 'hosting:session-test-0001')
   expect(saved.shares).toEqual(shares)
-  // As 0.11.24 resumes a place: its previews by port, and the ports forwarded.
-  expect(saved.previews).toEqual({ '3340': 'pv1', '3610': 'pv2' })
-  expect(saved.forwardPorts).toEqual(['3610'])
+  expect(Object.keys(saved).filter(k => k === 'previews' || k === 'forwardPorts')).toEqual([])
   expect(asked.state.shares).toEqual({})
   // Back again: as saved, its TLS too.
   await $.session.start(START)
   await eventually(asked.clock, () => Object.keys(asked.state.shares ?? {}).length)
   expect(asked.state.shares).toEqual(shares)
-  await $.command.run({ command: 'stop-sharing', args: '' } as never)
-})
-
-test('a host updated in place from 0.11.24 keeps what it shared: its previews, what it forwarded and the TLS ones move into its shares', async ($, on) => {
-  const stream: unknown[] = [{ seq: 1, events: [], people: PREVIEW_PEOPLE, ended: false, title: 'demo' }]
-  // What 0.11.24 kept in $.state (and the TLS ones, as an unreleased build
-  // kept them), which an update in place keeps: there until written.
-  const legacy = new Map<string, unknown>()
-  const asked = world(on, { stream, tcpRelays: true, wsRelays: true, beforeSet: key => void legacy.delete(key) })
-  on('state.get', async ($, e, next) => (e.plugin === 'shared-session' && legacy.has(e.key) ? ({ value: { value: legacy.get(e.key), version: 1 } } as never) : next(e)))
-  on('session.start', ($, e) => ({ cwd: e.cwd }))
-  const ui = await $.ui.mount(band('terminal'))
-  await ui.press({ key: 'share' })
-  await asked.clock.advance(20)
-  legacy.set('previews', { '3340': 'pv1', '3341': 'pv2', '70000': 'pv3', '3342': 'pv 4' })
-  legacy.set('forwardPorts', ['3340'])
-  legacy.set('previewSchemes', { pv2: 'https' })
-  await $.session.start(START)
-  await asked.clock.advance(20)
-  expect(asked.state.shares).toEqual({ '3340': { pid: 'pv1', tcp: true }, '3341': { pid: 'pv2', scheme: 'https' } })
-  expect([asked.state.previews, asked.state.forwardPorts, asked.state.previewSchemes]).toEqual([{}, [], {}])
-  // The room's asks find them: a connection to the forwarded one, a socket on the TLS one's link.
-  stream.push({ tcp: { id: 'connection0001', pid: 'pv1', port: 3340 } }, { ws: { id: 'socket00000001', pid: 'pv2', port: 3341, path: '/', protocols: [] } })
-  await within(asked.clock, () => asked.sent.some(x => x.body.op === 'open') && asked.wsRelays.length, 6000, 500)
-  stream.length = 0
-  expect(asked.sent.filter(x => x.body.op === 'open').map(x => x.body)).toEqual([{ op: 'open', id: 'connection0001', pid: 'pv1', port: 3340 }])
-  expect(asked.wsRelays[0]!.config).toMatchObject({ local: 'wss://localhost:3341/', insecureLocal: true, origin: 'https://localhost:3341' })
   await $.command.run({ command: 'stop-sharing', args: '' } as never)
 })
 

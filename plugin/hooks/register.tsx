@@ -34,7 +34,7 @@ import { upstreamFromEnv, upstreamFromScutil } from './upstream'
 import type { Upstream } from './upstream'
 import { alsoUses, cleanLabel, dependencyFor, dependencyOf, dependencyTitle, discoverResult, everyName, everyService, heldResult, pageLook, previewHost, previewScheme, previewUrl, questionsOf, relayedResult, rootMissing, serviceName, servicesOf, shareTooWords, urlHost, urlScheme } from './preview'
 import type { Discovered, DiscoveredService, PageLook, PreviewHost } from './preview'
-import { curlString, localHeaders, pageHead, pageHeaderBlock, PROXY_FETCH_MAX, PROXY_HEAD_MAX, proxyHead, proxyPage } from './proxy'
+import { curlString, localHeaders, pageHead, PROXY_FETCH_MAX, PROXY_HEAD_MAX, proxyHead, proxyPage } from './proxy'
 
 type $ = EngineInterface
 type UI = Elements[RenderSurface]
@@ -117,12 +117,6 @@ const sidebarA = atom({ plugin: 'shared-session', key: 'sidebar' } as const, nul
 const shownA = atom({ plugin: 'shared-session', key: 'shown' } as const, [] as ShareShown[])
 // Host: what this session shares, by port (`HostShare`).
 const sharesA = atom({ plugin: 'shared-session', key: 'shares' } as const, {} as Record<string, HostShare>)
-// How 0.11.24 kept it (preview ids by port, and the ports forwarded), and
-// the TLS ones as an unreleased build kept them: read once as the module
-// loads, into `shares` (`takeLegacyShares`).
-const legacyPreviewsA = atom({ plugin: 'shared-session', key: 'previews' } as const, {} as Record<string, string>)
-const legacyForwardPortsA = atom({ plugin: 'shared-session', key: 'forwardPorts' } as const, [] as string[])
-const legacySchemesA = atom({ plugin: 'shared-session', key: 'previewSchemes' } as const, {} as Record<string, 'https'>)
 const localPreviewsA = atom({ plugin: 'shared-session', key: 'localPreviews' } as const, [] as ShareLocalPreview[])
 const previewWindowA = atom({ plugin: 'shared-session', key: 'previewWindow' } as const, null as SharePreviewWindow | null)
 const previewNeedsOpenA = atom({ plugin: 'shared-session', key: 'previewNeedsOpen' } as const, [] as string[])
@@ -260,7 +254,6 @@ const NO_SERVER =
 const MARKETPLACE = 'claude-share'
 const MARKETPLACE_SOURCE = { source: 'github', repo: 'Paradigm-Study/claude-share' }
 const UPDATE_COMMAND = 'claude plugin marketplace update claude-share && claude plugin update shared-session@claude-share'
-const CARDS_FROM = '0.9.0' // the first version whose tool calls guests draw as cards
 let pluginVersion: string | undefined
 
 async function ownVersion($: $): Promise<string> {
@@ -332,12 +325,6 @@ async function readSettings($: $): Promise<{ path: string; settings: Record<stri
 
 // Names (or stops naming) the live folder in the settings' env, the rest kept.
 async function nameLiveDir($: $, on: boolean): Promise<boolean> {
-  // Changing the loader changes $.store's identity. Preserve its room
-  // checkpoints before either direction of that transition is enabled.
-  try { await migrateRoomCheckpoints($) } catch (error) {
-    $.ui.log(`Couldn't preserve saved shared sessions, so the plugin loader was not changed: ${String((error as Error)?.message ?? error)}`)
-    return false
-  }
   const dir = await liveDirOf($)
   const read0 = await readSettings($)
   if (!dir || !read0) return false
@@ -554,8 +541,8 @@ async function readUpdates($: $) {
   await update($, updatesA, () => on)
   const pinned = named && !runsLive($) && (await pinnedByDesktop($))
   await update($, liveUpdatesA, () => (runsLive($) ? 'running' : pinned ? 'pinned' : named ? 'next' : null))
-  // Automatic updates chosen before they could load in place (or the folder
-  // named for them gone): in place now.
+  // Automatic updates chosen outside the Room (setup.mjs turns on only the
+  // marketplace's autoUpdate), or the folder named for them gone: in place now.
   const missing = named && dir ? !(await $.fs.exists(`${dir}/.claude-plugin/plugin.json`).catch(() => true)) : false
   if (on && (!named || missing) && !runsLive($) && (await enableLive($))) {
     $.ui.log('Shared Sessions now updates in place: from your next new session on, a release loads without a restart.')
@@ -743,7 +730,7 @@ type TcpRelayRun = { id: string; pid: string; port: number; scope: RoomScope; wo
 type TcpWorkerRun = Helper & { room: ShareRoom; started: boolean }
 const tcpRejecting = new Set<string>()
 const TCP_RELAYS = 64
-const TCP_UNSUPPORTED = 'This server does not support local TCP forwarding. Update the server and host plugin, or choose Public link.'
+const TCP_UNAVAILABLE = 'Local forwarding is unavailable. Check the host is connected and has Node, then press Open, or choose Public link.'
 
 // The room's scope. What this session does for the room it's in that can
 // outlast a request (a listener, the window, its proxy and tunnels, the
@@ -1367,14 +1354,11 @@ async function runStream($: $, generation: number) {
     const room = await read($, roomA)
     if (!room || (await read($, modeA)) === 'idle') return
     if ((await $.env.get('SHARED_SESSION_TRANSPORT')) === 'poll') return void startPolls($, generation, 'SHARED_SESSION_TRANSPORT=poll')
-    // A host takes raw TCP and guests' needs: the room sends a need only to a
-    // host that says so, and tells a guest asking an older one that it
-    // didn't go. Both sides take messages between sessions (`peer`), which
-    // the room sends only to a stream that says so: a poll gets none, and
-    // the other side is told this one isn't connected.
+    // Messages between sessions (`peer`) come only on a stream: a poll gets
+    // none, and the other side is told this one isn't connected.
     const host = (await read($, modeA)) === 'host'
     const config = [
-      `url = "${room.server}/api/rooms/${room.id}/stream?after=${room.seq}${host ? '&tcp=1&need=1' : ''}&peer=1"`,
+      `url = "${room.server}/api/rooms/${room.id}/stream?after=${room.seq}"`,
       `header = "Authorization: Bearer ${room.token}"`,
       'header = "Accept: application/x-ndjson"',
       // Which plugin this is, so the room knows who needs to update.
@@ -1394,7 +1378,6 @@ async function runStream($: $, generation: number) {
     let started = false
     let delivered = false
     let status = 0
-    let refusal = ''
     let buffer = ''
     const opened = await $.clock.now()
     let lastLine = opened
@@ -1431,7 +1414,6 @@ async function runStream($: $, generation: number) {
           }
           const ask = ROOM_ASKS.find(kind => message[kind] && typeof message[kind] === 'object')
           if (typeof message.httpStatus === 'number') status = message.httpStatus
-          else if (typeof message.error === 'string') refusal = message.error
           else if (ask) answerRoomAsk($, room, ask, message[ask] as Record<string, unknown>)
           else if (message.peer && typeof message.peer === 'object') void takePeer($, room, host, message.peer as Record<string, unknown>).catch(error => $.ui.log(`Shared session: a message between sessions: ${String((error as Error)?.message ?? error)}`, { to: 'debug' }))
           else if (Array.isArray(message.events)) {
@@ -1461,8 +1443,6 @@ async function runStream($: $, generation: number) {
     }
     if (generation !== pollGeneration) return
     if ([401, 404, 410].includes(status)) {
-      // A server without streams answers the address itself with "Not found".
-      if (status === 404 && refusal === 'Not found') return void startPolls($, generation, 'the server has no stream')
       // A guest whose seat was let go sits down again and reconnects at once.
       if (!(await stillSeated($, room, status))) return
       if (generation !== pollGeneration) return
@@ -2538,9 +2518,6 @@ async function clearRoomState($: $, opts: { unmark?: string | true } = {}) {
   await update($, ownersA, () => ({}))
   await update($, shownA, () => [])
   await update($, sharesA, () => ({}))
-  // 0.11.24's keys, had they failed to move as the module loaded: never
-  // taken into a later room.
-  await takeLegacyShares($, false)
   await update($, askingA, () => null)
   await update($, connectionA, () => 'live')
   await update($, confirmingA, () => null)
@@ -2984,7 +2961,7 @@ async function makeRoom($: $, surface: RenderSurface | undefined, opts: { histor
   const signedIn = await signInFor($, server)
   const team = signedIn && opts.team !== false ? await shareTeam($, server) : null
 
-  const created = await api<{ id: string; url: string; token: string; seq: number; title: string; latest?: string; team?: { id: string; name: string }; peer?: boolean }>(
+  const created = await api<{ id: string; url: string; token: string; seq: number; title: string; latest?: string; team?: { id: string; name: string } }>(
     $,
     server,
     '/api/rooms',
@@ -3005,8 +2982,6 @@ async function makeRoom($: $, surface: RenderSurface | undefined, opts: { histor
     team: created.team ?? null,
     // Kept with its place: reopened, it looks back only from `since`.
     ...(opts.history === false ? { fromNow: true as const } : {}),
-    // Its server passes messages between sessions on: kept with the room.
-    ...(created.peer === true ? { peer: true as const } : {}),
   }
   // Its scope, before the room is anyone's to see.
   const s = openScope(room, 'host')
@@ -3072,17 +3047,8 @@ type Hosting = {
   room: ShareRoom
   policy: SharePolicy
   trusted: string[]
-  /**
-   * What it shares as 0.11.24 says it (port → preview id, and the ports
-   * forwarded): written from `shares` for an older copy taking the place
-   * back, and read where a place has no `shares` (0.11.24 saved it).
-   */
-  previews: Record<string, string>
-  forwardPorts?: string[]
   /** What it shares, by port (`HostShare`). */
-  shares?: Record<string, HostShare>
-  /** An unreleased build's TLS previews, by preview id: read only where a place has no `shares`. */
-  previewSchemes?: Record<string, 'https'>
+  shares: Record<string, HostShare>
   shown: ShareShown[]
   activity: ShareActivity[]
   chat: ShareChat[]
@@ -3098,6 +3064,7 @@ type Hosting = {
 // identities. Room checkpoints belong to the person's Claude configuration,
 // outside the live plugin folder that updates replace. Each session has its
 // own file, so saving another room cannot overwrite this one's checkpoint.
+// A file holding null is no place (how one taken was marked before 0.11.30).
 type RoomCheckpoint = Hosting | Joined
 type RoomCheckpointFile = { version: 1; value: RoomCheckpoint | null }
 
@@ -3116,7 +3083,7 @@ function isRoomCheckpoint(value: unknown): value is RoomCheckpoint {
   return Boolean(saved && typeof saved.at === 'number' && Number.isFinite(saved.at) && saved.room && typeof saved.room.token === 'string' && typeof saved.room.seat === 'string')
 }
 
-async function readRoomCheckpointFile($: $, key: string): Promise<RoomCheckpointFile | undefined> {
+async function readRoomCheckpoint($: $, key: string): Promise<RoomCheckpoint | undefined> {
   const path = `${await roomCheckpointDir($)}/${encodeURIComponent(key)}.json`
   if (!(await $.fs.exists(path))) return undefined
   const text = await $.fs.read(path)
@@ -3126,34 +3093,24 @@ async function readRoomCheckpointFile($: $, key: string): Promise<RoomCheckpoint
     throw new Error('A saved room checkpoint is invalid; it was left untouched')
   }
   if (record?.version !== 1 || (record.value !== null && !isRoomCheckpoint(record.value))) throw new Error('A saved room checkpoint is invalid; it was left untouched')
-  return record
+  return record.value ?? undefined
 }
 
-async function readRoomCheckpoint($: $, key: string): Promise<RoomCheckpoint | undefined> {
-  return (await readRoomCheckpointFile($, key))?.value ?? undefined
-}
-
-async function writeRoomCheckpoint($: $, key: string, value: RoomCheckpoint | null, migrate = false) {
+async function writeRoomCheckpoint($: $, key: string, value: RoomCheckpoint) {
   const dir = await roomCheckpointDir($)
   const path = `${dir}/${encodeURIComponent(key)}.json`
   const tmp = `${dir}/.checkpoint-${randomSecret()}.tmp`
   const body = JSON.stringify({ version: 1, value })
   const tag = fence(body)
-  // A migration never replaces an existing canonical file, even a tombstone.
-  // ln publishes atomically only if absent: a concurrent save/consume wins.
   // Unique private temp files keep unrelated sessions independent. Credentials
   // travel on stdin, never argv, and failed writes leave the old file intact.
-  const publish = migrate
-    ? `if ln ${sq(tmp)} ${sq(path)} 2>/dev/null; then :; elif [ -f ${sq(path)} ]; then :; else exit 1; fi`
-    : `mv ${sq(tmp)} ${sq(path)}`
-  const result = await sh($, `umask 077\nset -e\nmkdir -p ${sq(dir)}\nchmod 700 ${sq(dir)}\ntmp=${sq(tmp)}\ntrap 'rm -f "$tmp"' 0\ncat > ${sq(tmp)} <<'${tag}'\n${body}\n${tag}\nchmod 600 ${sq(tmp)}\n${publish}\n`)
+  const result = await sh($, `umask 077\nset -e\nmkdir -p ${sq(dir)}\nchmod 700 ${sq(dir)}\ntmp=${sq(tmp)}\ntrap 'rm -f "$tmp"' 0\ncat > ${sq(tmp)} <<'${tag}'\n${body}\n${tag}\nchmod 600 ${sq(tmp)}\nmv ${sq(tmp)} ${sq(path)}\n`)
   if (result.code !== 0) throw new Error('Could not write the private saved room checkpoint')
 }
 
 async function deleteRoomCheckpoint($: $, key: string) {
-  // Retain a small receipt without credentials. An old store encountered
-  // after switching back must not resurrect a consumed or stopped room.
-  await writeRoomCheckpoint($, key, null)
+  const path = `${await roomCheckpointDir($)}/${encodeURIComponent(key)}.json`
+  if ((await sh($, `rm -f -- ${sq(path)}\n`)).code !== 0) throw new Error('Could not delete the saved room checkpoint')
 }
 
 async function roomCheckpointKeys($: $): Promise<string[]> {
@@ -3167,23 +3124,6 @@ async function roomCheckpointKeys($: $): Promise<string[]> {
     if (isRoomCheckpointKey(key) && (await readRoomCheckpoint($, key))) keys.push(key)
   }
   return keys
-}
-
-async function migrateRoomCheckpoints($: $) {
-  for (const key of await $.store.keys()) {
-    if (!isRoomCheckpointKey(key)) continue
-    const value = await $.store.get(key)
-    if (value === undefined) continue
-    // Once present, canonical state is authoritative. In particular, no
-    // timestamp on a legacy value can override an intentional tombstone.
-    if (!(await readRoomCheckpointFile($, key))) {
-      if (!isRoomCheckpoint(value)) throw new Error('A legacy saved room checkpoint is invalid; it was left untouched')
-      await writeRoomCheckpoint($, key, value, true)
-    }
-    // A lost ln race is safe only when the winning file is valid and readable.
-    if (!(await readRoomCheckpointFile($, key))) throw new Error('The saved room checkpoint could not be verified')
-    await $.store.delete(key)
-  }
 }
 
 // Claude Desktop's own id for a session (`local_<uuid>`, the shape Claude Code
@@ -3206,8 +3146,7 @@ async function savedKey($: $, prefix: string): Promise<{ key: string | null; old
   for (const key of await roomCheckpointKeys($)) {
     if (!key.startsWith(prefix)) continue
     const saved = await readRoomCheckpoint($, key)
-    // Places saved before `place` was: the sidebar row's id is the same one.
-    if (typeof saved?.at === 'number' && (saved.place ?? saved.sidebar?.id) === place) mine.push({ key, at: saved.at })
+    if (typeof saved?.at === 'number' && saved.place === place) mine.push({ key, at: saved.at })
   }
   mine.sort((a, b) => b.at - a.at)
   return { key: mine[0]?.key ?? null, older: mine.slice(1).map(m => m.key) }
@@ -3221,10 +3160,6 @@ async function hostingPlace($: $, room: ShareRoom): Promise<Hosting> {
     room,
     policy: await read($, policyA),
     trusted: await read($, trustedA),
-    // An older copy (an installed one Claude Desktop pins, say) takes the
-    // place back from these two.
-    previews: Object.fromEntries(shares.map(([port, share]) => [port, share.pid])),
-    forwardPorts: shares.filter(([, share]) => share.tcp).map(([port]) => port),
     shares: Object.fromEntries(shares),
     shown: keptShown(await read($, shownA), 20),
     activity: (await read($, activityA)).slice(-40),
@@ -3248,10 +3183,7 @@ type Joined = {
   room: ShareRoom
   autoOpen: boolean
   policy: SharePolicy
-  /**
-   * Every open preview, what the host forwards among them (`tcp`), and the
-   * newest 20 of the rest. 0.11.24 reads what it forwards from here as well.
-   */
+  /** Every open preview, what the host forwards among them (`tcp`), and the newest 20 of the rest. */
   shown: ShareShown[]
   localPreviews?: ShareLocalPreview[]
   activity: ShareActivity[]
@@ -3895,7 +3827,7 @@ async function keepRoute($: $, room: ShareRoom, s: RoomScope, route: SharePeerRo
 // same paths, so the `from=` addresses Claude remembers still reach them.
 async function restoreMailboxes($: $) {
   const room = await read($, roomA)
-  if (!room?.peer || (await read($, modeA)) !== 'host' || (await peerMissing($))) return
+  if (!room || (await read($, modeA)) !== 'host' || (await peerMissing($))) return
   const routes = Object.entries(await read($, peerRoutesA)).filter((e): e is [string, Extract<SharePeerRoute, { kind: 'host' }>] => e[1].kind === 'host')
   const s = scope
   for (const [box, route] of routes) {
@@ -3907,7 +3839,6 @@ async function restoreMailboxes($: $) {
 // the session that wrote it (and its turn on the joined session).
 function peerRefusal(host: string, result: string | undefined): string {
   if (result === 'offline') return `${host} isn't connected right now, so this didn't reach their Claude. Send it again later.`
-  if (result === 'unsupported') return `${host}'s Shared Sessions needs an update to take messages from other sessions, so this didn't reach their Claude.`
   if (result === 'gone') return "The shared session has ended, so this didn't reach anyone's Claude."
   if (result === 'busy') return `Too many messages went to ${host}'s session this minute, so this one didn't. Send it again in a minute.`
   if (result === 'large') return `This was too large to send to ${host}'s session, so it didn't reach their Claude.`
@@ -3916,13 +3847,13 @@ function peerRefusal(host: string, result: string | undefined): string {
 
 // To the room for the other side (POST peer): what came of it, in a word. A
 // guest's refused bearer takes a new seat and goes once more with it.
-async function postPeer($: $, room: ShareRoom, body: Record<string, unknown>): Promise<'delivered' | 'offline' | 'unsupported' | 'gone' | 'busy' | 'large' | 'unreachable'> {
+async function postPeer($: $, room: ShareRoom, body: Record<string, unknown>): Promise<'delivered' | 'offline' | 'gone' | 'busy' | 'large' | 'unreachable'> {
   for (let again = room.seat !== 'host'; ; again = false) {
     const now = await read($, roomA)
     const token = now?.id === room.id ? now.token : room.token
     try {
-      const answer = await api<{ delivered?: boolean; reason?: string }>($, room.server, `/api/rooms/${room.id}/peer`, { method: 'POST', token, body })
-      return answer.delivered === true ? 'delivered' : answer.reason === 'unsupported' ? 'unsupported' : 'offline'
+      const answer = await api<{ delivered?: boolean }>($, room.server, `/api/rooms/${room.id}/peer`, { method: 'POST', token, body })
+      return answer.delivered === true ? 'delivered' : 'offline'
     } catch (error) {
       if (error instanceof ApiError && error.status === 401 && again && (await reseat($, room)).ok) continue
       if (!(error instanceof ApiError)) return 'unreachable'
@@ -4332,7 +4263,6 @@ async function replaced($: $): Promise<boolean> {
 async function relayRefusal($: $, room: ShareRoom): Promise<string | null> {
   if ((await read($, policyA)).prompts === 'watch') return `${room.host} has this shared session on watch-only, so this didn't reach their Claude.`
   if ((await read($, peopleA)).some(p => p.role === 'host' && !p.online)) return peerRefusal(room.host, 'offline')
-  if (!room.peer) return `The share server for ${room.host}'s session needs an update to pass messages between sessions, so this didn't reach their Claude.`
   const missing = await peerMissing($)
   return missing ? `This computer can't pass this on: ${missing}.` : null
 }
@@ -4581,14 +4511,11 @@ async function joinRoom($: $, server: string, id: string) {
     people: SharePerson[]
     latest?: string
     fromNow?: boolean
-    hostVersion?: string
     team?: { id: string; name: string }
     more?: boolean
     historySeq?: number
-    /** What's shared now, whatever the history no longer holds (newer servers). */
+    /** What's shared now, whatever the history no longer holds. */
     previews?: unknown
-    /** The server passes messages between sessions on (newer servers). */
-    peer?: boolean
   }>($, server, `/api/rooms/${id}/join?max=${PAGE_BYTES}`, { method: 'POST', body: { name }, account: signedIn?.token })
   try {
     // A long history comes in pages (the engine hands a plugin at most 4 MiB
@@ -4610,7 +4537,6 @@ async function joinRoom($: $, server: string, id: string) {
       seq: joined.seq,
       since: await $.clock.now(),
       team: joined.team ?? null,
-      ...(joined.peer === true ? { peer: true as const } : {}),
     }
     // Its scope, before the room is anyone's to see. In it from here: a late
     // take-back given up for it is over.
@@ -4659,7 +4585,6 @@ async function joinRoom($: $, server: string, id: string) {
       // time (the newest page); the rest are in the Room, a press of Open away.
       open: pages.slice(-1),
       fromNow: joined.fromNow === true,
-      hostVersion: typeof joined.hostVersion === 'string' ? joined.hostVersion : null,
     }
   } catch (error) {
     // Seated but not in: the seat goes, so nobody sees a guest who isn't there.
@@ -5020,43 +4945,16 @@ function shareOf(value: unknown): HostShare | null {
   return { pid: s.pid, ...(s.tcp === true ? { tcp: true } : {}), ...(host ? { host } : {}), ...(s.scheme === 'https' ? { scheme: 'https' } : {}), ...(dependency !== undefined ? { dependency } : {}) }
 }
 
-// What's shared as 0.11.24 kept it (preview ids by port, and the ports
-// forwarded), with the TLS ones as an unreleased build kept them (by preview id).
-function sharesFrom(previews: unknown, forwardPorts: unknown, schemes: unknown): Record<string, HostShare> {
-  const forwarded = new Set((Array.isArray(forwardPorts) ? forwardPorts : []).map(String))
-  const tls = schemes && typeof schemes === 'object' ? (schemes as Record<string, unknown>) : {}
-  const shares: Record<string, HostShare> = {}
-  for (const [port, pid] of Object.entries(previews && typeof previews === 'object' ? previews : {})) {
-    const share = validPort(Number(port)) ? shareOf({ pid, ...(forwarded.has(port) ? { tcp: true } : {}), scheme: tls[String(pid)] }) : null
-    if (share) shares[String(Number(port))] = share
-  }
-  return shares
-}
-
-// A place's shares: as this version saves them, else as 0.11.24 did.
+// A place's shares, each checked.
 function sharesSaved(saved: Hosting): Record<string, HostShare> {
   const kept: unknown = saved.shares
-  if (!kept || typeof kept !== 'object' || Array.isArray(kept)) return sharesFrom(saved.previews, saved.forwardPorts, saved.previewSchemes)
+  if (!kept || typeof kept !== 'object' || Array.isArray(kept)) return {}
   const shares: Record<string, HostShare> = {}
   for (const [port, value] of Object.entries(kept)) {
     const share = validPort(Number(port)) ? shareOf(value) : null
     if (share) shares[String(Number(port))] = share
   }
   return shares
-}
-
-// Host: updated in place from 0.11.24 (or an unreleased build), this session
-// finds what it shares in the keys that version kept: they move into
-// `shares` as the module loads, once, and empty. Only a host's room keeps
-// them; a share this version made already stands over the old say of its port.
-async function takeLegacyShares($: $, hosting: boolean) {
-  const previews: unknown = await read($, legacyPreviewsA)
-  if (!previews || typeof previews !== 'object' || !Object.keys(previews).length) return
-  const shares = sharesFrom(previews, await read($, legacyForwardPortsA), await read($, legacySchemesA))
-  if (hosting) await update($, sharesA, now => ({ ...shares, ...now }))
-  await update($, legacyPreviewsA, () => ({}))
-  await update($, legacyForwardPortsA, () => [])
-  await update($, legacySchemesA, () => ({}))
 }
 
 // Host: Allow forwarding in the Room, for a preview Claude's mention shared.
@@ -5731,7 +5629,7 @@ async function startLocalPreview($: $, room: ShareRoom, pid: string, run: LocalP
     const url = `${room.server}/api/rooms/${room.id}/previews/${pid}/tunnel`
     const grant = await api<LocalPreviewGrant>($, room.server, `/api/rooms/${room.id}/previews/${pid}/tunnel`, { method: 'POST', token: room.token })
     if (grant.protocol !== 1 || grant.port !== run.port || typeof grant.token !== 'string' || !/^[A-Za-z0-9_-]{16,128}$/.test(grant.token) || !Number.isSafeInteger(grant.expiresAt) || grant.expiresAt <= await $.clock.now()) {
-      run.error = TCP_UNSUPPORTED
+      run.error = TCP_UNAVAILABLE
       return
     }
     if (!(await localRunCurrent($, pid, run)) || !sameRoom(room, run.scope)) {
@@ -5814,9 +5712,7 @@ async function startLocalPreview($: $, room: ShareRoom, pid: string, run: LocalP
       ? SAY[run.owner].busy
       : [401, 403].includes(error.status)
         ? SAY[run.owner].refused
-      : [404, 426, 501].includes(error.status)
-        ? TCP_UNSUPPORTED
-        : 'Local forwarding is unavailable. Check the host has an updated plugin, Node and a live stream, then press Open, or choose Public link.'
+        : TCP_UNAVAILABLE
     // Never echo child diagnostics, credentials or a server's untrusted text.
     // The grant a refusal got by itself, refused as well (403: the room's
     // access, or the preview, says no; a 401 is a seat let go, which the
@@ -5938,19 +5834,15 @@ async function closeMapping($: $, s: RoomScope, pid: string) {
   else await stopLocalPreview($, pid, true, s)
 }
 
-// Where a saved listener was here: its last port, else (0.11.24 saved one
-// before its listener was up) the Local port it was asked for, else the
-// host's number.
-const savedPort = (p: Pick<ShareLocalPreview, 'port' | 'localPort' | 'requestedPort'>) => (validPort(p.localPort) ? p.localPort : validPort(p.requestedPort) ? p.requestedPort : p.port)
+// Where a saved listener was here: its last port, else the host's number.
+const savedPort = (p: Pick<ShareLocalPreview, 'port' | 'localPort'>) => (validPort(p.localPort) ? p.localPort : p.port)
 
 // What an Open (or a restore) brought up, saved once it's done, each where it
 // is now (its actual port alone), so a reload or resume brings it back there.
 // Only a run still up and current: no Stop, Close, Leave or newer start of it
 // since. An Open that didn't finish saves nothing, so nothing it only tried
-// comes back. 0.11.24 reads the same fields (pid, port, localPort: where it
-// binds first); its `requestedPort` was a port the person chose, which no
-// longer exists, so it isn't written. `own`: what a page uses, opened by its
-// own Open; kept as it was saved by an Open (or a restore) that reuses it.
+// comes back. `own`: what a page uses, opened by its own Open; kept as it was
+// saved by an Open (or a restore) that reuses it.
 async function commitMappings($: $, bound: readonly { pid: string; run: LocalPreviewRun; own?: true }[]) {
   await update($, localPreviewsA, list =>
     bound.reduce((next, { pid, run, own }) => {
@@ -5966,10 +5858,7 @@ async function commitMappings($: $, bound: readonly { pid: string; run: LocalPre
 // the port it had here (taken meanwhile, it stays closed rather than move: an
 // open tab would reach whatever took it). The grant is the check: what the
 // host stopped or no longer forwards stays closed. Forwarded is as the window
-// and the Room know it, Shown's: a later showing without `tcp` (a 0.11.24
-// host's Claude mentioning the address) took nothing away there. A listener
-// Shown doesn't list (a place 0.11.24 saved, with fewer kept) is tried: the
-// grant says.
+// and the Room know it, Shown's, which the room's list keeps.
 async function restoreLocalPreviews($: $) {
   const s = scope, room = await read($, roomA)
   if (!room || !sameRoom(room, s) || s.mode !== 'guest') return
@@ -5977,8 +5866,8 @@ async function restoreLocalPreviews($: $) {
   const failed: number[] = [], busy: number[] = [], denied: number[] = []
   for (const preview of await read($, localPreviewsA)) {
     if (!sameRoom(room, s)) return
-    const item = shown.find(x => x.kind === 'preview' && x.pid === preview.pid) ?? { ...preview, key: preview.pid, kind: 'preview' as const, name: `localhost:${preview.port}`, ts: 0, tcp: true }
-    if (item.closed || !item.tcp) {
+    const item = shown.find(x => x.kind === 'preview' && x.pid === preview.pid)
+    if (!item || item.closed || !item.tcp) {
       await stopLocalPreview($, preview.pid, true, s)
       continue
     }
@@ -6454,8 +6343,8 @@ async function noteNeedAsked($: $, s: RoomScope, port: number) {
 
 // The window asked for a localhost port nobody shared: the host is asked
 // (five ports a minute at most) and this person told. A port counts as asked
-// only once the room answered (or has no way to ask: an older server); a
-// request refused for too many, or not answered, is asked again later. One
+// only once the room answered; a request refused for too many, or not
+// answered, is asked again later. One
 // the host stopped isn't asked about (`previewEnded`).
 async function blockedPort($: $, proxy: BrowserProxy, port: number) {
   const s = proxy.scope, room = await read($, roomA)
@@ -6478,11 +6367,11 @@ async function blockedPort($: $, proxy: BrowserProxy, port: number) {
       return slot ? { ...cur, times: [...times, now] } : n
     })
     if (!slot) return
-    let answer: { delivered?: boolean; shared?: boolean } = {}
+    let answer: { delivered?: boolean; shared?: boolean }
     try {
       answer = await api<{ delivered?: boolean; shared?: boolean }>($, room.server, `/api/rooms/${room.id}/need`, { method: 'POST', token: room.token, body: { port } })
-    } catch (error) {
-      if (!(error instanceof ApiError) || error.status !== 404) return
+    } catch {
+      return
     }
     if (!live()) return
     await noteNeedAsked($, s, port)
@@ -7378,8 +7267,8 @@ async function relayedNow($: $, s: RoomScope, port: number): Promise<boolean> {
 // `tcp` (`ensurePreview`), and its page goes out at the host's own address
 // (its host name, scheme and page). `dependency`: shared for another page's
 // sake (the host port of the page that uses it, or true when that isn't
-// known), so a guest's Open preview never picks it; older plugins ignore
-// it. A port another session's preview holds here (`relayedHere`) isn't
+// known), so a guest's Open preview never picks it. A port another
+// session's preview holds here (`relayedHere`) isn't
 // shared: `refused` says why. With `offerRelated`, discovery's deadline: what the page uses beside
 // it is looked for and offered in the row above the prompt
 // (`offerRelated`), and `related` says what was put to the host and what
@@ -7400,8 +7289,8 @@ async function hostForwards($: $, room: ShareRoom, page: ForwardPage, opts: { of
   return { pid: share.pid, related }
 }
 
-// A Shown entry's title: as its artifact gave it, else (one saved before
-// titles were kept) its name without what Shown adds to it.
+// A Shown entry's title: as its artifact gave it, else its name without
+// what Shown adds to it.
 const shownTitle = (item: ShareShown) => (typeof item.title === 'string' && item.title ? item.title : item.name.replace(/ \(preview\)$| · used by (?:previews|localhost:\d+)$/, ''))
 
 // Host: a port forwarded for a page's sake (`dependency`: that page's host
@@ -7657,9 +7546,9 @@ function hostAskWords(ask: ShareHostAsk): string {
 // Machine-wide (the store): where a forwarded preview opens. Claude's
 // browser ('pane', Claude Desktop's default) or the person's own
 // ('browser', a terminal's), each with a separate window when a port is
-// taken; or always the window ('window'). Anything else (an unreleased build's 'auto',
-// nothing) reads as the surface's default, and 'pane' outside Desktop as
-// 'browser'. Read here alone.
+// taken; or always the window ('window'). Anything else (nothing chosen)
+// reads as the surface's default, and 'pane' outside Desktop as 'browser'.
+// Read here alone.
 const PREVIEW_OPEN_KEY = 'previewOpen'
 type PreviewOpen = 'pane' | 'browser' | 'window'
 async function previewOpenOf($: $): Promise<PreviewOpen> {
@@ -7965,10 +7854,9 @@ async function openShown($: $, shown: ShareShown, surface?: RenderSurface) {
 // Host: the public link's HTTP. A guest's browser asked a preview for
 // something (the room's `proxy`): this machine's localhost answers, only on
 // a port this session shares and at the scheme its server speaks, and the
-// answer goes back to the room (proxy/<id>). Format 2 (a line of status and
-// headers, then the body) when the ask says the room reads it (`answer: 2`):
-// the headers ride in the body, never in one request header a server caps
-// at 16 KiB; else as 0.11.24 rooms read it (x-proxy-status, x-proxy-headers).
+// answer goes back to the room (proxy/<id>): a line of status and headers,
+// then the body, so the headers ride in the body, never in one request
+// header a server caps at 16 KiB.
 // At most PROXY_RUNS run at once and PROXY_QUEUE wait, oldest first; past
 // that the browser gets a busy page at once. Each run is kept with its
 // preview in the room's scope, so Stop, unshare and the room closing end
@@ -8106,9 +7994,7 @@ async function proxyOnce($: $, run: ProxyRun) {
     return answerPage($, run, 502, 'The preview is not reachable', `Nothing answered on ${room.host}'s localhost:${port}.`)
   }
   const status = Number(/^status=(\d{3})$/m.exec(out)?.[1])
-  const dump = /^headers=([A-Za-z0-9+/=]*)$/m.exec(out)?.[1] ?? ''
-  const two = ask.answer === 2
-  const head = two ? proxyHead(status, dump) : ''
+  const head = proxyHead(status, /^headers=([A-Za-z0-9+/=]*)$/m.exec(out)?.[1] ?? '')
   if (out.length >= PROXY_SAID_MAX || (head !== null && head.length > PROXY_HEAD_MAX)) {
     discardFetch($, dir)
     return answerPage($, run, 502, 'Too large for a preview', "This response's headers are over 64 KB, more than a preview carries.")
@@ -8121,7 +8007,6 @@ async function proxyOnce($: $, run: ProxyRun) {
     roomConfig(room, `proxy/${run.id}`),
     // Taken in, or given up, within a minute.
     'max-time = 60',
-    ...(two ? ['header = "x-proxy-format: 2"'] : [`header = ${cfg(`x-proxy-status: ${status}`)}`, `header = ${cfg(`x-proxy-headers: ${dump}`)}`]),
   ].join('\n')
   const t1 = fence(config)
   const t2 = fence(head)
@@ -8138,7 +8023,9 @@ async function proxyOnce($: $, run: ProxyRun) {
       `cat > "$d/up" <<'${t1}'`,
       config,
       t1,
-      ...(two ? [`cat > "$d/pre" <<'${t2}'`, head, t2] : [': > "$d/pre"']),
+      `cat > "$d/pre" <<'${t2}'`,
+      head,
+      t2,
       `cat "$d/pre" "$d/b" | curl -K "$d/up" -X POST --data-binary @- -o /dev/null & c=$!`,
       'wait $c; c=',
       '',
@@ -8176,9 +8063,7 @@ async function answerPage($: $, run: ProxyRun, status: number, title: string, te
     roomConfig(run.room, `proxy/${run.id}`),
     'request = "POST"',
     'max-time = 60',
-    ...(run.ask.answer === 2
-      ? ['header = "x-proxy-format: 2"', `data-binary = ${curlString(`${pageHead(status)}\n${page}`)}`]
-      : [`header = ${cfg(`x-proxy-status: ${status}`)}`, `header = ${cfg(`x-proxy-headers: ${pageHeaderBlock(status)}`)}`, `data-binary = ${curlString(page)}`]),
+    `data-binary = ${curlString(`${pageHead(status)}\n${page}`)}`,
   ].join('\n')
   try {
     const child = $.process.spawn({ argv: ['curl', '--silent', '--output', '/dev/null', '--config', '-'], input: `${config}\n` })
@@ -8198,7 +8083,7 @@ function endChild(child: Child | undefined) {
 // process for the socket's life: at most PUBLIC_RELAYS at once, the rest
 // refused (BUSY), and one that fails (no Node, or a dev server that doesn't
 // take the socket) refused CONNECT; the room closes the browser's socket for
-// either (`ws/<id>/reject`; an older room, at its own deadline). Each is kept
+// either (`ws/<id>/reject`). Each is kept
 // with its preview in the room's scope, so Stop, unshare and the room closing
 // close it (`RoomChildren.closePublic`).
 const PUBLIC_RELAYS = 32
@@ -8711,7 +8596,7 @@ type RideState = {
   native?: Set<string>
 }
 
-// A file read's lines come numbered ("   12\tcode"); older hosts send them so.
+// A file read's lines come numbered ("   12\tcode"), as the host's Read gave them.
 function stripLineNumbers(text: string): string {
   return text.replace(/^ *\d+\t/gm, '')
 }
@@ -8940,7 +8825,7 @@ function shareChoice($: $, el: UI, prompts: number, where: 'band' | 'room', surf
 
 // What joining did, as the first reply in the guest's transcript.
 async function joinedNote($: $, joined: Awaited<ReturnType<typeof join>>): Promise<string> {
-  const { room, history, fromNow, hostVersion } = joined
+  const { room, history, fromNow } = joined
   const policy = await read($, policyA)
   return [
     `You joined **${room.host}'s session**${room.team ? ` in ${room.team.name}` : ''}.`,
@@ -8948,9 +8833,6 @@ async function joinedNote($: $, joined: Awaited<ReturnType<typeof join>>): Promi
       ? `It's watch-only for now: you see every turn live and can chat with everyone in the **Room**.`
       : `What you type here runs there, on ${room.host}'s machine, and everyone sees the replies live.`,
     `The **Room** (above the prompt, or \`/room\`) shows who's here and has a side chat Claude doesn't read. **Leave** is up there too.${history.length ? ` What happened before you joined follows, ${history.length === 1 ? 'one prompt' : `${history.length} prompts`} with their replies.` : fromNow ? ` ${room.host} shared from that point on, so what came before isn't shown.` : ''}`,
-    hostVersion && newerThan(CARDS_FROM, hostVersion)
-      ? `\n\n> ${room.host}'s Claude Code runs Shared Sessions ${hostVersion}, so their tool calls show here as text, not cards. Once they update (\`${UPDATE_COMMAND}\`) and restart Claude Code, they show as cards.`
-      : '',
   ].join(' ')
 }
 
@@ -9153,30 +9035,11 @@ async function accountFile($: $): Promise<string | null> {
   return dir ? `${dir}/shared-session/account.json` : null
 }
 
-// Where 0.11.24 and earlier kept it, whatever CLAUDE_CONFIG_DIR said.
-async function homeAccountFile($: $): Promise<string | null> {
-  const home = await $.env.get('HOME')
-  return home ? `${home}/.claude/shared-session/account.json` : null
-}
-
-// A folder of its own (CLAUDE_CONFIG_DIR) with no sign-in yet takes the one
-// ~/.claude keeps, once: written there as a sign-in is (`writeSignIns`).
-// ~/.claude's stays as it is, for the folders that still read it.
 async function readSignIns($: $): Promise<Record<string, SavedSignIn>> {
   const path = await accountFile($)
-  if (!path) return {}
-  const text = await $.fs.read(path).catch(() => null)
-  if (text !== null) return signInsIn(text)
-  const old = await homeAccountFile($)
-  if (!old || old === path || (await $.fs.exists(path).catch(() => true))) return {}
-  const copied = signInsIn((await $.fs.read(old).catch(() => null)) ?? '')
-  if (Object.keys(copied).length) await writeSignIns($, path, copied)
-  return copied
-}
-
-function signInsIn(text: string): Record<string, SavedSignIn> {
+  const text = path ? await $.fs.read(path).catch(() => null) : null
   try {
-    const data = JSON.parse(text) as { servers?: Record<string, SavedSignIn> }
+    const data = JSON.parse(text ?? '') as { servers?: Record<string, SavedSignIn> }
     return data?.servers && typeof data.servers === 'object' ? data.servers : {}
   } catch {
     return {}
@@ -9188,8 +9051,6 @@ async function signInFor($: $, server: string): Promise<SavedSignIn | null> {
   return saved && typeof saved.token === 'string' && saved.account ? saved : null
 }
 
-// Signing out (or deleting the account) clears the sign-in of the folder in
-// use alone.
 async function saveSignIn($: $, server: string, value: SavedSignIn | null) {
   const path = await accountFile($)
   if (!path) return
@@ -9339,9 +9200,7 @@ async function startSignIn($: $, provider: string, opts: { said?: boolean } = {}
   const invite = t.invite && t.invite.server === server ? `&invite=${encodeURIComponent(t.invite.code)}` : ''
   const login = await sha256Hex(verifier)
   const code = signInCode(login)
-  // `code=1`: this version shows the code, so the page asks that it match
-  // (an older one's link gets the page without the code).
-  const url = `${server}/auth/${encodeURIComponent(provider)}/start?login=${login}&code=1${invite}`
+  const url = `${server}/auth/${encodeURIComponent(provider)}/start?login=${login}${invite}`
   const run = ++signInRun
   const until = (await $.clock.now()) + 10 * 60_000
   await update($, teamsA, x => ({ ...x, server, signingIn: { provider, url, until, code }, error: null }))
@@ -9968,8 +9827,6 @@ export const register: Register = (on, options) => {
     await $.command.register({ name: 'share-file', description: 'Show a file to everyone in the shared session: /share-file <path>' })
     await $.command.register({ name: 'share-preview', description: "Let teammates open this machine's localhost: /share-preview <port|http://localhost:port/path> [title]" })
     await $.command.register({ name: 'who', description: "Who's in this shared session and what each is doing" })
-    // Do this before readUpdates can move the next load to another identity.
-    await migrateRoomCheckpoints($).catch(error => $.ui.log(`Couldn't preserve saved shared sessions: ${String((error as Error)?.message ?? error)}`))
     void readUpdates($)
     // Signed in: the team and what's shared with it, for Share and the Team button.
     void serverOf($)
@@ -10007,9 +9864,6 @@ export const register: Register = (on, options) => {
     // started again), or is finished here (one a reload cut short).
     await roomClosed($, { start: true })
     const room = await read($, roomA), mode = await read($, modeA)
-    // Updated in place from 0.11.24: what it shares, as this version keeps
-    // it, before the room's stream asks anything of it.
-    await takeLegacyShares($, Boolean(room) && mode === 'host').catch(error => $.ui.log(`Shared session: taking up what was shared: ${String((error as Error)?.message ?? error)}`, { to: 'debug' }))
     // A guest's reload (an update in place included): what the room shares
     // now first, as its next page lists it (a preview it ended or forwarded
     // meanwhile, or one forwarded before the update that Shown lost a sign
@@ -10341,10 +10195,10 @@ export const register: Register = (on, options) => {
     const known = (await read($, guestPromptsA)).find(p => e.text.includes(p.framed))
     if (known) await update($, guestPromptsA, list => list.filter(p => p.pid !== known.pid))
     const said = typedText(e.text)
-    // None of the queue's, but framed as a teammate's (one a module from
-    // before this queue submitted, starting after an update in place): still
-    // theirs, so its calls are put to the host. Asking more is the safe side:
-    // the host typing "Alex: …" is asked about their own calls.
+    // None of the queue's, but framed as a teammate's (one set aside that
+    // the queue's newest 8 no longer hold, or one the module before this one
+    // submitted): still theirs, so its calls are put to the host. Asking more
+    // is the safe side: the host typing "Alex: …" is asked about their own calls.
     const named = known ? undefined : (await read($, peopleA)).find(p => p.role !== 'host' && p.name && said.startsWith(`${p.name}: `))?.name
     const guest = known ?? (named ? { who: named, text: said.slice(named.length + 2), pid: '' } : null)
     // A prompt another session delivered is shown as its text, not its markup;
@@ -11292,7 +11146,7 @@ export const register: Register = (on, options) => {
           {signing ? (
             <Box flexDirection="column" gap={1} marginTop={1}>
               <Text>{`Finish signing in with ${providerName(signing.provider)} in your browser…`}</Text>
-              {signing.code ? <Text>{codeSaid(signing.code)}</Text> : null}
+              <Text>{codeSaid(signing.code)}</Text>
               <Box flexDirection="row" gap={1} alignItems="center">
                 {Link && linkable(signing.url) ? <Link href={signing.url} label="Open the sign-in page again" /> : null}
                 <Button key="signin-cancel" label="Cancel" plain dimColor onPress={() => void cancelSignIn($)} />

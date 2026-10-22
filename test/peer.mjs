@@ -1,10 +1,10 @@
 // No model or product accounts. Messages between a teammate's own sessions
 // and the host's session (POST peer), and receipts for them, both ways:
-// through a real Node room, to the other side's streams that take them
-// (`peer=1`) alone, the guest's seat and name stamped by the room, never
-// stored, never anyone else's; their refusals and minute allowances; and the
-// Worker's routing of the same by its streams' tags and attachments, through
-// a reconstruction, with stdlib storage/hibernatable-socket stubs.
+// through a real Node room, to the other side's streams alone, the guest's
+// seat and name stamped by the room, never stored, never anyone else's; their
+// refusals and minute allowances; and the Worker's routing of the same by its
+// streams' tags and attachments, through a reconstruction, with stdlib
+// storage/hibernatable-socket stubs.
 import assert from 'node:assert/strict'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -102,18 +102,19 @@ async function nodeChecks() {
     }
 
     const room = await ok('/api/rooms', null, 'POST', { name: 'Host' })
-    assert.equal(room.peer, true, 'a new room says its server passes messages between sessions on')
+    assert.equal(room.peer, undefined, 'a room says nothing of what its server passes on')
     assert.equal(room.replies, undefined)
     const base = `/api/rooms/${room.id}`
     const scott = await ok(`${base}/join`, null, 'POST', { name: 'Scott' })
-    assert.equal(scott.peer, true, 'a join says so too')
+    assert.equal(scott.peer, undefined, 'nor a join')
     const alex = await ok(`${base}/join`, null, 'POST', { name: 'Alex' })
     const riley = await ok(`${base}/join`, null, 'POST', { name: 'Riley' })
-    const hostStream = await stream(base, room.token, '&tcp=1&need=1&peer=1')
-    const scottStream = await stream(base, scott.token, '&peer=1')
-    const scottAgain = await stream(base, scott.token, '&peer=1')
-    const alexStream = await stream(base, alex.token, '&peer=1')
-    const rileyOld = await stream(base, riley.token, '')
+    // Streams say nothing of what they take: every one takes these.
+    const hostStream = await stream(base, room.token, '')
+    const scottStream = await stream(base, scott.token, '')
+    const scottAgain = await stream(base, scott.token, '')
+    const alexStream = await stream(base, alex.token, '')
+    const rileyStream = await stream(base, riley.token, '')
     const fromHost = body => http(`${base}/peer`, room.token, 'POST', body)
     const fromGuest = (who, body) => http(`${base}/peer`, who.token, 'POST', body)
 
@@ -123,7 +124,7 @@ async function nodeChecks() {
     assert(await hostStream.until(l => l.peer?.handle === HANDLE), 'the host got it')
     assert.deepEqual(hostStream.peers(), [{ seat: scott.seat, who: 'Scott', handle: HANDLE, name: 'composition', mode: 'prompting', chain: CHAIN, id: ID, pid: 'p1abc', body: 'Can you check the build?' }])
     for (const body of [{ ...up, seat: alex.seat }, { ...up, who: 'Alex' }, { ...up, to: alex.seat }, { ...up, ref: REF }]) assert.equal((await fromGuest(scott, body)).status, 400, 'a guest names no seat, no sender, no recipient and no ref')
-    // The host's answer: to Scott's seat, both of its streams that take them, no one else's.
+    // The host's answer: to Scott's seat, both of its streams, no one else's.
     assert.deepEqual(await (await fromHost({ to: scott.seat, handle: HANDLE, body: 'Here are the traces.', ref: REF })).json(), { delivered: true })
     for (const s of [scottStream, scottAgain]) assert(await s.until(l => l.peer?.handle === HANDLE), 'the seat got it')
     for (const s of [scottStream, scottAgain]) assert.deepEqual(s.peers(), [{ handle: HANDLE, body: 'Here are the traces.', ref: REF }])
@@ -146,7 +147,7 @@ async function nodeChecks() {
       assert.equal((await fromHost(body)).status, 400, JSON.stringify(body).slice(0, 80))
     }
     await wait(150)
-    for (const s of [alexStream, rileyOld]) assert.deepEqual(s.peers(), [], 'nobody else hears it')
+    for (const s of [alexStream, rileyStream]) assert.deepEqual(s.peers(), [], 'nobody else hears it')
     assert.equal(hostStream.peers().length, 3, 'the host hears only what guests send')
     // Not stored: not in history, not in what a later joiner gets.
     const events = await ok(`${base}/events?after=0&wait=0`, alex.token)
@@ -156,11 +157,10 @@ async function nodeChecks() {
     }
     const later = await ok(`${base}/join`, null, 'POST', { name: 'Kim' })
     assert(!JSON.stringify(later).includes('Here are the traces.') && !JSON.stringify(later).includes('Can you check'), 'not in a joiner\'s history')
-    console.log('OK Node peer: a guest\'s message and receipts to the host\'s peer=1 streams with its seat and name stamped, the host\'s to that seat\'s alone, never others, history or a later joiner')
+    console.log('OK Node peer: a guest\'s message and receipts to the host\'s streams with its seat and name stamped, the host\'s to that seat\'s alone, never others, history or a later joiner')
 
-    // A side whose streams don't take them, one with none, one gone.
+    // A side with no stream open, a seat not the room's, one gone.
     const reply = { handle: HANDLE, body: 'x', ref: REF }
-    assert.deepEqual(await (await fromHost({ to: riley.seat, ...reply })).json(), { delivered: false, reason: 'unsupported' })
     assert.deepEqual(await (await fromHost({ to: later.seat, ...reply })).json(), { delivered: false, reason: 'offline' })
     assert.equal((await fromHost({ to: 'nosuchseat', ...reply })).status, 403, 'not a seat of the room')
     assert.equal((await fromHost({ to: 'host', ...reply })).status, 403)
@@ -170,10 +170,7 @@ async function nodeChecks() {
     assert.deepEqual(alexStream.peers(), [])
     await hostStream.close()
     assert.deepEqual(await (await fromGuest(scott, up)).json(), { delivered: false, reason: 'offline' }, 'the host not connected')
-    const oldHost = await stream(base, room.token, '&tcp=1&need=1')
-    assert.deepEqual(await (await fromGuest(scott, up)).json(), { delivered: false, reason: 'unsupported' }, 'a host whose stream doesn\'t take them')
-    await oldHost.close()
-    console.log('OK Node peer: unsupported, offline, a seat not the room\'s, and a seat that left')
+    console.log('OK Node peer: offline, a seat not the room\'s, and a seat that left')
 
     // Who may, and what's well formed.
     assert.equal((await http(`${base}/peer`, '', 'POST', up)).status, 401)
@@ -275,7 +272,7 @@ await nodeChecks()
   }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) })
   const api = async (...args) => { const r = await w.obj.fetch(req(...args)); assert.equal(r.status, 200, await r.clone().text()); return r.json() }
   const created = await api('create', null, 'POST', { name: 'Host' })
-  assert.equal(created.peer, true)
+  assert.equal(created.peer, undefined)
   const host = created.token
   const scott = await api('join', null, 'POST', { name: 'Scott' })
   const riley = await api('join', null, 'POST', { name: 'Riley' })
@@ -284,12 +281,10 @@ await nodeChecks()
     assert.equal(r.status, 101)
     return state.sockets.at(-1)
   }
-  const hostWs = await socket(host, '&tcp=1&need=1&peer=1')
-  const scottWs = await socket(scott.token, '&peer=1')
+  const hostWs = await socket(host, '')
+  const scottWs = await socket(scott.token, '')
   const rileyWs = await socket(riley.token, '')
-  assert.equal(scottWs.deserializeAttachment().peerSupport, true)
-  assert.equal(rileyWs.deserializeAttachment().peerSupport, false)
-  assert.equal(hostWs.deserializeAttachment().peerSupport, true)
+  for (const ws of [hostWs, scottWs, rileyWs]) assert.deepEqual(Object.keys(ws.deserializeAttachment()).sort(), ['after', 'role', 'seat'], 'a stream keeps nothing of what it takes')
   const peersOf = ws => ws.sent.filter(x => typeof x === 'string').map(x => JSON.parse(x)).filter(m => m.peer).map(m => m.peer)
   const fromHost = async body => (await w.obj.fetch(req('peer', host, 'POST', body))).json()
   const fromGuest = async (who, body) => (await w.obj.fetch(req('peer', who.token, 'POST', body))).json()
@@ -303,7 +298,8 @@ await nodeChecks()
   assert.deepEqual(await fromHost({ to: scott.seat, handle: HANDLE, status: 'refused', id: ID }), { delivered: true })
   assert.deepEqual(peersOf(scottWs).at(-1), { handle: HANDLE, status: 'refused', id: ID })
   assert.deepEqual(peersOf(rileyWs), [])
-  assert.deepEqual(await fromHost({ to: riley.seat, handle: HANDLE, body: 'x', ref: REF }), { delivered: false, reason: 'unsupported' })
+  assert.deepEqual(await fromHost({ to: riley.seat, handle: HANDLE, body: 'riley', ref: REF }), { delivered: true })
+  assert.deepEqual(peersOf(rileyWs), [{ handle: HANDLE, body: 'riley', ref: REF }], "a seat's own streams alone")
   assert(!JSON.stringify([...state.storage.data.values()]).includes('Here.') && !JSON.stringify([...state.storage.data.values()]).includes('Up.'), 'never in storage')
   // Woken from hibernation: the sockets outlive the object, and so does what
   // their attachments say.
@@ -313,7 +309,7 @@ await nodeChecks()
   assert.deepEqual(peersOf(scottWs).filter(m => m.body).map(m => m.body), ['Here.', 'After a sleep.'])
   assert.deepEqual(await fromGuest(scott, up('Up again.')), { delivered: true })
   assert.deepEqual(peersOf(hostWs).filter(m => m.body).map(m => m.body), ['Up.', 'Up again.'])
-  assert.deepEqual(peersOf(rileyWs), [])
+  assert.equal(peersOf(rileyWs).length, 1, 'nothing more to another seat')
   // A stream closing (still listed while its close is handled) hears nothing.
   await w.obj.webSocketClose(scottWs, 1000, 'gone')
   assert.deepEqual(await fromHost({ to: scott.seat, handle: HANDLE, body: 'x', ref: REF }), { delivered: false, reason: 'offline' })

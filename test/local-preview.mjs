@@ -689,9 +689,8 @@ async function publicRelayFailures() {
 async function bridgeChecks() {
   const control = row => frame(1, JSON.stringify(row)), ready = control({ t: 'ready' }), credit = n => control({ t: 'credit', n, nonce: 'N'.repeat(24) })
   let attack
-  const checksSaid = []
   const fixture = track(http.createServer())
-  fixture.on('upgrade', (req, socket, head) => { checksSaid.push(req.headers['x-tcp-checks']); handshake(req, socket); attack(socket, head) })
+  fixture.on('upgrade', (req, socket, head) => { handshake(req, socket); attack(socket, head) })
   const url = `http://127.0.0.1:${await listen(fixture)}/api/rooms/${ROOM}/previews/${PID}/tunnel`
   for (const bytes of [frame(2, 'before ready'), Buffer.concat([ready, ready]), Buffer.concat([ready, credit(1)]), Buffer.concat([ready, frame(2, 'a'), frame(2, 'b')]), Buffer.concat([ready, frame(2, 'a'), credit(2)]), Buffer.concat([ready, control({ t: 'fin' }), control({ t: 'fin' })]), Buffer.concat([ready, control({ t: 'unknown' })]), Buffer.concat([ready, frame(1, 'x'.repeat(257))]), Buffer.concat([ready, control({ t: 'check', nonce: 'short' })]), Buffer.concat([ready, control({ t: 'check', n: 1, nonce: 'C'.repeat(24) })])]) {
     const states = []
@@ -730,8 +729,7 @@ async function bridgeChecks() {
   roomSocket.write(credit(5)); noCredit = false
   await until(() => received.length === 1, 'challenge ACK')
   assert.deepEqual(JSON.parse(received[0].bytes), { t: 'ack', n: 5, nonce: 'N'.repeat(24) })
-  // A check, which this helper said it answers as it connected: its nonce back, and nothing else.
-  assert.ok(checksSaid.length && checksSaid.every(said => said === '1'), JSON.stringify(checksSaid))
+  // A check: its nonce back, and nothing else.
   roomSocket.write(control({ t: 'check', nonce: 'C'.repeat(24) }))
   await until(() => received.length === 2, 'check answered')
   assert.deepEqual(JSON.parse(received[1].bytes), { t: 'seen', nonce: 'C'.repeat(24) })
@@ -1173,7 +1171,7 @@ async function realChain() {
   await ensureWorker()
   async function subscribe() {
     const state = { ready: false, closed: false }
-    const req = (target.protocol === 'https:' ? https : http).get(`${origin}${base}/stream?after=0&tcp=1`, { headers: { authorization: `Bearer ${room.token}`, 'x-shared-session-version': VERSION } })
+    const req = (target.protocol === 'https:' ? https : http).get(`${origin}${base}/stream?after=0`, { headers: { authorization: `Bearer ${room.token}`, 'x-shared-session-version': VERSION } })
     requests.add(req)
     req.on('error', () => {})
     req.once('close', () => { state.closed = true; requests.delete(req) })
