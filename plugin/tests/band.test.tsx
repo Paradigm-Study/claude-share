@@ -10404,6 +10404,36 @@ test('a share of a port waits for the room to hear its Stop told again, so it ne
   await $.command.run({ command: 'stop-sharing', args: '' } as never)
 })
 
+test("a share of a port whose Stop the room is still being told after five seconds isn't made, so that Stop can't end it", async ($, on) => {
+  const endFail = { count: 1 }, ended: string[] = []
+  let release = () => {}
+  const held = new Promise<void>(done => (release = done))
+  const beforeEnd = async (pid: string) => {
+    ended.push(pid)
+    if (ended.length === 2) await held
+  }
+  const { asked, stream } = await sharingLink($, on, 'http://localhost:3340/', { endFail, beforeEnd })
+  await stopInRoom($, asked, stream)
+  // Connected again: the Stop is told again, and the room doesn't answer.
+  await within(asked.clock, () => ended.length === 2, 60_000)
+  const posts = () => asked.sent.filter(x => x.path.endsWith('/previews')).length
+  const before = posts()
+  const sharing = $.command.run({ command: 'share-preview', args: '3340 App' } as never)
+  await asked.clock.advance(6_000)
+  // Past its wait, nothing is asked of the room: what it answered would be the preview that Stop then ends.
+  expect(JSON.stringify(await sharing)).toContain("Couldn't share localhost:3340.")
+  expect(posts()).toBe(before)
+  expect(asked.logged.some(l => l.includes("Couldn't share localhost:3340 yet: the room is still being told it stopped. Try again in a moment."))).toBe(true)
+  // Heard at last: shared again, the room asked only now.
+  release()
+  await eventually(asked.clock, () => asked.state.shown?.find(s => s.pid === 'pv1')?.closed)
+  const again = $.command.run({ command: 'share-preview', args: '3340 App' } as never)
+  await within(asked.clock, () => posts() > before, 5_000)
+  await again
+  expect(asked.sent.filter(x => x.path.endsWith('/previews')).at(-1)?.body).toEqual({ port: 3340, title: 'App', tcp: true })
+  await $.command.run({ command: 'stop-sharing', args: '' } as never)
+})
+
 test("polling (no curl here), a Stop the room didn't hear is told again as a poll goes through", async ($, on) => {
   const endFail = { count: 1 }
   // No stream: curl can't start, so the room is polled.
