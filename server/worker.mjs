@@ -186,7 +186,7 @@ export default {
     // or socket (only previewFetch makes these paths, by the room's key).
     if (rest.startsWith('__preview')) return notFound()
     const limit = limitOf(req, id, rest, req.headers.get('cf-connecting-ip') ?? 'unknown')
-    const limiter = limit && { create: env.CREATE_LIMIT, join: env.JOIN_LIMIT, events: env.EVENTS_LIMIT, tunnel: env.TUNNEL_LIMIT }[limit.kind]
+    const limiter = limit && { create: env.CREATE_LIMIT, join: env.JOIN_LIMIT, events: env.EVENTS_LIMIT }[limit.kind]
     if (limiter && !(await limiter.limit({ key: limit.key })).success) return limitedResponse(limit.kind)
 
     const stub = env.ROOMS.get(env.ROOMS.idFromName(id))
@@ -278,8 +278,11 @@ export class RoomObject {
       this.tcpSaved = tcpCounted(tcpStats ?? { used: 0 })
       const files = await this.loadFiles()
       this.attach(Room.resume({ ...meta, tcpStats, files, events: [...stored.values()] }, Date.now()))
-      this.cleanupPublic(Date.now())
-      if (this.cleanupTCP(Date.now())) await this.persist()
+      const now = Date.now()
+      this.cleanupPublic(now)
+      const expired = this.room.sweepExpired(now)
+      this.closeStaleTCP(now)
+      if (expired) await this.persist()
       await this.schedule()
     })
   }
@@ -294,11 +297,12 @@ export class RoomObject {
     room.connected = seat => this.state.getWebSockets(seat).some(ws => !this.closed.has(ws))
     room.onChange = () => this.broadcast()
     // A revocation closes the channels it covers (revokeMatches): a TCP pair
-    // by its grant, a public one by its browser session, seat or preview.
+    // by its preview or seat, a public one by its browser session, seat or
+    // preview.
     room.onTCPRevoke = filter => {
       for (const ws of this.tcpSockets()) {
         const s = ws.deserializeAttachment().tcp
-        if (revokeMatches(filter, s)) this.closeTCP(s.id, 1008, 'TCP grant revoked')
+        if (revokeMatches(filter, s)) this.closeTCP(s.id, 1008, 'TCP access revoked')
       }
     }
     room.onPreviewRevoke = filter => {
@@ -417,7 +421,7 @@ export class RoomObject {
     if (changed) await this.persist()
     // The byte budget changed without the room (a revocation's refund): its key alone.
     else if (this.room === room && tcpCounted(room.tcpStats) !== counters) await this.persistTCPStats()
-    // A grant made is something to sweep when it expires; a refused one isn't.
+    // A link or a browser session made is something to sweep when it expires.
     if (changed) await this.schedule()
     return response
   }
@@ -589,19 +593,12 @@ export class RoomObject {
     })
   }
 
-  // Expired grants, browser sessions and links go (their channels with
-  // them); from the constructor and the alarm.
-  cleanupTCP(now) {
-    const changed = this.room.sweepGrants(now)
-    this.closeStaleTCP(now)
-    return changed
-  }
-
-  // TCP halves whose grant went, and guest halves past their pairing deadline.
+  // TCP halves no longer valid (their seat or preview gone, the room ended),
+  // and guest halves past their pairing deadline.
   closeStaleTCP(now) {
     for (const ws of this.tcpSockets()) {
       const s = ws.deserializeAttachment().tcp
-      if (!tcpValid(this.room, s, now)) this.closeTCP(s.id, 1008, 'TCP grant revoked or expired')
+      if (!tcpValid(this.room, s)) this.closeTCP(s.id, 1008, 'TCP access revoked')
       else if (!s.ready && s.deadline <= now) this.closeTCP(s.id, 1008, 'TCP relay timeout')
     }
   }
@@ -611,7 +608,7 @@ export class RoomObject {
   // when it finished the channel, else 'sent'.
   forwardTCP(ws, peer, frame, now) {
     const from = ws.deserializeAttachment().tcp, to = peer?.deserializeAttachment()?.tcp
-    if (this.closed.has(ws) || (peer && this.closed.has(peer)) || from.closed || to?.closed) throw tcpFailure('TCP grant revoked.')
+    if (this.closed.has(ws) || (peer && this.closed.has(peer)) || from.closed || to?.closed) throw tcpFailure('TCP channel closed.')
     const step = tcpStep(this.room, from, to, frame, now)
     if (step.reserve) return 'reserve'
     ws.serializeAttachment({ tcp: from })
@@ -637,7 +634,7 @@ export class RoomObject {
         // Protocol/budget failures close just this pair, not everyone's room.
         try {
           const from = ws.deserializeAttachment().tcp
-          if (from.closed || !tcpValid(this.room, from, Date.now())) throw tcpFailure('TCP grant revoked.')
+          if (from.closed || !tcpValid(this.room, from)) throw tcpFailure('TCP access revoked.')
           tcpCheck(from, peer.deserializeAttachment().tcp, frame, Date.now())
           if (!tcpReserve(this.room, from)) throw tcpFailure('TCP room byte budget exhausted.')
           await this.persistTCPStats()
@@ -662,8 +659,8 @@ export class RoomObject {
     if (guest) {
       const s = guest.deserializeAttachment().tcp
       if (this.tcpPeer(s)) return json({ error: 'That socket already has a host relay.' }, 409)
-      if (!tcpValid(this.room, s, now) || s.ready || s.deadline <= now) {
-        this.closeTCP(wsId, 1008, 'TCP grant expired or relay timed out')
+      if (!tcpValid(this.room, s) || s.ready || s.deadline <= now) {
+        this.closeTCP(wsId, 1008, 'TCP access revoked or relay timed out')
         return json({ error: 'That TCP channel has ended.' }, 410)
       }
       const [client, server] = Object.values(new WebSocketPair())
@@ -832,7 +829,7 @@ export class RoomObject {
 
   persist() {
     // Body reads may overlap, but an older metadata save must never finish
-    // after a newer one (a preview's Stop, a revoked grant). Capture each
+    // after a newer one (a preview's Stop, a Leave). Capture each
     // snapshot only when the previous save has finished.
     const saving = this.persisting.catch(() => {}).then(() => this.saveRoom())
     this.persisting = saving
@@ -860,11 +857,11 @@ export class RoomObject {
     }
   }
 
-  // The next thing due: a disconnected seat's grace running out, a grant or
-  // browser session expiring, a socket's pairing deadline, or the room's
-  // expiry. Set only when that's sooner than the alarm already set (or none
-  // is): one set for later fires early, and alarm() looks again and sets the
-  // next, so a connection or a stream's turn writes no alarm of its own.
+  // The next thing due: a disconnected seat's grace running out, a browser
+  // session expiring, a socket's pairing deadline, or the room's expiry. Set
+  // only when that's sooner than the alarm already set (or none is): one set
+  // for later fires early, and alarm() looks again and sets the next, so a
+  // connection or a stream's turn writes no alarm of its own.
   async schedule() {
     const room = this.room
     if (!room) return
@@ -875,10 +872,8 @@ export class RoomObject {
         due.push(seat.lastSeen + SEAT_TIMEOUT_MS + 1000)
       }
     }
-    for (const grant of room.previewSessions.values()) if (grant.scope === 'tcp' && grant.exp > now) due.push(grant.exp)
     for (const ws of this.tcpSockets()) {
       const s = ws.deserializeAttachment().tcp
-      due.push(s.exp)
       if (!s.ready) due.push(s.deadline)
     }
     for (const ws of this.publicSockets()) {
@@ -912,7 +907,8 @@ export class RoomObject {
       this.room = null
       return
     }
-    const expired = this.cleanupTCP(now)
+    const expired = this.room.sweepExpired(now)
+    this.closeStaleTCP(now)
     this.cleanupPublic(now)
     if (this.room.sweep(now) || expired) await this.persist()
     this.broadcast() // seats that left, and the host coming and going

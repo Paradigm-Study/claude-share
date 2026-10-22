@@ -9,38 +9,28 @@ const { bridge, run, vacant, endpoint, portOK, tokenOK, notify, failure, safeCod
 const REFUSED = new Set(['EACCES', 'EPERM'])
 const BIND_TRIES = 8, SOCKETS_MAX = 32
 
+// `token`: the guest's seat token, which each connection's room socket
+// carries; it lasts as long as the seat does.
 function configOf(cfg) {
   // Port 0 asks the OS for any free port, so it only makes sense when not strict.
-  if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg) || Object.keys(cfg).some(k => !['port', 'strict', 'url', 'token', 'expiresAt'].includes(k)) || !(portOK(cfg.port) || (cfg.port === 0 && cfg.strict === false)) || typeof cfg.strict !== 'boolean' || !tokenOK(cfg.token) || !Number.isSafeInteger(cfg.expiresAt)) throw failure('INVALID_CONFIG')
-  const url = endpoint(cfg.url)
-  if (cfg.expiresAt <= Date.now()) throw failure('EXPIRED')
-  return { port: cfg.port, strict: cfg.strict, url, token: cfg.token, expiresAt: cfg.expiresAt }
+  if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg) || Object.keys(cfg).some(k => !['port', 'strict', 'url', 'token'].includes(k)) || !(portOK(cfg.port) || (cfg.port === 0 && cfg.strict === false)) || typeof cfg.strict !== 'boolean' || !tokenOK(cfg.token)) throw failure('INVALID_CONFIG')
+  return { port: cfg.port, strict: cfg.strict, url: endpoint(cfg.url), token: cfg.token }
 }
 
 // testoptions are internal, never accepted from stdin.
 async function start(cfg, { emit = notify, signal, createServer = net.createServer, connect = net.connect } = {}) {
   const servers = new Set(), sockets = new Set(), relays = new Set()
-  let settings, port, ipv6 = false, ready = false, stopped = false, closing, expiryTimer
+  let settings, port, ipv6 = false, ready = false, stopped = false, closing
   const close = () => {
     if (closing) return closing
     stopped = true
     ready = false
-    clearTimeout(expiryTimer)
     signal?.removeEventListener('abort', close)
     for (const relay of relays) relay.close()
     for (const socket of sockets) socket.destroy()
     closing = Promise.all([...servers].map(unbind)).then(() => {})
     return closing
   }
-  const expire = () => {
-    if (stopped) return
-    // ponytail: grants expire; Open obtains a new one. An old TCP flow is
-    // never resumed, and an HTTP request or OAuth callback is never replayed.
-    if (Date.now() < settings.expiresAt) return scheduleExpiry()
-    emit({ state: 'expired' })
-    void close()
-  }
-  const scheduleExpiry = () => { expiryTimer = setTimeout(expire, Math.min(0x7fffffff, Math.max(1, settings.expiresAt - Date.now()))) }
   function unbind(server) {
     return new Promise(resolve => {
       if (!server.listening) return resolve()
@@ -51,7 +41,7 @@ async function start(cfg, { emit = notify, signal, createServer = net.createServ
     const server = createServer({ allowHalfOpen: true, highWaterMark: DATA_MAX }, socket => {
       socket.on('error', () => {})
       socket.pause()
-      if (!ready || stopped || Date.now() >= settings.expiresAt) { socket.destroy(); if (Date.now() >= settings.expiresAt) expire(); return }
+      if (!ready || stopped) { socket.destroy(); return }
       if (sockets.size >= SOCKETS_MAX) { emit({ state: 'channel-error', code: 'BUSY' }); socket.destroy(); return }
       sockets.add(socket)
       socket.on('close', () => sockets.delete(socket))
@@ -105,9 +95,7 @@ async function start(cfg, { emit = notify, signal, createServer = net.createServ
       }
     }
     if (stopped) throw failure('STARTUP')
-    if (Date.now() >= settings.expiresAt) throw failure('EXPIRED')
     ready = true
-    scheduleExpiry()
     emit({ state: 'ready', port, ipv6 })
     return { close, port, ipv6 }
   } catch (error) {

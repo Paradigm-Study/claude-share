@@ -146,9 +146,6 @@ const pinRefusedA = atom({ plugin: 'shared-session', key: 'pinRefused' } as cons
 // Auto mode refused the plugin's own call to Claude's browser: not tried
 // again until an allow rule names it (Allow previews in Claude).
 const paneRefusedA = atom({ plugin: 'shared-session', key: 'paneRefused' } as const, false)
-// Guest: a preview whose window (Always a separate window) couldn't open,
-// and why: Open anyway, above the prompt, opens it without one.
-const windowFailedA = atom({ plugin: 'shared-session', key: 'windowFailed' } as const, null as { pid: string; reason: string } | null)
 const roomTabA = atom({ plugin: 'shared-session', key: 'roomTab' } as const, 'people' as RoomTab)
 const turnsA = atom({ plugin: 'shared-session', key: 'turns' } as const, [] as ShareTurn[])
 const changesA = atom({ plugin: 'shared-session', key: 'changes' } as const, [] as ShareChange[])
@@ -657,22 +654,21 @@ type LocalBind = { port: number; strict: boolean }
 //   only through the window's proxy: no mapping. It lasts while the window
 //   does and the host allows it (`windowInterest`), and ends with the
 //   window's proxy. A channel's trouble is said a moment on, in the window's
-//   words, and a refusal grants it once more by itself (`windowChannel`);
-//   expired or failed once up, it says nothing: the window's next ask
-//   starts it again. While it serves the window, an Open's listener doesn't
+//   words, and a refusal starts it once more by itself (`windowChannel`);
+//   failed once up, it says nothing: the window's next ask starts it
+//   again. While it serves the window, an Open's listener doesn't
 //   take it over, which would reset the window's sockets to try a port
 //   here: that Open goes to the window (`windowServes`).
 type RunOwner = 'listener' | 'window'
 
-// What a run says, by its owner. What both say alike (a grant the server
-// doesn't take, a start that timed out, no Node here) is said where it
-// happens, in the Room's words.
+// What a run says, by its owner. What both say alike (a start that timed
+// out, no Node here) is said where it happens, in the Room's words.
 type RunWords = {
   /** It never came up. */
   unreachable: (host: string, port: number) => string
-  /** Too many at once: its grant, or a connection through it, refused by the room's limits (BUSY). */
+  /** Too many at once: a connection through it refused by the room's limits (BUSY). */
   busy: string
-  /** Its grant refused, or a connection through it (AUTH). */
+  /** A connection through it refused (AUTH): the seat's token it carries isn't the room's now. */
   refused: string
   /** A connection through it couldn't reach the host's target (CONNECT). */
   connect: (host: string, port: number) => string
@@ -706,7 +702,8 @@ type LocalPreviewRun = {
   ready: Promise<boolean>
   settle: (ready: boolean) => void
   started: boolean
-  expired: boolean
+  /** Its helper failed once up: it serves nothing more. */
+  failed: boolean
   error: string
   channelError?: string
   ipv6?: boolean
@@ -730,7 +727,6 @@ type TcpRelayRun = { id: string; pid: string; port: number; scope: RoomScope; wo
 type TcpWorkerRun = Helper & { room: ShareRoom; started: boolean }
 const tcpRejecting = new Set<string>()
 const TCP_RELAYS = 64
-const TCP_UNAVAILABLE = 'Local forwarding is unavailable. Check the host is connected and has Node, then press Open, or choose Public link.'
 
 // The room's scope. What this session does for the room it's in that can
 // outlast a request (a listener, the window, its proxy and tunnels, the
@@ -750,7 +746,7 @@ type Detection = { done?: BrowserFound; task?: Promise<BrowserFound & { failed?:
 
 // Guest: the room's preview window, kept with its scope (`RoomScope.window`):
 // its opens, one at a time, and those still running; what holds a tunnel
-// back (a start that failed, a refusal's one grant); what it said once; the
+// back (a start that failed, a refusal's one restart); what it said once; the
 // host's needs it's asking about; the look at it every 30 s while it's open;
 // and whether a browser here can open one. Its proxy and tunnels are the
 // scope's children (`RoomChildren`), ended with the rest of what the room
@@ -762,11 +758,11 @@ class WindowContext {
   readonly openings = new Set<Promise<void>>()
   /**
    * By preview: a window tunnel that failed to start isn't offered again for
-   * 30 s (`until`); `regranted`, the one grant a refusal got by itself since
-   * the person's own Open (`regrantOnce`). Their Open clears both
+   * 30 s (`until`); `retried`, the one restart a refusal got by itself since
+   * the person's own Open (`retryOnce`). Their Open clears both
    * (`clearRefusals`).
    */
-  readonly backoff = new Map<string, { until: number; regranted?: true }>()
+  readonly backoff = new Map<string, { until: number; retried?: true }>()
   /** Previews whose Stop was said in the window's words. */
   readonly stopSaid = new Set<string>()
   /** Ports a need of the window's is being asked of the host about now: one at a time each. */
@@ -783,15 +779,14 @@ class WindowContext {
     this.misses = 0
   }
 
-  // The window's tunnel was refused (AUTH): its grant was revoked (the seat
-  // it was made for let go and this session seated anew, a rotation, an
-  // expiry) or the host's side refuses it now. The first time since the
-  // person's Open, the page's next ask grants it again, with the seat this
-  // session holds now; false, and it waits for their Open.
-  regrantOnce(pid: string): boolean {
+  // The window's tunnel was refused (AUTH): the seat whose token it carries
+  // was let go (this session seated anew), or the room refuses it now. The
+  // first time since the person's Open, the page's next ask starts it again,
+  // with the token this session holds now; false, and it waits for their Open.
+  retryOnce(pid: string): boolean {
     const backoff = this.backoff.get(pid)
-    if (backoff?.regranted) return false
-    this.backoff.set(pid, { until: backoff?.until ?? 0, regranted: true })
+    if (backoff?.retried) return false
+    this.backoff.set(pid, { until: backoff?.until ?? 0, retried: true })
     return true
   }
 }
@@ -2488,7 +2483,6 @@ async function tellRoom($: $, room: { server: string; id: string; token: string 
 async function clearRoomState($: $, opts: { unmark?: string | true } = {}) {
   await update($, previewWindowA, () => null)
   await update($, previewNeedsOpenA, () => [])
-  await update($, windowFailedA, () => null)
   await update($, hostAskA, () => null)
   await update($, hostMemoryA, () => null)
   await update($, needAskedA, () => null)
@@ -2845,8 +2839,7 @@ async function earlierPrompts($: $): Promise<number> {
 // on in a new file that starts at the summary: its oldest message's parent
 // is a row of the file before, read on from there back.
 const HISTORY_MESSAGES = 6000
-// `at`: when it was written (ms since the epoch), where the transcript says.
-type HistoryMessage = { role?: string; content: unknown; at?: number }
+type HistoryMessage = { role?: string; content: unknown }
 async function sessionHistory($: $): Promise<HistoryMessage[]> {
   try {
     const id = await $.session.id()
@@ -2892,7 +2885,7 @@ async function readBackward($: $, path: string, upTo: number, out: HistoryMessag
   let parent: string | null = null
   // false: enough read, stop.
   const take = (line: string): boolean => {
-    let d: { type?: unknown; isSidechain?: unknown; isCompactSummary?: unknown; parentUuid?: unknown; timestamp?: unknown; message?: { role?: unknown; content?: unknown } }
+    let d: { type?: unknown; isSidechain?: unknown; isCompactSummary?: unknown; parentUuid?: unknown; message?: { role?: unknown; content?: unknown } }
     try {
       d = JSON.parse(line)
     } catch {
@@ -2908,8 +2901,7 @@ async function readBackward($: $, path: string, upTo: number, out: HistoryMessag
       if (b?.type !== 'tool_result' || !Array.isArray(b.content) || !b.content.some((x: { type?: unknown }) => x?.type === 'image')) return b
       return keep.pictures++ < HISTORY_IMAGES ? b : { ...b, content: (b.content as { type?: unknown }[]).filter(x => x?.type !== 'image') }
     })
-    const at = typeof d.timestamp === 'string' ? Date.parse(d.timestamp) : NaN
-    out.push({ role: String(d.message.role ?? d.type), content, ...(Number.isFinite(at) ? { at } : {}) })
+    out.push({ role: String(d.message.role ?? d.type), content })
     return out.length < HISTORY_MESSAGES
   }
   let buf = ''
@@ -2985,8 +2977,6 @@ async function makeRoom($: $, surface: RenderSurface | undefined, opts: { histor
     seq: created.seq,
     since: await $.clock.now(),
     team: created.team ?? null,
-    // Kept with its place: reopened, it looks back only from `since`.
-    ...(opts.history === false ? { fromNow: true as const } : {}),
   }
   // Its scope, before the room is anyone's to see.
   const s = openScope(room, 'host')
@@ -3581,12 +3571,6 @@ async function resumeHosting($: $) {
     if (!s.live) return
     startFeed($)
     $.ui.log(`Still sharing this session: ${room.url}`)
-    // Dev servers this session's Claude opened, running again (or never shared
-    // by the version that was running before), open for everyone too. Shared
-    // Only from now on: those it opened since Share alone, by the
-    // transcript's times (without them, none), as Share itself did.
-    const history = await sessionHistory($)
-    void shareLocal($, localOpens(room.fromNow ? history.filter(m => typeof m.at === 'number' && m.at >= room.since) : history)).catch(() => {})
   } finally {
     if (reclaiming === back) reclaiming = null
     tookBack($, back)
@@ -5585,9 +5569,10 @@ function localRequestCurrent(room: ShareRoom, s: RoomScope, pid: string, epoch: 
   return sameRoom(room, s) && s.epoch(pid) === epoch
 }
 
-// A run lasts across a reseat (only its grant's request checks the seat,
-// `startLocalPreview`): its scope open, no Stop, Close or Leave of its
-// preview since, and still the preview's run.
+// A run lasts across a reseat (only its start checks the seat,
+// `startLocalPreview`; the room checks its token at each connection): its
+// scope open, no Stop, Close or Leave of its preview since, and still the
+// preview's run.
 function runCurrent(pid: string, run: LocalPreviewRun): boolean {
   return run.scope.live && run.scope.epoch(pid) === run.epoch && run.scope.children.listeners.get(pid) === run && !run.stopping
 }
@@ -5612,11 +5597,12 @@ type LocalPreviewReady = { url?: string; error?: string; run?: LocalPreviewRun; 
 // room's window proxy with it (a page in the window uses it, or is it).
 function windowServes(s: RoomScope, pid: string): boolean {
   const run = s.children.listeners.get(pid), proxy = s.children.windowProxy
-  return Boolean(run?.owner === 'window' && run.started && !run.expired && !run.stopping && proxy && !proxy.stopped)
+  return Boolean(run?.owner === 'window' && run.started && !run.failed && !run.stopping && proxy && !proxy.stopped)
 }
 
-// The preview's run, refused (AUTH) on a channel: its grant's gone, so the
-// person's own Open, theirs to retry with, starts it anew.
+// The preview's run, refused (AUTH) on a channel: the seat's token it
+// carries isn't the room's now, so the person's own Open, theirs to retry
+// with, starts it anew.
 function refusedRun(s: RoomScope, pid: string): boolean {
   const run = s.children.listeners.get(pid)
   return Boolean(run && run.channelError === SAY[run.owner].refused)
@@ -5634,7 +5620,7 @@ async function ensureLocalPreview($: $, room: ShareRoom, s: RoomScope, shown: Sh
   // won't be) where this asks it to bind exactly. Not, for an Open that
   // could go to the window, a tunnel that serves the window.
   const fits = (run: LocalPreviewRun) =>
-    !run.stopping && !run.expired && run.port === port && (owner === 'window' || (run.owner === 'listener' && (!bind.strict || (run.started ? run.localPort === bind.port : run.bind.strict && run.bind.port === bind.port))))
+    !run.stopping && !run.failed && run.port === port && (owner === 'window' || (run.owner === 'listener' && (!bind.strict || (run.started ? run.localPort === bind.port : run.bind.strict && run.bind.port === bind.port))))
   for (let run = runs.get(pid); run && !fits(run); run = runs.get(pid)) {
     if ('keepWindow' in ask && ask.keepWindow && windowServes(s, pid)) return { error: "It's open in the preview window.", inWindow: true }
     await stopLocalPreview($, pid, false, s)
@@ -5647,12 +5633,12 @@ async function ensureLocalPreview($: $, room: ShareRoom, s: RoomScope, shown: Sh
   if (!run) {
     let settle!: (ready: boolean) => void
     const ready = new Promise<boolean>(done => { settle = done })
-    run = made = { scope: s, port, bind, epoch, ready, settle, started: false, expired: false, error: SAY[owner].unreachable(room.host, port), owner }
+    run = made = { scope: s, port, bind, epoch, ready, settle, started: false, failed: false, error: SAY[owner].unreachable(room.host, port), owner }
     runs.set(pid, run)
     void startLocalPreview($, room, pid, run)
   }
   const ready = await run.ready
-  if (!ready || !run.localPort || run.expired || !(await localRunCurrent($, pid, run)) || !localRequestCurrent(room, s, pid, epoch)) return { error: run.error, ...(made ? { made } : {}), ...(run.refused ? { refused: run.refused } : {}) }
+  if (!ready || !run.localPort || run.failed || !(await localRunCurrent($, pid, run)) || !localRequestCurrent(room, s, pid, epoch)) return { error: run.error, ...(made ? { made } : {}), ...(run.refused ? { refused: run.refused } : {}) }
   return { url: listenerUrl(shown, run), run, ...(made ? { made } : {}) }
 }
 
@@ -5660,27 +5646,17 @@ function validPort(port: unknown): port is number {
   return typeof port === 'number' && Number.isInteger(port) && port > 0 && port <= 65535
 }
 
-type LocalPreviewGrant = { token: string; expiresAt: number; port: number; protocol: number }
-
 async function startLocalPreview($: $, room: ShareRoom, pid: string, run: LocalPreviewRun) {
   let child: Child | undefined
   const runs = run.scope.children.listeners
   try {
-    // Its grant is a request made with the seat's token: a reseat meanwhile
-    // ends it (the run that follows lasts across one).
+    // Its connections carry the seat's token as it starts, which the room
+    // checks at each. A reseat meanwhile ends the start; once up, a run lasts
+    // across one, until the room refuses the old token (AUTH).
     if (!(await localRunCurrent($, pid, run)) || !sameRoom(room, run.scope)) return
     const url = `${room.server}/api/rooms/${room.id}/previews/${pid}/tunnel`
-    const grant = await api<LocalPreviewGrant>($, room.server, `/api/rooms/${room.id}/previews/${pid}/tunnel`, { method: 'POST', token: room.token })
-    if (grant.protocol !== 1 || grant.port !== run.port || typeof grant.token !== 'string' || !/^[A-Za-z0-9_-]{16,128}$/.test(grant.token) || !Number.isSafeInteger(grant.expiresAt) || grant.expiresAt <= await $.clock.now()) {
-      run.error = TCP_UNAVAILABLE
-      return
-    }
-    if (!(await localRunCurrent($, pid, run)) || !sameRoom(room, run.scope)) {
-      run.error = 'The preview was stopped or changed while it was being forwarded.'
-      return
-    }
     // Where its caller asked (the window's tunnel: a port the system picks).
-    child = $.process.spawn({ argv: ['/bin/sh', '-c', FIND_NODE, 'sh', `${$.plugin.root}/relay/local-preview.cjs`], input: JSON.stringify({ port: run.bind.port, strict: run.bind.strict, url, token: grant.token, expiresAt: grant.expiresAt }) })
+    child = $.process.spawn({ argv: ['/bin/sh', '-c', FIND_NODE, 'sh', `${$.plugin.root}/relay/local-preview.cjs`], input: JSON.stringify({ port: run.bind.port, strict: run.bind.strict, url, token: room.token }) })
     run.child = child
     // An unresponsive child doesn't hold an Open, a restore or the window's
     // page for long: eight seconds to say it's listening, then it's stopped.
@@ -5701,7 +5677,9 @@ async function startLocalPreview($: $, room: ShareRoom, pid: string, run: LocalP
           void stopLocalPreview($, pid, false, run.scope)
           break
         }
-        if (!(await localRunCurrent($, pid, run))) {
+        // Up after a reseat: its connections would carry the old seat's
+        // token, so it stops, and what wants it starts it again with the new one.
+        if (!(await localRunCurrent($, pid, run)) || !sameRoom(room, run.scope)) {
           void stopLocalPreview($, pid, false, run.scope)
           break
         }
@@ -5712,12 +5690,6 @@ async function startLocalPreview($: $, room: ShareRoom, pid: string, run: LocalP
         // Listening: what asked for it saves it once its Open (or restore)
         // is done (`commitMappings`); the window's tunnel never is.
         run.settle(true)
-        void syncBrowserRoutes($, run.scope)
-      } else if (message.state === 'expired') {
-        run.expired = true
-        run.error = 'Local preview authorization expired. Press Open in the Room to reconnect.'
-        await runTrouble($, room, pid, run, 'expired')
-        await $.ui.invalidate('ui.render')
         void syncBrowserRoutes($, run.scope)
       } else if (message.state === 'channel-ready') {
         run.channelError = undefined
@@ -5738,11 +5710,9 @@ async function startLocalPreview($: $, room: ShareRoom, pid: string, run: LocalP
           ? `localhost:${run.bind.port} is already in use on this computer. Nothing of yours was stopped.`
           : message.code === 'DENIED'
             ? `This computer doesn't let Claude Code listen on localhost:${run.bind.port}${run.bind.port < 1024 ? ' (on Linux, ports below 1024 need administrator rights)' : ''}.`
-          : message.code === 'AUTH'
-            ? 'The preview could not be authenticated. Press Open in the Room to retry, or choose Public link.'
             : `Couldn't forward the host's localhost:${run.port}. Check the host is connected, then press Open in the Room to retry.`
         if (run.started) {
-          run.expired = true
+          run.failed = true
           await runTrouble($, room, pid, run, 'failed')
           await $.ui.invalidate('ui.render')
           void syncBrowserRoutes($, run.scope)
@@ -5750,24 +5720,14 @@ async function startLocalPreview($: $, room: ShareRoom, pid: string, run: LocalP
       }
     }
     if ((await ended) === 'NODE') run.error = 'Local previews need Node on this computer. Install Node and press Open in the Room, or choose Public link.'
-  } catch (error) {
-    if (error instanceof ApiError) run.error = error.status === 429
-      ? SAY[run.owner].busy
-      : [401, 403].includes(error.status)
-        ? SAY[run.owner].refused
-        : TCP_UNAVAILABLE
-    // Never echo child diagnostics, credentials or a server's untrusted text.
-    // The grant a refusal got by itself, refused as well (403: the room's
-    // access, or the preview, says no; a 401 is a seat let go, which the
-    // stream takes anew): refused again, so only the person's Open
-    // reconnects it, and that is said.
-    if (run.owner === 'window' && error instanceof ApiError && error.status === 403 && run.scope.window.backoff.get(pid)?.regranted) void needsOpen($, room, pid, run).catch(() => {})
+  } catch {
+    // Never echo child diagnostics or credentials: the run's own words stand.
   } finally {
     run.timer?.cancel()
     run.settle(false)
     if (runs.get(pid) === run && !run.stopping) {
       runs.delete(pid)
-      if (run.started && !run.expired && run.scope.live) await runTrouble($, room, pid, run, 'stopped')
+      if (run.started && !run.failed && run.scope.live) await runTrouble($, room, pid, run, 'stopped')
       await $.ui.invalidate('ui.render')
       void syncBrowserRoutes($, run.scope)
     }
@@ -5775,10 +5735,10 @@ async function startLocalPreview($: $, room: ShareRoom, pid: string, run: LocalP
 }
 
 // A run's trouble, said as its owner says it (`RunOwner`): a listener's at
-// once (a failed channel, once for each kind; once up, its expiry, failure
-// or stop); the window's tunnel a channel's its own way (`windowChannel`),
-// and nothing of the rest: the window's next ask starts it again.
-async function runTrouble($: $, room: ShareRoom, pid: string, run: LocalPreviewRun, what: 'channel' | 'expired' | 'failed' | 'stopped', code?: string) {
+// once (a failed channel, once for each kind; once up, its failure or
+// stop); the window's tunnel a channel's its own way (`windowChannel`), and
+// nothing of the rest: the window's next ask starts it again.
+async function runTrouble($: $, room: ShareRoom, pid: string, run: LocalPreviewRun, what: 'channel' | 'failed' | 'stopped', code?: string) {
   const say = SAY[run.owner]
   if (what !== 'channel') {
     if (run.owner === 'listener') $.ui.toast(what === 'stopped' ? `Local preview on localhost:${run.localPort} stopped. Press Open in the Room to reconnect.` : run.error)
@@ -5794,8 +5754,8 @@ async function runTrouble($: $, room: ShareRoom, pid: string, run: LocalPreviewR
 
 // A channel of the window's own tunnel failed (`code`; `error`, its words).
 // Refused (AUTH): once since the person's own Open, the tunnel stops and
-// the page's next ask grants it again with the seat this session holds now
-// (its old one let go, its grants with it); refused again, only their Open
+// the page's next ask starts it again with the seat's token this session
+// holds now (its old seat let go); refused again, only their Open
 // reconnects it (`needsOpen`). One refusal a tunnel: its other sockets say
 // nothing more. Anything else is said a moment on, in the window's words,
 // once the host's Stop (if that's what it was) has reached this session.
@@ -5803,7 +5763,7 @@ function windowChannel($: $, room: ShareRoom, pid: string, run: LocalPreviewRun,
   if (code === 'AUTH') {
     if (run.channelError === error) return
     run.channelError = error
-    if (run.scope.window.regrantOnce(pid)) {
+    if (run.scope.window.retryOnce(pid)) {
       void stopLocalPreview($, pid, false, run.scope)
       // A Stop the host pressed is said in the window's words, as below.
       sayWindowLater($, room, pid, run, 'AUTH', async () => {})
@@ -5889,7 +5849,7 @@ const savedPort = (p: Pick<ShareLocalPreview, 'port' | 'localPort'>) => (validPo
 async function commitMappings($: $, bound: readonly { pid: string; run: LocalPreviewRun; own?: true }[]) {
   await update($, localPreviewsA, list =>
     bound.reduce((next, { pid, run, own }) => {
-      if (run.owner !== 'listener' || !run.started || run.expired || !validPort(run.localPort) || !runCurrent(pid, run)) return next
+      if (run.owner !== 'listener' || !run.started || run.failed || !validPort(run.localPort) || !runCurrent(pid, run)) return next
       const was = next.find(p => p.pid === pid)
       const kept = own ?? (was?.own && was.port === run.port ? was.own : undefined)
       return [...next.filter(p => p.pid !== pid), { pid, port: run.port, localPort: run.localPort, ...(kept ? { own: kept } : {}) }]
@@ -5899,9 +5859,9 @@ async function commitMappings($: $, bound: readonly { pid: string; run: LocalPre
 
 // A reload or resume: each listener this guest had open comes back exactly at
 // the port it had here (taken meanwhile, it stays closed rather than move: an
-// open tab would reach whatever took it). The grant is the check: what the
-// host stopped or no longer forwards stays closed. Forwarded is as the window
-// and the Room know it, Shown's, which the room's list keeps.
+// open tab would reach whatever took it). What the host stopped or no longer
+// forwards stays closed, as the window and the Room know it: Shown's, which
+// the room's list keeps (and the room checks each connection again).
 async function restoreLocalPreviews($: $) {
   const s = scope, room = await read($, roomA)
   if (!room || !sameRoom(room, s) || s.mode !== 'guest') return
@@ -6208,7 +6168,7 @@ function finishBrowserProxy(proxy: BrowserProxy): Promise<void> {
 // lines read as they come (8192 bytes each at most), and ended on anything
 // unexpected. Its settings go on stdin: a port, its control secret, whether
 // it may reach this computer's network, and the person's upstream proxy;
-// never a room's token or a grant.
+// never a room's token.
 async function runBrowserProxy($: $, proxy: BrowserProxy) {
   try {
     const upstream = await upstreamProxy($).catch(() => null)
@@ -6328,7 +6288,7 @@ async function syncBrowserRoutes($: $, s: RoomScope = scope) {
     const routes: Record<string, number> = {}
     for (const run of s.children.listeners.values()) {
       if (Object.keys(routes).length >= 128) break
-      if (run.started && !run.expired && !run.stopping && validPort(run.localPort)) routes[String(run.port)] = run.localPort
+      if (run.started && !run.failed && !run.stopping && validPort(run.localPort)) routes[String(run.port)] = run.localPort
     }
     const now = await $.clock.now()
     const refused = new Set(await read($, previewNeedsOpenA))
@@ -6361,8 +6321,8 @@ async function wantPort($: $, proxy: BrowserProxy, port: number) {
   if (proxy.wants.has(pid)) return
   const task = (async () => {
     const opened = await ensureLocalPreview($, room, s, authority, { window: true })
-    // Ended by a reseat meanwhile (its grant asked with the old seat's token):
-    // the page's next ask starts it again at once, with the new seat.
+    // Ended by a reseat meanwhile (started with the old seat's token): the
+    // page's next ask starts it again at once, with the new seat's.
     if (opened.error && s.children.windowProxy === proxy && !proxy.stopped && sameRoom(room, s)) {
       s.window.backoff.set(pid, { ...s.window.backoff.get(pid), until: (await $.clock.now()) + 30_000 })
       $.clock.after(30_000, () => void syncBrowserRoutes($, s))
@@ -6498,7 +6458,7 @@ function sayWindowLater($: $, room: ShareRoom, pid: string, run: LocalPreviewRun
 
 // What a person's Open clears of the host's refusals before: the page's own,
 // and the page's dependencies.
-// Their Open clears the start backoff, and gives each a refusal's one grant again.
+// Their Open clears the start backoff, and gives each a refusal's one restart again.
 async function clearRefusals($: $, pids: readonly string[], s: RoomScope) {
   if (!pids.length || !s.live) return
   await update($, previewNeedsOpenA, list => (!s.live ? list : list.filter(p => !pids.includes(p))))
@@ -6506,10 +6466,11 @@ async function clearRefusals($: $, pids: readonly string[], s: RoomScope) {
 }
 
 // The person's own Open: a refusal before, the page's or of what it uses, is
-// theirs to retry. A run the host's side refused (AUTH: its grant's gone)
-// stops, so this Open grants it anew: what the page uses kept as it is would
-// refuse the page's every request, a listener's and the window's alike (the
-// window routes to whatever run serves a port).
+// theirs to retry. A run the room refused (AUTH: the seat's token it carries
+// isn't the room's now) stops, so this Open starts it anew with the token
+// held now: what the page uses kept as it is would refuse the page's every
+// request, a listener's and the window's alike (the window routes to
+// whatever run serves a port).
 async function retryRefused($: $, page: { pid: string; port: number }, s: RoomScope) {
   const clears = [page.pid, ...dependenciesOf(await forwardedNow($), page).map(f => f.pid)]
   await clearRefusals($, clears, s)
@@ -6778,16 +6739,17 @@ async function readyProxy($: $, open: WindowOpen): Promise<BrowserProxy | Window
     }
     open.alive = null
   }
-  // Its grant asked with the seat this session holds now (the window goes on
-  // through a reseat, `windowStep`); seated anew while it was asked for, what
-  // that started (the old seat's) stops, and the Open asks to be pressed again.
+  // Its tunnel starts with the seat's token this session holds now (the
+  // window goes on through a reseat, `windowStep`); seated anew meanwhile,
+  // what that started (with the old seat's token) stops, and the Open asks
+  // to be pressed again.
   const asked = s.token
   const tunnel = await windowStep(open, ensureLocalPreview($, { ...room, token: asked }, s, page, { window: true }))
   const reseated = s.token !== asked
   if (!tunnel.run && reseated && tunnel.made && s.children.listeners.get(page.pid) === tunnel.made) await stopLocalPreview($, page.pid, false, s)
-  // The preview's own trouble (the host's side, no Node for the tunnel): it
-  // would be the same without the window. A proxy this open started, and
-  // nothing else, may go with it (`idleProxy`).
+  // The preview's own trouble (its tunnel didn't start here, no Node for
+  // it): it would be the same without the window. A proxy this open
+  // started, and nothing else, may go with it (`idleProxy`).
   if (!tunnel.run) {
     await idleProxy(open, proxy)
     $.ui.toast(reseated ? RESEATED : tunnel.error ?? 'That preview could not be opened.')
@@ -6909,13 +6871,12 @@ async function announceWindow($: $, open: WindowOpen, proxy: BrowserProxy): Prom
 }
 
 // The window this session's, on its proxy's `port`, with the page open in
-// it (`withPage`; not a page stopped as it opened): a window that couldn't
-// open for the page before is answered, and it's looked at every 30 s from now.
+// it (`withPage`; not a page stopped as it opened): it's looked at every
+// 30 s from now.
 async function windowOpened($: $, open: WindowOpen, port: number, withPage = true) {
   const { s, key, page } = open
   // What's open in it: what the record had for this same window (profile and port), and the page.
   await update($, previewWindowA, w => (!s.live ? w : { room: key, port, opened: [...new Set([...(w?.room === key && w.port === port && w.profile === open.name ? w.opened : []), ...(withPage ? [page.pid] : [])])], profile: open.name }))
-  if (withPage) await update($, windowFailedA, f => (s.live && f?.pid === page.pid ? null : f))
   watchWindow($, s, open.profile!)
 }
 
@@ -7671,7 +7632,7 @@ const portsSaid = (ports: readonly number[]) => ports.map(p => `localhost:${p}`)
 // A listener of this preview open here now (not the window's own tunnel).
 function listening(pid: string, s: RoomScope = scope): LocalPreviewRun | null {
   const run = s.children.listeners.get(pid)
-  return run?.owner === 'listener' && run.started && !run.expired && !run.stopping ? run : null
+  return run?.owner === 'listener' && run.started && !run.failed && !run.stopping ? run : null
 }
 
 // The page and what it uses beside it, each listening here where the policy
@@ -7686,10 +7647,10 @@ function listening(pid: string, s: RoomScope = scope): LocalPreviewRun | null {
 // `keepWindow` (an Open that could go to the window): one whose tunnel
 // serves the window is left to it, and nothing more is tried: `{ inWindow }`.
 // Whatever doesn't come up, or the room left meanwhile, stops what this
-// Open started and changes nothing else. Its grants are asked with the seat
-// this session holds as it starts; seated anew while it binds (the room let
-// the old seat go: grants asked with it are its), what it started stops and
-// the Open asks to be pressed again (`RESEATED`).
+// Open started and changes nothing else. What it starts carries the seat's
+// token this session holds as it starts; seated anew while it binds (the
+// room let the old seat go, and refuses its token), what it started stops
+// and the Open asks to be pressed again (`RESEATED`).
 // What's up is saved only once the page is (`commitMappings`), so nothing
 // an Open only tried comes back; the page, when it's what another page uses,
 // as opened on its own (`own`).
@@ -7755,12 +7716,14 @@ function elsewhereNote(room: ShareRoom, page: Forwarded, bound: Bound, why: Refu
 // A forwarded preview's Open: Always a separate window, or the page open in
 // the window already, goes there; else the host's own numbers here; one
 // taken (or refused), the window; no window, the page elsewhere. A window
-// that couldn't open: in Always, Open anyway is offered (and so when none can
-// open here at all); else the Open goes on without it. `without`: why no
-// window this time (one just failed, or Open anyway after one did): the
-// host's numbers, else elsewhere.
+// that couldn't open: in Always, that's said, and the Previews setting is
+// the way to open it without one (and so when none can open here at all);
+// else the Open goes on without it. `without`: why no window this time
+// (one just failed): the host's numbers, else elsewhere.
 async function openForwarded($: $, room: ShareRoom, s: RoomScope, shown: ShareShown, surface?: RenderSurface, without?: string): Promise<void> {
   if (!isForwarded(shown)) return void $.ui.toast('That preview has ended or has no valid localhost address.')
+  // The host away: nothing of theirs answers now, so nothing is bound or opened.
+  if ((await read($, peopleA)).some(p => p.role === 'host' && !p.online)) return void $.ui.toast(`${room.host} is offline, so their previews can't open now. Press Open again once they're back.`)
   const page = shown, pid = page.pid, epoch = s.epoch(pid)
   // Still this Open: its room's scope, and no Stop, Close or Leave of the
   // preview since. A reseat isn't one: what the Open asks for goes with the
@@ -7768,8 +7731,6 @@ async function openForwarded($: $, room: ShareRoom, s: RoomScope, shown: ShareSh
   // one seated anew meanwhile says so (`RESEATED`) rather than end without a
   // word.
   const live = async () => stillInRoom(room, s) && s.epoch(pid) === epoch
-  // A window that couldn't open for it before: this Open answers that.
-  await update($, windowFailedA, f => (s.live && f?.pid === pid ? null : f))
   // Whether a window can open here, looked for only once one is wanted
   // (Always, the page in the window, a port taken): an Open whose ports are
   // free never waits on the browser look.
@@ -7787,12 +7748,9 @@ async function openForwarded($: $, room: ShareRoom, s: RoomScope, shown: ShareSh
     noteOnce($, `elsewhere ${note}`, note, s)
   }
   // Always a separate window, and none opened (one failed, or none can open
-  // here): nothing else opens it by itself (the person's cookies and own
-  // servers stay apart from the host's), but Open anyway, above the prompt, does.
-  const alwaysFailed = async (reason: string) => {
-    await update($, windowFailedA, f => (s.live ? { pid, reason } : f))
-    $.ui.toast(`Couldn't open the preview window: ${reason}. Press Open anyway, above the prompt, to open ${room.host}'s localhost:${page.port} without one.`)
-  }
+  // here): nothing else opens it (the person's cookies and own servers stay
+  // apart from the host's); their Previews setting does, changed.
+  const alwaysFailed = (reason: string) => void $.ui.toast(`Couldn't open the preview window: ${reason}. To open ${room.host}'s localhost:${page.port} without one, change Previews in Room → Settings.`)
   const viaWindow = async (c: Extract<WindowChoice, { window: true }>, why: WindowWhy): Promise<void> => {
     const outcome = await openInWindow($, room, s, c, page, why)
     if (typeof outcome !== 'object' || !(await live())) return
@@ -7849,36 +7807,19 @@ async function openForwarded($: $, room: ShareRoom, s: RoomScope, shown: ShareSh
 // One Open of a preview at a time (the room scope's): a second press while
 // one runs waits for it and opens nothing more (no second tab, and nothing of
 // a failed attempt saved over the first's mapping).
-async function openShownPreview($: $, shown: ShareShown, surface?: RenderSurface, without?: string) {
+async function openShownPreview($: $, shown: ShareShown, surface?: RenderSurface) {
   const s = scope, room = await read($, roomA)
   if (!room || !shown.pid || !stillInRoom(room, s)) return
   const pid = shown.pid
   const running = s.previewOpens.get(pid)
   if (running) return running
-  const task = shown.tcp ? openForwarded($, room, s, shown, surface, without) : openPublicPreview($, shown, surface)
+  const task = shown.tcp ? openForwarded($, room, s, shown, surface) : openPublicPreview($, shown, surface)
   s.previewOpens.set(pid, task)
   try {
     await task
   } finally {
     if (s.previewOpens.get(pid) === task) s.previewOpens.delete(pid)
   }
-}
-
-// The preview whose window couldn't open (Always a separate window), while
-// the room still forwards it.
-async function windowFailedNow($: $): Promise<{ page: Forwarded; reason: string } | null> {
-  const failed = await read($, windowFailedA), room = await read($, roomA)
-  if (!failed || !room || !stillInRoom(room, scope)) return null
-  const page = (await forwardedNow($)).find(f => f.pid === failed.pid)
-  return page ? { page, reason: failed.reason } : null
-}
-
-// Open anyway, above the prompt: that preview without a window, the person's
-// own choice (its cost said as any Open's is).
-async function openAnyway($: $, surface?: RenderSurface) {
-  const failed = await windowFailedNow($)
-  await update($, windowFailedA, () => null)
-  if (failed) await openShownPreview($, failed.page, surface, failed.reason)
 }
 
 async function openShown($: $, shown: ShareShown, surface?: RenderSurface) {
@@ -11592,7 +11533,7 @@ export const register: Register = (on, options) => {
       previewOpen !== 'window'
         ? ''
         : windowing && !windowing.window
-          ? ` in a preview window, which can't open here: ${windowing.reason}. Open, then Open anyway above the prompt, opens it without one.`
+          ? ` in a preview window, which can't open here: ${windowing.reason}. Change Previews in Settings to open it without one.`
           : ' in a preview window'
     // Claude's browser is Desktop's: auto mode refused it, and nothing allows it yet.
     const desktop = await isDesktop($)
@@ -11987,7 +11928,7 @@ export const register: Register = (on, options) => {
           .map(item => {
             const local = localPreviews.find(p => p.pid === item.pid)
             const run = item.pid ? scope.children.listeners.get(item.pid) : undefined
-            const active = run?.started && !run.expired && !run.stopping
+            const active = run?.started && !run.failed && !run.stopping
             // The mapping is live only on its own listener: the window's tunnel
             // for the page (on a port of its own) is no mapping here.
             const mapped = Boolean(active && run?.owner === 'listener' && run.localPort === local?.localPort)
@@ -12452,10 +12393,7 @@ export const register: Register = (on, options) => {
         ],
       )
     }
-    // A guest's forwarded preview not open here yet: one press opens it. One
-    // whose window (Always a separate window) couldn't open: Open anyway
-    // opens it without one, in that page's place.
-    const failedWindow = !isHost && !stopping ? await windowFailedNow($) : null
+    // A guest's forwarded preview not open here yet: one press opens it.
     const openable = !isHost && !stopping ? await bandEntry($) : null
     if (openable) void windowChoice($, false).catch(() => {})
 
@@ -12520,8 +12458,7 @@ export const register: Register = (on, options) => {
           </Button>
         ) : null,
         pin ? <Button key="band-allow-pin" label="Pin" plain onPress={() => void allowDeskTools($)} /> : null,
-        failedWindow ? <Button key="open-anyway" label="Open anyway" plain onPress={press => void openAnyway($, press.surface)} /> : null,
-        openable && openable.pid !== failedWindow?.page.pid ? <Button key="open-preview" label="Open preview" plain onPress={press => void openShown($, openable, press.surface)} /> : null,
+        openable ? <Button key="open-preview" label="Open preview" plain onPress={press => void openShown($, openable, press.surface)} /> : null,
         signedIn && !stopping && !invite ? <Button key="invite" label="Invite" plain onPress={() => void openRoom($, 'people')} /> : null,
         isHost && !stopping && !invite ? <Button key="copy" label="Copy link" plain dimColor onPress={press => void (v.room ? copyLink($, v.room.url, press.surface) : undefined)} /> : null,
         <Button key="room" label={roomLabel} plain dimColor={!v.unread} onPress={() => void openRoom($)}>

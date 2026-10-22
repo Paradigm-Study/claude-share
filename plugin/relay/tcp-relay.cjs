@@ -11,7 +11,7 @@ const notify = row => process.stdout.write(JSON.stringify(row) + '\n')
 const failure = code => Object.assign(new Error('Local preview relay failed'), { code })
 // DENIED: a bind the system refuses this user (a port below 1024 on Linux, a
 // sandbox), which the plugin treats as a taken port, never as STARTUP.
-const safeCode = error => ['INVALID_CONFIG', 'EADDRINUSE', 'DENIED', 'EXPIRED', 'AUTH', 'BUSY', 'CONNECT', 'TIMEOUT', 'PROTOCOL', 'BUFFER_LIMIT'].includes(error?.code) ? error.code : 'STARTUP'
+const safeCode = error => ['INVALID_CONFIG', 'EADDRINUSE', 'DENIED', 'AUTH', 'BUSY', 'CONNECT', 'TIMEOUT', 'PROTOCOL', 'BUFFER_LIMIT'].includes(error?.code) ? error.code : 'STARTUP'
 const portOK = port => Number.isInteger(port) && port >= 1 && port <= 65535
 const tokenOK = token => typeof token === 'string' && /^[A-Za-z0-9_.-]{16,512}$/.test(token)
 const loopback = hostname => hostname === 'localhost' || hostname === '[::1]' || (net.isIP(hostname) === 4 && hostname.startsWith('127.'))
