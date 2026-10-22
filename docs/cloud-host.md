@@ -30,6 +30,9 @@ prompt. So the room server runs the host itself.
    teammate's call that would ask the host is put to the room (`ask`); only the
    approver's session draws it (the row above the prompt, the Room), and only
    the approver's seats may answer (`answer`). Ten minutes unanswered is a no.
+   A local page the cloud host's Claude gives out (`http://localhost:3000/…`)
+   is asked the same way, **Share** or **Not now**, before anyone can open it:
+   unanswered in ten minutes, it isn't shared, and a later mention asks again.
 4. **Bring home** (approver only). The room stops the runner, which answers
    with its changes since the move (a git diff of the repository); the
    approver's session takes the host back with a fresh host token and offers

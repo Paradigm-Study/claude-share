@@ -13,7 +13,7 @@ import relay from '../plugin/relay/ws-relay.cjs'
 import ws from '../plugin/relay/ws.cjs'
 import { spawn } from 'node:child_process'
 import { once } from 'node:events'
-import { Room, PLUGIN_LATEST, roomRequest, token, versionInfo, tcpSocketTarget, NEED_LIMIT, LIMITS, limitOf, streamedRoomBody, previewRequest, previewSocketTarget, publicPairValid, PUBLIC_LIMITS, TCP_LIMITS, SEAT_TIMEOUT_MS, EVENT_BYTES, HISTORY_BYTES, ROOM_FILES_COUNT, ROOM_PREVIEWS_MAX, ROOM_SEATS_MAX, hostHalfClose, tcpHalfClose, rejectReason, homePage } from '../server/core.mjs'
+import { Room, PLUGIN_LATEST, roomRequest, token, versionInfo, tcpSocketTarget, NEED_LIMIT, LIMITS, limitOf, streamedRoomBody, previewRequest, previewSocketTarget, publicPairValid, PUBLIC_LIMITS, TCP_LIMITS, SEAT_TIMEOUT_MS, EVENT_BYTES, HISTORY_BYTES, ROOM_FILES_COUNT, ROOM_PREVIEWS_MAX, ROOM_SEATS_MAX, SERVE_LIMITS, previewLabel, previewKeyOf, previewHostLabel, roomOrigins, hostHalfClose, tcpHalfClose, rejectReason, homePage } from '../server/core.mjs'
 import { metaOf } from '../server/worker.mjs'
 
 function world() {
@@ -621,6 +621,50 @@ async function admit(w, url, cookie) {
   console.log('OK proxied answers: a JSON line, then the body; malformed or oversized give the browser a 502 at once; 512 waiting per room')
 }
 
+// What a room sends out (SERVE_LIMITS): its files and what its previews'
+// links answer, counted against its day and each seat's minute, the day
+// reserved a chunk at a time with the TCP budget. Past either, a 429 (a page
+// for the browser), and the host isn't asked; a room loaded again starts its
+// day from all it reserved.
+{
+  const w = world(), pid = (await api(w, 'previews', w.host, 'POST', { port: 43445 })).pid
+  const lines = []
+  w.room.subscribers.add({ seat: 'host', send: m => lines.push(m), push() {} })
+  const cookie = cookieOf(await admit(w, await enterLink(w, pid)))
+  const today = new Date().toISOString().slice(0, 10), MiB = 1024 ** 2
+  const upload = async (bytes, name) => (await send(w, new Request(`https://room.test/api/rooms/${w.room.id}/files`, { method: 'POST', headers: { authorization: `Bearer ${w.host}`, 'x-shared-session-version': PLUGIN_LATEST, 'content-type': 'application/octet-stream', 'x-file-name': name }, body: new Uint8Array(bytes).fill(name.length) }))).json()
+  const [file, rest] = [await upload(10 * MiB, 'big.bin'), await upload(6 * MiB, 'rest.bin')]
+  const download = (f = file, bearer = w.guest) => call(w, `files/${f.id}`, bearer)
+  for (let i = 0; i < 25; i++) assert.equal((await download()).status, 200, `download ${i}`)
+  assert.equal((await download()).status, 429, "past the seat's minute")
+  assert.equal((await download(file, w.host)).status, 200, "another seat's minute is its own")
+  assert.equal((await download(rest)).status, 200, 'what still fits in the minute goes')
+  assert.deepEqual(w.room.tcpStats.served, { day: today, reserved: Math.ceil((26 * 10 * MiB + 6 * MiB) / SERVE_LIMITS.reserveBytes) * SERVE_LIMITS.reserveBytes })
+  // The public link, its seat's minute spent: a page at once, the host not asked.
+  const before = lines.length
+  let res = (await previewRequest(w.room, new Request('https://preview.test/', { headers: { cookie } }), Date.now())).response
+  assert.equal(res.status, 429); assert.match(await res.text(), /sent all it may/); assert.equal(lines.length, before)
+  // Another room: each answer counts against its browser's seat, and the one past it is a page instead.
+  const v = world(), vpid = (await api(v, 'previews', v.host, 'POST', { port: 43446 })).pid, asks = []
+  v.room.subscribers.add({ seat: 'host', send: m => m.proxy && asks.push(m.proxy), push() {} })
+  const vcookie = cookieOf(await admit(v, await enterLink(v, vpid)))
+  const body = Buffer.concat([Buffer.from('{"status":200,"headers":[]}\n'), Buffer.alloc(20 * MiB)])
+  const answer = id => send(v, new Request(`https://room.test/api/rooms/${v.room.id}/proxy/${id}`, { method: 'POST', headers: { authorization: `Bearer ${v.host}`, 'x-shared-session-version': PLUGIN_LATEST }, body }))
+  const statuses = []
+  for (let i = 0; i < 13; i++) {
+    const pending = previewRequest(v.room, new Request(`https://preview.test/${i}`, { headers: { cookie: vcookie } }), Date.now()).then(r => r.response)
+    await new Promise(resolve => setImmediate(resolve))
+    const posted = await answer(asks.at(-1).id)
+    statuses.push([posted.status, (await pending).status])
+  }
+  assert.deepEqual(statuses, [...Array(12).fill([200, 200]), [429, 429]])
+  // Saved with its day spent: loaded again, nothing more goes out today, to anyone.
+  const loaded = Room.resume({ ...w.room.toJSON(), tcpStats: { ...w.room.tcpStats, served: { day: today, reserved: SERVE_LIMITS.roomBytesPerDay } } }, Date.now())
+  const again = await roomRequest(loaded, request(w, `files/${file.id}`, w.host), `files/${file.id}`, Date.now(), 'https://room.test', { isCurrent: () => true })
+  assert.equal(again.response.status, 429)
+  console.log('OK a room sends out 8 GB a day of files and preview answers, 256 MB a minute a seat: counted before they go, the day reserved with the TCP budget')
+}
+
 // Public sockets: PUBLIC_LIMITS.seatPairs per cookie session's seat and
 // roomPairs per room, pending and paired alike.
 {
@@ -845,7 +889,9 @@ async function admit(w, url, cookie) {
     'on Cloudflare, which can\'t see that, once one side sends more than 4 MB in a second', 'those waiting hold 8 MB per room at most', 'a key of its own, which can\'t join it',
     'A room keeps its newest 5000 events, 16 MB of them at most', '10,240 files at most), 128 open previews, and events of 128 KB each', 'a room its newest 128 links and 256 browser sessions',
     'the browser session it starts (which preview and seat) for 12 hours from the last link that browser opened', 'Signing in finishes only when you press Continue on this server\'s page', 'The page and Claude Code show the same code, and you continue only if they match.',
-    'Claude Code\'s token is made when it picks up the sign-in, and the server keeps only its hash', 'a connection closes if 1 MiB of control messages to one side goes unacknowledged (each acknowledgement covers everything sent before it), however long it lives']) assert(text.includes(said), said)
+    'Claude Code\'s token is made when it picks up the sign-in, and the server keeps only its hash', 'after ten minutes that sign-in stops working, and it\'s deleted then.', 'until it\'s joined, dismissed, ends, or 12 hours pass', 'a connection closes if 1 MiB of control messages to one side goes unacknowledged (each acknowledgement covers everything sent before it), however long it lives',
+    'A room sends out at most 8 GB a day of its files and of what its previews\' links answer, and to any one seat at most 256 MB a minute of it', 'keyed by a random key made for that day, with that count, until the day (UTC) ends; then all of it goes, the key too']) assert(text.includes(said), said)
+  assert.deepEqual([SERVE_LIMITS.roomBytesPerDay, SERVE_LIMITS.seatBytesPerMinute, SERVE_LIMITS.periodMs], [8 * 1024 ** 3, 256 * 1024 ** 2, 60_000])
   assert.equal([HISTORY_BYTES, EVENT_BYTES, ROOM_FILES_COUNT, ROOM_PREVIEWS_MAX, PUBLIC_LIMITS.roomTickets, PUBLIC_LIMITS.roomSessions, PUBLIC_LIMITS.pendingBytes, PUBLIC_LIMITS.bytesPerWindow, TCP_LIMITS.bufferBytes,
     TCP_LIMITS.seatPairs, TCP_LIMITS.roomPairs, TCP_LIMITS.opensPerMinute, TCP_LIMITS.seatOpensPerMinute, TCP_LIMITS.pairMs].join(), [16 * 1024 ** 2, 128 * 1024, 10_240, 128, 128, 256, 8 * 1024 ** 2, 4 * 1024 ** 2, 1024 ** 2, 32, 64, 1200, 240, 10_000].join())
   assert.equal(text.includes('grant'), false, 'no grants to speak of')
@@ -1516,6 +1562,130 @@ async function saveFailureChecks() {
     await rm(dir, { recursive: true, force: true })
   }
 }
+// Per-room preview origins: with PREVIEW_URL a wildcard, each room's
+// previews have a host name of their own (<label>.<rest>), the room's key in
+// base32, so no room's page shares an origin, or a cookie, with another's.
+// On a real Node server: a link names its room's host name, entering there
+// needs no clearing hop, and only that host name serves the room.
+async function ownOriginChecks() {
+  const dir = await mkdtemp(join(tmpdir(), 'share-previews-'))
+  const port = await freePort(); let preview = await freePort()
+  while (preview === port) preview = await freePort()
+  const origin = `http://127.0.0.1:${port}`
+  let logs = ''
+  const child = spawn(process.execPath, [fileURLToPath(new URL('../server/node.mjs', import.meta.url))], { cwd: dir,
+    env: { PATH: process.env.PATH, HOME: dir, PORT: String(port), PREVIEW_PORT: String(preview), PREVIEW_URL: `http://*.previews.test:${preview}`, DATA_FILE: join(dir, 'rooms.json') }, stdio: ['ignore', 'pipe', 'pipe'] })
+  child.stdout.on('data', b => { logs += b }); child.stderr.on('data', b => { logs += b })
+  // A request to the preview port as a browser at that host name sends it.
+  const at = (host, path, cookie) => new Promise((resolve, reject) => {
+    const req = httpRequest({ host: '127.0.0.1', port: preview, path, headers: { host, ...(cookie ? { cookie } : {}) } }, res => {
+      let body = ''
+      res.on('data', b => { body += b }); res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body }))
+    })
+    req.on('error', reject); req.end()
+  })
+  try {
+    for (let i = 0; i < 150 && !(await fetch(`${origin}/api/health`).then(r => r.ok).catch(() => false)); i++) {
+      if (child.exitCode !== null) throw new Error(logs)
+      await wait(20)
+    }
+    const post = async (path, bearer, body) => {
+      const r = await fetch(`${origin}${path}`, { method: 'POST', headers: { ...(bearer ? { authorization: `Bearer ${bearer}` } : {}), 'x-shared-session-version': PLUGIN_LATEST }, body: JSON.stringify(body) })
+      assert.equal(r.status, 200, await r.clone().text())
+      return r.json()
+    }
+    const rooms = []
+    for (const name of ['Ann', 'Bo']) {
+      const room = await post('/api/rooms', null, { name }), base = `/api/rooms/${room.id}`
+      const guest = await post(`${base}/join`, null, { name: 'Guest' })
+      const { pid } = await post(`${base}/previews`, room.token, { port: 43470 + rooms.length })
+      rooms.push({ room, base, guest, pid })
+    }
+    const links = await Promise.all(rooms.map(async r => new URL((await post(`${r.base}/previews/${r.pid}/ticket`, r.guest.token, { path: '/' })).url)))
+    // Each room its own host name under the wildcard's, a label of its key.
+    const labels = links.map(url => url.hostname.slice(0, -'.previews.test'.length))
+    assert.ok(links.every(url => url.hostname.endsWith('.previews.test') && url.port === String(preview)), links.join(' '))
+    assert.notEqual(labels[0], labels[1])
+    assert.ok(labels.every(label => /^[a-z2-7]{26}$/.test(label)), labels.join(' '))
+    // Entered at its own host name: no clearing hop, whatever another room
+    // left in the browser, and a cookie for that host name alone.
+    const entered = await at(links[0].host, `${links[0].pathname}${links[0].search}`, 'cs_pv=someotherroom.x; app=1')
+    assert.equal(entered.status, 302, entered.body)
+    assert.equal(entered.headers['clear-site-data'], undefined)
+    const cookie = entered.headers['set-cookie'][0]
+    assert.match(cookie, /^cs_pv=[^;]+; Path=\/; HttpOnly; SameSite=Lax$/)
+    const jar = cookie.split(';')[0]
+    // That cookie opens the room's preview on its own host name (the host
+    // isn't connected here: a 503 page, so the room was found) and nowhere
+    // else: not another room's host name, not the bare one.
+    assert.equal((await at(links[0].host, '/', jar)).status, 503)
+    assert.equal((await at(links[1].host, '/', jar)).status, 404)
+    assert.equal((await at(`previews.test:${preview}`, '/', jar)).status, 404)
+    assert.equal((await at(`x.${links[0].host}`, '/', jar)).status, 404, 'a host name deeper than the wildcard')
+    // A link used at another room's host name opens nothing there.
+    assert.equal((await at(links[0].host.replace(labels[0], labels[1]), `${links[1].pathname}${links[1].search}`.replace(links[1].searchParams.get('ticket'), links[0].searchParams.get('ticket')))).status, 403)
+    console.log("OK per-room preview origins on a real Node server: a link names its room's own host name, entered there with no clearing hop, and only that host name serves the room")
+  } finally {
+    if (child.exitCode === null) { child.kill(); await once(child, 'exit') }
+    await rm(dir, { recursive: true, force: true })
+  }
+}
+
+// The same rooms' keys as labels and back, both adapters' kinds; what an
+// app's answer sets stays on its own host name; and on the Worker, a
+// wildcard's host name alone names the room, and only the preview Worker
+// says it came that way.
+{
+  for (const key of [token(16), 'f'.repeat(30) + '0123456789abcdef0123456789abcdef01']) {
+    const label = previewLabel(key), back = previewKeyOf(label)
+    assert.ok(label.length <= 63 && /^[a-z2-7]+$/.test(label), label)
+    assert.equal(/^[0-9a-f]{64}$/.test(key) ? back.hex : back.base64url, key)
+  }
+  assert.equal(previewKeyOf('Abc'), null); assert.equal(previewKeyOf(''), null); assert.equal(previewKeyOf(`${previewLabel(token(16))}a`), null, 'one way to write a key')
+  assert.equal(roomOrigins('https://*.previews.test'), true); assert.equal(roomOrigins('https://previews.test'), false); assert.equal(roomOrigins(undefined), false)
+  assert.equal(previewHostLabel('https://*.previews.test', 'abc.previews.test'), 'abc')
+  assert.equal(previewHostLabel('https://*.previews.test', 'ABC.Previews.Test'), 'abc')
+  assert.equal(previewHostLabel('https://*.previews.test', 'a.b.previews.test'), null)
+  assert.equal(previewHostLabel('https://*.previews.test', 'previews.test'), null)
+  assert.equal(previewHostLabel('https://*.previews.test', 'abc.previews.test.evil'), null)
+  assert.equal(previewHostLabel('https://previews.test', 'abc.previews.test'), null)
+  // A ticket names the room's own host name when PREVIEW_URL is a wildcard.
+  const w = world(), pid = (await api(w, 'previews', w.host, 'POST', { port: 43460 })).pid
+  const minted = await roomRequest(w.room, request(w, `previews/${pid}/ticket`, w.guest, 'POST', { path: '/' }), `previews/${pid}/ticket`, Date.now(), 'https://room.test', { isCurrent: () => true, previewOrigin: 'https://*.previews.test' })
+  const url = new URL((await minted.response.json()).url)
+  assert.equal(url.hostname, `${previewLabel(w.room.previewKey)}.previews.test`)
+  // On its own host name, a browser holding another room's cookie goes in
+  // with no clearing hop.
+  const entered = (await previewRequest(w.room, new Request(url, { headers: { cookie: 'cs_pv=other.x' } }), Date.now(), { own: true })).response
+  assert.equal(entered.status, 302); assert.equal(entered.headers.get('clear-site-data'), null)
+  const cookie = entered.headers.get('set-cookie').split(';')[0]
+  // What the app sets stays on that host name: no Domain, and never the room's own cookie.
+  const lines = []
+  w.room.subscribers.add({ seat: 'host', send: m => lines.push(m), push() {} })
+  const pending = previewRequest(w.room, new Request('https://preview.test/', { headers: { cookie } }), Date.now(), { own: true }).then(r => r.response)
+  await new Promise(resolve => setImmediate(resolve))
+  const head = { status: 200, headers: [['set-cookie', 'sid=1; Path=/; Domain=previews.test; HttpOnly'], ['set-cookie', 'pref=2; domain = .previews.test'], ['set-cookie', 'cs_pv=forged.x; Path=/'], ['set-cookie', 'plain=3']] }
+  const answered = await send(w, new Request(`https://room.test/api/rooms/${w.room.id}/proxy/${lines.filter(m => m.proxy).at(-1).proxy.id}`, { method: 'POST', headers: { authorization: `Bearer ${w.host}`, 'x-shared-session-version': PLUGIN_LATEST }, body: `${JSON.stringify(head)}\nok` }))
+  assert.equal(answered.status, 200)
+  assert.deepEqual((await pending).headers.getSetCookie(), ['sid=1; Path=/; HttpOnly', 'pref=2', 'plain=3'])
+
+  // The preview Worker: a wildcard's host name names the room's object by
+  // its own id; any other host name, nothing. The room hears it came on its
+  // own host name only from there: a browser's own x-preview-own goes.
+  const { default: worker } = await import('../server/worker.mjs')
+  const id = 'a'.repeat(64), seen = []
+  const env = (PREVIEW_URL) => ({ ROLE: 'preview', PREVIEW_URL, ROOMS: { idFromString: hex => { if (!/^[0-9a-f]{64}$/.test(hex)) throw new Error('not an id'); return hex }, get: hex => ({ fetch: req => { seen.push({ hex, url: req.url, own: req.headers.get('x-preview-own') }); return new Response('room') } }) } })
+  assert.equal(await (await worker.fetch(new Request(`https://${previewLabel(id)}.previews.test/app?x=1`, { headers: { 'x-preview-own': '0' } }), env('https://*.previews.test'))).text(), 'room')
+  assert.deepEqual(seen.at(-1), { hex: id, url: `https://room.internal/${id}/__preview/app?x=1`, own: '1' })
+  assert.equal((await worker.fetch(new Request('https://previews.test/', { headers: { cookie: `cs_pv=${id}.x` } }), env('https://*.previews.test'))).status, 404, 'no cookie names a room then')
+  assert.equal((await worker.fetch(new Request(`https://${previewLabel(id)}.other.test/`), env('https://*.previews.test'))).status, 404)
+  // One host name for every room: the cookie names it, and nothing says it's its own.
+  await worker.fetch(new Request('https://preview.test/', { headers: { cookie: `cs_pv=${id}.x`, 'x-preview-own': '1' } }), env('https://preview.test'))
+  assert.deepEqual(seen.at(-1), { hex: id, url: `https://room.internal/${id}/__preview/`, own: null })
+  console.log("OK per-room preview origins: a room's key as one DNS label and back, a ticket naming the room's own host name, no clearing hop there, an app's cookies kept to it, and the preview Worker routing by host name alone")
+}
+
 await nodeChecks()
 await saveFailureChecks()
+await ownOriginChecks()
 console.log('PASS preview server and isolated Node tests')

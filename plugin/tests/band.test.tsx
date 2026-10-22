@@ -5,7 +5,7 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { Engine, TestBody } from 'claude-code/testing'
 import type { On, PluginState } from 'claude-code'
-import { readsInside } from '../hooks/paths'
+import { readsInside, readTargets, realInside } from '../hooks/paths'
 import { fit } from '../hooks/fit'
 import { replyKey } from '../hooks/room'
 import { DETACHED, hostProfileName, profileName } from '../hooks/window'
@@ -15,7 +15,7 @@ import { DETACHED, hostProfileName, profileName } from '../hooks/window'
 declare const setTimeout: (done: () => void, ms: number) => unknown
 
 const SURFACES = ['desktop', 'terminal'] as const
-const LINK = 'http://share.test/s/room0000000000000001'
+const LINK = 'https://share.test/s/room0000000000000001'
 
 function band<S extends (typeof SURFACES)[number]>(surface: S) {
   return {
@@ -26,6 +26,9 @@ function band<S extends (typeof SURFACES)[number]>(surface: S) {
     viewport: { columns: 100, rows: 30 },
   }
 }
+
+// Where relay/save.sh was asked to save each file: <project>/.shared-session/<folder>/<name>.
+const savesOf = (spawned: { argv: readonly string[] }[]) => spawned.filter(s => s.argv[1]?.endsWith('/relay/save.sh')).map(s => `${s.argv[2]}/.shared-session/${s.argv[3]}/${s.argv[4]}`)
 
 // Everything beneath the plugin a session would provide, plus a share server
 // that answers from memory. Returns what the server was asked. `stream` is
@@ -57,6 +60,8 @@ function world(
     paged?: { failRest?: boolean }
     /** This session's Claude Code id. */
     sessionId?: string
+    /** The host's name as the room's join answer gives it. */
+    hostName?: string
     /** The first this many stream connections are refused (401): the room let the seat go. */
     streamRefuses?: number
     /** The next posts of events are refused (401), as many as `count`, set any time: the room let the seat go. */
@@ -120,6 +125,12 @@ function world(
      * refused.
      */
     pages?: Record<string, string>
+    /**
+     * Links on the host's disk, each path to where it points, for the look
+     * at where a guest's read really goes (`readsInsideReally`). Every other
+     * path is its own real path.
+     */
+    links?: Record<string, string>
     /** The share server's answer to a preview window's need. */
     need?: 'delivered' | 'undelivered' | 'shared'
     /** Where the session draws; the host's questions need one. */
@@ -611,6 +622,21 @@ function world(
       if (body && to) files.set(to[1]!, body[2]!)
       return { value: { code: 0, signal: null } }
     }
+    // Where a guest's read really goes: each path as it is, but through the world's links.
+    if (e.argv[0] === '/bin/sh' && e.argv[1]?.endsWith('/relay/real.sh')) {
+      const named = e.argv.slice(2)
+      // As the system finds it, a name at a time: a link goes where it points, and `..` climbs from there.
+      const real = (path: string) => {
+        let at = ''
+        for (const part of path.split('/').filter(x => x && x !== '.')) {
+          at = part === '..' ? at.slice(0, at.lastIndexOf('/')) : `${at}/${part}`
+          at = opts.links?.[at] ?? at
+        }
+        return at || '/'
+      }
+      yield { stream: 'stdout' as const, text: named.map(p => `${real(p)}\n`).join('') }
+      return { value: { code: 0, signal: null } }
+    }
     // A saved place deleted.
     const gone = /^rm -f -- '([^']+\/shared-session\/rooms\/[^']+)'\n$/.exec(e.argv[0] === '/bin/sh' ? (e.input ?? '') : '')
     if (gone) {
@@ -916,7 +942,7 @@ function world(
       return { value: { status: 403, ok: false, headers: {}, text: JSON.stringify({ error: 'This session is for Acme.', team: 'Acme', signIn: true }) } }
     } else if (path.endsWith('/join') && opts.paged) {
       const row = (seq: number, text: string) => ({ seq, type: 'row', from: { seat: 'host', name: 'Sam', role: 'host' }, ts: 900, body: { kind: 'user', who: 'Sam', text } })
-      body = { token: 'g', seat: 'seat1', title: 'demo', host: 'Sam', seq: 3, history: [row(1, 'first page')], more: true, historySeq: 1, people }
+      body = { token: 'g', seat: 'seat1', title: 'demo', host: opts.hostName ?? 'Sam', seq: 3, history: [row(1, 'first page')], more: true, historySeq: 1, people }
       void row
     } else if (opts.paged && path.endsWith('/events') && method === 'GET' && /after=1&/.test(e.url)) {
       if (opts.paged.failRest) return { value: { status: 500, ok: false, headers: {}, text: '{"error":"boom"}' } }
@@ -931,7 +957,7 @@ function world(
       joins += 1
       const history = opts.joinHistory ?? []
       served({ events: history })
-      body = { token: joins === 1 ? 'g' : `g${joins}`, seat: joins === 1 ? 'seat1' : `seat${joins}1`, title: 'demo', host: 'Sam', seq: Math.max(1, ...history.map(e => e.seq)), history, people, latest: opts.latest, previews: listed() }
+      body = { token: joins === 1 ? 'g' : `g${joins}`, seat: joins === 1 ? 'seat1' : `seat${joins}1`, title: 'demo', host: opts.hostName ?? 'Sam', seq: Math.max(1, ...history.map(e => e.seq)), history, people, latest: opts.latest, previews: listed() }
       if (opts.joinHold && joins > 1) {
         const text = JSON.stringify(body)
         await opts.joinHold()
@@ -2217,7 +2243,7 @@ for (const ending of ['leave', 'timeout'] as const) {
 test('saved localhost listeners resume and restore after helper loss without opening a browser', async ($, on) => {
   const saved = {
     at: 900,
-    room: { server: 'http://share.test', id: 'room0000000000000001', url: LINK, title: 'demo', host: 'Sam', token: 'g', seat: 'seat1', seq: 2, since: 1 },
+    room: { server: 'https://share.test', id: 'room0000000000000001', url: LINK, title: 'demo', host: 'Sam', token: 'g', seat: 'seat1', seq: 2, since: 1 },
     autoOpen: true, policy: { prompts: 'everyone', approvals: 'edits', files: 'on' },
     shown: [{ key: 'preview:pv-local', kind: 'preview', name: 'Sign in (preview)', ts: 900, pid: 'pv-local', port: 3340, path: '/login?next=%2Faccount', tcp: true }],
     localPreviews: [{ pid: 'pv-local', port: 3340 }], activity: [], chat: [], sidebar: null,
@@ -2321,10 +2347,11 @@ test('the host relays only a port it chose, with 64 reservations in one worker',
     { role: 'user', content: 'Start the app' },
     { role: 'assistant', content: [{ type: 'text', text: 'Running at http://localhost:3340/' }] },
   ]
-  const asked = world(on, { stream, tcpRelays: true, history })
+  const asked = world(on, { stream, tcpRelays: true, history, surfaces: ['terminal'] })
   const ui = await $.ui.mount(band('terminal'))
   await ui.press({ key: 'share' })
   await ui.press({ key: 'share-all' })
+  await allowShow(asked, ui)
   await asked.clock.advance(200)
   expect(asked.sent.filter(x => x.path.endsWith('/previews')).map(x => x.body)).toEqual([{ port: 3340, title: 'localhost:3340' }])
   // Shared because Claude mentioned it: even asked by the room, no relay.
@@ -2676,9 +2703,7 @@ test("a guest saves a page and the files beside it in a folder of its own, and o
   await pane.press({ key: 'open-seq:2' })
   await asked.clock.advance(200)
   const dir = `/tmp/demo/.shared-session/Sam/page-${'b'.repeat(8)}`
-  const saved = asked.spawned.map(s => /-o '([^']+)'/.exec(s.input ?? '')?.[1]).filter(Boolean)
-  expect(saved).toEqual([`${dir}/index.html`, `${dir}/img/01-start.jpg`])
-  expect(asked.spawned.some(s => s.input?.includes(`mkdir -p '${dir}/img'`))).toBe(true)
+  expect(savesOf(asked.spawned)).toEqual([`${dir}/index.html`, `${dir}/img/01-start.jpg`])
   expect(opened).toContain(`Claude_Browser.preview_start {"url":"file://${dir}/index.html"}`)
 })
 
@@ -2761,9 +2786,51 @@ test("a guest's attachment reaches the host's Claude: saved in the project and n
   await ui.press({ key: 'share' })
   await asked.clock.advance(2_000)
   const saved = `/tmp/demo/.shared-session/Alex/${'d'.repeat(6)}-shot.png`
-  expect(asked.spawned.some(s => s.input?.includes(`-o '${saved}'`))).toBe(true)
+  expect(savesOf(asked.spawned)).toContain(saved)
   const sent = asked.submitted.find(p => p.text.startsWith('Alex: What is this?'))
   expect(sent?.text).toBe(`Alex: What is this?\n\n📎 .shared-session/Alex/${'d'.repeat(6)}-shot.png (attached by Alex; open it with the Read tool to see it)`)
+})
+
+test("a host named `..` has its files saved in .shared-session/host, never the guest's project folder", async ($, on) => {
+  const people = [
+    { id: 'host', name: '..', role: 'host', online: true },
+    { id: 'seat1', name: 'scott', role: 'guest', online: true },
+  ]
+  const files = [{ id: 'b'.repeat(64), name: 'package.json', type: 'application/json', size: 42 }]
+  const shown = { seq: 2, type: 'artifact', ts: 900, from: { seat: 'host', name: '..', role: 'host' }, body: { kind: 'file', files } }
+  const asked = world(on, { hostName: '..', stream: [{ seq: 2, events: [shown], people, ended: false, title: 'demo' }] })
+  await $.prompt.submit({ text: LINK, origin: { kind: 'composer' }, wait: false })
+  await asked.clock.advance(10)
+  const pane = await $.ui.mount({ plugin: 'shared-session', surface: 'desktop', component: 'Pane', requestId: 'shared-room', props: PANE })
+  await pane.press({ key: 'tab-shown' })
+  await pane.press({ key: 'open-seq:2' })
+  await asked.clock.advance(200)
+  const saves = asked.spawned.filter(s => s.argv[1]?.endsWith('/relay/save.sh'))
+  expect(savesOf(asked.spawned)).toEqual(['/tmp/demo/.shared-session/host/package.json'])
+  // The project it must stay inside, and curl's settings on stdin, never argv.
+  expect(saves[0]!.argv[2]).toBe('/tmp/demo')
+  expect(saves[0]!.argv.join(' ')).not.toContain('Bearer')
+  expect(saves[0]!.input).toContain('header = "Authorization: Bearer g"')
+})
+
+test("a guest named `..` has their attachment saved in .shared-session/guest on the host, never the host's project folder", async ($, on) => {
+  const people = [
+    { id: 'host', name: 'scott', role: 'host', online: true },
+    { id: 'seat2', name: '..', role: 'guest', online: true },
+  ]
+  const prompt = {
+    seq: 2,
+    type: 'prompt',
+    ts: 900,
+    from: { seat: 'seat2', name: '..', role: 'guest' },
+    body: { text: 'What is this?', pid: 'p1', attachments: [{ id: 'd'.repeat(64), name: 'shot.png', type: 'image/png', size: 68 }] },
+  }
+  const asked = world(on, { stream: [{ seq: 2, events: [prompt], people, ended: false, title: 'demo' }] })
+  const ui = await $.ui.mount(band('desktop'))
+  await ui.press({ key: 'share' })
+  await asked.clock.advance(2_000)
+  // Every place it was saved (the test's stream brings the prompt again on each reconnect).
+  expect([...new Set(savesOf(asked.spawned))]).toEqual([`/tmp/demo/.shared-session/guest/${'d'.repeat(6)}-shot.png`])
 })
 
 test('a guest message whose attachments never come through still goes, and says so', async ($, on) => {
@@ -2871,10 +2938,15 @@ test('"Share everything" opens the dev servers Claude opened before, still runni
         ],
       },
     ],
+    surfaces: ['desktop'],
   })
   const ui = await $.ui.mount(band('desktop'))
   await ui.press({ key: 'share' })
   await ui.press({ key: 'share-all' })
+  // Nothing goes until the host says so.
+  await asked.clock.advance(200)
+  expect(asked.posted.filter(e => e.type === 'artifact')).toEqual([])
+  await allowShow(asked, ui)
   await asked.clock.advance(200)
   const previews = asked.posted.filter(e => e.type === 'artifact' && e.body.kind === 'preview')
   // 3320 isn't answering; 5432 answers, but not as a web server (a database): neither is shared.
@@ -2885,12 +2957,14 @@ test('"Share everything" opens the dev servers Claude opened before, still runni
   expect(asked.sent.filter(x => x.path.endsWith('/previews')).map(x => x.body)).toEqual([{ port: 3340, title: 'localhost:3340' }])
 })
 
-test('a page the host\'s Claude opens with browser_batch goes to the room', async ($, on) => {
-  const asked = world(on)
+test('a page the host\'s Claude opens with browser_batch goes to the room, once the host says so', async ($, on) => {
+  const asked = world(on, { surfaces: ['desktop'] })
   on('tool.call', { tool: 'mcp__Claude_Browser__browser_batch' }, () => ({ result: [], text: 'navigated' }) as never)
   const ui = await $.ui.mount(band('desktop'))
   await ui.press({ key: 'share' })
   await $.tool.call({ tool: 'mcp__Claude_Browser__browser_batch', actions: [{ name: 'navigate', input: { url: 'http://localhost:5173/settings' } }, { name: 'computer', input: { action: 'screenshot' } }] } as never)
+  expect(await hostAsked(ui)).toBe('Share localhost:5173 with the room?')
+  await allowShow(asked, ui, 5173)
   await asked.clock.advance(200)
   const shown = asked.posted.find(e => e.type === 'artifact')
   expect([shown?.body.kind, shown?.body.port, shown?.body.path]).toEqual(['preview', 5173, '/settings'])
@@ -3052,7 +3126,7 @@ test('a host session reopened takes its room back, on the same link', async ($, 
 // A guest's place, as a session closing saves it.
 const JOINED_PLACE = {
   at: 900,
-  room: { server: 'http://share.test', id: 'room0000000000000001', url: LINK, title: 'demo', host: 'Sam', token: 'g', seat: 'seat1', seq: 2, since: 1 },
+  room: { server: 'https://share.test', id: 'room0000000000000001', url: LINK, title: 'demo', host: 'Sam', token: 'g', seat: 'seat1', seq: 2, since: 1 },
   autoOpen: true, policy: { prompts: 'everyone', approvals: 'edits', files: 'on' },
   shown: [], localPreviews: [], activity: [], chat: [], sidebar: null,
 }
@@ -3202,7 +3276,7 @@ test("a link pasted while this session's place in a room is being taken back wai
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   const starting = $.session.start(START)
   await eventually(asked.clock, () => Boolean(held.release))
-  const other = 'http://share.test/s/room0000000000000003'
+  const other = 'https://share.test/s/room0000000000000003'
   const pasted = $.prompt.submit({ text: other, origin: { kind: 'composer' }, wait: false })
   await asked.clock.advance(1_000)
   expect(asked.some(a => a.includes('room0000000000000003'))).toBe(false)
@@ -3345,7 +3419,7 @@ test("a link pasted while this session's place in a room is slow to come back wa
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   const starting = $.session.start(START)
   await eventually(asked.clock, () => Boolean(held.release))
-  const pasted = $.prompt.submit({ text: 'http://share.test/s/room0000000000000003', origin: { kind: 'composer' }, wait: false })
+  const pasted = $.prompt.submit({ text: 'https://share.test/s/room0000000000000003', origin: { kind: 'composer' }, wait: false })
   await asked.clock.advance(9_500)
   expect(asked.some(a => a.includes('room0000000000000003'))).toBe(false)
   expect(await within(asked.clock, () => asked.state.room?.id === 'room0000000000000003', 1_000)).toBe(true)
@@ -3572,7 +3646,7 @@ test("a guest's place given up for a link while its first request hung takes no 
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   const starting = $.session.start(START)
   await eventually(asked.clock, () => Boolean(held.release))
-  const pasted = $.prompt.submit({ text: 'http://share.test/s/room0000000000000003', origin: { kind: 'composer' }, wait: false })
+  const pasted = $.prompt.submit({ text: 'https://share.test/s/room0000000000000003', origin: { kind: 'composer' }, wait: false })
   expect(await within(asked.clock, () => asked.state.room?.id === 'room0000000000000003', 11_000)).toBe(true)
   await pasted
   expect(toldOver(asked, JOINED_PLACE.room, 'leave')).toHaveLength(1)
@@ -3596,7 +3670,7 @@ test("a link pasted while this session's place in a room is late coming back, wh
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   const starting = $.session.start(START)
   await eventually(asked.clock, () => Boolean(held.release))
-  const pasted = $.prompt.submit({ text: 'http://share.test/s/room0000000000000003', origin: { kind: 'composer' }, wait: false })
+  const pasted = $.prompt.submit({ text: 'https://share.test/s/room0000000000000003', origin: { kind: 'composer' }, wait: false })
   expect(await within(asked.clock, () => asked.includes('POST /api/rooms/room0000000000000003/join'), 11_000)).toBe(true)
   await pasted
   await asked.clock.advance(50)
@@ -3624,7 +3698,7 @@ test("a link pasted while this session's place in a room is late coming back, wh
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   const starting = $.session.start(START)
   await eventually(asked.clock, () => Boolean(held.release))
-  const pasted = $.prompt.submit({ text: 'http://share.test/s/room0000000000000003', origin: { kind: 'composer' }, wait: false })
+  const pasted = $.prompt.submit({ text: 'https://share.test/s/room0000000000000003', origin: { kind: 'composer' }, wait: false })
   expect(await within(asked.clock, () => asked.includes('POST /api/rooms/room0000000000000003/leave'), 11_000)).toBe(true)
   await pasted
   await asked.clock.advance(50)
@@ -4158,7 +4232,7 @@ test("a teammate's calls asked in the row above the prompt at once are each the 
   expect(verdicts).toEqual({ a: allowed, b: allowed, c: allowed })
   expect(asked.state.approving).toBeNull()
   expect(asked.state.working?.waitingFor).toBeNull()
-  expect(asked.state.trusted).toEqual(['Alex'])
+  expect(asked.state.trusted).toEqual([{ who: 'Alex', seat: 'seat2' }])
   await asked.clock.advance(50)
   expect(approvals().slice(5)).toHaveLength(2)
   expect(approvals().slice(5)).toEqual(expect.arrayContaining([
@@ -4475,7 +4549,7 @@ test("Always allow for a teammate answers their call still on its way to the row
   await row.press({ key: 'approve-always' })
   const allowed = { decision: 'allow', reason: 'scott allowed it' }
   expect(await eventually(asked.clock, () => verdicts.a)).toEqual(allowed)
-  expect(asked.state.trusted).toEqual(['Alex'])
+  expect(asked.state.trusted).toEqual([{ who: 'Alex', seat: 'seat2' }])
   release()
   expect(await eventually(asked.clock, () => verdicts.b)).toEqual(allowed)
   expect(shown.filter(v => (v as { what?: string } | null)?.what === 'WebFetch https://example.com/b')).toEqual([])
@@ -4498,7 +4572,7 @@ test("Always allow for a teammate given in the dialog answers their calls waitin
   expect(await eventually(asked.clock, () => verdicts.a && verdicts.b)).toBeTruthy()
   expect(verdicts).toEqual({ a: allowed, b: allowed })
   expect(asked.state.approving).toBeNull()
-  expect(asked.state.trusted).toEqual(['Alex'])
+  expect(asked.state.trusted).toEqual([{ who: 'Alex', seat: 'seat2' }])
   await $.command.run({ command: 'stop-sharing', args: '' } as never)
 })
 
@@ -4551,7 +4625,7 @@ test("Always allow for a teammate given in the dialog answers their call still o
   release()
   expect(await eventually(asked.clock, () => verdicts.c)).toEqual(allowed)
   expect(dialog.up).toHaveLength(1)
-  expect(asked.state.trusted).toEqual(['Alex'])
+  expect(asked.state.trusted).toEqual([{ who: 'Alex', seat: 'seat2' }])
   await $.command.run({ command: 'stop-sharing', args: '' } as never)
 })
 
@@ -4648,15 +4722,17 @@ test("what one line leaves out of a teammate's call is said beside it, the Room 
 // starts later (a workflow's), whatever turn runs then. The host's own, and
 // one this session never saw start, are the running turn's: in the host's
 // own turn, the mode's.
+// Alex as an owner: their name and the seat their prompt came from.
+const ALEX_OWNS = { who: 'Alex', seat: 'seat2' }
 test("an agent started in a teammate's turn is theirs after that turn ends, and in the host's own turn the host's own agents, and one no one is known to have started, are the mode's", async ($, on) => {
   on('turn.complete', () => ({ text: '' }))
   // Each agent's id is its description here.
   on('agent.spawn', ($, e) => ({ model: 'claude-test', agentId: e.description }))
   // A workflow Alex's turn started: its call was Alex's.
-  const { asked, verdicts } = await alexAsking($, on, { beneath: 'allow', beforeSet: reloaded(on, { owners: { toolu_workflow: 'Alex' } }) })
+  const { asked, verdicts } = await alexAsking($, on, { beneath: 'allow', beforeSet: reloaded(on, { owners: { toolu_workflow: { who: 'Alex', seat: 'seat2' } } }) })
   // Claude starts a background agent in Alex's turn.
   expect(await $.agent.spawn({ prompt: 'Watch the build and fix what breaks', description: 'agent-bg' } as never)).toMatchObject({ agentId: 'agent-bg' })
-  expect(asked.state.agents).toEqual({ 'agent-bg': 'Alex' })
+  expect(asked.state.agents).toEqual({ 'agent-bg': ALEX_OWNS })
   await $.turn.complete({ turnId: 'alex-1', isAborted: false, durationMs: 0, reason: 'answer', answer: '' } as never)
   // Alex's turn is over and the agent goes on: its call is Alex's, put to the host.
   void bash($, verdicts, 'bg', 'git push --force origin main', 'agent-bg')
@@ -4671,7 +4747,7 @@ test("an agent started in a teammate's turn is theirs after that turn ends, and 
   await $.agent.spawn({ prompt: 'Step 2', description: 'agent-workflow', tool_use_id: 'toolu_workflow' } as never)
   await $.agent.spawn({ prompt: 'Read the notes', description: 'agent-host' } as never)
   await $.agent.spawn({ prompt: 'Look', description: 'agent-orphan', parentAgentId: 'agent-unseen' } as never)
-  expect(asked.state.agents).toEqual({ 'agent-bg': 'Alex', 'agent-inner': 'Alex', 'agent-workflow': 'Alex', 'agent-host': '' })
+  expect(asked.state.agents).toEqual({ 'agent-bg': ALEX_OWNS, 'agent-inner': ALEX_OWNS, 'agent-workflow': ALEX_OWNS, 'agent-host': { who: '', seat: '' } })
   void $.tool.check({ tool: 'Edit', input: { file_path: '/tmp/demo/a.ts', old_string: 'a', new_string: 'b' }, tool_use_id: 'toolu_edit', agentId: 'agent-bg' } as never).then(v => void (verdicts.edit = v))
   expect(await eventually(asked.clock, () => asked.state.approving)).toEqual({ id: expect.any(String), who: 'Alex', what: 'Edit a.ts', extent: '1 → 1 line', always: 'Always allow Alex', more: 0 })
   expect(await $.tool.check({ tool: 'Bash', input: { command: 'git status' }, tool_use_id: 'toolu_host' } as never)).toEqual({ decision: 'allow', reason: 'Allowed in this mode' })
@@ -4728,7 +4804,7 @@ for (const surfaces of [[], ['desktop']] as const) {
 // and an agent this session never saw start can be working in it: their
 // calls then are put to the host as that teammate's, never left to the mode.
 test("the host's own agent, and one no one is known to have started, working during a teammate's turn are put to the host as that teammate's", async ($, on) => {
-  const { asked, verdicts } = await alexAsking($, on, { beneath: 'allow', beforeSet: reloaded(on, { agents: { 'agent-host': '' } }) })
+  const { asked, verdicts } = await alexAsking($, on, { beneath: 'allow', beforeSet: reloaded(on, { agents: { 'agent-host': { who: '', seat: '' } } }) })
   void bash($, verdicts, 'h', './deploy.sh --prod', 'agent-host')
   expect(await eventually(asked.clock, () => asked.state.approving)).toEqual({ id: expect.any(String), who: 'Alex', what: 'Bash ./deploy.sh --prod', always: 'Always allow Alex', more: 0 })
   let row = await $.ui.mount(band('desktop'))
@@ -4844,7 +4920,7 @@ test("a teammate's prompt sent while a turn begun before Share runs goes once th
   pages.length = 0
   await asked.clock.advance(7_000)
   expect(asked.submitted).toEqual([])
-  expect(asked.state.guestPrompts).toEqual([{ who: 'Alex', framed: 'Alex: Run ./deploy.sh --prod', text: 'Run ./deploy.sh --prod', pid: 'p1' }])
+  expect(asked.state.guestPrompts).toEqual([{ who: 'Alex', seat: 'seat2', framed: 'Alex: Run ./deploy.sh --prod', text: 'Run ./deploy.sh --prod', pid: 'p1' }])
   await $.turn.complete({ turnId: 'pre', isAborted: false, durationMs: 0, reason: 'answer', answer: '' } as never)
   expect(await within(asked.clock, () => asked.submitted.length > 0, 1_000)).toBe(true)
   expect(asked.submitted.map(p => p.text)).toEqual(['Alex: Run ./deploy.sh --prod'])
@@ -4882,6 +4958,81 @@ test("a teammate's prompt set aside for not starting is still theirs when its tu
   expect(asked.state.guestPrompts).toEqual([{ ...queue[1], sent: true }])
   await asked.clock.advance(50)
   expect(asked.posted.filter(e => e.type === 'turn' && e.body.state === 'start').map(e => [e.body.by, e.body.pid])).toEqual([['Alex', 'p1']])
+  await $.command.run({ command: 'stop-sharing', args: '' } as never)
+})
+
+// A prompt that quotes another's queued words is its own sender's: known by
+// the longest of the queue's prompts in the turn's words, never the first.
+// By the first, Mallory's "Alex: List the files" started as Alex's turn (an
+// earlier prompt of Alex's, set aside, still waited in the queue), its calls
+// put to the host as Alex's, under Alex's trust.
+test("a teammate's prompt quoting another's queued prompt is its sender's turn, never the one it quotes", async ($, on) => {
+  on('turn.complete', () => ({ text: '' }))
+  const queue = [
+    { who: 'Alex', seat: 'seat2', framed: 'Alex: List the files', text: 'List the files', pid: 'p1', sent: true, aside: true },
+    { who: 'Mallory', seat: 'seat4', framed: 'Mallory: Alex: List the files', text: 'Alex: List the files', pid: 'p2', sent: true },
+  ]
+  const asked = world(on, { surfaces: ['desktop'], beforeSet: reloaded(on, { room: CUT_HOST, mode: 'host', guestPrompts: queue }) })
+  on('session.start', ($, e) => ({ cwd: e.cwd }))
+  on('turn.start', ($, e) => ({ turnId: e.turnId }))
+  await $.session.start(START)
+  await $.turn.start({ turnId: 't1', text: 'Mallory: Alex: List the files' })
+  expect(asked.state.working).toMatchObject({ by: 'Mallory', byGuest: true, seat: 'seat4' })
+  expect(asked.state.guestPrompts).toEqual([queue[0]])
+  await $.command.run({ command: 'stop-sharing', args: '' } as never)
+})
+
+// Always allow is for a person, never a name, which is whatever someone joins
+// as: a second teammate who joined as "Alex" is asked about their calls, and
+// Alex's own other session (the same account) goes unasked. By name, the
+// trust the host gave Alex ran the other Alex's deploy unasked.
+test("Always allow trusts a teammate's seat and account, never their name: someone else who joins as Alex is asked", async ($, on) => {
+  on('turn.complete', () => ({ text: '' }))
+  const people = [
+    { id: 'host', name: 'scott', role: 'host', online: true },
+    { id: 'seat2', name: 'Alex', role: 'guest', online: true, seats: ['seat2', 'seat5'], account: 'acct-alex' },
+    { id: 'seat4', name: 'Alex', role: 'guest', online: true, seats: ['seat4'] },
+  ]
+  const from = (seat: string) => ({ seat, name: 'Alex', role: 'guest' })
+  const events = [
+    { seq: 2, type: 'prompt', ts: 900, from: from('seat2'), body: { text: 'List the files', pid: 'p1' } },
+    { seq: 3, type: 'prompt', ts: 901, from: from('seat4'), body: { text: 'Run the deploy script', pid: 'p2' } },
+    { seq: 4, type: 'prompt', ts: 902, from: from('seat5'), body: { text: 'Fetch the docs', pid: 'p3' } },
+  ]
+  const pages: unknown[] = [{ seq: 4, events, people, ended: false, title: 'demo' }]
+  const asked = world(on, { surfaces: ['desktop'], stream: pages })
+  on('turn.start', ($, e) => ({ turnId: e.turnId }))
+  on('tool.check', () => ({ decision: 'ask', reason: 'Asked in this mode' }))
+  const ui = await $.ui.mount(band('desktop'))
+  await ui.press({ key: 'share' })
+  const sent = () => asked.submitted.map(p => p.text)
+  expect(await within(asked.clock, () => sent().length > 0, 5_000)).toBe(true)
+  pages.length = 0
+  await asked.clock.advance(2_000)
+  const done = (turnId: string) => $.turn.complete({ turnId, isAborted: false, durationMs: 0, reason: 'answer', answer: '' } as never)
+  await $.turn.start({ turnId: 't1', text: 'Alex: List the files' })
+  const verdicts: Record<string, unknown> = {}
+  void bash($, verdicts, 'one', 'ls -la')
+  expect(await eventually(asked.clock, () => asked.state.approving?.what)).toBe('Bash ls -la')
+  await (await $.ui.mount(band('desktop'))).press({ key: 'approve-always' })
+  expect(await eventually(asked.clock, () => verdicts.one)).toEqual({ decision: 'allow', reason: 'scott allowed it' })
+  expect(asked.state.trusted).toEqual([{ who: 'Alex', seat: 'seat2', account: 'acct-alex' }])
+  await done('t1')
+  expect(await within(asked.clock, () => sent().length === 2, 1_000)).toBe(true)
+  // The other Alex: asked, and declined.
+  await $.turn.start({ turnId: 't2', text: 'Alex: Run the deploy script' })
+  expect(asked.state.working).toMatchObject({ by: 'Alex', byGuest: true, seat: 'seat4' })
+  void bash($, verdicts, 'deploy', './deploy.sh --prod')
+  expect(await eventually(asked.clock, () => asked.state.approving)).toMatchObject({ who: 'Alex', what: 'Bash ./deploy.sh --prod' })
+  expect(verdicts.deploy).toBeUndefined()
+  await (await $.ui.mount(band('desktop'))).press({ key: 'approve-no' })
+  expect(await eventually(asked.clock, () => verdicts.deploy)).toEqual({ decision: 'deny', reason: 'scott did not allow this Bash call from the shared session.' })
+  await done('t2')
+  expect(await within(asked.clock, () => sent().length === 3, 1_000)).toBe(true)
+  // Alex's other session, the same account: unasked.
+  await $.turn.start({ turnId: 't3', text: 'Alex: Fetch the docs' })
+  void bash($, verdicts, 'docs', 'cat README.md')
+  expect(await eventually(asked.clock, () => verdicts.docs)).toEqual({ decision: 'allow', reason: 'scott always allows Alex' })
   await $.command.run({ command: 'stop-sharing', args: '' } as never)
 })
 
@@ -5144,6 +5295,50 @@ test("a guest's read runs without asking only inside the host's project", async 
   expect(readsInside('Read', { file_path: '/tmp/demo/../demo-other/x' }, cwd)).toBe(false)
   expect(readsInside('Glob', { pattern: '/etc/**' }, cwd)).toBe(false)
   expect(readsInside('Grep', { pattern: 'key', path: '/' }, cwd)).toBe(false)
+  // What's looked at for links: each path as written, a Glob's pattern up to
+  // its first wildcard, from the folder it's given.
+  expect(readTargets('Grep', { pattern: 'TODO' }, cwd)).toEqual([])
+  expect(readTargets('Read', { file_path: 'src/./app.ts' }, cwd)).toEqual(['/tmp/demo/src/app.ts'])
+  expect(readTargets('Glob', { pattern: 'notes/**/*.md', path: 'docs' }, cwd)).toEqual(['/tmp/demo/docs', '/tmp/demo/docs/notes'])
+  expect(readTargets('Glob', { pattern: '../**', path: 'docs' }, cwd)).toEqual(['/tmp/demo/docs', '/tmp/demo', '/tmp/demo/docs/..'])
+  expect(readTargets('Glob', { pattern: '../../**', path: 'docs' }, cwd)).toBeNull()
+  // Past a wildcard nothing climbs: `**` may be no folder at all, and a brace may hold `..`.
+  expect(readTargets('Glob', { pattern: '**/../x/*' }, cwd)).toBeNull()
+  expect(readTargets('Glob', { pattern: '{..,src}/*' }, cwd)).toBeNull()
+  // A name with a wildcard's characters is a name to every other tool, looked at whole.
+  expect(readTargets('Read', { file_path: 'notes[1].md' }, cwd)).toEqual(['/tmp/demo/notes[1].md'])
+  // Climbing back out of a link goes on from where the link points: also given as written.
+  expect(readTargets('Read', { file_path: 'notes/../x' }, cwd)).toEqual(['/tmp/demo/x', '/tmp/demo/notes/../x'])
+  // Real paths: in the project's real folder, or it.
+  expect(realInside('/private/tmp/demo', ['/private/tmp/demo', '/private/tmp/demo/src/app.ts'])).toBe(true)
+  expect(realInside('/private/tmp/demo', ['/private/tmp/demo-other/x'])).toBe(false)
+  expect(realInside('/private/tmp/demo', ['/Users/scott/.ssh/id_ed25519'])).toBe(false)
+})
+
+// A link in the project (a repository's own, committed) can name any file
+// of the host's: a guest's read through it is no read inside the project.
+test("a teammate's read runs without asking only where it really is inside the project: through a link out of it, the host is asked", async ($, on) => {
+  const people = [{ id: 'host', name: 'scott', role: 'host', online: true }, { id: 'seat2', name: 'Alex', role: 'guest', online: true }]
+  const prompt = { seq: 2, type: 'prompt', ts: 900, from: { seat: 'seat2', name: 'Alex', role: 'guest' }, body: { text: 'Read the notes', pid: 'p1' } }
+  const asked = world(on, { surfaces: ['desktop'], links: { '/tmp/demo/notes': '/Users/scott/.ssh' }, stream: [{ seq: 2, events: [prompt], people, ended: false, title: 'demo' }] })
+  on('turn.start', ($, e) => ({ turnId: e.turnId }))
+  on('tool.check', () => ({ decision: 'allow', reason: 'Allowed in this mode' }))
+  const ui = await $.ui.mount(band('desktop'))
+  await ui.press({ key: 'share' })
+  expect(await within(asked.clock, () => asked.submitted.some(p => p.text === 'Alex: Read the notes'), 5_000)).toBe(true)
+  await $.turn.start({ turnId: 'alex-1', text: 'Alex: Read the notes' })
+  expect(await $.tool.check({ tool: 'Read', input: { file_path: '/tmp/demo/src/app.ts' }, tool_use_id: 'toolu_in' } as never)).toEqual({ decision: 'allow', reason: 'Allowed in this mode' })
+  expect(await $.tool.check({ tool: 'Grep', input: { pattern: 'TODO' }, tool_use_id: 'toolu_grep' } as never)).toEqual({ decision: 'allow', reason: 'Allowed in this mode' })
+  const verdicts: Record<string, unknown> = {}
+  for (const [id, tool, input] of [['link', 'Read', { file_path: 'notes/id_ed25519' }], ['glob', 'Glob', { pattern: '*', path: '/tmp/demo/notes' }], ['out', 'Read', { file_path: 'src/../notes/../x' }]] as const) {
+    void $.tool.check({ tool, input, tool_use_id: `toolu_${id}` } as never).then(v => void (verdicts[id] = v))
+    expect(await eventually(asked.clock, () => asked.state.approving)).toMatchObject({ who: 'Alex' })
+    const row = await $.ui.mount(band('desktop'))
+    await row.press({ key: 'approve-no' })
+    await eventually(asked.clock, () => verdicts[id])
+    expect(verdicts[id]).toEqual({ decision: 'deny', reason: `scott did not allow this ${tool} call from the shared session.` })
+  }
+  await $.command.run({ command: 'stop-sharing', args: '' } as never)
 })
 
 test('signing in opens the browser with only a hash of the secret, and keeps the sign-in where only this user reads it', async ($, on) => {
@@ -5786,7 +5981,7 @@ test("an invite shows in a session that's in a room too: a button in its row, Jo
 const CHROME = '/Applications/Google Chrome.app'
 const WINDOW_SHOWN = { seq: 2, type: 'artifact', ts: 900, from: { seat: 'host', name: 'Sam', role: 'host' }, body: { kind: 'preview', pid: 'pv-local', port: 3340, path: '/login?next=%2Faccount', title: 'Sign in', tcp: true, host: '127.0.0.1' } }
 const WINDOW_URL = 'http://127.0.0.1:3340/login?next=%2Faccount'
-const roomProfile = async (owner = 'session-test-0001') => `/home/scott/.claude/shared-session/browser/${await profileName('http://share.test', 'room0000000000000001', owner)}`
+const roomProfile = async (owner = 'session-test-0001') => `/home/scott/.claude/shared-session/browser/${await profileName('https://share.test', 'room0000000000000001', owner)}`
 // Previews: Always a separate window, unless a test says otherwise: these are about the window itself.
 const windowWorld = (on: On, opts: Parameters<typeof world>[1] = {}) =>
   world(on, { browser: { platform: 'Darwin', path: CHROME }, localPreviewPort: 45001, stream: [{ seq: 2, events: [WINDOW_SHOWN], people: PREVIEW_PEOPLE, ended: false, title: 'demo' }], ...opts, store: { previewOpen: 'window', ...opts.store } })
@@ -5858,7 +6053,7 @@ test("Open preview opens the host's own address in a separate window, through a 
   // The profile is private, and no listener is saved for this computer's localhost.
   expect(asked.spawned.some(s => s.input?.startsWith('umask 077') && s.input.includes(profile))).toBe(true)
   expect(asked.state.localPreviews ?? []).toEqual([])
-  expect(asked.state.previewWindow).toEqual({ room: 'http://share.test/room0000000000000001', port: 47100, opened: ['pv-local'], profile: profile.split('/').pop() })
+  expect(asked.state.previewWindow).toEqual({ room: 'https://share.test/room0000000000000001', port: 47100, opened: ['pv-local'], profile: profile.split('/').pop() })
   // Open, it leaves the row above the prompt.
   expect(await ui.find({ key: 'open-preview' })).toBeUndefined()
   await $.command.run({ command: 'stop-sharing', args: '' } as never)
@@ -5866,7 +6061,7 @@ test("Open preview opens the host's own address in a separate window, through a 
 
 // A signed-in host: their rooms share one window profile, kept between them.
 const SIGNED_IN = PREVIEW_PEOPLE.map(p => (p.role === 'host' ? { ...p, account: 'acct-sam' } : p))
-const hostProfilePath = async () => `/home/scott/.claude/shared-session/browser/${await hostProfileName('http://share.test', 'acct-sam')}`
+const hostProfilePath = async () => `/home/scott/.claude/shared-session/browser/${await hostProfileName('https://share.test', 'acct-sam')}`
 
 test("a signed-in host's rooms share one window profile: Leave closes this session's window and keeps the profile", async ($, on) => {
   const asked = windowWorld(on, { stream: [{ seq: 2, events: [WINDOW_SHOWN], people: SIGNED_IN, ended: false, title: 'demo' }] })
@@ -6209,7 +6404,7 @@ test("in Firefox the window's settings are written first, and its address goes o
   expect(settings.text).not.toContain(asked.proxies[0]!.config.controlToken)
   expect(tunnels(asked)[0]).toMatchObject({ port: 0, strict: false })
   expect(asked.toasted).toContain("Opened Sam's localhost:3340 in a separate Firefox window. In it, localhost reaches only what Sam shares; your own servers aren't touched.")
-  expect(asked.state.previewWindow).toEqual({ room: 'http://share.test/room0000000000000001', port: 47100, opened: ['pv-local'], profile: profile.split('/').pop() })
+  expect(asked.state.previewWindow).toEqual({ room: 'https://share.test/room0000000000000001', port: 47100, opened: ['pv-local'], profile: profile.split('/').pop() })
   // Looked at on: the same window, its port read back from those settings.
   await asked.clock.advance(31_000)
   expect(asked.state.previewWindow?.opened).toEqual(['pv-local'])
@@ -6533,7 +6728,7 @@ test("Leave while Open moves the page puts nothing back: no mapping is left save
   let starts = 0
   const saved = {
     at: 900,
-    room: { server: 'http://share.test', id: 'room0000000000000001', url: LINK, title: 'demo', host: 'Sam', token: 'g', seat: 'seat1', seq: 3, since: 1 },
+    room: { server: 'https://share.test', id: 'room0000000000000001', url: LINK, title: 'demo', host: 'Sam', token: 'g', seat: 'seat1', seq: 3, since: 1 },
     autoOpen: true, policy: { prompts: 'everyone', approvals: 'edits', files: 'on' }, shown: [], activity: [], chat: [], sidebar: null,
     // Where the page was last: on a free port, the host's number taken then.
     localPreviews: [{ pid: 'pv-local', port: 3340, localPort: 44321 }],
@@ -7017,7 +7212,7 @@ test("with no window possible, a host port this computer refuses moves the page,
 test("a listener this computer no longer lets Claude Code listen on stays closed after a reload, and that is said as what it is", async ($, on) => {
   const saved = {
     at: 900,
-    room: { server: 'http://share.test', id: 'room0000000000000001', url: LINK, title: 'demo', host: 'Sam', token: 'g', seat: 'seat1', seq: 2, since: 1 },
+    room: { server: 'https://share.test', id: 'room0000000000000001', url: LINK, title: 'demo', host: 'Sam', token: 'g', seat: 'seat1', seq: 2, since: 1 },
     autoOpen: true, policy: { prompts: 'everyone', approvals: 'edits', files: 'on' },
     shown: [{ key: 'preview:pv-low', kind: 'preview', name: 'App (preview)', ts: 900, pid: 'pv-low', port: 80, path: '/', tcp: true }],
     localPreviews: [{ pid: 'pv-low', port: 80, localPort: 80 }], activity: [], chat: [], sidebar: null,
@@ -7374,13 +7569,13 @@ test('a link pasted while the room is still closing joins once it has closed, an
   // Still closing: out of the room already (idle, its close marked), and
   // nothing offers Share until it's done.
   expect(asked.state.mode).toBe('idle')
-  expect(asked.state.closing).toEqual({ how: 'leave', room: 'http://share.test/room0000000000000001' })
+  expect(asked.state.closing).toEqual({ how: 'leave', room: 'https://share.test/room0000000000000001' })
   const ui = await $.ui.mount(band('desktop'))
   expect(await ui.find({ key: 'share' })).toBeUndefined()
   expect(await ui.find({ key: 'team' })).toBeDefined()
   expect(await pane.find({ type: 'Text', text: "This session isn't shared" })).toBeDefined()
   expect(await pane.find({ key: 'room-share' })).toBeUndefined()
-  const pasted = $.prompt.submit({ text: 'http://share.test/s/room0000000000000002', origin: { kind: 'composer' }, wait: false })
+  const pasted = $.prompt.submit({ text: 'https://share.test/s/room0000000000000002', origin: { kind: 'composer' }, wait: false })
   await asked.clock.advance(10)
   expect(asked.filter(a => a.endsWith('/join'))).toHaveLength(1)
   gone!()
@@ -7658,7 +7853,7 @@ test('a start that finds a Leave cut short finishes it: the room hears it, the w
   await asked.clock.advance(50)
   cut.on = false
   expect(asked.state.mode).toBe('guest')
-  expect(asked.state.closing).toEqual({ how: 'leave', room: 'http://share.test/room0000000000000001' })
+  expect(asked.state.closing).toEqual({ how: 'leave', room: 'https://share.test/room0000000000000001' })
   expect(asked.windowState.alive).toBe(true)
   expect(asked.some(a => a.endsWith('/leave'))).toBe(false)
   const before = { helpers: asked.localHelpers.length, proxies: asked.proxies.length }
@@ -7706,7 +7901,7 @@ function reloaded(on: On, stored: Record<string, unknown>) {
   return (key: string) => void written.add(key)
 }
 const CUT_HOST = { server: 'http://localhost:8787', id: 'room0000000000000002', url: 'http://localhost:8787/s/room0000000000000002', title: 'demo', host: 'scott', token: 'host-token', seat: 'host', seq: 1, since: 1 }
-const CUT_GUEST = { server: 'http://share.test', id: 'room0000000000000001', url: 'http://share.test/s/room0000000000000001', title: 'demo', host: 'Sam', token: 'guest-token', seat: 'seat1', seq: 1, since: 1 }
+const CUT_GUEST = { server: 'https://share.test', id: 'room0000000000000001', url: 'https://share.test/s/room0000000000000001', title: 'demo', host: 'Sam', token: 'guest-token', seat: 'seat1', seq: 1, since: 1 }
 
 test('loaded again after a reload cut Stop sharing short, the close is finished: the room hears it ended, and nothing of it comes back', async ($, on) => {
   // Cut once the mode was idle, before the room was told.
@@ -7725,7 +7920,7 @@ test('loaded again after a reload cut Stop sharing short, the close is finished:
 
 test('loaded again after a reload cut Leave short, the close is finished: the room hears it, and neither its stream nor a listener comes back', async ($, on) => {
   // Cut before the mode went idle: the state still a guest's, its listener saved.
-  const stored = { room: CUT_GUEST, mode: 'guest', closing: { how: 'leave', room: 'http://share.test/room0000000000000001' }, localPreviews: [{ pid: 'pv-local', port: 3340, localPort: 3340 }] }
+  const stored = { room: CUT_GUEST, mode: 'guest', closing: { how: 'leave', room: 'https://share.test/room0000000000000001' }, localPreviews: [{ pid: 'pv-local', port: 3340, localPort: 3340 }] }
   const asked = world(on, { beforeSet: reloaded(on, stored) })
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   await $.session.start(START)
@@ -7740,7 +7935,7 @@ test('loaded again after a reload cut Leave short, the close is finished: the ro
 })
 
 test('loaded again with a marker naming another room than the one set, nothing is closed: that room is taken up as after any reload', async ($, on) => {
-  const stored = { room: CUT_GUEST, mode: 'guest', closing: { how: 'leave', room: 'http://share.test/room0000000000000009' } }
+  const stored = { room: CUT_GUEST, mode: 'guest', closing: { how: 'leave', room: 'https://share.test/room0000000000000009' } }
   const asked = world(on, { beforeSet: reloaded(on, stored) })
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   await $.session.start(START)
@@ -7879,12 +8074,12 @@ test('a Leave cut short is finished by the next Join: nothing of the room left c
   // Told, then cut as its state cleared: the room's chat still here, its marker up.
   expect(asked.filter(a => a.endsWith('/leave'))).toHaveLength(1)
   expect(asked.state.chat?.map(c => c.text)).toEqual(['lunch?'])
-  expect(asked.state.closing).toEqual({ how: 'leave', room: 'http://share.test/room0000000000000001' })
+  expect(asked.state.closing).toEqual({ how: 'leave', room: 'https://share.test/room0000000000000001' })
   // No close runs here now: the row offers Share, and the next Join finishes that one first.
   const ui = await $.ui.mount(band('desktop'))
   expect(await ui.find({ key: 'share' })).toBeDefined()
   history.length = 0
-  await $.prompt.submit({ text: 'http://share.test/s/room0000000000000002', origin: { kind: 'composer' }, wait: false })
+  await $.prompt.submit({ text: 'https://share.test/s/room0000000000000002', origin: { kind: 'composer' }, wait: false })
   await eventually(asked.clock, () => asked.state.room?.id === 'room0000000000000002')
   expect(asked.state.room?.id).toBe('room0000000000000002')
   expect(asked.state.chat).toEqual([])
@@ -8118,7 +8313,7 @@ test("a reload that finds another session's window on the host's profile leaves 
   const host = await hostProfilePath()
   const saved = {
     at: 900,
-    room: { server: 'http://share.test', id: 'room0000000000000001', url: LINK, title: 'demo', host: 'Sam', token: 'g', seat: 'seat1', seq: 2, since: 1 },
+    room: { server: 'https://share.test', id: 'room0000000000000001', url: LINK, title: 'demo', host: 'Sam', token: 'g', seat: 'seat1', seq: 2, since: 1 },
     autoOpen: true, policy: { prompts: 'everyone', approvals: 'edits', files: 'on' }, shown: [], localPreviews: [], activity: [], chat: [], sidebar: null,
     previewWindow: { port: 47100, profile: host.split('/').pop() },
   }
@@ -8139,7 +8334,7 @@ test("a reload that finds the window closed forgets its port: a window on the ho
   const host = await hostProfilePath()
   const saved = {
     at: 900,
-    room: { server: 'http://share.test', id: 'room0000000000000001', url: LINK, title: 'demo', host: 'Sam', token: 'g', seat: 'seat1', seq: 1, since: 1 },
+    room: { server: 'https://share.test', id: 'room0000000000000001', url: LINK, title: 'demo', host: 'Sam', token: 'g', seat: 'seat1', seq: 1, since: 1 },
     autoOpen: true, policy: { prompts: 'everyone', approvals: 'edits', files: 'on' }, shown: [], localPreviews: [], activity: [], chat: [], sidebar: null,
     previewWindow: { port: 47100, profile: host.split('/').pop() },
   }
@@ -8230,7 +8425,7 @@ test('joining, a guest lists what the room shares though its history lost the ar
 const placeShown = (pid: string, port: number, tcp: boolean) => ({ key: `preview:${pid}`, kind: 'preview', name: 'App (preview)', ts: 900, pid, port, path: '/', ...(tcp ? { tcp: true } : {}) })
 const LOST_PLACE = {
   at: 900,
-  room: { server: 'http://share.test', id: 'room0000000000000001', url: LINK, title: 'demo', host: 'Sam', token: 'g', seat: 'seat1', seq: 3, since: 1 },
+  room: { server: 'https://share.test', id: 'room0000000000000001', url: LINK, title: 'demo', host: 'Sam', token: 'g', seat: 'seat1', seq: 3, since: 1 },
   autoOpen: true, policy: { prompts: 'everyone', approvals: 'edits', files: 'on' }, activity: [], chat: [], sidebar: null,
   shown: [placeShown('pv-local', 3340, true), placeShown('pv-ended', 3341, true)],
   localPreviews: [{ pid: 'pv-local', port: 3340, localPort: 3340 }, { pid: 'pv-ended', port: 3341, localPort: 3341 }],
@@ -8472,7 +8667,7 @@ test('a guest sees no Previews setting, and no browser is looked for, until the 
 test('a place that comes back to a room that ended removes its preview profile', async ($, on) => {
   const saved = {
     at: 900,
-    room: { server: 'http://share.test', id: 'room0000000000000001', url: LINK, title: 'demo', host: 'Sam', token: 'g', seat: 'seat1', seq: 2, since: 1 },
+    room: { server: 'https://share.test', id: 'room0000000000000001', url: LINK, title: 'demo', host: 'Sam', token: 'g', seat: 'seat1', seq: 2, since: 1 },
     autoOpen: true, policy: { prompts: 'everyone', approvals: 'edits', files: 'on' }, shown: [], localPreviews: [], activity: [], chat: [], sidebar: null,
     previewWindow: { port: 47100 },
   }
@@ -9010,7 +9205,7 @@ const DISCOVERED = { state: 'done', platform: 'darwin', target: { port: 3340, la
 // Three servers beside it, as discovery finds them.
 const MANY = { state: 'done', platform: 'darwin', target: { port: 3340, label: 'next-server', web: 'yes', devtools: false }, related: [{ port: 3610, label: 'convex-local-backend', web: 'yes', devtools: false }, { port: 3611, label: 'api', web: 'yes', devtools: false }, { port: 27017, label: 'mongod', web: 'slow', devtools: false }] }
 // The question in the row now: its words, as drawn.
-const hostAsked = async (ui: { find: (q: { type: string; text: RegExp }) => Promise<{ text?: string } | undefined> }) => (await ui.find({ type: 'Text', text: /^Share localhost:.* too\? |^Let guests open / }))?.text
+const hostAsked = async (ui: { find: (q: { type: string; text: RegExp }) => Promise<{ text?: string } | undefined> }) => (await ui.find({ type: 'Text', text: /^Share localhost:.* too\? |^Let guests open |^Share localhost:.* with the room\?/ }))?.text
 
 test("discovery saying a line past 8 KiB has found nothing: no question is asked", async ($, on) => {
   const asked = world(on, { surfaces: ['desktop'], discover: { 3340: { ...DISCOVERED, more: 'x'.repeat(8200) } } })
@@ -9125,6 +9320,12 @@ test('a port Claude mentions, with a guest here, asks once to open it at the sam
   await asked.clock.advance(20)
   const reply = { type: 'assistant', role: 'assistant', content: [{ type: 'text', text: 'Running at http://127.0.0.1:3340/dash' }] }
   await $.session.append({ message: reply, door: 'response', origin: { kind: 'composer' }, uuid: 'a1' } as never)
+  // Shared through its link only once the host says so; then the same address is asked about.
+  expect(await eventually(asked.clock, () => asked.state.hostAsk?.kind === 'show')).toBe(true)
+  expect(await hostAsked(ui)).toBe('Share localhost:3340 with the room?')
+  expect((await ui.find({ key: 'host-ask-yes' }))?.props.label).toBe('Share')
+  expect(asked.posted.filter(e => e.type === 'artifact')).toEqual([])
+  await allowShow(asked, ui)
   await eventually(asked.clock, () => asked.discovered.length)
   await eventually(asked.clock, () => asked.posted.some(e => e.type === 'artifact'))
   await asked.clock.advance(20)
@@ -9155,6 +9356,45 @@ test('a port Claude mentions, with a guest here, asks once to open it at the sam
   await $.command.run({ command: 'stop-sharing', args: '' } as never)
 })
 
+// A page Claude gives out or opens is the host's to give: a guest's prompt
+// can have Claude name any port of the host's, and what answers there (an
+// admin page, a login redirect) went to the room through its link unasked.
+test("a page Claude gives out goes to the room only once the host says so: Not now shares nothing, and holds for the room", async ($, on) => {
+  const asked = world(on, { surfaces: ['desktop'], stream: [{ seq: 1, events: [], people: HOST_ONLY, ended: false, title: 'demo' }] })
+  const ui = await $.ui.mount(band('desktop'))
+  await ui.press({ key: 'share' })
+  await asked.clock.advance(20)
+  const mention = (uuid: string) => $.session.append({ message: { type: 'assistant', role: 'assistant', content: [{ type: 'text', text: 'Admin at http://localhost:3340/admin' }] }, door: 'response', origin: { kind: 'composer' }, uuid } as never)
+  await mention('a1')
+  expect(await eventually(asked.clock, () => asked.state.hostAsk?.kind === 'show')).toBe(true)
+  expect(await hostAsked(ui)).toBe('Share localhost:3340 with the room?')
+  await asked.clock.advance(1_000)
+  expect(asked.sent.filter(x => x.path.endsWith('/previews'))).toEqual([])
+  expect(asked.posted.filter(e => e.type === 'artifact')).toEqual([])
+  await ui.press({ key: 'host-ask-no' })
+  await asked.clock.advance(50)
+  expect(asked.state.hostMemory?.declined).toEqual([3340])
+  await asked.clock.advance(11 * 60_000)
+  await mention('a2')
+  await asked.clock.advance(300)
+  expect(asked.state.hostAsk ?? null).toBeNull()
+  expect(asked.sent.filter(x => x.path.endsWith('/previews'))).toEqual([])
+  await $.command.run({ command: 'stop-sharing', args: '' } as never)
+})
+
+test("with nowhere to ask the host (a -p run), a page Claude gives out or opens isn't shared", async ($, on) => {
+  const asked = world(on, { surfaces: [], stream: [{ seq: 1, events: [], people: HOST_ONLY, ended: false, title: 'demo' }] })
+  on('tool.call', { tool: 'mcp__Claude_Browser__navigate' }, () => ({ result: [], text: 'navigated' }) as never)
+  await $.command.run({ command: 'share-session', args: '' } as never)
+  await asked.clock.advance(20)
+  await $.session.append({ message: { type: 'assistant', role: 'assistant', content: [{ type: 'text', text: 'Running at http://localhost:3340/' }] }, door: 'response', origin: { kind: 'composer' }, uuid: 'a1' } as never)
+  await $.tool.call({ tool: 'mcp__Claude_Browser__navigate', url: 'http://localhost:3341/' } as never)
+  await asked.clock.advance(1_000)
+  expect(asked.sent.filter(x => x.path.endsWith('/previews'))).toEqual([])
+  expect(asked.state.hostAsk ?? null).toBeNull()
+  await $.command.run({ command: 'stop-sharing', args: '' } as never)
+})
+
 test("an Allow that couldn't forward is asked about again ten minutes on: not at once, and not never", async ($, on) => {
   const refused = { now: true }
   const asked = world(on, { surfaces: ['desktop'], discover: { 3340: { ...DISCOVERED, related: [] } }, refuseForward: refused, stream: [{ seq: 1, events: [], people: PREVIEW_PEOPLE, ended: false, title: 'demo' }] })
@@ -9167,7 +9407,8 @@ test("an Allow that couldn't forward is asked about again ten minutes on: not at
     await asked.clock.advance(200)
   }
   await opened()
-  await eventually(asked.clock, () => asked.state.hostAsk)
+  await allowShow(asked, ui)
+  await eventually(asked.clock, () => asked.state.hostAsk?.kind === 'mention')
   await ui.press({ key: 'host-ask-yes' })
   await eventually(asked.clock, () => asked.toasted.includes("Couldn't allow forwarding localhost:3340"))
   refused.now = false
@@ -9359,11 +9600,12 @@ test("a port the host said Not now to while a mention's question waited is never
   await $.command.run({ command: 'share-preview', args: '3000 App' } as never)
   await eventually(asked.clock, () => asked.state.hostAsk)
   expect(asked.state.hostAsk).toMatchObject({ kind: 'related', port: 3000, related: [{ port: 3610 }] })
-  // Claude names 3340, whose discovery finds 3610 too: its question waits behind the first.
+  // Claude names 3340: whether it's shared waits behind the first question,
+  // and then its address, whose discovery finds 3610 too.
   await $.session.append({ message: { type: 'assistant', role: 'assistant', content: [{ type: 'text', text: 'Running at http://localhost:3340/' }] }, door: 'response', origin: { kind: 'composer' }, uuid: 'a1' } as never)
-  await eventually(asked.clock, () => asked.discovered.length >= 2)
   await asked.clock.advance(50)
   await ui.press({ key: 'host-ask-no' })
+  await allowShow(asked, ui)
   await eventually(asked.clock, () => asked.state.hostAsk?.kind === 'mention')
   expect(asked.state.hostAsk).toMatchObject({ kind: 'mention', port: 3340, related: [] })
   expect(await hostAsked(ui)).toBe('Let guests open localhost:3340 at the same address?')
@@ -9628,13 +9870,31 @@ const LINKED = (path = '/') => ({ seq: 2, events: [{ seq: 2, type: 'artifact', t
 // the world's own, so a test can change it as it goes.
 async function sharingLink($: Parameters<TestBody>[0], on: On, url: string, opts: NonNullable<Parameters<typeof world>[1]> = {}) {
   const stream: unknown[] = [{ seq: 1, events: [], people: HOST_ONLY, ended: false, title: 'demo' }]
-  const asked = world(on, Object.assign(opts, { stream }))
+  // The caller's own object: a test changes what the world does by it later (`wsRelays`).
+  const asked = world(on, Object.assign(opts, { surfaces: opts.surfaces ?? ['desktop'], stream }))
   const ui = await $.ui.mount(band('desktop'))
   await ui.press({ key: 'share' })
   await asked.clock.advance(20)
   await $.session.append({ message: { type: 'assistant', role: 'assistant', content: [{ type: 'text', text: `Running at ${url}` }] }, door: 'response', origin: { kind: 'composer' }, uuid: 'a1' } as never)
+  await allowShow(asked, ui)
   await eventually(asked.clock, () => asked.posted.some(e => e.type === 'artifact' && e.body.port === 3340))
   return { asked, stream, ui }
+}
+
+// Every page waiting to be shared through its link, said yes to, a question at a time.
+async function allowShows(asked: ReturnType<typeof world>, ui: { press: (q: { key: string }) => Promise<unknown> }) {
+  for (;;) {
+    await asked.clock.advance(50)
+    if (asked.state.hostAsk?.kind !== 'show') return
+    await ui.press({ key: 'host-ask-yes' })
+  }
+}
+
+// The host's Share for a page Claude gave out or opened (the row's `show`
+// question): only then does it go to the room, through its link.
+async function allowShow(asked: ReturnType<typeof world>, ui: { press: (q: { key: string }) => Promise<unknown> }, port = 3340) {
+  expect(await eventually(asked.clock, () => asked.state.hostAsk?.kind === 'show' && asked.state.hostAsk.port === port)).toBe(true)
+  await ui.press({ key: 'host-ask-yes' })
 }
 
 // Lines the room's stream says once: delivered, then gone from it.
@@ -9712,7 +9972,7 @@ test("/share-preview of a port another session's preview holds here shares nothi
 test("Claude giving out a port another session's preview holds here shares nothing and says nothing; a later mention looks again", async ($, on) => {
   const holders: Record<number, boolean> = { 3340: true }
   const stream: unknown[] = [{ seq: 1, events: [], people: HOST_ONLY, ended: false, title: 'demo' }]
-  const asked = world(on, { stream, holders })
+  const asked = world(on, { stream, holders, surfaces: ['desktop'] })
   const ui = await $.ui.mount(band('desktop'))
   await ui.press({ key: 'share' })
   await asked.clock.advance(20)
@@ -9728,10 +9988,12 @@ test("Claude giving out a port another session's preview holds here shares nothi
   // Neither declined nor stopped: the host's own say is untouched.
   expect(asked.state.hostMemory?.declined ?? []).toEqual([])
   expect(asked.state.hostMemory?.stopped ?? []).toEqual([])
-  // The guest's listener gone and the host's own app there now: the next mention shares it.
+  expect(await ui.find({ key: 'host-ask-yes' })).toBeUndefined()
+  // The guest's listener gone and the host's own app there now: the next mention asks, and shares it.
   holders[3340] = false
   await asked.clock.advance(31_000)
   await mention('a2')
+  await allowShow(asked, ui)
   await eventually(asked.clock, () => asked.posted.some(e => e.type === 'artifact' && e.body.port === 3340))
   expect(asked.sent.filter(x => x.path.endsWith('/previews')).map(x => x.body)).toEqual([{ port: 3340, title: 'localhost:3340' }])
   await $.command.run({ command: 'stop-sharing', args: '' } as never)
@@ -9753,10 +10015,11 @@ test("Claude opening a page another session's preview holds here in the browser 
   expect(asked.posted.some(e => e.type === 'artifact' && e.body.port === 3340)).toBe(false)
   expect(asked.toasted.filter(t => t.includes('3340'))).toEqual([])
   expect(await ui.find({ key: 'host-ask-yes' })).toBeUndefined()
-  // Something else there now: the next open shares it, as ever.
+  // Something else there now: the next open asks, and shares it.
   holders[3340] = false
   await asked.clock.advance(31_000)
   await $.tool.call({ tool: 'mcp__Claude_Browser__navigate', url: 'http://localhost:3340/app' } as never)
+  await allowShow(asked, ui)
   await eventually(asked.clock, () => asked.posted.some(e => e.type === 'artifact' && e.body.port === 3340))
   expect(asked.sent.filter(x => x.path.endsWith('/previews')).map(x => x.body.port)).toEqual([3340])
   await $.command.run({ command: 'stop-sharing', args: '' } as never)
@@ -9937,7 +10200,7 @@ test("a mention shares a page, never an API's JSON, its 404 or a debugger; a ser
     4005: pageSays('500 text/html'),
     4006: pageSays('200 text/html', '{"webSocketDebuggerUrl":"ws://localhost:4006/devtools/browser/x"}'),
   }
-  const asked = world(on, { pages, stream: [{ seq: 1, events: [], people: HOST_ONLY, ended: false, title: 'demo' }] })
+  const asked = world(on, { pages, surfaces: ['desktop'], stream: [{ seq: 1, events: [], people: HOST_ONLY, ended: false, title: 'demo' }] })
   const ui = await $.ui.mount(band('desktop'))
   await ui.press({ key: 'share' })
   await asked.clock.advance(20)
@@ -9948,6 +10211,9 @@ test("a mention shares a page, never an API's JSON, its 404 or a debugger; a ser
   const shared = () => asked.sent.filter(x => x.path.endsWith('/previews')).map(x => (x.body as { port: number }).port)
   await say('API http://localhost:4000/api/items, http://localhost:4001/, web http://localhost:4002/', 'a1')
   await say('Debugger http://localhost:4003/, login http://localhost:4004/, http://localhost:4005/ and http://localhost:4006/', 'a2')
+  // The pages are put to the host, in turn; nothing else is.
+  expect(shared()).toEqual([])
+  await allowShows(asked, ui)
   expect(shared()).toEqual([4002, 4004])
   // Asked at `/` alone, as a browser asks for a page: never the path Claude gave out.
   const probes = asked.spawned.filter(x => x.input?.startsWith('r=$(curl '))
@@ -9957,6 +10223,7 @@ test("a mention shares a page, never an API's JSON, its 404 or a debugger; a ser
   const before = probes.length
   pages[4005] = pageSays('200 text/html')
   await say('http://localhost:4000/ http://localhost:4003/ http://localhost:4005/', 'a3')
+  await allowShows(asked, ui)
   expect(asked.spawned.filter(x => x.input?.startsWith('r=$(curl ')).length).toBe(before + 1)
   expect(shared()).toEqual([4002, 4004, 4005])
   await $.command.run({ command: 'stop-sharing', args: '' } as never)
@@ -9970,13 +10237,14 @@ test("an app at a base path is shared at the page Claude gave out; an API's \"Ca
     '4101/api/items': pageSays('200 application/json', '[]'),
     4102: pageSays('404 text/html'),
   }
-  const asked = world(on, { pages, stream: [{ seq: 1, events: [], people: HOST_ONLY, ended: false, title: 'demo' }] })
+  const asked = world(on, { pages, surfaces: ['desktop'], stream: [{ seq: 1, events: [], people: HOST_ONLY, ended: false, title: 'demo' }] })
   const ui = await $.ui.mount(band('desktop'))
   await ui.press({ key: 'share' })
   await asked.clock.advance(20)
   const text = 'App: http://localhost:4100/app/dash\nAPI: http://localhost:4101/api/items\nAnd http://localhost:4102/'
   await $.session.append({ message: { type: 'assistant', role: 'assistant', content: [{ type: 'text', text }] }, door: 'response', origin: { kind: 'composer' }, uuid: 'a1' } as never)
   await asked.clock.advance(300)
+  await allowShows(asked, ui)
   expect(asked.sent.filter(x => x.path.endsWith('/previews')).map(x => (x.body as { port: number }).port)).toEqual([4100])
   expect(asked.posted.find(e => e.type === 'artifact')?.body).toMatchObject({ kind: 'preview', port: 4100, path: '/app/dash' })
   expect(asked.looks).toEqual(['4100/', '4100/app/dash', '4101/', '4101/api/items', '4102/'])
@@ -9986,7 +10254,7 @@ test("an app at a base path is shared at the page Claude gave out; an API's \"Ca
 test("a page Claude opens is shared whatever it is, but never a debugger, nor once the host stopped it", async ($, on) => {
   const pages = { 4000: pageSays('200 application/json', '{"ok":true}'), 4003: pageSays('400 text/html', INSPECTOR) }
   const stream: unknown[] = [{ seq: 1, events: [], people: HOST_ONLY, ended: false, title: 'demo' }]
-  const asked = world(on, { pages, stream })
+  const asked = world(on, { pages, stream, surfaces: ['desktop'] })
   on('tool.call', { tool: 'mcp__Claude_Browser__navigate' }, () => ({ result: [], text: 'navigated' }) as never)
   const ui = await $.ui.mount(band('desktop'))
   await ui.press({ key: 'share' })
@@ -10003,6 +10271,7 @@ test("a page Claude opens is shared whatever it is, but never a debugger, nor on
   expect(shared()).toEqual([3340])
   await open('http://localhost:4000/api/health')
   await open('http://localhost:4003/json/list')
+  await allowShows(asked, ui)
   expect(shared()).toEqual([3340, 4000])
   expect(asked.posted.find(e => e.type === 'artifact' && e.body.port === 4000)?.body).toMatchObject({ kind: 'preview', port: 4000, path: '/api/health' })
   // Opened again at another page: shared already, so it goes out again without a look.
@@ -11051,12 +11320,13 @@ test('/share-preview of an https address shares an https preview; plain http say
 })
 
 test('an https localhost address Claude gives out is looked at over TLS and shared as https', async ($, on) => {
-  const asked = world(on, { stream: [{ seq: 1, events: [], people: PREVIEW_PEOPLE, ended: false, title: 'demo' }] })
+  const asked = world(on, { surfaces: ['desktop'], stream: [{ seq: 1, events: [], people: PREVIEW_PEOPLE, ended: false, title: 'demo' }] })
   const ui = await $.ui.mount(band('desktop'))
   await ui.press({ key: 'share' })
   await asked.clock.advance(20)
   const reply = { type: 'assistant', role: 'assistant', content: [{ type: 'text', text: 'Running at https://localhost:3340/dash' }] }
   await $.session.append({ message: reply, door: 'response', origin: { kind: 'composer' }, uuid: 'a1' } as never)
+  await allowShow(asked, ui)
   await eventually(asked.clock, () => asked.posted.some(e => e.type === 'artifact'))
   expect(asked.spawned.find(s => s.input?.startsWith('r=$(curl '))?.input).toContain("curl -gsk -o /dev/null -H 'Accept: text/html,application/xhtml+xml;q=0.9,*/*;q=0.8' -w '%{http_code} %{content_type}' --connect-timeout 2 -m 3 'https://localhost:3340/')")
   expect(asked.posted.find(e => e.type === 'artifact')?.body).toMatchObject({ kind: 'preview', port: 3340, path: '/dash', scheme: 'https' })
@@ -11248,7 +11518,7 @@ test("a second page's Open while another session holds the host's profile opens 
   await asked.clock.advance(20)
   const own = await roomProfile()
   expect(asked.launches[1]).toContain(`--user-data-dir=${own}/chrome`)
-  expect(asked.state.previewWindow).toEqual({ room: 'http://share.test/room0000000000000001', port: 47100, opened: ['pv-b'], profile: own.split('/').pop() })
+  expect(asked.state.previewWindow).toEqual({ room: 'https://share.test/room0000000000000001', port: 47100, opened: ['pv-b'], profile: own.split('/').pop() })
   launchLockHeld.count = 0
   await $.command.run({ command: 'stop-sharing', args: '' } as never)
 })
@@ -11358,10 +11628,10 @@ test("each session in a room has a window profile of its own, named for its last
 })
 
 test('a session Claude Desktop reopens under a new id takes its window profile back, and what the host forwards', async ($, on) => {
-  const name = await profileName('http://share.test', 'room0000000000000001', PLACE)
+  const name = await profileName('https://share.test', 'room0000000000000001', PLACE)
   const saved = {
     at: 900,
-    room: { server: 'http://share.test', id: 'room0000000000000001', url: LINK, title: 'demo', host: 'Sam', token: 'g', seat: 'seat1', seq: 2, since: 1 },
+    room: { server: 'https://share.test', id: 'room0000000000000001', url: LINK, title: 'demo', host: 'Sam', token: 'g', seat: 'seat1', seq: 2, since: 1 },
     autoOpen: true, policy: { prompts: 'everyone', approvals: 'edits', files: 'on' }, localPreviews: [], activity: [], chat: [], sidebar: null, place: PLACE,
     previewWindow: { port: 47100, profile: name },
     // What the host forwards, in the place's Shown.
@@ -11377,7 +11647,7 @@ test('a session Claude Desktop reopens under a new id takes its window profile b
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   await $.session.start(START)
   await eventually(asked.clock, () => asked.state.mode === 'guest')
-  expect(asked.state.previewWindow).toEqual({ room: 'http://share.test/room0000000000000001', port: 47100, opened: [], profile: name })
+  expect(asked.state.previewWindow).toEqual({ room: 'https://share.test/room0000000000000001', port: 47100, opened: [], profile: name })
   const gc = await eventually(asked.clock, () => asked.spawned.find(s => s.input?.startsWith('# shared-session: clean up preview profiles')))
   expect(gc?.input).toContain(`keep='${name}'`)
   // No new events: what the place kept, and the room's list of it, are enough to open.
@@ -11517,13 +11787,14 @@ test('a host back from a restart keeps what each forwarded preview was shared as
 })
 
 test("a host's saved place keeps its shares, its TLS ones too", async ($, on) => {
-  const asked = world(on, { stream: [{ seq: 1, events: [], people: HOST_ONLY, ended: false, title: 'demo' }] })
+  const asked = world(on, { surfaces: ['desktop'], stream: [{ seq: 1, events: [], people: HOST_ONLY, ended: false, title: 'demo' }] })
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   on('session.end', ($, e) => ({ sessionId: e.sessionId }))
   await $.session.start(START)
   await $.command.run({ command: 'share-session', args: 'new' } as never)
-  // A page Claude gave out, over TLS, and a port the host forwards.
+  // A page Claude gave out, over TLS, the host's Share for it, and a port the host forwards.
   await $.session.append({ message: { type: 'assistant', role: 'assistant', content: [{ type: 'text', text: 'Running at https://localhost:3340/app' }] }, door: 'response', origin: { kind: 'composer' }, uuid: 'a1' } as never)
+  await allowShow(asked, await $.ui.mount(band('desktop')))
   await eventually(asked.clock, () => asked.state.shares?.['3340'])
   await $.command.run({ command: 'share-preview', args: '3610 API' } as never)
   const shares = { '3340': { pid: 'pv1', scheme: 'https' }, '3610': { pid: 'pv2', tcp: true } }
@@ -12081,6 +12352,99 @@ test("the approver answers the cloud host's question above the prompt, and the r
   expect(await pane.find({ key: 'cloud-ask-once-q2' })).toBeDefined()
   expect(await pane.find({ key: 'cloud-home' })).toBeDefined()
   lines.push({ seq: 6, events: [{ seq: 6, type: 'answer', ts: 1_100, from: { seat: 'seatD', name: 'scott', role: 'guest' }, body: { id: 'q2', answer: 'Decline' } }], people: CLOUD_PEOPLE, ended: false, title: 'demo', cloud: IN_CLOUD })
+  expect(await within(asked.clock, () => asked.state.cloudAsks?.length === 0, 5_000)).toBe(true)
+  await $.session.end({ reason: 'other', sessionId: 'session-test-0001', resume: {} } as never)
+})
+
+// A cloud host draws nothing, so a page its Claude gives out is its
+// approver's to give: asked through the room as its calls are, and shared
+// only on their Share.
+const cloudMention = ($: Parameters<TestBody>[0], port: number, uuid: string) =>
+  $.session.append({ message: { type: 'assistant', role: 'assistant', content: [{ type: 'text', text: `Running at http://localhost:${port}/dash` }] }, door: 'response', origin: { kind: 'composer' }, uuid } as never)
+const approverSays = (lines: LiveLines, seq: number, id: string, answer: string) =>
+  lines.push({ seq, events: [{ seq, type: 'answer', ts: 950, from: { seat: 'seatC', name: 'scott', role: 'guest' }, body: { id, answer } }], people: CLOUD_PEOPLE, ended: false, title: 'demo', cloud: IN_CLOUD })
+
+test("a cloud host asks its approver through the room whether to share a page its Claude gives out, and shares it on their Share", async ($, on) => {
+  const lines = liveLines({ seq: 1, events: [], people: CLOUD_PEOPLE, ended: false, title: 'demo', cloud: IN_CLOUD })
+  const asked = world(on, { live: lines, env: { SHARED_SESSION_RUNNER: '1' } })
+  const ui = await $.ui.mount(band('desktop'))
+  await ui.press({ key: 'share' })
+  await asked.clock.advance(20)
+  await cloudMention($, 3340, 'a1')
+  const question = await eventually(asked.clock, () => asked.posted.find(e => e.type === 'ask'))
+  expect(question?.body).toMatchObject({ kind: 'show', port: 3340, what: 'localhost:3340', options: ['Share', 'Not now'] })
+  // Nothing drawn here, nothing shared until the approver says so.
+  expect(asked.state.hostAsk ?? null).toBeNull()
+  await asked.clock.advance(60_000)
+  expect(asked.sent.filter(x => x.path.endsWith('/previews'))).toEqual([])
+  expect(asked.posted.filter(e => e.type === 'artifact')).toEqual([])
+  approverSays(lines, 3, String(question!.body.id), 'Share')
+  await eventually(asked.clock, () => asked.posted.some(e => e.type === 'artifact'))
+  expect(asked.posted.find(e => e.type === 'artifact')?.body).toMatchObject({ kind: 'preview', port: 3340, path: '/dash' })
+  expect(asked.sent.filter(x => x.path.endsWith('/previews')).map(x => x.body)).toEqual([{ port: 3340, title: 'localhost:3340' }])
+  await $.command.run({ command: 'stop-sharing', args: '' } as never)
+})
+
+test("a cloud host's question about a page: the approver's Not now holds for the room; unanswered in ten minutes, it's taken back, and asked again later", async ($, on) => {
+  const lines = liveLines({ seq: 1, events: [], people: CLOUD_PEOPLE, ended: false, title: 'demo', cloud: IN_CLOUD })
+  const asked = world(on, { live: lines, env: { SHARED_SESSION_RUNNER: '1' }, pages: { 3341: 'exit=28\ncode=000\n' } })
+  const ui = await $.ui.mount(band('desktop'))
+  await ui.press({ key: 'share' })
+  await asked.clock.advance(20)
+  const questions = () => asked.posted.filter(e => e.type === 'ask' && e.body.kind === 'show')
+  await cloudMention($, 3340, 'a1')
+  await eventually(asked.clock, () => questions().length === 1)
+  approverSays(lines, 3, String(questions()[0]!.body.id), 'Not now')
+  await eventually(asked.clock, () => asked.state.hostMemory?.declined.includes(3340))
+  // Unanswered: taken back at ten minutes, off the approver's list.
+  await cloudMention($, 3341, 'a2')
+  await eventually(asked.clock, () => questions().length === 2)
+  const second = String(questions()[1]!.body.id)
+  await asked.clock.advance(10 * 60_000 + 1_000)
+  expect(await eventually(asked.clock, () => asked.posted.some(e => e.type === 'ask' && e.body.id === second && e.body.done === true))).toBe(true)
+  expect(asked.sent.filter(x => x.path.endsWith('/previews'))).toEqual([])
+  // Later: the one taken back is asked again; the one declined isn't.
+  await asked.clock.advance(60_000)
+  await cloudMention($, 3340, 'a3')
+  await cloudMention($, 3341, 'a4')
+  await eventually(asked.clock, () => questions().length === 3)
+  await asked.clock.advance(5_000)
+  expect(questions().map(e => e.body.port)).toEqual([3340, 3341, 3341])
+  expect(asked.sent.filter(x => x.path.endsWith('/previews'))).toEqual([])
+  await $.command.run({ command: 'stop-sharing', args: '' } as never)
+})
+
+// The approver (the session that moved it) answers it above the prompt or
+// in the Room; a question the cloud host took back leaves the list.
+test("the approver is asked whether to share the cloud host's page, above the prompt and in the Room; a question taken back goes", async ($, on) => {
+  const saved = {
+    at: 900,
+    room: { server: 'https://share.test', id: 'room0000000000000001', url: LINK, title: 'demo', host: 'scott', token: 'g-cloud', seat: 'seatC', seq: 2, since: 1 },
+    autoOpen: true, policy: { prompts: 'everyone', approvals: 'edits', files: 'on' }, shown: [], activity: [], chat: [], sidebar: null, cloudMine: true,
+  }
+  const show = (id: string, port: number, seq: number) => ({ seq, type: 'ask', ts: 1_000, from: { seat: 'host', name: 'scott', role: 'host' }, body: { id, kind: 'show', port, who: '', what: `localhost:${port}`, options: ['Share', 'Not now'] } })
+  const lines = liveLines({ seq: 3, events: [show('s1', 3340, 3)], people: CLOUD_PEOPLE, ended: false, title: 'demo', cloud: IN_CLOUD })
+  const asked = world(on, { live: lines, files: { [checkpointPath('joined:session-test-0001')]: JSON.stringify({ version: 1, value: saved }) } })
+  on('session.start', ($, e) => ({ cwd: e.cwd }))
+  on('session.end', ($, e) => ({ sessionId: e.sessionId }))
+  await $.session.start(START)
+  expect(await within(asked.clock, () => asked.state.cloudAsks?.length === 1, 5_000)).toBe(true)
+  expect(asked.state.cloudAsks?.[0]).toMatchObject({ id: 's1', kind: 'show', port: 3340, what: 'localhost:3340', always: '', options: ['Share', 'Not now'] })
+  const row = await $.ui.mount(band('desktop'))
+  expect((await row.find({ type: 'Text', text: /cloud host's localhost/ }))?.text).toBe("Share the cloud host's localhost:3340 with the room?")
+  expect(await row.find({ key: 'cloud-once' })).toBeUndefined()
+  await row.press({ key: 'cloud-share' })
+  await asked.clock.advance(50)
+  expect(asked.posted.filter(e => e.type === 'answer').map(e => e.body)).toEqual([{ id: 's1', answer: 'Share' }])
+  expect(asked.state.cloudAsks).toEqual([])
+  // The next, in the Room too, said as it comes; taken back, it goes.
+  lines.push({ seq: 5, events: [show('s2', 3341, 5)], people: CLOUD_PEOPLE, ended: false, title: 'demo', cloud: IN_CLOUD })
+  expect(await within(asked.clock, () => asked.state.cloudAsks?.length === 1, 5_000)).toBe(true)
+  expect(asked.toasted).toContain("The cloud host's Claude gave out localhost:3341: share it with the room? Answer above the prompt")
+  const pane = await $.ui.mount({ plugin: 'shared-session', surface: 'desktop', component: 'Pane', requestId: 'shared-room', props: PANE })
+  expect(await pane.find({ key: 'cloud-ask-share-s2' })).toBeDefined()
+  expect(await pane.find({ key: 'cloud-ask-not-now-s2' })).toBeDefined()
+  lines.push({ seq: 6, events: [{ seq: 6, type: 'ask', ts: 1_100, from: { seat: 'host', name: 'scott', role: 'host' }, body: { id: 's2', done: true } }], people: CLOUD_PEOPLE, ended: false, title: 'demo', cloud: IN_CLOUD })
   expect(await within(asked.clock, () => asked.state.cloudAsks?.length === 0, 5_000)).toBe(true)
   await $.session.end({ reason: 'other', sessionId: 'session-test-0001', resume: {} } as never)
 })

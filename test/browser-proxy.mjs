@@ -413,7 +413,7 @@ async function classificationChecks() {
   const loopbackClass = [{ atyp: 3, host: 'localhost' }, { atyp: 3, host: 'LocalHost.' }, { atyp: 3, host: 'app.localhost' }, { atyp: 3, host: 'a.b.localhost' },
     { atyp: 1, host: '127.0.0.1' }, { atyp: 1, host: '127.8.9.10' }, { atyp: 1, host: '0.0.0.0' }, { atyp: 4, host: '::1' }, { atyp: 4, host: '::' },
     { atyp: 4, host: '::ffff:7f00:1' }, { atyp: 4, host: '::ffff:0:0' }, { atyp: 3, host: '::ffff:127.0.0.1' }, { atyp: 3, host: '[::1]' }, { atyp: 3, host: '127.0.0.1' },
-    { atyp: 3, host: '0.0.0.0' }, { atyp: 3, host: 'lvh.test' }, { atyp: 3, host: 'mixed.test' }, { atyp: 3, host: 'zero.test' }, { atyp: 3, host: 'mapped.test' }]
+    { atyp: 3, host: '0.0.0.0' }]
   for (const target of loopbackClass) {
     const c = await socks(p.port, { ...target, port: 3000 })
     await expectReply(c, 0, JSON.stringify(target))
@@ -421,7 +421,12 @@ async function classificationChecks() {
     c.client.destroy()
   }
   assert.ok(dials.length === loopbackClass.length && dials.every(dial => dial === `127.0.0.1:${echoPort}`), 'every loopback-class target reaches only its route')
-  assert.deepEqual([...lookups].sort(), ['lvh.test', 'mapped.test', 'mixed.test', 'zero.test'], 'localhost names never consult DNS')
+  assert.deepEqual(lookups, [], 'localhost names and literals never consult DNS')
+  // Any other name pointing at this computer may be a page's own, rebound to
+  // loopback after it loaded (DNS rebinding): refused, silently, never dialled.
+  for (const host of ['lvh.test', 'mixed.test', 'zero.test', 'mapped.test', 'LVH.test.']) await expectReply(await socks(p.port, { atyp: 3, host, port: 3000 }), 2, `rebound ${host}`)
+  assert.deepEqual([...new Set(lookups)].sort(), ['lvh.test', 'mapped.test', 'mixed.test', 'zero.test'])
+  assert.equal(dials.length, loopbackClass.length, 'a name rebound to loopback is never dialled')
   const quiet = p.rows.length
   for (const target of [{ atyp: 1, host: '203.0.113.7' }, { atyp: 4, host: '2001:db8::7' }, { atyp: 4, host: '::ffff:cb00:7107' }, { atyp: 3, host: '203.0.113.7' },
     { atyp: 3, host: '2001:DB8:0:0:0:0:0:7' }, { atyp: 3, host: '[2001:db8::7]' }, { atyp: 3, host: 'own.test' }, { atyp: 3, host: 'own6.test' }]) {
@@ -444,7 +449,7 @@ async function classificationChecks() {
     assert.deepEqual(own.rows, [])
     await shut(own)
   }
-  console.log(`ok classification: localhost/*.localhost without DNS, 127/8, 0.0.0.0, ::1, ::, ::ffff:127.x (ATYP 3/4), names resolving to loopback -> route only; own interfaces${real4 || real6 ? ' (injected + real)' : ' (injected)'} and names resolving there -> 02 silently; unknown interfaces fail closed`)
+  console.log(`ok classification: localhost/*.localhost without DNS, 127/8, 0.0.0.0, ::1, ::, ::ffff:127.x (ATYP 3/4), names resolving to loopback -> 02 silently (rebinding), never dialled; own interfaces${real4 || real6 ? ' (injected + real)' : ' (injected)'} and names resolving there -> 02 silently; unknown interfaces fail closed`)
 }
 
 async function routingChecks() {
@@ -694,8 +699,12 @@ async function outboundChecks() {
   for (const name of ['deny.test', 'huge.test', 'garbage.test', 'drop.test']) await expectReply(await socks(viaHttp.port, { atyp: 3, host: name, port: 443 }), 1, `upstream ${name}`)
   assert.equal(dials.filter(dial => typeof dial === 'object').length, 0, 'nothing went direct so far')
   const routedBefore = dials.filter(dial => dial === 'route').length
-  for (const host of ['localhost', 'lvh.test']) await echoes(await expectReply(await socks(viaHttp.port, { atyp: 3, host, port: 3000 }), 0, `${host} never uses the upstream`))
-  assert.equal(dials.filter(dial => dial === 'route').length, routedBefore + 2)
+  await echoes(await expectReply(await socks(viaHttp.port, { atyp: 3, host: 'localhost', port: 3000 }), 0, 'localhost never uses the upstream'))
+  assert.equal(dials.filter(dial => dial === 'route').length, routedBefore + 1)
+  const rebindAt = connects.length
+  await expectReply(await socks(viaHttp.port, { atyp: 3, host: 'lvh.test', port: 3000 }), 2, 'a name rebound to loopback is refused, never routed or tunnelled')
+  assert.equal(connects.length, rebindAt)
+  assert.equal(dials.filter(dial => dial === 'route').length, routedBefore + 1)
   await expectReply(await socks(viaHttp.port, { atyp: 3, host: 'own.test', port: 443 }), 2, 'own address never uses the upstream')
   const upstreamDials = dials.filter(dial => dial === 'upstream').length
   for (const [target, label] of [[{ atyp: 3, host: 'direct.test' }, 'a bare name'], [{ atyp: 3, host: 'www.direct.test' }, 'a subdomain of a bare name'], [{ atyp: 3, host: 'deep.www.direct.test' }, 'a deeper subdomain'],
@@ -886,8 +895,9 @@ async function localNetworkChecks() {
   assert.equal(await opened(p, { atyp: 3, host: 'mixed.test' }, 'mixed resolution'), 'DIRECT')
   assert.deepEqual(dials.find(dial => dial.host === 'mixed.test').pinned, [{ address: '93.184.216.34', family: 4 }, { address: '2001:db8::5', family: 6 }], 'only the public addresses are dialled')
   await expectReply(await socks(p.port, { atyp: 3, host: 'nas.test', port: 80 }), 2, 'a name with only local addresses')
-  await echoes(await expectReply(await socks(p.port, { atyp: 3, host: 'loop-lan.test', port: 3000 }), 0, 'loopback still routes first'))
   const rowsBefore = p.rows.length
+  await expectReply(await socks(p.port, { atyp: 3, host: 'loop-lan.test', port: 3000 }), 2, 'a name pointing at loopback is refused, whatever else it gives')
+  assert.ok(!dials.some(dial => dial === 'route' || dial.host === 'loop-lan.test'), 'and never dialled')
   for (const target of [{ atyp: 1, host: '192.168.1.5' }, { atyp: 4, host: '::ffff:c0a8:105' }, { atyp: 4, host: '64:ff9b::c0a8:105' }, { atyp: 3, host: 'own-lan.test' }]) await expectReply(await socks(p.port, { ...target, port: 80 }), 2, `own ${target.host}`)
   assert.equal(p.rows.length, rowsBefore, 'own addresses stay silent')
   await shut(p)

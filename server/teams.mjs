@@ -17,11 +17,19 @@
 //   left:<team>:<acct>        left or was removed: its domain or org rule doesn't take them back
 //   dom:<domain>:<team>, org:<org>:<team>   who joins by themselves
 //   live:<team>:<room>        a session shared with the team { id, url, title, host, hostAccount, createdAt }
-//   sinv:<acct>:<room>        a host's invite to that session { room: { id, url, title, host }, from: { id, name }, at, exp }
+//   sinv:<acct>:<room>        a host's invite to that session { room: { id, url, title, host }, from: { id, name }, at, exp };
+//                             rinv:<room>:<acct> → 1, so a session's invites go with it
+//
+// What's timed (invites, sign-ins under way) is deleted when it's due
+// (`sweep`), the adapter woken for the next (`onDue`: a Durable Object's
+// alarm, a Node timer) whether or not anyone asks; a session's end or expiry
+// takes its invites and its place on its team's list (`roomEnded`).
 //
 // Rooms ask it two things (`shareCheck` when one is shared with a team,
 // `joinCheck` when someone joins one) and tell it two (`register`,
-// `unregister`); it asks rooms how they are (`roomInfo`) when listing.
+// `unregister`); it asks rooms how they are (`roomInfo`) when listing, and
+// tells a members-only team's rooms whom it has now (`keepTeam`), so someone
+// who leaves it or is removed leaves its sessions too.
 
 import { json, token, brandPage, commandBox, COPY_SCRIPT, INSTALL_COMMAND } from './core.mjs'
 
@@ -146,6 +154,8 @@ export class Directory {
     this.kv = kv
     this.providers = opts.providers ?? {}
     this.roomInfo = opts.roomInfo ?? (async () => null)
+    this.keepTeam = opts.keepTeam ?? (async () => {})
+    this.onDue = opts.onDue ?? (() => {})
     this.fetch = opts.fetch ?? ((...a) => fetch(...a))
     this.changes = new Map() // account id → { start, count }: its minute (CHANGES)
   }
@@ -174,7 +184,7 @@ export class Directory {
   async signIn(identity, now) {
     const ident = `ident:${identity.provider}:${identity.subject}`
     const email = identity.emailVerified && identity.email ? String(identity.email).toLowerCase() : ''
-    let id = (await this.kv.get(ident)) ?? (email ? await this.kv.get(`email:${email}`) : null)
+    let id = (await this.kv.get(ident)) ?? (email ? await this.byEmail(email, identity.provider) : null)
     const before = id ? await this.kv.get(`acct:${id}`) : null
     id = before?.id ?? token(12)
     const account = {
@@ -193,9 +203,30 @@ export class Directory {
     }
     await this.kv.put(`acct:${id}`, account)
     await this.kv.put(ident, id)
+    // An address the account moved from is no longer its way in: whoever has
+    // it next (an address reassigned, a domain sold) is someone else.
+    if (before?.email && before.email !== account.email) await this.unindex(before.email, id)
     if (email) await this.kv.put(`email:${email}`, id)
     await this.autoJoin(account, now)
     return account
+  }
+
+  // The account a provider's verified address signs in to, when it's another
+  // provider's identity of the same person: the account must still have that
+  // address, and no identity of its own at this provider (a second one there,
+  // with the same address, is that address deleted and made again for someone
+  // else). Anything else in the index takes nobody.
+  async byEmail(email, provider) {
+    const id = await this.kv.get(`email:${email}`)
+    const account = id ? await this.kv.get(`acct:${id}`) : null
+    if (!account || account.email !== email) return null
+    const idents = new Set([...(account.idents ?? []), `ident:${account.provider}:${account.subject}`])
+    return [...idents].some(i => i.startsWith(`ident:${provider}:`)) ? null : account.id
+  }
+
+  // The address's index entry, only while it is this account's.
+  async unindex(email, id) {
+    if ((await this.kv.get(`email:${email}`)) === id) await this.kv.delete(`email:${email}`)
   }
 
   // A signed-in Claude Code's token, handed straight over: only its hash is kept.
@@ -228,11 +259,13 @@ export class Directory {
     await this.kv.delete(`mem:${teamId}:${accountId}`)
     await this.kv.delete(`myteam:${accountId}:${teamId}`)
     if (opts.remember !== false) await this.kv.put(`left:${teamId}:${accountId}`, 1)
+    const team = await this.kv.get(`team:${teamId}`)
+    const rooms = (await this.kv.list(`live:${teamId}:`)).map(([, entry]) => entry.id)
     // A team keeps an owner while it has anyone: the longest-standing member.
     // With nobody left, it goes, with its invite and what joined it by itself.
     const members = await this.kv.list(`mem:${teamId}:`)
+    await this.enforce(teamId, rooms, team?.access, members)
     if (!members.length) {
-      const team = await this.kv.get(`team:${teamId}`)
       if (team) {
         for (const [key] of await this.kv.list(`left:${teamId}:`)) await this.kv.delete(key)
         await this.kv.delete(`inv:${team.invite}`)
@@ -247,6 +280,15 @@ export class Directory {
       const [key, m] = members.sort((a, b) => a[1].at - b[1].at)[0]
       await this.kv.put(key, { ...m, role: 'owner' })
     }
+  }
+
+  // A members-only team's sessions keep only its members as they are now
+  // (someone left or was removed, or it just turned members-only): each room
+  // lets go of the guests whose account isn't one, with what they hold open.
+  async enforce(teamId, rooms, access, members) {
+    if (access !== 'members' || !rooms.length) return
+    const allowed = (members ?? (await this.kv.list(`mem:${teamId}:`))).map(([key]) => key.split(':')[2])
+    for (const id of rooms) await this.keepTeam(id, teamId, allowed).catch(() => {})
   }
 
   async teamsOf(account) {
@@ -332,9 +374,40 @@ export class Directory {
         continue
       }
       await this.kv.put(`sinv:${id}:${room.id}`, { room, from: { id: account.id, name: account.name }, at: now, exp: now + INVITE_MS })
+      await this.kv.put(`rinv:${room.id}:${id}`, 1)
       invited.push(mate.name)
     }
+    if (invited.length) this.onDue(now + INVITE_MS)
     return { ok: true, invited, refused }
+  }
+
+  // An invite gone (answered, ended, expired, its account deleted), with
+  // its session's index of it.
+  async dropInvite(accountId, roomId) {
+    await this.kv.delete(`sinv:${accountId}:${roomId}`)
+    await this.kv.delete(`rinv:${roomId}:${accountId}`)
+  }
+
+  // A session ended or expired: its invites go, and its place on its team's list.
+  async roomEnded(roomId, teamId) {
+    if (teamId) await this.kv.delete(`live:${teamId}:${roomId}`)
+    for (const [key] of await this.kv.list(`rinv:${roomId}:`)) await this.dropInvite(key.slice(`rinv:${roomId}:`.length), roomId)
+  }
+
+  // What's due goes: invites past their 12 hours, sign-ins past their ten
+  // minutes. Returns when the next is due, or null.
+  async sweep(now) {
+    let next = null
+    for (const prefix of ['sinv:', 'login:', 'state:']) {
+      for (const [key, rec] of await this.kv.list(prefix)) {
+        if (!(rec?.exp > now)) {
+          const [, accountId, roomId] = key.split(':')
+          if (prefix === 'sinv:') await this.dropInvite(accountId, roomId)
+          else await this.kv.delete(key)
+        } else if (next === null || rec.exp < next) next = rec.exp
+      }
+    }
+    return next
   }
 
   // An account's invites still good: an ended or expired session's go.
@@ -345,7 +418,7 @@ export class Directory {
       // Already there (another session of theirs joined): nothing to answer.
       const there = Array.isArray(info?.people) && info.people.some(p => p.account === account.id && p.online)
       if (!info || info.ended || there) {
-        await this.kv.delete(key)
+        await this.dropInvite(account.id, key.slice(`sinv:${account.id}:`.length))
         continue
       }
       out.push({ room: { ...invite.room, title: info.title ?? invite.room.title }, from: { name: invite.from.name }, at: invite.at })
@@ -427,7 +500,7 @@ export class Directory {
       if (url.pathname === '/api/me' && method === 'GET') return json({ account: this.accountView(account), teams: await this.teamsOf(account), teammates: await this.teammates(account) })
       if (url.pathname === '/api/me/invites' && method === 'GET') return json({ invites: await this.invitesOf(account, now) })
       if (parts[0] === 'api' && parts[1] === 'me' && parts[2] === 'invites' && parts.length === 4 && method === 'DELETE') {
-        await this.kv.delete(`sinv:${account.id}:${parts[3]}`)
+        await this.dropInvite(account.id, parts[3])
         return json({ ok: true })
       }
       if (url.pathname === '/api/teams' && method === 'POST') return this.createTeam(account, await readBody(req), now)
@@ -531,6 +604,8 @@ export class Directory {
     for (const d of domains) await this.kv.put(`dom:${d}:${team.id}`, 1)
     for (const o of orgs) await this.kv.put(`org:${o}:${team.id}`, 1)
     await this.kv.put(`team:${team.id}`, next)
+    // Turned members-only: its sessions keep only its members.
+    if (next.access === 'members' && team.access !== 'members') await this.enforce(team.id, (await this.kv.list(`live:${team.id}:`)).map(([, entry]) => entry.id), 'members')
     // People already signed in whom the new rules take in. Only an account
     // says which organizations it's in, so a new one reads every account
     // once; a new domain alone reads the verified-email index.
@@ -564,11 +639,18 @@ export class Directory {
   }
 
   async deleteAccount(account) {
-    for (const [key] of await this.kv.list(`myteam:${account.id}:`)) await this.removeMember(key.split(':')[2], account.id, { remember: false })
+    const teams = (await this.kv.list(`myteam:${account.id}:`)).map(([key]) => key.split(':')[2])
+    // The sessions it shares, off its teams' lists (they go on, by link).
+    for (const team of teams) for (const [key, entry] of await this.kv.list(`live:${team}:`)) if (entry?.hostAccount === account.id) await this.kv.delete(key)
+    for (const team of teams) await this.removeMember(team, account.id, { remember: false })
     for (const [key, rec] of await this.kv.list('tok:')) if (rec.account === account.id) await this.kv.delete(key)
-    for (const [key] of await this.kv.list(`sinv:${account.id}:`)) await this.kv.delete(key)
+    // Invites to it, and those it sent, which carry its name.
+    for (const [key, invite] of await this.kv.list('sinv:')) {
+      const [, to, roomId] = key.split(':')
+      if (to === account.id || invite?.from?.id === account.id) await this.dropInvite(to, roomId)
+    }
     for (const ident of new Set([...(account.idents ?? []), `ident:${account.provider}:${account.subject}`])) await this.kv.delete(ident)
-    if (account.email) await this.kv.delete(`email:${account.email}`)
+    if (account.email) await this.unindex(account.email, account.id)
     await this.kv.delete(`acct:${account.id}`)
     return json({ ok: true })
   }
@@ -591,6 +673,7 @@ export class Directory {
     // Sign-ins nobody finished or collected go after their ten minutes.
     for (const prefix of ['login:', 'state:']) for (const [key, rec] of await this.kv.list(prefix)) if (rec.exp < now) await this.kv.delete(key)
     await this.kv.put(`login:${login}`, { status: 'pending', exp: now + LOGIN_MS })
+    this.onDue(now + LOGIN_MS)
     if (provider === 'test') {
       // The end-to-end test's own provider: who to be comes in the link. It
       // asks in the browser as the others do.

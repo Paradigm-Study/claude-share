@@ -387,6 +387,37 @@ try {
   ok((await call('/api/auth/logout', { method: 'POST', tok: bob })).status === 200 && (await call('/api/me', { tok: bob })).status === 401, 'Bob signs out')
   ok((await call('/auth/github/start?login=' + 'x'.repeat(24))).status === 200, 'unconfigured provider says so')
 
+  // Someone who leaves a members-only team, or is removed, leaves its
+  // sessions at once: their seats, and their open stream; a member stays.
+  // And a team turning members-only lets go of whoever joined by its link.
+  {
+    const erin = await signIn('erin@erin.test', 'Erin')
+    const crew = (await call('/api/teams', { method: 'POST', tok: erin, body: { name: 'Crew' } })).data.team
+    const fred = await signIn('fred@else.test', 'Fred', crew.invite, 'Crew')
+    const gus = await signIn('gus@else.test', 'Gus', crew.invite, 'Crew')
+    const fredId = (await call('/api/me', { tok: fred })).data.account.id
+    const shared = (await call('/api/rooms', { method: 'POST', acct: erin, body: { name: 'Erin', title: 'crew work', team: crew.id } })).data
+    const seatOf = async (acct, name) => (await call(`/api/rooms/${shared.id}/join`, { method: 'POST', acct, body: { name } })).data
+    const [fred1, fred2, gus1] = [await seatOf(fred, 'Fred'), await seatOf(fred, 'Fred'), await seatOf(gus, 'Gus')]
+    const stream = await fetch(`${S}/api/rooms/${shared.id}/stream?after=0`, { headers: { ...V, authorization: `Bearer ${fred1.token}` } })
+    const reader = stream.body.getReader()
+    await reader.read()
+    const drained = (async () => { for (;;) if ((await reader.read()).done) return true })()
+    const out = async seat => (await call(`/api/rooms/${shared.id}/events?after=0&wait=0`, { tok: seat.token })).status
+    ok((await call(`/api/teams/${crew.id}/members/${fredId}`, { method: 'DELETE', tok: erin })).status === 200, 'Erin removes Fred from Crew')
+    ok(await Promise.race([drained, wait(3000).then(() => false)]), "Fred's open stream ends at once")
+    ok((await out(fred1)) === 401 && (await out(fred2)) === 401 && (await out(gus1)) === 200 && (await out(shared)) === 200, 'both of his seats are let go; Gus and the host stay')
+    const seen = (await call(`/api/rooms/${shared.id}/events?after=0&wait=0`, { tok: shared.token })).data
+    ok(!seen.people.some(p => p.name === 'Fred') && seen.events.filter(e => e.type === 'leave' && e.from.name === 'Fred').map(e => e.body.reason).join() === 'removed', 'he leaves the room once, as removed')
+    ok((await call(`/api/rooms/${shared.id}/join`, { method: 'POST', acct: fred, body: { name: 'Fred' } })).status === 403, "and can't join again")
+    await call(`/api/teams/${crew.id}`, { method: 'PATCH', tok: erin, body: { access: 'link' } })
+    const passer = (await call(`/api/rooms/${shared.id}/join`, { method: 'POST', body: { name: 'Passer' } })).data
+    ok((await out(passer)) === 200, 'by link, anyone joins')
+    await call(`/api/teams/${crew.id}`, { method: 'PATCH', tok: erin, body: { access: 'members' } })
+    ok((await out(passer)) === 401 && (await out(gus1)) === 200, 'turned members-only, it lets go of whoever joined by link, and keeps its members')
+    await call(`/api/rooms/${shared.id}/end`, { method: 'POST', tok: shared.token })
+  }
+
   // Reactions to Claude's replies and who saw them: kept when they're well
   // formed, from the host and guests alike; anything else is dropped.
   const marks = (await call('/api/rooms', { method: 'POST', body: { name: 'Host', title: 'marks' } })).data
@@ -425,6 +456,13 @@ try {
   r1.sweep(200_000)
   r1.end(200_001)
   ok(r1.auth(kyle.token, 200_002) === null, 'nobody comes back to an ended room')
+  // A team's word reaches the seats it covers: here or away, and only for its own room.
+  const r2 = Room.create({ id: 'r2', name: 'Host', title: 't', now: 0, team: { id: 'teamA', name: 'A', account: 'h' } })
+  const [kept2, gone2, idle2] = [r2.join('Kim', 0, null, 'k'), r2.join('Ned', 0, null, 'n'), r2.join('Oz', 0, null, 'o')]
+  r2.seats.get(kept2.token).lastSeen = r2.seats.get(gone2.token).lastSeen = 50_000
+  r2.sweep(60_000)
+  ok(r2.away.has(idle2.token) && !r2.keepTeam('teamB', [], 60_000), "an away seat is the room's still, and another team's word changes nothing")
+  ok(r2.keepTeam('teamA', ['k'], 61_000) && Boolean(r2.auth(kept2.token, 61_000)) && r2.auth(gone2.token, 61_000) === null && r2.auth(idle2.token, 61_000) === null && !r2.away.has(idle2.token), 'its own team keeps its members, and lets the others go, here or away, for good')
 } catch (error) {
   // Reported, so the checks below still run.
   console.error(error)
@@ -577,6 +615,75 @@ try {
   for (let i = 0; i < 31; i++) await here(`/api/me/invites/${'r'.repeat(16)}`, { method: 'DELETE', tok: yan.token })
   ok((await here('/api/me/invites/x', { method: 'DELETE', tok: yan.token })).status === 429 && (await here('/api/auth/logout', { method: 'POST', tok: yan.token })).status === 200 && !(await dir.accountOf(yan.token)), 'past its minute an account can still sign out')
   ok((await here('/api/me', { method: 'DELETE', tok: zed.token })).status === 200 && !(await dir.kv.get(`acct:${zed.id}`)), 'and delete itself')
+}
+
+// A verified address signs in to an account only while that account still
+// has it, and only from another provider: an address it moved from, a second
+// account at the same provider with the address, or an index entry left
+// behind take nobody's account.
+{
+  const { Directory, mapStore } = await import('../server/teams.mjs')
+  const data = new Map()
+  const dir = new Directory(mapStore(data), { providers: {} })
+  const now = 1_000_000
+  const github = (subject, email) => ({ provider: 'github', subject, login: `gh${subject}`, name: `GH ${subject}`, email, emailVerified: true })
+  const google = (subject, email) => ({ provider: 'google', subject, name: `G ${subject}`, email, emailVerified: true })
+  const alice = await dir.signIn(github('1', 'alice@old.test'), now)
+  const moved = await dir.signIn(github('1', 'Alice@New.test'), now)
+  ok(moved.id === alice.id && moved.email === 'alice@new.test' && !data.has('email:alice@old.test') && data.get('email:alice@new.test') === alice.id, 'an address an account moved from leaves the index')
+  const heir = await dir.signIn(google('g9', 'alice@old.test'), now)
+  ok(heir.id !== alice.id && data.get('email:alice@old.test') === heir.id, "whoever has that address next signs in to an account of their own, never the one that moved from it")
+  const own = await dir.signIn(google('g1', 'alice@new.test'), now)
+  ok(own.id === alice.id && own.idents.includes('ident:google:g1') && own.idents.includes('ident:github:1'), "another provider's identity with the address an account has now is that account")
+  const recycled = await dir.signIn(google('g2', 'alice@new.test'), now)
+  ok(recycled.id !== alice.id && (await dir.kv.get('ident:google:g1')) === alice.id, 'a second identity at the same provider with that address (the address made again for someone else) is someone else')
+  data.set('email:left@old.test', alice.id)
+  const stale = await dir.signIn(google('g3', 'left@old.test'), now)
+  ok(stale.id !== alice.id && data.get('email:left@old.test') === stale.id, "an index entry whose account doesn't have that address any more takes nobody's account")
+  data.set('email:alice@new.test', alice.id)
+  const mine = await dir.signIn(github('5', 'mine@test.test'), now)
+  data.set('email:mine@test.test', alice.id)
+  await dir.deleteAccount(mine)
+  ok(data.get('email:mine@test.test') === alice.id && !data.has(`acct:${mine.id}`), "deleting an account removes only the index entries that are its own")
+  await dir.deleteAccount(await dir.kv.get(`acct:${alice.id}`))
+  ok(!data.has('email:alice@new.test') && !data.has('ident:github:1') && !data.has('ident:google:g1'), 'and its own, with its identities')
+}
+
+// What's timed goes when it's due, whether anyone asks or not (the adapter is
+// told when: `onDue`), and a session's end or expiry takes its invites and
+// its place on its team's list; deleting an account takes the invites it
+// sent and its sessions' places on its teams' lists too.
+{
+  const { Directory, mapStore } = await import('../server/teams.mjs')
+  const data = new Map()
+  const due = []
+  const dir = new Directory(mapStore(data), { providers: { test: {} }, onDue: at => due.push(at), roomInfo: async () => ({ title: 't', people: [], ended: false }) })
+  const now = 5_000_000, HOURS_12 = 12 * 60 * 60 * 1000
+  const person = (subject, name) => dir.signIn({ provider: 'github', subject, login: name.toLowerCase(), name, email: `${name.toLowerCase()}@x.test`, emailVerified: true }, now)
+  const [hana, milo] = [await person('h1', 'Hana'), await person('m1', 'Milo')]
+  const crew = (await (await dir.createTeam(hana, { name: 'Crew' }, now)).json()).team
+  await dir.addMember(crew.id, milo.id, 'member', now)
+  const hanaToken = await dir.mint(hana.id, now)
+  const room = id => ({ id: id.repeat(16), url: `http://dir.test/s/${id}`, title: 't', host: 'Hana' })
+  const invited = r => data.has(`sinv:${milo.id}:${r.id}`) || data.has(`rinv:${r.id}:${milo.id}`)
+  const [a, b, c] = [room('a'), room('b'), room('c')]
+  await dir.sessionInvite(hanaToken, a, [milo.id], now)
+  ok(invited(a) && due.at(-1) === now + HOURS_12, 'an invite is kept with its session\'s index of it, and the adapter told when it goes')
+  ok((await dir.sweep(now + HOURS_12 - 1)) === now + HOURS_12 && invited(a), 'before its 12 hours it stays')
+  ok((await dir.sweep(now + HOURS_12 + 1)) === null && !invited(a), 'and at them it goes, whether anyone asks or not')
+  await dir.sessionInvite(hanaToken, b, [milo.id], now)
+  await dir.register(crew.id, { ...b, createdAt: now, hostAccount: hana.id })
+  await dir.roomEnded(b.id, crew.id)
+  ok(!invited(b) && !data.has(`live:${crew.id}:${b.id}`), "a session's end takes its invites and its place on its team's list")
+  const verifier = 'V'.repeat(40), login = sha(verifier)
+  await dir.handle(new Request(`http://dir.test/auth/test/start?login=${login}&email=x@x.test&name=X`), 'http://dir.test', now)
+  ok(data.has(`login:${login}`) && due.at(-1) === now + 10 * 60_000, 'a sign-in under way tells the adapter when it goes')
+  await dir.sweep(now + 10 * 60_000 + 1)
+  ok(!data.has(`login:${login}`), 'and goes at its ten minutes')
+  await dir.sessionInvite(hanaToken, c, [milo.id], now)
+  await dir.register(crew.id, { ...c, createdAt: now, hostAccount: hana.id })
+  await dir.deleteAccount(hana)
+  ok(!invited(c) && !data.has(`live:${crew.id}:${c.id}`), "deleting an account takes the invites it sent and its sessions' places on its teams' lists")
 }
 
 // The Worker sends the same sign-in, its Continue included, to its

@@ -10,6 +10,10 @@ NEW_ROOMS = "on"
 MAX_ROOMS_PER_DAY = "3000"
 # Optional: pin the origin share links use (otherwise the request's own).
 # PUBLIC_URL = "https://share.example.com"
+# Optional: where previews are served (otherwise this Worker's workers.dev
+# name with -preview). A wildcard gives each room's previews a host name of
+# its own; set the same in wrangler.preview.toml (docs/guide.md).
+# PREVIEW_URL = "https://*.example-previews.dev"
 # Secret, for ending a room that's being abused (POST /api/admin/rooms/<id>/end):
 #   npx wrangler secret put ADMIN_TOKEN
 

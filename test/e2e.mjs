@@ -280,6 +280,18 @@ async function publicPreview(id, port) {
   }
 }
 
+// Whether a room's events hold a preview of this port, as a member who joins
+// to look sees them (then leaves): null when the look itself failed.
+async function previewsShared(id, port) {
+  const base = `${SERVER}/api/rooms/${id}`
+  const headers = { 'content-type': 'application/json', 'x-shared-session-version': JSON.parse(readFileSync(join(ROOT, 'plugin/.claude-plugin/plugin.json'), 'utf8')).version }
+  const joined = await fetch(`${base}/join`, { method: 'POST', headers, body: JSON.stringify({ name: 'preview probe' }) }).catch(() => null)
+  const seat = joined?.ok ? await joined.json() : null
+  if (!seat?.token) return null
+  await fetch(`${base}/leave`, { method: 'POST', headers: { ...headers, authorization: `Bearer ${seat.token}` } }).catch(() => {})
+  return (seat.history ?? []).some(e => e.type === 'artifact' && e.body.kind === 'preview' && e.body.port === port)
+}
+
 // A browser opening a preview link. A first entry clears what other rooms
 // left on the shared host name, with a page that sets no cookie and leads on
 // to a second link, which the browser opens with its cookies gone.
@@ -309,8 +321,10 @@ async function sharing() {
   check('a plugin older than the minimum is turned away with the update command', tooOld.status === 426 && String((await tooOld.json()).error).includes(UPDATE_LINE))
   check('an out-of-date plugin is told how to update', outdated.status === 426 && String(outdatedBody.error).includes('claude plugin update shared-session@claude-share'), `HTTP ${outdated.status}`)
 
-  // Kim's session gave out a dev server's address before sharing: Share
-  // everything opens it for whoever joins, at that page.
+  // Kim's session gave out a dev server's address before sharing. A page
+  // Claude only gave out is the host's to give (a teammate's prompt could
+  // have it name any port of theirs), asked in the row above the prompt; a
+  // -p run draws no row, so Share everything shares none of it.
   // Slow to answer, like a dev server compiling its first page.
   const kimDev = createServer((req, res) => setTimeout(() => res.writeHead(200, { 'content-type': 'text/html' }).end('<h1>kim ok</h1>'), 6000))
   await new Promise(r => kimDev.listen(0, '127.0.0.1', r))
@@ -321,13 +335,9 @@ async function sharing() {
   await until('Kim answered', () => kim.lines.some(l => l.type === 'result'), 120_000)
   kim.say('/share-session all')
   const kimLink = await until("Kim's link", () => /\/s\/([A-Za-z0-9_-]{16,})/.exec(kim.text)?.[1], 60_000)
-  const kimRoom = await until("Kim's dev server shared", async () => {
-    const seat = await fetch(`${SERVER}/api/rooms/${kimLink}/join`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-shared-session-version': '9.9.9' }, body: JSON.stringify({ name: 'probe' }) }).then(r => r.json())
-    await fetch(`${SERVER}/api/rooms/${kimLink}/leave`, { method: 'POST', headers: { authorization: `Bearer ${seat.token}` } }).catch(() => {})
-    return seat.history?.some(e => e.type === 'artifact' && e.body.kind === 'preview' && e.body.port === kimDev.address().port) && seat
-  }, 30_000).catch(() => null)
-  const kimShown = kimRoom?.history.find(e => e.type === 'artifact' && e.body.kind === 'preview')
-  check('a dev server Claude gave out before Share opens for whoever joins, at that page', kimShown?.body.path === '/dev/sheet', kimShown ? `${kimShown.body.port}${kimShown.body.path}` : 'nothing shared')
+  await new Promise(r => setTimeout(r, 10_000)) // past the page's slow first answer, and the look at it
+  const kimShown = await previewsShared(kimLink, kimDev.address().port)
+  check('a dev server Claude gave out before Share is shared only once the host says so: a -p run has nowhere to ask, so nothing is', kimShown === false, String(kimShown))
   kim.say('/stop-sharing')
 
   // Scott's session: a normal session with some history, then Share.
@@ -577,21 +587,18 @@ async function sharing() {
   // and quickly: one step for its calls, one for its last words.
   check('and sees each earlier prompt as its own turn, with its reply', ['marmalade', 'pineapple', 'kiwi'].every(w => assistantText(lee).some(t => t.toLowerCase().includes(w))) && lee.lines.filter(l => l.type === 'result').length >= 6, `${lee.lines.filter(l => l.type === 'result').length} turns in ${((leeCaughtUp - leeJoined) / 1000).toFixed(1)} s`)
 
-  // A mentioned web page is shared through its public link, not TCP forwarding.
+  // A web page the host's Claude mentions is the host's to give, asked in the
+  // row above the prompt (band tests press it); a -p run draws none, so it
+  // isn't shared, through its link or otherwise.
   const dev = createServer((req, res) => res.writeHead(req.url === '/dash' ? 200 : 404, { 'content-type': 'text/html' }).end(req.url === '/dash' ? '<h1>mentioned ok</h1>' : 'wrong page'))
   await new Promise(r => dev.listen(0, '127.0.0.1', r))
   children.push({ kill: () => dev.close() })
+  const turns = host.lines.filter(l => l.type === 'result').length
   host.say(`Reply with exactly this line and nothing else: The dev server is running at http://localhost:${dev.address().port}/dash`)
-  const mentioned = await publicPreview(id, dev.address().port).catch(() => null)
-  let mentionedOk = false
-  if (mentioned) {
-    const opened = await enterPreview(mentioned.url)
-    const jar = (opened.headers.get('set-cookie') ?? '').split(';')[0]
-    const page = await fetch(`${new URL(mentioned.url).origin}/dash`, { headers: { cookie: jar } })
-    mentionedOk = opened.status === 302 && opened.headers.get('location') === '/dash' && page.ok && (await page.text()).includes('mentioned ok')
-    await mentioned.leave()
-  }
-  check("a dev server the host's Claude mentions opens at its path through an explicit public ticket", mentionedOk, mentioned ? `${new URL(mentioned.url).origin}/dash` : 'no public ticket')
+  await until('host answered the mention', () => host.lines.filter(l => l.type === 'result').length > turns, 120_000)
+  await new Promise(r => setTimeout(r, 5_000)) // past the look at the page
+  const mentioned = await previewsShared(id, dev.address().port)
+  check("a dev server the host's Claude mentions is shared only once the host says so: a -p run has nowhere to ask, so it isn't", mentioned === false, String(mentioned))
 
   // How everyone heard the room: one open stream each, or polls when asked to.
   const polling = process.env.SHARED_SESSION_TRANSPORT === 'poll'

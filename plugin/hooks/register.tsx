@@ -18,7 +18,7 @@
 import { atom, memberOf, read, update } from 'claude-code'
 import type { Elements, EngineInterface, HookStream, ProcessSpawnChunk, ProcessSpawnResult, Register, RenderChildren, RenderSurface, Timer, TurnStepChunk } from 'claude-code'
 
-import type { HostShare, ShareAccount, ShareActivity, ShareChange, ShareChat, ShareCloud, ShareCloudAsk, ShareDoing, ShareFileMeta, ShareGuestPrompt, ShareHostAsk, ShareHostMemory, ShareInvite, ShareLocalPreview, ShareMailboxHelper, ShareMode, ShareNeedAsked, SharePeerRelay, SharePeerRoute, SharePeerSend, SharePerson, SharePolicy, SharePrefs, SharePreviewWindow, ShareRoom, ShareShown, ShareTeam, ShareTeams, ShareTeamSession, ShareTurn, ShareWorking } from '../types'
+import type { HostShare, ShareAccount, ShareActivity, ShareChange, ShareChat, ShareCloud, ShareCloudAsk, ShareDoing, ShareFileMeta, ShareGuestPrompt, ShareHostAsk, ShareHostMemory, ShareInvite, ShareLocalPreview, ShareMailboxHelper, ShareMode, ShareNeedAsked, ShareOwner, SharePeerRelay, SharePeerRoute, SharePeerSend, SharePerson, SharePolicy, SharePrefs, SharePreviewWindow, ShareRoom, ShareShown, ShareTeam, ShareTeams, ShareTeamSession, ShareTrust, ShareTurn, ShareWorking } from '../types'
 import { fit, isModern } from './fit'
 import { BAD, GOOD, ago, avatarSvg, cloverSvg, colorFor, colorsFor, labelsFor, liveSvg, stackSvg, toolGlyph } from './look'
 import { REACTS, diffOf, mentionsOf, patchOf, replyKey, took, writeOf } from './room'
@@ -27,7 +27,7 @@ import type { Face } from './look'
 import { attachmentsOf, delivered, neutralize, PEER_ID, rowsFromMessage, rowsToMarkdown, splitSpeaker, summarizeTool } from './rows'
 import type { Media, RoomImage, Row } from './rows'
 import { SERVER_URL } from './server'
-import { readsInside } from './paths'
+import { readTargets, realInside } from './paths'
 import { browserFamily, browserName, chromeFlags, chromePrefs, chromePrefsScript, detectScript, FIREFOX_MIN, FIREFOX_PATH_MAX, firefoxFlags, firefoxProfileScript, gcScript, hostProfileName, killScript, LAUNCH_LOCK_BUSY, launchArgv, launchLockScript, launchUnlockScript, lockScript, parseDetect, profileName, profileScript, proxyLine, trashScript, windowOf } from './window'
 import type { BrowserFamily, BrowserFound, WindowPlatform } from './window'
 import { upstreamFromEnv, upstreamFromScutil } from './upstream'
@@ -91,8 +91,8 @@ const activityA = atom({ plugin: 'shared-session', key: 'activity' } as const, [
 const chatA = atom({ plugin: 'shared-session', key: 'chat' } as const, [] as ShareChat[])
 const unreadA = atom({ plugin: 'shared-session', key: 'unread' } as const, 0)
 const policyA = atom({ plugin: 'shared-session', key: 'policy' } as const, DEFAULT_POLICY)
-const trustedA = atom({ plugin: 'shared-session', key: 'trusted' } as const, [] as string[])
-const ownersA = atom({ plugin: 'shared-session', key: 'owners' } as const, {} as Record<string, string>)
+const trustedA = atom({ plugin: 'shared-session', key: 'trusted' } as const, [] as ShareTrust[])
+const ownersA = atom({ plugin: 'shared-session', key: 'owners' } as const, {} as Record<string, ShareOwner>)
 const liveUpdatesA = atom({ plugin: 'shared-session', key: 'liveUpdates' } as const, null as 'running' | 'next' | 'pinned' | null)
 const replayRunF = atom({ plugin: 'shared-session', key: 'replayRun' } as const, null as { tools?: string[]; hidden?: true } | null)
 const toolRowsA = atom({ plugin: 'shared-session', key: 'toolRows' } as const, 'grouped' as 'grouped' | 'each')
@@ -110,8 +110,8 @@ const unansweredA = atom({ plugin: 'shared-session', key: 'unanswered' } as cons
 // The hooks module that started last in this session, by its own id (`MODULE`).
 const moduleA = atom({ plugin: 'shared-session', key: 'module' } as const, null as string | null)
 // Host: whose each agent is, by its loop's id: the teammate whose turn (or
-// agent) started it, '' for the host's own (`callOwner`).
-const agentsA = atom({ plugin: 'shared-session', key: 'agents' } as const, {} as Record<string, string>)
+// agent) started it, `who: ''` for the host's own (`callOwner`).
+const agentsA = atom({ plugin: 'shared-session', key: 'agents' } as const, {} as Record<string, ShareOwner>)
 // Host: teammates' prompts waiting for Claude, oldest first, the first
 // marked once it has gone (`nextGuestPrompt`); kept through a reload.
 const guestPromptsA = atom({ plugin: 'shared-session', key: 'guestPrompts' } as const, [] as ShareGuestPrompt[])
@@ -613,7 +613,25 @@ async function serverOf($: $): Promise<string> {
   }
   const url = (saved || fromEnv || SERVER_URL).trim().replace(/\/+$/, '')
   if (!/^https?:\/\/[^\s/]+/.test(url)) throw new Error(NO_SERVER)
+  if (!secureServer(url)) throw new PlainServer(url)
   return url
+}
+
+// Room tokens, and a sign-in's, go with every request to a share server:
+// only over HTTPS, or plain http to a server on this computer (one run for
+// testing).
+function secureServer(url: string): boolean {
+  try {
+    const u = new URL(url)
+    return u.protocol === 'https:' || (u.protocol === 'http:' && /^(?:(?:[a-z0-9-]+\.)*localhost|127(?:\.\d{1,3}){3}|\[::1\])$/i.test(u.hostname))
+  } catch {
+    return false
+  }
+}
+class PlainServer extends Error {
+  constructor(url: string) {
+    super(`The share server ${url} is plain http, which would send everyone's tokens unencrypted. Use its https:// address (plain http works only for a server on this computer).`)
+  }
 }
 let myName: string | undefined
 // An entry held (`hold`) waits for its pictures to go up, and what follows it waits too.
@@ -957,8 +975,10 @@ let heldPrompt: { text: string; pid: string; names: string[]; timer: Timer } | n
 // the row left the first with nothing on screen to answer it.
 type Approval = {
   id: string
-  /** Whose call it is (`callOwner`). */
+  /** Whose call it is (`callOwner`): their name, and the seat and account they're told by. */
   who: string
+  seat: string
+  account?: string
   what: string
   /** What the one line leaves out (`callExtent`), said beside it. */
   extent: string
@@ -1655,9 +1675,11 @@ async function absorb($: $, room: ShareRoom, mode: ShareMode, event: ServerEvent
       // The room let a quiet seat go: they're likely back in a moment, so only
       // the Room's timeline notes it.
       const lost = body.reason === 'timeout'
-      await note({ ts: event.ts, who, kind: 'leave', text: lost ? 'timeout' : undefined })
+      // Removed: no longer in the team a members-only session is shared with.
+      const removed = body.reason === 'removed'
+      await note({ ts: event.ts, who, kind: 'leave', text: lost ? 'timeout' : removed ? 'removed' : undefined })
       if (lost) lostAt.set(who, event.ts)
-      else if (live && !mine) $.ui.log(`${who} left`)
+      else if (live && !mine) $.ui.log(removed ? `${who} left: no longer in the team` : `${who} left`)
       break
     }
     case 'prompt':
@@ -2218,7 +2240,7 @@ async function receive($: $, mode: ShareMode, room: ShareRoom, page: EventsPage)
     switch (event.type) {
       case 'prompt':
         if (mode === 'host' && typeof body.text === 'string') {
-          await acceptPrompt($, event.from.name, body.text, typeof body.pid === 'string' ? body.pid : '', Array.isArray(body.attachments) ? (body.attachments as ShareFileMeta[]) : [])
+          await acceptPrompt($, event.from.name, event.from.seat ?? '', body.text, typeof body.pid === 'string' ? body.pid : '', Array.isArray(body.attachments) ? (body.attachments as ShareFileMeta[]) : [])
         }
         break
       case 'stop':
@@ -3081,7 +3103,7 @@ type Hosting = {
   at: number
   room: ShareRoom
   policy: SharePolicy
-  trusted: string[]
+  trusted: ShareTrust[]
   /** What it shares, by port (`HostShare`). */
   shares: Record<string, HostShare>
   shown: ShareShown[]
@@ -3581,7 +3603,7 @@ async function resumeHosting($: $) {
     const shares = sharesSaved(saved)
     await update($, roomA, v => (reclaiming === back ? room : v))
     await update($, policyA, v => (reclaiming === back ? ({ ...DEFAULT_POLICY, ...saved.policy }) : v))
-    await update($, trustedA, v => (reclaiming === back ? (saved.trusted ?? []) : v))
+    await update($, trustedA, v => (reclaiming === back ? (saved.trusted ?? []).filter(t => typeof t === 'object' && Boolean(t?.seat)) : v))
     await update($, sharesA, v => (reclaiming === back ? shares : v))
     await update($, shownA, v => (reclaiming === back ? (saved.shown ?? []) : v))
     await update($, activityA, v => (reclaiming === back ? (saved.activity ?? []) : v))
@@ -3608,7 +3630,7 @@ async function resumeHosting($: $) {
         if (event.type === 'prompt' && event.from.role === 'guest') {
           // A cloud host taking the room up: a prompt sent while it moved runs now.
           if ((await isRunner($)) && typeof event.body.text === 'string') {
-            await acceptPrompt($, event.from.name, event.body.text, typeof event.body.pid === 'string' ? event.body.pid : '', Array.isArray(event.body.attachments) ? (event.body.attachments as ShareFileMeta[]) : [])
+            await acceptPrompt($, event.from.name, event.from.seat ?? '', event.body.text, typeof event.body.pid === 'string' ? event.body.pid : '', Array.isArray(event.body.attachments) ? (event.body.attachments as ShareFileMeta[]) : [])
             continue
           }
           send($, 'declined', { pid: typeof event.body.pid === 'string' ? event.body.pid : '', who: event.from.name, reason: `${room.host}'s Claude Code was closed when you sent this, so it didn't run. Send it again.` })
@@ -3633,7 +3655,7 @@ async function setPolicy($: $, change: Partial<SharePolicy>) {
   send($, 'policy', policy)
 }
 
-async function acceptPrompt($: $, who: string, text: string, pid: string, attachments: ShareFileMeta[] = []) {
+async function acceptPrompt($: $, who: string, seat: string, text: string, pid: string, attachments: ShareFileMeta[] = []) {
   if ((await read($, policyA)).prompts === 'watch') {
     send($, 'declined', { pid, who, reason: 'This session is watch-only right now. Chat in the Room panel.' })
     return
@@ -3648,7 +3670,7 @@ async function acceptPrompt($: $, who: string, text: string, pid: string, attach
   // Claude Code frames itself carries one, a mailbox's among them.
   const words = neutralize(text)
   const framed = `${who}: ${words}${marks ? `${words ? '\n\n' : ''}${marks}` : ''}`
-  await update($, guestPromptsA, list => [...list, { who, framed, text: framed.slice(who.length + 2), pid }])
+  await update($, guestPromptsA, list => [...list, { who, seat, framed, text: framed.slice(who.length + 2), pid }])
   // Runs once the session is idle, after any turn already running.
   nextGuestPromptSoon($)
 }
@@ -4074,8 +4096,7 @@ async function saveAttachments($: $, who: string, files: ShareFileMeta[]): Promi
   const room = await read($, roomA)
   if (!room || !files.length) return []
   const cwd = await $.session.cwd()
-  const dir = `${cwd}/.shared-session/${who.replace(/[^\w.-]+/g, '-').slice(0, 40) || 'guest'}`
-  await sh($, `mkdir -p ${sq(dir)}\n`)
+  const dir = `${cwd}/.shared-session/${personDir(who, 'guest')}`
   const out: string[] = []
   for (const meta of files.slice(0, 10)) {
     const name = `${meta.id.slice(0, 6)}-${(meta.name || 'attachment').replace(/[^\w.\- ()]+/g, '-').replace(/^\.+/, '') || 'attachment'}`
@@ -4184,7 +4205,7 @@ function answerBandAsk(id: string, label: string) {
 // those in the row and those yet to be asked, but one up in the dialog,
 // whose answer is the dialog's.
 function answerFor(ask: Approval, label: string) {
-  const all = label === ask.always ? approvals.filter(a => a.who === ask.who && (a === ask || a.stage !== 'dialog')) : [ask]
+  const all = label === ask.always ? approvals.filter(a => samePerson(a, ask) && (a === ask || a.stage !== 'dialog')) : [ask]
   for (const a of all) a.answer(label)
 }
 
@@ -4195,10 +4216,13 @@ function answerFor(ask: Approval, label: string) {
 // approver: the runner's questions are put to it. Bring home takes the host
 // back, with the cloud's changes.
 
-// A cloud host's answer, from the approver: settles the call it was asked for.
+// A cloud host's answer, from the approver: settles the call it was asked
+// for, or the question about sharing a page (`askApprover`).
 function settleCloudAnswer(body: Record<string, unknown>) {
-  const ask = approvals.find(a => a.id === body.id && a.stage === 'row')
   const label = typeof body.answer === 'string' ? body.answer : ''
+  const show = typeof body.id === 'string' ? cloudShows.get(body.id) : undefined
+  if (show) return show(label === 'Share' ? 'yes' : label === 'Not now' ? 'no' : 'later')
+  const ask = approvals.find(a => a.id === body.id && a.stage === 'row')
   if (ask && ['Allow once', ask.always, 'Decline'].includes(label)) answerFor(ask, label)
 }
 
@@ -4207,35 +4231,42 @@ function settleCloudAnswer(body: Record<string, unknown>) {
 // computer slept), never once it's past its ten minutes.
 async function takeCloudAsk($: $, event: ServerEvent, live: boolean) {
   const b = event.body
+  // Taken back by the cloud host (a question about a page, unanswered).
+  if (b.done === true && typeof b.id === 'string') return void (await update($, cloudAsksA, list => list.filter(a => a.id !== b.id)))
   if (typeof b.id !== 'string' || typeof b.what !== 'string') return
   if ((await $.clock.now()) - event.ts > 10 * 60_000) return
+  const show = b.kind === 'show' && validPort(b.port)
   const options = Array.isArray(b.options) ? b.options.filter((o): o is string => typeof o === 'string').slice(0, 3) : []
-  const always = typeof b.always === 'string' ? b.always : ''
+  const always = !show && typeof b.always === 'string' ? b.always : ''
   const ask: ShareCloudAsk = {
     id: b.id,
     who: typeof b.who === 'string' ? b.who : 'Someone',
-    what: b.what.slice(0, 200),
+    ...(typeof b.seat === 'string' && b.seat ? { seat: b.seat.slice(0, 64) } : {}),
+    ...(show ? { kind: 'show' as const, port: Number(b.port) } : {}),
+    what: show ? `localhost:${Number(b.port)}` : b.what.slice(0, 200),
     ...(typeof b.extent === 'string' && b.extent ? { extent: b.extent.slice(0, 80) } : {}),
     ...(typeof b.preview === 'string' && b.preview ? { preview: b.preview.slice(0, 4000) } : {}),
     always,
-    options: options.length ? options : ['Allow once', 'Decline'],
+    options: show ? ['Share', 'Not now'] : options.length ? options : ['Allow once', 'Decline'],
     ts: event.ts,
   }
   await update($, cloudAsksA, list => (list.some(a => a.id === ask.id) ? list : [...list, ask].slice(-20)))
   if (!live) return
-  $.ui.toast(`${ask.who} wants Claude to run ${ask.what.slice(0, 80)}: answer above the prompt`)
-  void cue($, 'mention', `${ask.who} wants Claude to run ${ask.what.slice(0, 60)}`)
+  const said = show ? `The cloud host's Claude gave out ${ask.what}: share it with the room? Answer above the prompt` : `${ask.who} wants Claude to run ${ask.what.slice(0, 80)}: answer above the prompt`
+  $.ui.toast(said)
+  void cue($, 'mention', show ? `The cloud host's Claude gave out ${ask.what}` : `${ask.who} wants Claude to run ${ask.what.slice(0, 60)}`)
   nudgeSidebar($)
 }
 
 // Approver: an answer for the cloud host. Always allow answers that person's
-// other questions too: the cloud host trusts them from there.
+// other questions too: the cloud host trusts them from there, by their seat
+// (never their name, which anyone can join as), and says which it settled.
 async function answerCloudAsk($: $, id: string, label: string) {
   const list = await read($, cloudAsksA)
   const ask = list.find(a => a.id === id)
   if (!ask) return
   send($, 'answer', { id, answer: label })
-  const gone = label !== '' && label === ask.always ? list.filter(a => a.who === ask.who) : [ask]
+  const gone = label !== '' && label === ask.always && ask.seat ? list.filter(a => a.seat === ask.seat) : [ask]
   await update($, cloudAsksA, now => now.filter(a => !gone.some(g => g.id === a.id)))
   await flushOut($)
 }
@@ -4451,6 +4482,9 @@ async function applyCloudChanges($: $, room: ShareRoom, changes: ShareFileMeta) 
   else $.ui.log("Back home. The cloud host's changes couldn't be downloaded; they're in the Room's files for a while.")
 }
 
+// Two calls put to the host are one person's: one seat, or one account.
+const samePerson = (a: Approval, b: Approval) => (Boolean(a.seat) && a.seat === b.seat) || (Boolean(a.account) && a.account === b.account)
+
 function wakeApprovals() {
   for (const done of [...approvalWaiters]) done()
 }
@@ -4499,12 +4533,51 @@ function drawsRow(surfaces: readonly RenderSurface[]): boolean {
 // one begun before this version loaded). null is the host's own, which the
 // mode decides: put to the host, those would be declined where no dialog or
 // row shows (a -p host).
-async function callOwner($: $, agentId: string | undefined): Promise<string | null> {
-  const owner = agentId === undefined ? undefined : (await read($, agentsA))[agentId]
-  if (owner) return owner
-  const working = await read($, workingA)
-  return working?.byGuest ? working.by : null
+async function callOwner($: $, agentId: string | undefined): Promise<ShareOwner | null> {
+  const owner = agentId === undefined ? undefined : ownerOf((await read($, agentsA))[agentId])
+  if (owner?.who) return owner
+  return turnOwner(await read($, workingA))
 }
+
+// The running turn's teammate, when a teammate's prompt started it.
+const turnOwner = (working: ShareWorking | null): ShareOwner | null => (working?.byGuest ? { who: working.by, seat: working.seat ?? '' } : null)
+
+// An owner as the state keeps it; one written as a bare name (by a module
+// before owners had seats) has no seat it can be told by.
+const ownerOf = (value: ShareOwner | string | undefined): ShareOwner | undefined =>
+  value === undefined ? undefined : typeof value === 'string' ? { who: value, seat: '' } : value
+
+// A guest's read inside the project as it really is: each path it names,
+// links followed (a link in the project to ~/.ssh reads ~/.ssh), in the
+// project's own real folder. A path that doesn't exist yet counts by the
+// nearest folder that does; one that can't be told (no realpath here, a
+// dangling link) asks. A call naming no path reads the project itself.
+async function readsInsideReally($: $, tool: string, input: Record<string, unknown>, cwd: string): Promise<boolean> {
+  const targets = readTargets(tool, input, cwd)
+  if (!targets) return false
+  if (!targets.length) return true
+  // Paths have no newline (`readTargets`), so each is a line; one that hangs (a stalled mount) asks.
+  const { code, out } = await spawned($, ['/bin/sh', `${$.plugin.root}/relay/real.sh`, cwd, ...targets], undefined, 5_000)
+  const [root, ...paths] = out.split('\n').slice(0, targets.length + 1)
+  return code === 0 && root !== undefined && paths.length === targets.length && realInside(root, paths)
+}
+
+// Always allow is for a person, never a name, which is whatever someone joins
+// as: the seat it was given for, or that seat's account (their other
+// sessions, a seat the room gave them anew). An owner with no seat it can be
+// told by is never always allowed.
+function trusts(trusted: readonly ShareTrust[], owner: ShareOwner, people: readonly SharePerson[]): boolean {
+  if (!owner.seat) return false
+  const account = seatAccount(owner.seat, people)
+  return trusted.some(t => typeof t === 'object' && Boolean(t.seat) && (t.seat === owner.seat || (Boolean(account) && t.account === account)))
+}
+
+// The account a seat belongs to, as the room's people say.
+const seatAccount = (seat: string, people: readonly SharePerson[]): string | undefined => (seat ? people.find(p => p.seats?.includes(seat))?.account : undefined)
+
+// Whether the host always allows this person (the Room's list of people).
+const trustsPerson = (trusted: readonly ShareTrust[], p: SharePerson): boolean =>
+  trusted.some(t => typeof t === 'object' && Boolean(t.seat) && (Boolean(p.seats?.includes(t.seat)) || (Boolean(p.account) && t.account === p.account)))
 
 // A teammate's call put to the host: unanswered until its hook has the
 // answer. Recorded here first, so a write that fails still leaves it denied.
@@ -4791,6 +4864,7 @@ function peerRoutesSaved(value: unknown, kind: SharePeerRoute['kind']): Record<s
 }
 
 async function join($: $, server: string, id: string) {
+  if (!secureServer(server)) throw new PlainServer(server)
   // A room being left finishes first: its state clears before this one's.
   // A late take-back it gives up is over once this room is joined, and kept
   // if it isn't (`roomMade`, `notMade`).
@@ -4951,11 +5025,16 @@ let toolNames: Set<string> | null = null
 // must (they go one at a time: one that hung would hold every Open after
 // it). Past it the call answers `late`, with no code, and lets the child go.
 async function sh($: $, script: string, within?: number): Promise<{ out: string; code: number | null; late?: true }> {
+  return spawned($, ['/bin/sh', '-s'], script, within)
+}
+
+// A child's output and how it ended, as `sh`'s.
+async function spawned($: $, argv: string[], input?: string, within?: number): Promise<{ out: string; code: number | null; late?: true }> {
   let out = ''
   let child: HookStream<ProcessSpawnChunk, ProcessSpawnResult> | undefined
   const run = (async () => {
     try {
-      child = $.process.spawn({ argv: ['/bin/sh', '-s'], input: script })
+      child = $.process.spawn({ argv, ...(input === undefined ? {} : { input }) })
       for await (const chunk of child) if (chunk.stream === 'stdout') out += chunk.text
       return { out, code: (await child.result.catch(() => ({ code: null }))).code }
     } catch {
@@ -5054,26 +5133,44 @@ async function uploadText($: $, room: ShareRoom, text: string, name: string): Pr
   return out ? uploadFile($, room, out, name) : null
 }
 
+// A person's name as their folder in .shared-session/: one part of a path,
+// never `.`, `..` or hidden. A room's names are whatever its people chose.
+function personDir(name: string, fallback: string): string {
+  return name.replace(/[^\w.-]+/g, '-').replace(/^\.+/, '').slice(0, 40) || fallback
+}
+
 // Guest: a room file into .shared-session/<host>/ in this session's folder
-// (inside the project, so the browser pane runs its pages live), kept out of git.
+// (inside the project, so the browser pane runs its pages live), kept out of
+// git, and only ever there (relay/save.sh): a name a room chose, or a link
+// someone left in the folder, takes it nowhere else.
 async function downloadFile($: $, room: ShareRoom, meta: ShareFileMeta, into?: string): Promise<string | null> {
   const cwd = await $.session.cwd()
-  const dir = into ? into.slice(0, into.lastIndexOf('/')) : `${cwd}/.shared-session/${room.host.replace(/[^\w.-]+/g, '-').slice(0, 40) || 'host'}`
+  const dir = into ? into.slice(0, into.lastIndexOf('/')) : `${cwd}/.shared-session/${personDir(room.host, 'host')}`
   const clean = meta.name.replace(/[^\w.\- ()]+/g, '-').replace(/^\.+/, '') || 'file'
   const owner = savedNames.get(`${dir}/${clean}`)
   const dot = clean.lastIndexOf('.')
   const name = !owner || owner === meta.id ? clean : dot > 0 ? `${clean.slice(0, dot)}-${meta.id.slice(0, 6)}${clean.slice(dot)}` : `${clean}-${meta.id.slice(0, 6)}`
   const path = into ?? `${dir}/${name}`
+  const box = `${cwd}/.shared-session/`
+  if (!dir.startsWith(box)) return null
   const config = roomConfig(room, `files/${meta.id}`)
-  const tag = fence(config)
-  const exclude = excluded
-    ? ''
-    : `f=$(git rev-parse --git-path info/exclude 2>/dev/null) && { mkdir -p "$(dirname "$f")"; grep -qxF '.shared-session/' "$f" 2>/dev/null || echo '.shared-session/' >> "$f"; }\n`
-  const { code } = await sh($, `mkdir -p ${sq(dir)} || exit 1\n${exclude}curl -K - -f -o ${sq(path)} <<'${tag}'\n${config}\n${tag}\n`)
+  const code = await saveHere($, [cwd, dir.slice(box.length), path.slice(path.lastIndexOf('/') + 1), ...(excluded ? [] : ['exclude'])], config)
   if (code !== 0) return null
   excluded = true
   savedNames.set(path, meta.id)
   return path
+}
+
+// relay/save.sh, its paths in argv and curl's settings (the room's token) on
+// stdin: 0 when the file is saved.
+async function saveHere($: $, args: string[], input: string): Promise<number | null> {
+  try {
+    const child = $.process.spawn({ argv: ['/bin/sh', `${$.plugin.root}/relay/save.sh`, ...args], input })
+    for await (const _ of child) void _
+    return (await child.result.catch(() => ({ code: null }))).code
+  } catch {
+    return null
+  }
 }
 
 // Guest: what was shown, saved here. A page with files beside it (an Artifact's
@@ -5089,11 +5186,10 @@ async function downloadShown($: $, room: ShareRoom, files: ShareFileMeta[]): Pro
     return paths
   }
   const cwd = await $.session.cwd()
-  const dir = `${cwd}/.shared-session/${room.host.replace(/[^\w.-]+/g, '-').slice(0, 40) || 'host'}/page-${files[0]!.id.slice(0, 8)}`
+  const dir = `${cwd}/.shared-session/${personDir(room.host, 'host')}/page-${files[0]!.id.slice(0, 8)}`
   for (const meta of files) {
     const at = pagePath(meta.path ?? meta.name)
     if (!at) continue
-    if (at.includes('/')) await sh($, `mkdir -p ${sq(`${dir}/${at.slice(0, at.lastIndexOf('/'))}`)}\n`)
     const path = await downloadFile($, room, meta, `${dir}/${at}`)
     if (path) paths.push(path)
   }
@@ -5370,10 +5466,10 @@ const localPages = (text: string) => [...text.matchAll(new RegExp(LOCAL_URL.sour
 // opened it in the browser pane. Never forwarded by this: its preview is
 // made without `tcp` (`ensurePreview`). One the host forwards already goes
 // out saying so, as what it was forwarded as (`sharedAs`). One another
-// session's preview holds here (`relayedHere`) isn't shared. With guests
-// here, the host may be asked whether they may open it at the same address
-// (`offerSameAddress`).
-async function sharePublic($: $, room: ShareRoom, page: LocalPage, opts: { title?: string; turnId?: string } = {}): Promise<string | null> {
+// session's preview holds here (`relayedHere`) isn't shared. Whether guests
+// may open it at the same address is its callers' to ask after
+// (`offerSameAddress`), once their own question lets go of the port.
+async function sharePublic($: $, room: ShareRoom, page: LocalPage, opts: { title?: string; turnId?: string } = {}): Promise<HostShare | null> {
   const title = opts.title || `localhost:${page.port}`
   // Another session's preview forwarded here: never shared on, and nothing said (Claude's mention, not the host's ask).
   if (await relayedHere($, page.port)) {
@@ -5383,8 +5479,7 @@ async function sharePublic($: $, room: ShareRoom, page: LocalPage, opts: { title
   const share = await ensurePreview($, room, page.port, title, page.scheme ? { scheme: page.scheme } : {})
   if (!share) return null
   send($, 'artifact', { kind: 'preview', turnId: opts.turnId, pid: share.pid, port: page.port, title, path: page.path, ...sharedAs(share, page.host) })
-  void offerSameAddress($, room, page.port, page.path, page.host, share.scheme).catch(() => {})
-  return share.pid
+  return share
 }
 
 // The pages a browser_batch call opened, in order.
@@ -5450,10 +5545,46 @@ async function shareLocal($: $, pages: LocalPage[]) {
       continue
     }
     if (look === 'not') continue
-    // Its link opens on another address; with guests here, the host may let
-    // them open it at this one.
-    if (await sharePublic($, room, page)) $.ui.toast(`Sharing localhost:${port} with the room (stop it in the Room)`)
+    // Shared through its link once the host says so; with guests here, the
+    // host is asked after whether they may open it at this address.
+    void offerShow($, room, page).catch(() => {})
   }
+}
+
+// Claude gave out or opened a localhost page nobody shared: it goes to the
+// room through its link only when the host says so. A guest's prompt can
+// have Claude name or open any port of the host's, and what answers there
+// (an admin page, a service behind a login redirect) is the host's to give.
+// Not now: never again in this room, until the host shares it on purpose;
+// unanswered, the row full, or nowhere drawn (a -p run), not shared, and a
+// mention ten minutes on asks again. A cloud host, which draws nothing,
+// asks its approver (`askApprover`).
+async function offerShow($: $, room: ShareRoom, page: LocalPage, opts: { title?: string; turnId?: string } = {}) {
+  const { port } = page
+  const flight = `${roomIdentity(room)} ${port}`
+  // Asked in the row above the prompt, or on a cloud host, of its approver.
+  const asks = (await isRunner($)) || (await canAskHost($))
+  if (hostAsking.has(flight) || (await read($, sharesA))[String(port)] || !asks || hostAsking.has(flight)) return
+  hostAsking.add(flight)
+  let answer: HostAnswer = 'later'
+  let shared: HostShare | null = null
+  try {
+    if (!(await claimAsks($, room, [port])).length) return
+    answer = await offer($, room, { kind: 'show', port, related: [] }, [port], async () => {
+      // Its own yes: the same-address question after it is a question of its own.
+      await rememberHost($, room, m => ({ ...m, askedAt: Object.fromEntries(Object.entries(m.askedAt).filter(([p]) => Number(p) !== port)) }))
+      shared = await sharePublic($, room, page, opts)
+      if (shared) $.ui.toast(`Sharing localhost:${port} with the room (stop it in the Room)`)
+      return { shared: [], refused: [] }
+    })
+  } finally {
+    hostAsking.delete(flight)
+    if (answer === 'later') mentionedPorts.delete(port)
+  }
+  // With guests here, whether they may open it at this address: asked once this question let go of the port.
+  // (Set in the yes above, which control flow doesn't follow.)
+  const share = shared as HostShare | null
+  if (share) void offerSameAddress($, room, port, page.path, page.host, share.scheme).catch(() => {})
 }
 
 // One look at a port's `/`, asked as a browser asks for a page: its status
@@ -5494,8 +5625,11 @@ async function shareOpened($: $, room: ShareRoom, page: LocalPage, opts: { title
     if ((await hostMemoryOf($, room)).stopped.includes(page.port)) return
     if (await relayedHere($, page.port)) return void $.ui.log(`Not sharing localhost:${page.port}: another shared session's preview forwarded here`, { to: 'debug' })
     if ((await lookAtPage($, { ...page, opened: true })) === 'not') return
+    // A new one goes once the host says so (never waited on here, in a tool's hook).
+    return void offerShow($, room, page, opts).catch(() => {})
   }
-  await sharePublic($, room, page, opts)
+  const share = await sharePublic($, room, page, opts)
+  if (share) void offerSameAddress($, room, page.port, page.path, page.host, share.scheme).catch(() => {})
 }
 
 // Host: a tool call that showed something, sent to the room for guests.
@@ -7458,6 +7592,27 @@ async function pumpHostAsks($: $) {
 function clearHostAsks() {
   hostAskActive?.answer('later')
   for (const item of hostAskQueue.splice(0)) item.resolve('later')
+  for (const done of [...cloudShows.values()]) done('later')
+}
+
+// A cloud host draws nothing, so its question about sharing a page goes to
+// its approver through the room, as its calls do (`ask`, `kind: 'show'`):
+// their Share or Not now comes back as an `answer` (`settleCloudAnswer`).
+// Ten minutes without one (the room's end too) is no answer, and the
+// question is taken back (`done`), off the approver's list.
+const cloudShows = new Map<string, (answer: HostAnswer) => void>()
+async function askApprover($: $, port: number): Promise<HostAnswer> {
+  const id = newId()
+  let timer: Timer | undefined
+  const answer = await new Promise<HostAnswer>(done => {
+    cloudShows.set(id, done)
+    timer = $.clock.after(10 * 60_000, () => done('later'))
+    send($, 'ask', { id, kind: 'show', port, who: '', what: `localhost:${port}`, options: ['Share', 'Not now'] })
+  })
+  timer?.cancel()
+  cloudShows.delete(id)
+  if (answer === 'later') send($, 'ask', { id, done: true })
+  return answer
 }
 
 // One question to the host about ports claimed for it (`claimAsks`) and held
@@ -7465,7 +7620,8 @@ function clearHostAsks() {
 // room; a yes forwards them (`forward`), and what that came to is said.
 // `asked`: once the question is in the row, or waiting for it.
 async function offer($: $, room: ShareRoom, ask: Omit<ShareHostAsk, 'id'>, ports: readonly number[], forward: () => Promise<{ shared: number[]; refused: string[] }>, asked?: () => void): Promise<HostAnswer> {
-  const answering = askHost($, room, ask)
+  // A cloud host's question about sharing a page is its approver's.
+  const answering = ask.kind === 'show' && (await isRunner($)) ? askApprover($, ask.port) : askHost($, room, ask)
   asked?.()
   const answer = await answering
   if (!hostHere(room)) return 'later'
@@ -7839,6 +7995,7 @@ async function hostNeed($: $, room: ShareRoom, need: Record<string, unknown>) {
 function hostAskWords(ask: ShareHostAsk): string {
   if (ask.kind === 'related') return shareTooWords(ask.port, ask.related)
   if (ask.kind === 'mention') return `Let guests open localhost:${ask.port} at the same address?`
+  if (ask.kind === 'show') return `Share ${serviceName({ port: ask.port, label: ask.label })} with the room?`
   return `${ask.who ?? 'A guest'}'s preview needs ${serviceName({ port: ask.port, label: ask.label })}`
 }
 
@@ -9064,7 +9221,7 @@ function describe(a: ShareActivity): string {
     case 'join':
       return `${a.who} joined`
     case 'leave':
-      return a.text === 'timeout' ? `${a.who} lost connection` : `${a.who} left`
+      return a.text === 'timeout' ? `${a.who} lost connection` : a.text === 'removed' ? `${a.who} left: no longer in the team` : `${a.who} left`
     case 'prompt':
       return `${a.who} asked “${(a.text ?? '').replace(/\s+/g, ' ').slice(0, 70)}${(a.text ?? '').length > 70 ? '…' : ''}”`
     case 'allowed':
@@ -9135,6 +9292,7 @@ async function joinedNote($: $, joined: Awaited<ReturnType<typeof join>>): Promi
 
 // Why a link didn't join, in words a person can act on.
 function joinFailure(error: unknown, server: string): string {
+  if (error instanceof PlainServer) return error.message
   // A team's session: who may join is the team's to say.
   if (error instanceof ApiError && typeof error.data.team === 'string' && (error.status === 401 || error.status === 403)) {
     return error.data.signIn
@@ -10489,15 +10647,20 @@ export const register: Register = (on, options) => {
     mainStarts += 1
     // A teammate's prompt, known by its words: theirs, and off the queue.
     // One set aside is known too: the engine held it, and starts it first.
-    const known = (await read($, guestPromptsA)).find(p => e.text.includes(p.framed))
+    // The longest whose words are in the turn's: a prompt quoting another's
+    // queued words ("Alex: …") is its own sender's, never the one it quotes.
+    const known = (await read($, guestPromptsA)).filter(p => e.text.includes(p.framed)).sort((a, b) => b.framed.length - a.framed.length)[0]
     if (known) await update($, guestPromptsA, list => list.filter(p => p.pid !== known.pid))
     const said = typedText(e.text)
     // None of the queue's, but framed as a teammate's (one set aside that
     // the queue's newest 8 no longer hold, or one the module before this one
     // submitted): still theirs, so its calls are put to the host. Asking more
     // is the safe side: the host typing "Alex: …" is asked about their own calls.
-    const named = known ? undefined : (await read($, peopleA)).find(p => p.role !== 'host' && p.name && said.startsWith(`${p.name}: `))?.name
-    const guest = known ?? (named ? { who: named, text: said.slice(named.length + 2), pid: '' } : null)
+    const people = await read($, peopleA)
+    const named = known ? undefined : people.find(p => p.role !== 'host' && p.name && said.startsWith(`${p.name}: `))?.name
+    // Its seat, when one person has that name; else none (never always allowed).
+    const namesake = named ? people.filter(p => p.role !== 'host' && p.name === named) : []
+    const guest = known ?? (named ? { who: named, seat: namesake.length === 1 ? (namesake[0]!.seats?.[0] ?? namesake[0]!.id) : '', text: said.slice(named.length + 2), pid: '' } : null)
     // A prompt another session delivered is shown as its text, not its markup;
     // one from a teammate's session's mailbox as their agent's (the host's
     // turn all the same: its calls are the mode's, as any peer's are), with
@@ -10507,7 +10670,7 @@ export const register: Register = (on, options) => {
     const relayPid = agent && sent ? relayPidOf(agent.box, sent.text) : undefined
     const by = guest?.who ?? (agent ? `${agent.who}'s agent` : room?.host ?? 'host')
     const startedAt = await $.clock.now()
-    await update($, workingA, () => ({ turnId: e.turnId, by, byGuest: Boolean(guest), startedAt, tail: '', waitingFor: null }))
+    await update($, workingA, () => ({ turnId: e.turnId, by, byGuest: Boolean(guest), ...(guest ? { seat: guest.seat } : {}), startedAt, tail: '', waitingFor: null }))
     const relayed = guest ? delivered(guest.text) : null
     const guestPrompt = guest ? (relayed ? `(from ${relayed.from}) ${relayed.text}` : guest.text) : undefined
     const agentPrompt = agent && sent ? `(from ${agent.name}) ${sent.text}` : undefined
@@ -10880,10 +11043,10 @@ export const register: Register = (on, options) => {
   on('tool.call', async ($, e, next) => {
     if (e.agentId === undefined && (await read($, modeA)) === 'host') {
       const working = await read($, workingA)
-      if (working?.byGuest) {
-        const who = working.by
+      const owner = turnOwner(working)
+      if (owner) {
         await update($, ownersA, owners => {
-          const entries = Object.entries({ ...owners, [e.tool_use_id]: who })
+          const entries = Object.entries({ ...owners, [e.tool_use_id]: owner })
           return Object.fromEntries(entries.slice(-300))
         })
       }
@@ -10946,9 +11109,9 @@ export const register: Register = (on, options) => {
     const id = started.agentId
     if (!id || (await read($, modeA)) === 'guest') return started
     const working = await read($, workingA)
-    const who = e.parentAgentId !== undefined ? (await read($, agentsA))[e.parentAgentId] : ((await read($, ownersA))[e.tool_use_id] ?? (working?.byGuest ? working.by : ''))
+    const who = e.parentAgentId !== undefined ? ownerOf((await read($, agentsA))[e.parentAgentId]) : (ownerOf((await read($, ownersA))[e.tool_use_id]) ?? turnOwner(working) ?? { who: '', seat: '' })
     if (who === undefined) return started
-    await update($, agentsA, agents => Object.fromEntries([...Object.entries(agents).filter(([agent]) => agent !== id), [id, who] as [string, string]].slice(-200)))
+    await update($, agentsA, agents => Object.fromEntries([...Object.entries(agents).filter(([agent]) => agent !== id), [id, who] as [string, ShareOwner]].slice(-200)))
     return started
   })
 
@@ -10977,16 +11140,17 @@ export const register: Register = (on, options) => {
     if (!e.tool_use_id || verdict.decision === 'deny') return verdict
     if ((await read($, modeA)) !== 'host') return verdict
     // Whose call it is, by its loop (`callOwner`); the host's own is the mode's.
-    const who = await callOwner($, e.agentId)
-    if (who === null) return verdict
+    const owner = await callOwner($, e.agentId)
+    if (owner === null) return verdict
+    const who = owner.who
     const policy = await read($, policyA)
     // A cloud host holds its approver's Claude sign-in: a teammate's call is never let through unasked there.
     if (policy.approvals === 'none' && !(await isRunner($))) return verdict
-    if (policy.approvals === 'edits' && READ_ONLY.has(e.tool) && readsInside(e.tool, (e.input ?? {}) as Record<string, unknown>, await $.session.cwd())) return verdict
+    if (policy.approvals === 'edits' && READ_ONLY.has(e.tool) && (await readsInsideReally($, e.tool, (e.input ?? {}) as Record<string, unknown>, await $.session.cwd()))) return verdict
     // "Always allow" is the host's answer for this person's later calls too, so
     // it settles them the way "Allow once" settles one, not back to the host's
     // own permission prompt.
-    if ((await read($, trustedA)).includes(who)) {
+    if (trusts(await read($, trustedA), owner, await read($, peopleA))) {
       const room = await read($, roomA)
       return { decision: 'allow', reason: `${room?.host ?? 'The host'} always allows ${who}` }
     }
@@ -11002,9 +11166,12 @@ export const register: Register = (on, options) => {
     let over = false
     let settle!: (label: string) => void
     const answered = new Promise<string>(resolve => { settle = resolve })
+    const account = seatAccount(owner.seat, await read($, peopleA))
     const ask: Approval = {
       id: newId(),
       who,
+      seat: owner.seat,
+      ...(account ? { account } : {}),
       what,
       extent,
       always,
@@ -11044,12 +11211,12 @@ export const register: Register = (on, options) => {
       // The dialog, one call at a time, the oldest first.
       await approvalWait($, ask, answered, () => over || (!approvals.some(a => a.stage === 'dialog') && approvals.find(a => a.stage === 'waiting') === ask))
       // Trusted meanwhile (Always allow, in a dialog, for another of theirs): it goes unasked.
-      if (!over && (await read($, trustedA)).includes(who)) ask.answer(always)
+      if (!over && trusts(await read($, trustedA), owner, await read($, peopleA))) ask.answer(always)
       // A cloud host: asked of its approver through the room, wherever they are.
       if (!over && (await isRunner($))) {
         ask.stage = 'row'
         timer = $.clock.after(10 * 60_000, giveUp)
-        send($, 'ask', { id: ask.id, who, what, ...(extent ? { extent } : {}), preview: ask.whole.slice(0, 4000), always, options: ['Allow once', always, 'Decline'] })
+        send($, 'ask', { id: ask.id, who, ...(owner.seat ? { seat: owner.seat } : {}), what, ...(extent ? { extent } : {}), preview: ask.whole.slice(0, 4000), always, options: ['Allow once', always, 'Decline'] })
         await approvalWait($, ask, answered, () => over)
       } else if (!over) {
         ask.stage = 'dialog'
@@ -11077,7 +11244,7 @@ export const register: Register = (on, options) => {
           // allow on another of theirs, pressed while this was on its way), it's
           // allowed, never asked again.
           if (await replaced($)) ask.answer(REPLACED)
-          else if ((await read($, trustedA)).includes(who)) ask.answer(always)
+          else if (trusts(await read($, trustedA), owner, await read($, peopleA))) ask.answer(always)
           else if (next.signal.aborted || !drawsRow(await $.session.surfaces()) || !(await askedRoomOpen($, ask.room))) ask.answer('Decline')
           else {
             ask.stage = 'row'
@@ -11114,7 +11281,7 @@ export const register: Register = (on, options) => {
     if (!(await askedRoomOpen($, ask.room))) answer = 'Decline'
     const allowed = answer === 'Allow once' || (always !== '' && answer === always)
     if (allowed && answer === always) {
-      await update($, trustedA, list => [...new Set([...list, who])])
+      if (owner.seat) await update($, trustedA, list => [...list.filter(t => typeof t === 'object' && t.seat !== owner.seat), { who, seat: owner.seat, ...(account ? { account } : {}) }])
       // Given in the dialog too: their calls still waiting go with it.
       answerFor(ask, always)
     }
@@ -11346,7 +11513,7 @@ export const register: Register = (on, options) => {
   // Host: a tool call Claude made for a teammate says for whom.
   on('ui.render', { component: 'ToolUse' }, async ($, e, next) => {
     if ((await read($, modeA)) !== 'host') return next(e)
-    const who = (await read($, ownersA))[e.props.tool_use_id]
+    const who = ownerOf((await read($, ownersA))[e.props.tool_use_id])?.who
     if (!who) return next(e)
     const drawn = await next(e)
     const { Box, Text } = $.ui.resolve(e)
@@ -11860,7 +12027,21 @@ export const register: Register = (on, options) => {
               {` · ${cloud.state === 'starting' ? 'starting' : cloud.state === 'stopped' ? 'stopped' : `since ${hhmm(cloud.since)}`} · you approve teammates’ calls`}
             </Text>
           </Text>
-          {cloudAsks.map(ask => (
+          {cloudAsks.map(ask =>
+            ask.kind === 'show' ? (
+              <Box key={`cloud-ask-${ask.id}`} flexDirection="column" gap={1}>
+                <Text wrap="truncate-end">
+                  <Text>{"Share the cloud host's "}</Text>
+                  <Text bold>{ask.what}</Text>
+                  <Text>{' with the room?'}</Text>
+                </Text>
+                <Text dimColor>Its Claude gave out this page. Shared, everyone in the room can open it through its link.</Text>
+                <Box flexDirection="row" gap={1}>
+                  <Button key={`cloud-ask-share-${ask.id}`} label="Share" variant="primary" onPress={() => void answerCloudAsk($, ask.id, 'Share')} />
+                  <Button key={`cloud-ask-not-now-${ask.id}`} label="Not now" plain dimColor onPress={() => void answerCloudAsk($, ask.id, 'Not now')} />
+                </Box>
+              </Box>
+            ) : (
             <Box key={`cloud-ask-${ask.id}`} flexDirection="column" gap={1}>
               <Text wrap="truncate-end">
                 <Text bold color={colorOf(ask.who)}>
@@ -11876,7 +12057,8 @@ export const register: Register = (on, options) => {
                 <Button key={`cloud-ask-no-${ask.id}`} label="Decline" plain dimColor onPress={() => void answerCloudAsk($, ask.id, 'Decline')} />
               </Box>
             </Box>
-          ))}
+            ),
+          )}
           <Box flexDirection="row" gap={1} alignItems="center">
             <Button key="cloud-home" label={cloudMove?.stage === 'home' ? 'Bringing it home…' : 'Bring home'} variant={cloudAsks.length ? 'secondary' : 'primary'} onPress={() => void bringHome($)} />
             <Box flexShrink={1} minWidth={0}>
@@ -12065,7 +12247,7 @@ export const register: Register = (on, options) => {
         <Text color="warning">{`on ${p.version}, needs an update`}</Text>
       ) : (
         <Text dimColor wrap="truncate-end">
-          {[joined && !p.note?.includes('host') ? `joined ${ago(joined, now)}` : '', asked ? `${asked} prompt${asked === 1 ? '' : 's'}` : '', trusted.includes(p.name) ? 'always allowed' : '']
+          {[joined && !p.note?.includes('host') ? `joined ${ago(joined, now)}` : '', asked ? `${asked} prompt${asked === 1 ? '' : 's'}` : '', v.everyone.some(person => person.name === p.name && trustsPerson(trusted, person)) ? 'always allowed' : '']
             .filter(Boolean)
             .join(' · ')}
         </Text>
@@ -12473,7 +12655,7 @@ export const register: Register = (on, options) => {
               : null}
             {trusted.length ? (
               <Box flexDirection="row" gap={1} alignItems="center" justifyContent="space-between">
-                <Text dimColor wrap="truncate-end">{`Always allowed: ${listNames(trusted)}`}</Text>
+                <Text dimColor wrap="truncate-end">{`Always allowed: ${listNames([...new Set(trusted.map(t => t.who))])}`}</Text>
                 <Button key="untrust" label="Ask again" plain onPress={() => void update($, trustedA, () => [])} />
               </Box>
             ) : null}
@@ -12772,6 +12954,23 @@ export const register: Register = (on, options) => {
     // teammate's call takes the host's.
     const cloudAsks = isHost ? [] : await read($, cloudAsksA)
     const cloudAsk = cloudAsks[0]
+    if (cloudAsk?.kind === 'show') {
+      return row(
+        [
+          liveMark,
+          <Text key="what" wrap="truncate-end">
+            <Text>{"Share the cloud host's "}</Text>
+            <Text bold>{cloudAsk.what}</Text>
+            <Text>{' with the room?'}</Text>
+            {cloudAsks.length > 1 ? <Text dimColor>{` · ${cloudAsks.length - 1} more waiting`}</Text> : null}
+          </Text>,
+        ],
+        [
+          <Button key="cloud-share" label="Share" variant="primary" onPress={() => void answerCloudAsk($, cloudAsk.id, 'Share')} />,
+          <Button key="cloud-not-now" label="Not now" plain dimColor onPress={() => void answerCloudAsk($, cloudAsk.id, 'Not now')} />,
+        ],
+      )
+    }
     if (cloudAsk) {
       const color = colors.get(cloudAsk.who) ?? colorFor(cloudAsk.who)
       return row(
