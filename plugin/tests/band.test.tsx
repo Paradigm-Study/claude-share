@@ -77,13 +77,10 @@ function world(
     detectWait?: Promise<void>
     /** Sees each of the plugin's state writes before it lands: it may hold the write, or say what's written instead. */
     beforeSet?: (key: string, value: unknown) => Promise<{ value: unknown } | void> | { value: unknown } | void
-    /** Delay grant validation, as when the server is still reading its body. */
-    beforeTunnel?: (pid: string) => Promise<void>
+    /** Before a local-preview helper says anything: it may hold its start, or fail it (it exits 1, saying nothing). */
+    beforeHelper?: (pid: string, config: Record<string, unknown>) => Promise<void> | void
     /** A new pid after the old preview on the same port closed. */
     replacementPreviewPid?: string
-    tunnelWait?: string[]
-    tunnelStatus?: Record<string, number>
-    tunnel?: 404 | 503
     tcpRelays?: boolean
     /** The host's TCP worker: `wait` holds its ready line; `missing`, no Node to run it (exit 127). */
     tcpWorker?: 'wait' | 'missing'
@@ -199,7 +196,7 @@ function world(
     polled?: unknown[]
     /**
      * What the room shares now, as the join answer and every page list it
-     * (`previews`, read as each is sent), and where its grants answer.
+     * (`previews`, read as each is sent).
      * Absent: what the pages served so far opened (an artifact of a preview,
      * an `open` event), forwarded once one said so, less those closed since.
      */
@@ -232,7 +229,6 @@ function world(
   let refusedStreams = 0
   let joins = 0
   const localHelpers: { pid?: string; send: (message: { state: string; code?: string; port?: number; id?: string; ipv6?: boolean }) => void; output: (text: string) => void; exit: () => void; stopped: boolean }[] = []
-  const blockedTunnels: { pid: string; release: () => void }[] = []
   const standalone = new Map<string, { port: number; tcp: boolean }>()
   const previews = new Map<number, string>()
   const rememberPreviews = (page: unknown) => {
@@ -469,6 +465,15 @@ function world(
       const choice = pid ? opts.localPreviewByPid?.[pid] : undefined
       const failure = choice?.mode ?? opts.localPreview
       if (local && failure === 'missing') return { value: { code: 127, signal: null } }
+      if (local && opts.beforeHelper) {
+        const aborted = new Promise<void>(done => next.signal.addEventListener('abort', () => done(), { once: true }))
+        try {
+          await Promise.race([opts.beforeHelper(pid ?? '', config), aborted])
+        } catch {
+          return { value: { code: 1, signal: null } }
+        }
+        if (next.signal.aborted) return { value: { code: null, signal: 'SIGTERM' } }
+      }
       if (!local && opts.tcpWorker === 'missing') return { value: { code: 127, signal: null } }
       if (local && (failure === 'busy' || (config.strict && choice?.taken?.includes(config.port)))) {
         yield { stream: 'stdout' as const, text: '{"state":"error","code":"EADDRINUSE"}\n' }
@@ -903,18 +908,6 @@ function world(
       body = withList((opts.polled as { seq: number }[] | undefined)?.find(page => page.seq > after) ?? { seq: 1, events: [], people, ended: false, title: 'demo' })
     } else if (/\/previews\/[^/]+\/ticket$/.test(path) && method === 'POST') {
       body = { url: `https://preview.test/__share/enter?room=room0000000000000001&ticket=ticket-${asked.filter(a => a.endsWith('/ticket')).length}` }
-    } else if (/\/previews\/[^/]+\/tunnel$/.test(path) && method === 'POST') {
-      if (opts.tunnel) return { value: { status: opts.tunnel, ok: false, headers: {}, text: '{"error":"no tunnel"}' } }
-      const pid = /\/previews\/([^/]+)/.exec(path)![1]!
-      await opts.beforeTunnel?.(pid)
-      const status = opts.tunnelStatus?.[pid] ?? 200
-      if (status !== 200) return { value: { status, ok: false, headers: {}, text: '{"error":"Not allowed"}' } }
-      body = { token: 'tcp_cap0000000000000000000001', expiresAt: 43_201_000, port: standalone.get(pid)?.port ?? opts.roomList?.previews.find(p => p.pid === pid)?.port ?? 3340, protocol: 1 }
-      // Capture the response before delaying: a revoked late grant must not
-      // start a listener just because its HTTP response finally arrived.
-      const text = JSON.stringify(body)
-      if (opts.tunnelWait?.includes(pid)) await new Promise<void>(done => blockedTunnels.push({ pid, release: done }))
-      return { value: { status: 200, ok: true, headers: {}, text } }
     } else if (path.endsWith('/previews') && method === 'POST' && data.tcp === true && opts.refuseForward?.now) {
       return { value: { status: 503, ok: false, headers: {}, text: '{"error":"unavailable"}' } }
     } else if (path.endsWith('/previews') && method === 'POST') {
@@ -926,7 +919,7 @@ function world(
     }
     return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify(body) } }
   })
-  return Object.assign(asked, { state, clock, logged, spawned, posted, peerSends, peerPosts, mailboxes, receipts, killed, versions, written, urls, submitted, sent, opened, files, store, localHelpers, tcpHelpers, blockedControls, blockedTunnels, externals, toasted, copied, checkpointWrites, windowState, firefoxSettings, startsAlive, launches, proxies, discovered, owners, needLooks, looks, proxyFetches, wsRelays })
+  return Object.assign(asked, { state, clock, logged, spawned, posted, peerSends, peerPosts, mailboxes, receipts, killed, versions, written, urls, submitted, sent, opened, files, store, localHelpers, tcpHelpers, blockedControls, externals, toasted, copied, checkpointWrites, windowState, firefoxSettings, startsAlive, launches, proxies, discovered, owners, needLooks, looks, proxyFetches, wsRelays })
 }
 
 // A press settles before work waiting on the runtime's own promises does (a
@@ -1952,14 +1945,16 @@ test("a guest opens localhost in Claude's browser only after the helper is ready
   // Claude's browser, Claude Desktop's default (it took the call), once; not the person's own.
   expect(urls).toEqual(['http://localhost:3340/login?next=%2Faccount'])
   expect(asked.externals).toHaveLength(0)
-  expect(asked.filter(a => a.endsWith('/tunnel'))).toHaveLength(1)
+  expect(tunnels(asked)).toHaveLength(1)
   const spawn = asked.spawned.find(s => s.argv.at(-1)?.endsWith('/relay/local-preview.cjs'))!
   expect(JSON.parse(spawn.input!).port).toBe(3340)
-  expect(JSON.stringify(spawn.argv)).not.toContain('ticket=')
-  expect(JSON.parse(spawn.input!).token).toBe('tcp_cap0000000000000000000001')
+  // The seat's token, on stdin alone: no grant is asked for, and argv carries none.
+  expect(JSON.parse(spawn.input!).token).toBe('g')
+  expect(Object.keys(JSON.parse(spawn.input!)).sort()).toEqual(['port', 'strict', 'token', 'url'])
+  expect(JSON.stringify(spawn.argv)).not.toMatch(/ticket=|"g"/)
+  expect(asked.filter(a => a.endsWith('/tunnel'))).toHaveLength(0)
   // The host's own number, or nothing: a page that moves loses its sign-ins.
   expect(JSON.parse(spawn.input!).strict).toBe(true)
-  expect(spawn.input).not.toContain('"token":"g"')
   // Said once: what the first preview at the host's numbers here costs.
   expect(asked.toasted.filter(t => t.startsWith("Opened Sam's localhost:3340"))).toEqual(["Opened Sam's localhost:3340 in Claude's browser. While you're in the room, localhost:3340 here reaches Sam's, your cookies for it included; Close in Room → Shown, or Leave, frees it."])
   await pane.press({ key: 'public-preview:pv-local' })
@@ -2010,22 +2005,21 @@ for (const invalid of [0, 65536]) {
   })
 }
 
-for (const tunnel of [404, 503] as const) {
-  test(`a TCP endpoint answering ${tunnel} reports the boundary without public fallback`, async ($, on) => {
-    const asked = world(on, { tunnel, env: { CLAUDE_CODE_ENTRYPOINT: 'cli' }, stream: [{ seq: 2, events: [LOCAL_SHOWN], people: PREVIEW_PEOPLE, ended: false, title: 'demo' }] })
-    await $.prompt.submit({ text: LINK, origin: { kind: 'composer' }, wait: false })
-    await asked.clock.advance(10)
-    const pane = await $.ui.mount({ plugin: 'shared-session', surface: 'terminal', component: 'Pane', requestId: 'shared-room', props: PANE })
-    await pane.press({ key: 'tab-shown' })
-    await pane.press({ key: 'open-preview:pv-local' })
-    await eventually(asked.clock, () => asked.toasted.length)
-    expect(asked.toasted.some(t => t.includes('Local forwarding is unavailable'))).toBe(true)
-    expect(asked.localHelpers).toHaveLength(0)
-    expect(asked.copied).toHaveLength(0)
-    expect(asked.filter(a => a.endsWith('/ticket'))).toHaveLength(0)
-    await $.command.run({ command: 'stop-sharing', args: '' } as never)
-  })
-}
+test("Open while the host is offline binds nothing and says so, and never falls back to the public link", async ($, on) => {
+  const offline = [{ ...PREVIEW_PEOPLE[0]!, online: false }, PREVIEW_PEOPLE[1]!]
+  const asked = world(on, { env: { CLAUDE_CODE_ENTRYPOINT: 'cli' }, stream: [{ seq: 2, events: [LOCAL_SHOWN], people: offline, ended: false, title: 'demo' }] })
+  await $.prompt.submit({ text: LINK, origin: { kind: 'composer' }, wait: false })
+  await asked.clock.advance(10)
+  const pane = await $.ui.mount({ plugin: 'shared-session', surface: 'terminal', component: 'Pane', requestId: 'shared-room', props: PANE })
+  await pane.press({ key: 'tab-shown' })
+  await pane.press({ key: 'open-preview:pv-local' })
+  await eventually(asked.clock, () => asked.toasted.some(t => t.includes('is offline')))
+  expect(asked.toasted).toContain("Sam is offline, so their previews can't open now. Press Open again once they're back.")
+  expect(asked.localHelpers).toHaveLength(0)
+  expect(asked.copied).toHaveLength(0)
+  expect(asked.filter(a => a.endsWith('/ticket'))).toHaveLength(0)
+  await $.command.run({ command: 'stop-sharing', args: '' } as never)
+})
 
 for (const [failure, message] of [['busy', /localhost:3340 is already in use/], ['missing', /need Node/]] as const) {
   test(`a ${failure} localhost helper reports the problem without opening a public preview`, async ($, on) => {
@@ -2039,11 +2033,11 @@ for (const [failure, message] of [['busy', /localhost:3340 is already in use/], 
     expect(asked.toasted.some(t => message.test(t))).toBe(true)
     expect(asked.externals).toHaveLength(0)
     // In use: the host's number, then (no window here) any other port, both refused.
-    expect(asked.filter(a => a.endsWith('/tunnel'))).toHaveLength(failure === 'busy' ? 2 : 1)
+    expect(tunnels(asked)).toHaveLength(failure === 'busy' ? 2 : 1)
   })
 }
 
-test('a channel failure keeps the listener, grant and port; success clears its transient warning', async ($, on) => {
+test('a channel failure keeps the listener and its port; success clears its transient warning', async ($, on) => {
   const asked = world(on, { env: { CLAUDE_CODE_ENTRYPOINT: 'cli' }, stream: [{ seq: 2, events: [LOCAL_SHOWN], people: PREVIEW_PEOPLE, ended: false, title: 'demo' }] })
   await $.prompt.submit({ text: LINK, origin: { kind: 'composer' }, wait: false })
   await asked.clock.advance(10)
@@ -2069,7 +2063,7 @@ test('a channel failure keeps the listener, grant and port; success clears its t
   await eventually(asked.clock, () => asked.externals.length === 2)
   expect(asked.localHelpers).toHaveLength(1)
   expect(helper.stopped).toBe(false)
-  expect(asked.filter(a => a.endsWith('/tunnel'))).toHaveLength(1)
+  expect(tunnels(asked)).toHaveLength(1)
   helper.send({ state: 'channel-ready' })
   await asked.clock.advance(20)
   expect(await pane.find({ type: 'Text', text: /connection or request limit reached|Preview authorization was refused/ })).toBeUndefined()
@@ -2078,14 +2072,14 @@ test('a channel failure keeps the listener, grant and port; success clears its t
   expect((await pane.find({ type: 'Text', text: /Preview authorization was refused/ }))?.text).toContain('Press Open')
   expect(asked.localHelpers).toHaveLength(1)
   expect(helper.stopped).toBe(false)
-  expect(asked.filter(a => a.endsWith('/tunnel'))).toHaveLength(1)
+  expect(tunnels(asked)).toHaveLength(1)
   // Only this person's explicit retry replaces a refused authorization.
   await pane.press({ key: 'open-preview:pv-local' })
   await eventually(asked.clock, () => asked.externals.length === 3)
   expect(asked.localHelpers).toHaveLength(2)
   expect(helper.stopped).toBe(true)
   expect(asked.localHelpers[1]!.stopped).toBe(false)
-  expect(asked.filter(a => a.endsWith('/tunnel'))).toHaveLength(2)
+  expect(tunnels(asked)).toHaveLength(2)
   expect(asked.filter(a => a.endsWith('/ticket'))).toHaveLength(0)
   expect(new Set(asked.externals)).toEqual(new Set(['http://localhost:3340/login?next=%2Faccount']))
   expect(await pane.find({ type: 'Text', text: /connection or request limit reached|Preview authorization was refused/ })).toBeUndefined()
@@ -2093,7 +2087,7 @@ test('a channel failure keeps the listener, grant and port; success clears its t
   expect(asked.localHelpers.every(h => h.stopped)).toBe(true)
 })
 
-test('an expired, failed or exited localhost helper redraws and restarts on Open; Leave closes it', async ($, on) => {
+test('a failed or exited localhost helper redraws and restarts on Open; Leave closes it', async ($, on) => {
   const asked = world(on, { env: { CLAUDE_CODE_ENTRYPOINT: 'cli' }, stream: [{ seq: 2, events: [LOCAL_SHOWN], people: PREVIEW_PEOPLE, ended: false, title: 'demo' }] })
   await $.prompt.submit({ text: LINK, origin: { kind: 'composer' }, wait: false })
   await asked.clock.advance(10)
@@ -2101,24 +2095,18 @@ test('an expired, failed or exited localhost helper redraws and restarts on Open
   await pane.press({ key: 'tab-shown' })
   await pane.press({ key: 'open-preview:pv-local' })
   await eventually(asked.clock, () => asked.externals.length)
-  asked.localHelpers[0]!.send({ state: 'expired' })
+  asked.localHelpers[0]!.send({ state: 'error', code: 'STARTUP' })
   await asked.clock.advance(20)
   expect((await pane.find({ type: 'Text', text: 'Last: localhost:3340' }))?.text).toBe("Last: localhost:3340 here → Sam's localhost:3340")
   await pane.press({ key: 'open-preview:pv-local' })
   await eventually(asked.clock, () => asked.externals.length === 2)
   expect(asked.localHelpers).toHaveLength(2)
   expect(asked.localHelpers[0]!.stopped).toBe(true)
-  asked.localHelpers[1]!.send({ state: 'error', code: 'STARTUP' })
-  await asked.clock.advance(20)
-  expect((await pane.find({ type: 'Text', text: 'Last: localhost:3340' }))?.text).toBe("Last: localhost:3340 here → Sam's localhost:3340")
-  await pane.press({ key: 'open-preview:pv-local' })
-  await eventually(asked.clock, () => asked.externals.length === 3)
-  expect(asked.localHelpers[1]!.stopped).toBe(true)
-  asked.localHelpers[2]!.exit()
+  asked.localHelpers[1]!.exit()
   await asked.clock.advance(5)
   await pane.press({ key: 'open-preview:pv-local' })
-  await eventually(asked.clock, () => asked.externals.length === 4)
-  expect(asked.localHelpers).toHaveLength(4)
+  await eventually(asked.clock, () => asked.externals.length === 3)
+  expect(asked.localHelpers).toHaveLength(3)
   expect(new Set(asked.externals)).toEqual(new Set(['http://localhost:3340/login?next=%2Faccount']))
   await $.command.run({ command: 'stop-sharing', args: '' } as never)
   expect(asked.localHelpers.every(h => h.stopped)).toBe(true)
@@ -2142,7 +2130,7 @@ test("a replay never forwards by itself: a forwarded preview waits for Open; one
   expect(chunks.some(c => c.kind === 'tool')).toBe(false)
   expect(chunks.filter(c => c.kind === 'text').map(c => c.text).join('')).toContain('press **Open preview** above the prompt (or **Open** in the Room) to open it at http://localhost:3340/login?next=%2Faccount')
   expect(asked.localHelpers).toHaveLength(0)
-  expect(asked.filter(a => a.endsWith('/tunnel'))).toHaveLength(0)
+  expect(tunnels(asked)).toHaveLength(0)
   await $.turn.complete({ turnId: 'show-forwarded', isAborted: false, durationMs: 0, reason: 'answer' } as never)
   await asked.clock.advance(10)
   // Shared because Claude mentioned it: its link, on the preview's own host name.
@@ -2216,7 +2204,7 @@ test('saved localhost listeners resume and restore after helper loss without ope
   await $.session.end({ reason: 'other', sessionId: 'session-test-0001', resume: {} } as never)
   const kept = savedAt(asked, 'joined:session-test-0001') as typeof saved
   expect(kept.localPreviews).toEqual([{ pid: 'pv-local', port: 3340, localPort: 3340 }])
-  expect(JSON.stringify(kept.localPreviews)).not.toContain('tcp_cap')
+  expect(JSON.stringify(kept.localPreviews)).not.toContain('"g"')
   expect(JSON.stringify(kept.localPreviews)).not.toContain('ticket')
   expect(asked.localHelpers.every(h => h.stopped)).toBe(true)
 })
@@ -5773,9 +5761,11 @@ const routesOf = (asked: ReturnType<typeof world>) => asked.proxies[0]?.routes.a
 // What the guest takes the host to forward: Shown's open previews the room says are forwarded.
 const forwardedPids = (asked: ReturnType<typeof world>) => (asked.state.shown ?? []).filter(s => s.kind === 'preview' && s.tcp && !s.closed).map(s => s.pid)
 const tunnels = (asked: ReturnType<typeof world>) => asked.spawned.filter(s => s.argv.at(-1)?.endsWith('/relay/local-preview.cjs')).map(s => JSON.parse(s.input!))
+// What a window Open says when its tunnel didn't start here.
+const tunnelUnstarted = (port: number) => `Couldn't reach Sam's localhost:${port} for the preview window. Press Open preview to try again.`
 
-// The host's side refusing a window tunnel for good: refused once, the page's
-// next ask grants it again by itself; that one refused too, it waits for an Open.
+// The room refusing a window tunnel for good: refused once, the page's next
+// ask starts it again by itself; that one refused too, it waits for an Open.
 async function refuseForGood(asked: ReturnType<typeof world>, pid: string, port: number) {
   const first = asked.localHelpers.filter(h => h.pid === pid).at(-1)!
   first.send({ state: 'channel-error', code: 'AUTH' })
@@ -5815,7 +5805,7 @@ test("Open preview opens the host's own address in a separate window, through a 
   const profile = await roomProfile()
   expect(asked.launches[0]).toEqual(['open', '-n', '-a', CHROME, '--args', `--user-data-dir=${profile}/chrome`, '--proxy-server=socks5://127.0.0.1:47100', '--proxy-bypass-list=<-loopback>', '--no-first-run', '--no-default-browser-check', '--new-window', '--use-mock-keychain', WINDOW_URL])
   const argv = JSON.stringify(asked.launches[0])
-  for (const secret of ['tcp_cap', 'ticket', 'Bearer', 'ignore-certificate-errors']) expect(argv).not.toContain(secret)
+  for (const secret of ['"g"', 'ticket', 'Bearer', 'ignore-certificate-errors']) expect(argv).not.toContain(secret)
   expect(pane).toHaveLength(0)
   // Its tunnel takes a port the system picks: no host port is taken here.
   expect(tunnels(asked)).toHaveLength(1)
@@ -6034,7 +6024,6 @@ for (const whose of ["the room's own", "a host's"] as const) {
     expect(asked.proxies).toHaveLength(0)
     expect(tunnels(asked)).toHaveLength(0)
     expect(asked.state.previewWindow ?? null).toBeNull()
-    expect(asked.state.windowFailed ?? null).toBeNull()
     expect(asked.toasted.filter(t => t === LOOK_UNKNOWN)).toHaveLength(1)
     // Nor taken for someone else's: no turn to the room's own profile, and the host's hold let go.
     if (whose === "a host's") {
@@ -6173,7 +6162,7 @@ test("in Firefox the window's settings are written first, and its address goes o
   const profile = await roomProfile()
   expect(asked.launches[0]).toEqual(['open', '-n', '-a', FIREFOX, '--args', '-profile', `${profile}/firefox`, WINDOW_URL])
   const argv = JSON.stringify(asked.launches[0])
-  for (const secret of ['tcp_cap', 'ticket', 'Bearer', 'ignore-certificate']) expect(argv).not.toContain(secret)
+  for (const secret of ['"g"', 'ticket', 'Bearer', 'ignore-certificate']) expect(argv).not.toContain(secret)
   // Its proxy is in the profile's settings, for the proxy's own port, written privately.
   const settings = asked.firefoxSettings.get(profile)!
   expect(settings.port).toBe(47100)
@@ -6306,7 +6295,7 @@ test("a Firefox profile whose settings can't be written opens no window and says
   await asked.clock.advance(10)
   const ui = await $.ui.mount(band('desktop'))
   await ui.press({ key: 'open-preview' })
-  const said = "Couldn't open the preview window: its private profile couldn't be made. Press Open anyway, above the prompt, to open Sam's localhost:3340 without one."
+  const said = "Couldn't open the preview window: its private profile couldn't be made. To open Sam's localhost:3340 without one, change Previews in Room → Settings."
   await eventually(asked.clock, () => asked.toasted.includes(said))
   await asked.clock.advance(10)
   expect(asked.toasted).toContain(said)
@@ -6489,8 +6478,8 @@ test('a page opened elsewhere comes back after a reload exactly where it was; ta
 })
 
 test("with no window possible, a page that fails to open stops what its Open started for it: nothing stays at the host's numbers", async ($, on) => {
-  let grants = 0
-  const asked = localWorld(on, { localPreviewByPid: { 'pv-local': { taken: [3340] } }, beforeTunnel: async pid => { if (pid === 'pv-local' && ++grants === 2) throw new Error('the network went away') } })
+  let starts = 0
+  const asked = localWorld(on, { localPreviewByPid: { 'pv-local': { taken: [3340] } }, beforeHelper: pid => { if (pid === 'pv-local' && ++starts === 2) throw new Error("it didn't start") } })
   await $.prompt.submit({ text: LINK, origin: { kind: 'composer' }, wait: false })
   await asked.clock.advance(10)
   const ui = await $.ui.mount(band('terminal'))
@@ -6498,7 +6487,7 @@ test("with no window possible, a page that fails to open stops what its Open sta
   await eventually(asked.clock, () => asked.toasted.some(t => t.startsWith("Couldn't forward localhost:3340")))
   await asked.clock.advance(10)
   // The host's numbers first (the page's taken), then what it uses again for the page elsewhere, whose own start failed.
-  expect(tunnels(asked).map(t => [t.port, t.strict])).toEqual([[3610, true], [3340, true], [3610, true]])
+  expect(tunnels(asked).map(t => [t.port, t.strict])).toEqual([[3610, true], [3340, true], [3610, true], [3340, false]])
   expect(asked.localHelpers.filter(h => h.pid === 'pv-dep').every(h => h.stopped)).toBe(true)
   expect(asked.state.localPreviews ?? []).toEqual([])
   expect(asked.externals).toEqual([])
@@ -6507,7 +6496,7 @@ test("with no window possible, a page that fails to open stops what its Open sta
 
 test("Leave while Open moves the page puts nothing back: no mapping is left saved", async ($, on) => {
   let hold: (() => void) | undefined
-  let grants = 0
+  let starts = 0
   const saved = {
     at: 900,
     room: { server: 'http://share.test', id: 'room0000000000000001', url: LINK, title: 'demo', host: 'Sam', token: 'g', seat: 'seat1', seq: 3, since: 1 },
@@ -6519,7 +6508,7 @@ test("Leave while Open moves the page puts nothing back: no mapping is left save
     localPreviewByPid: { 'pv-local': { taken: [3340, 44321], port: 45555 } },
     files: { [checkpointPath('joined:session-test-0001')]: JSON.stringify({ version: 1, value: saved }) },
     roomList: { previews: [{ pid: 'pv-local', port: 3340, tcp: true }] },
-    beforeTunnel: pid => (pid === 'pv-local' && ++grants === 3 ? new Promise<void>(done => { hold = done }) : Promise.resolve()),
+    beforeHelper: pid => (pid === 'pv-local' && ++starts === 3 ? new Promise<void>(done => { hold = done }) : undefined),
   })
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   await $.session.start(START)
@@ -6528,7 +6517,7 @@ test("Leave while Open moves the page puts nothing back: no mapping is left save
   expect(asked.state.localPreviews).toEqual([{ pid: 'pv-local', port: 3340, localPort: 44321 }])
   const ui = await $.ui.mount(band('terminal'))
   await ui.press({ key: 'open-preview' })
-  // The host's number taken too, the page is moving: Leave while its grant is on its way.
+  // The host's number taken too, the page is moving: Leave while it starts there.
   await eventually(asked.clock, () => Boolean(hold))
   await $.command.run({ command: 'stop-sharing', args: '' } as never)
   hold!()
@@ -6543,12 +6532,12 @@ const RESEATED = 'The room reconnected you while the preview was opening. Press 
 test("seated anew while Open forwards the page, what that Open started stops and it says to press Open again: the next Open forwards both with the new seat", async ($, on) => {
   let hold: (() => void) | undefined
   const refusals = { count: 0 }
-  const asked = localWorld(on, { streamRefusals: refusals, beforeTunnel: pid => (pid === 'pv-local' && !hold ? new Promise<void>(done => { hold = done }) : Promise.resolve()) })
+  const asked = localWorld(on, { streamRefusals: refusals, beforeHelper: pid => (pid === 'pv-local' && !hold ? new Promise<void>(done => { hold = done }) : undefined) })
   await $.prompt.submit({ text: LINK, origin: { kind: 'composer' }, wait: false })
   await asked.clock.advance(10)
   const ui = await $.ui.mount(band('terminal'))
   await ui.press({ key: 'open-preview' })
-  // What the page uses is up at its number; the page's own grant is on its way, asked with the old seat.
+  // What the page uses is up at its number; the page's own listener is starting, with the old seat's token.
   await eventually(asked.clock, () => Boolean(hold) && asked.localHelpers.some(h => h.pid === 'pv-dep'))
   const first = asked.localHelpers.find(h => h.pid === 'pv-dep')!
   refusals.count = 1
@@ -6557,22 +6546,22 @@ test("seated anew while Open forwards the page, what that Open started stops and
   hold!()
   await eventually(asked.clock, () => asked.toasted.includes(RESEATED))
   await asked.clock.advance(10)
-  // What the old seat was granted stops; nothing opens, and nothing is saved.
+  // What started with the old seat's token stops; nothing opens, and nothing is saved.
   expect(first.stopped).toBe(true)
   expect(asked.externals).toEqual([])
   expect(asked.state.localPreviews ?? []).toEqual([])
-  // The next Open: both granted to the new seat, and the page opens.
+  // The next Open: both start with the new seat's token, and the page opens.
   await ui.press({ key: 'open-preview' })
   await eventually(asked.clock, () => asked.externals.length)
   await asked.clock.advance(10)
-  expect(asked.sent.filter(s => s.path.endsWith('/tunnel')).map(s => s.headers.authorization)).toEqual(['Bearer g', 'Bearer g', 'Bearer g2', 'Bearer g2'])
+  expect(tunnels(asked).map(t => t.token)).toEqual(['g', 'g', 'g2', 'g2'])
   expect(asked.externals).toEqual([WINDOW_URL])
   expect((asked.state.localPreviews ?? []).map(p => [p.pid, p.localPort]).sort()).toEqual([['pv-dep', 3610], ['pv-local', 3340]])
   expect(asked.toasted.some(t => t.includes('no longer open'))).toBe(false)
   await $.command.run({ command: 'stop-sharing', args: '' } as never)
 })
 
-test("seated anew between a listener's grant and its start, the Open stops what it started and says to press Open again: the next opens the page once, with the new seat", async ($, on) => {
+test("seated anew while a listener starts, the Open stops what it started and says to press Open again: the next opens the page once, with the new seat", async ($, on) => {
   const refusals = { count: 0 }
   const asked = world(on, { localPreview: 'wait', streamRefusals: refusals, stream: localStream })
   const pane = paneCalls(on, false)
@@ -6584,7 +6573,7 @@ test("seated anew between a listener's grant and its start, the Open stops what 
   await eventually(asked.clock, () => asked.localHelpers.length)
   refusals.count = 1
   await within(asked.clock, () => asked.state.room?.token === 'g2', 5_000)
-  // Up after the reseat: its grant went with the old seat, so it stops, and the Open says so.
+  // Up after the reseat: it carries the old seat's token, so it stops, and the Open says so.
   asked.localHelpers[0]!.send({ state: 'ready', port: 3340 })
   await eventually(asked.clock, () => asked.toasted.includes(RESEATED))
   await asked.clock.advance(10)
@@ -6599,7 +6588,7 @@ test("seated anew between a listener's grant and its start, the Open stops what 
   await asked.clock.advance(10)
   expect(pane).toEqual([LOCAL_URL])
   expect(asked.state.localPreviews).toEqual([{ pid: 'pv-local', port: 3340, localPort: 3340 }])
-  expect(asked.sent.filter(s => s.path.endsWith('/tunnel')).map(s => s.headers.authorization)).toEqual(['Bearer g', 'Bearer g2'])
+  expect(tunnels(asked).map(t => t.token)).toEqual(['g', 'g2'])
   await $.command.run({ command: 'stop-sharing', args: '' } as never)
 })
 
@@ -6687,8 +6676,8 @@ test('Close on a mapping frees its port here and what only its page uses; what e
   await $.command.run({ command: 'stop-sharing', args: '' } as never)
 })
 
-// The host's side refusing a page's listeners and what it uses (their grants
-// gone: the seat they were made for let go, say), each said as it is.
+// The host's side refusing a page's listeners and what it uses (the seat
+// whose token they carry let go, say), each said as it is.
 async function refusedHere($: Parameters<TestBody>[0], asked: ReturnType<typeof world>) {
   await $.prompt.submit({ text: LINK, origin: { kind: 'composer' }, wait: false })
   await asked.clock.advance(10)
@@ -6704,7 +6693,7 @@ async function refusedHere($: Parameters<TestBody>[0], asked: ReturnType<typeof 
   return { dep, pane }
 }
 
-test("a page's Open after the host's side refused it and what it uses grants both again: the refused listener it uses isn't kept", async ($, on) => {
+test("a page's Open after the host's side refused it and what it uses starts both again: the refused listener it uses isn't kept", async ($, on) => {
   const asked = autoWorld(on)
   const { dep, pane } = await refusedHere($, asked)
   await pane.press({ key: 'open-preview:pv-local' })
@@ -6843,7 +6832,7 @@ test("a page open in the window opens there again: the window's tunnel isn't sto
   await eventually(asked.clock, () => asked.launches.length)
   await asked.clock.advance(10)
   const tunnel = asked.localHelpers.filter(h => h.pid === 'pv-local').at(-1)!
-  const grants = asked.sent.filter(s => s.path.endsWith('/tunnel')).length
+  const started = tunnels(asked).length
   // Open again from the Room (the band hides a page that's open).
   const pane = await $.ui.mount(roomPane())
   await pane.press({ key: 'tab-shown' })
@@ -6851,7 +6840,7 @@ test("a page open in the window opens there again: the window's tunnel isn't sto
   await eventually(asked.clock, () => asked.launches.length === 2)
   await asked.clock.advance(10)
   expect(tunnel.stopped).toBe(false)
-  expect(asked.sent.filter(s => s.path.endsWith('/tunnel'))).toHaveLength(grants)
+  expect(tunnels(asked)).toHaveLength(started)
   expect(asked.launches[1]!.at(-1)).toBe(PAGE_URL)
   expect(asked.startsAlive).toEqual([false, true])
   await $.command.run({ command: 'stop-sharing', args: '' } as never)
@@ -7116,7 +7105,7 @@ test('the window asks the host about five ports a minute at most', async ($, on)
   await $.command.run({ command: 'stop-sharing', args: '' } as never)
 })
 
-test("the host's side refusing the window's tunnel stops it; the page's next ask grants it once more; refused again, only this person's Open reconnects it", async ($, on) => {
+test("the host's side refusing the window's tunnel stops it; the page's next ask starts it once more; refused again, only this person's Open reconnects it", async ($, on) => {
   const asked = windowWorld(on)
   await openedInWindow($, asked)
   const first = asked.localHelpers[0]!
@@ -7127,11 +7116,11 @@ test("the host's side refusing the window's tunnel stops it; the page's next ask
   await asked.clock.advance(20)
   expect(asked.state.previewNeedsOpen).toEqual([])
   expect(routesOf(asked)).toEqual({ routes: {}, startable: [3340] })
-  // The page asks again: a grant of its own, at once, nothing said.
+  // The page asks again: started anew, at once, nothing said.
   asked.proxies[0]!.send({ state: 'want', port: 3340 })
   await eventually(asked.clock, () => routesOf(asked)?.routes['3340'] === 45001)
   expect(asked.localHelpers).toHaveLength(2)
-  expect(asked.sent.filter(s => s.path.endsWith('/tunnel'))).toHaveLength(2)
+  expect(tunnels(asked)).toHaveLength(2)
   await asked.clock.advance(1_600)
   expect(asked.toasted.filter(t => t.includes('refused'))).toEqual([])
   // Refused again: stopped until this person presses Open.
@@ -7152,13 +7141,13 @@ test("the host's side refusing the window's tunnel stops it; the page's next ask
   expect(asked.localHelpers).toHaveLength(2)
   expect(asked.sent.filter(s => s.path.endsWith('/need'))).toHaveLength(0)
   // Open preview is back above the prompt; pressing it reconnects, and a
-  // refusal after it gets its one grant again.
+  // refusal after it gets its one restart again.
   const ui = await $.ui.mount(band('desktop'))
   await ui.press({ key: 'open-preview' })
   await eventually(asked.clock, () => routesOf(asked)?.routes['3340'] === 45001)
   expect(asked.localHelpers).toHaveLength(3)
   expect(asked.state.previewNeedsOpen).toEqual([])
-  expect(asked.sent.filter(s => s.path.endsWith('/tunnel'))).toHaveLength(3)
+  expect(tunnels(asked)).toHaveLength(3)
   asked.localHelpers[2]!.send({ state: 'channel-error', code: 'AUTH' })
   await eventually(asked.clock, () => asked.localHelpers[2]!.stopped)
   await asked.clock.advance(20)
@@ -7167,25 +7156,7 @@ test("the host's side refusing the window's tunnel stops it; the page's next ask
   await $.command.run({ command: 'stop-sharing', args: '' } as never)
 })
 
-test("a refusal's own grant refused as well (the room's access says no), the window waits for this person's Open, and that is said", async ($, on) => {
-  const status: Record<string, number> = {}
-  const asked = windowWorld(on, { tunnelStatus: status })
-  await openedInWindow($, asked)
-  const first = asked.localHelpers[0]!
-  status['pv-local'] = 403
-  first.send({ state: 'channel-error', code: 'AUTH' })
-  await eventually(asked.clock, () => first.stopped && routesOf(asked)?.startable.includes(3340))
-  asked.proxies[0]!.send({ state: 'want', port: 3340 })
-  await eventually(asked.clock, () => (asked.state.previewNeedsOpen ?? []).includes('pv-local'))
-  expect(asked.state.previewNeedsOpen).toEqual(['pv-local'])
-  expect(asked.localHelpers).toHaveLength(1)
-  await asked.clock.advance(1_600)
-  expect(asked.toasted.filter(t => t.includes("refused the preview window's connection to localhost:3340"))).toEqual(["Sam's side refused the preview window's connection to localhost:3340. Press Open preview to reconnect."])
-  expect(routesOf(asked)).toEqual({ routes: {}, startable: [] })
-  await $.command.run({ command: 'stop-sharing', args: '' } as never)
-})
-
-test("seated anew while a window Open starts its proxy, the Open goes on: the page's tunnel is granted to the new seat and the window opens", async ($, on) => {
+test("seated anew while a window Open starts its proxy, the Open goes on: the page's tunnel starts with the new seat's token and the window opens", async ($, on) => {
   let release!: () => void
   const proxyHold = new Promise<void>(done => { release = done })
   const refusals = { count: 0 }
@@ -7202,36 +7173,12 @@ test("seated anew while a window Open starts its proxy, the Open goes on: the pa
   await asked.clock.advance(20)
   expect(asked.toasted.some(t => t.includes('no longer open'))).toBe(false)
   expect(asked.launches).toHaveLength(1)
-  expect(asked.sent.filter(s => s.path.endsWith('/tunnel')).map(s => s.headers.authorization)).toEqual(['Bearer g2'])
+  expect(tunnels(asked).map(t => t.token)).toEqual(['g2'])
   expect(asked.toasted.some(t => t.startsWith("Opened Sam's localhost:3340 in a separate Google Chrome window."))).toBe(true)
   await $.command.run({ command: 'stop-sharing', args: '' } as never)
 })
 
-test("seated anew while a window Open's tunnel is granted, the Open says to press Open again: the next one's tunnel is the new seat's, and the window opens", async ($, on) => {
-  let hold: (() => void) | undefined
-  const refusals = { count: 0 }
-  const asked = windowWorld(on, { streamRefusals: refusals, beforeTunnel: pid => (pid === 'pv-local' && !hold ? new Promise<void>(done => { hold = done }) : Promise.resolve()) })
-  await $.prompt.submit({ text: LINK, origin: { kind: 'composer' }, wait: false })
-  await asked.clock.advance(10)
-  const ui = await $.ui.mount(band('desktop'))
-  await ui.press({ key: 'open-preview' })
-  await eventually(asked.clock, () => Boolean(hold))
-  refusals.count = 1
-  await within(asked.clock, () => asked.state.room?.token === 'g2', 5_000)
-  hold!()
-  await eventually(asked.clock, () => asked.toasted.includes(RESEATED))
-  await asked.clock.advance(20)
-  expect(asked.launches).toHaveLength(0)
-  await ui.press({ key: 'open-preview' })
-  await within(asked.clock, () => asked.launches.length, 5_000)
-  await asked.clock.advance(20)
-  expect(asked.sent.filter(s => s.path.endsWith('/tunnel')).map(s => s.headers.authorization)).toEqual(['Bearer g', 'Bearer g2'])
-  expect(asked.launches).toHaveLength(1)
-  expect(asked.toasted.some(t => t.includes('stopped or changed'))).toBe(false)
-  await $.command.run({ command: 'stop-sharing', args: '' } as never)
-})
-
-test("seated anew between a window tunnel's grant and its start, what the old seat was granted stops and the Open says to press Open again: the next one's tunnel serves the window", async ($, on) => {
+test("seated anew while a window tunnel starts, what started with the old seat's token stops and the Open says to press Open again: the next one's tunnel serves the window", async ($, on) => {
   const refusals = { count: 0 }
   const asked = windowWorld(on, { localPreview: 'wait', streamRefusals: refusals })
   await $.prompt.submit({ text: LINK, origin: { kind: 'composer' }, wait: false })
@@ -7253,24 +7200,24 @@ test("seated anew between a window tunnel's grant and its start, what the old se
   asked.localHelpers[1]!.send({ state: 'ready', port: 45002 })
   await within(asked.clock, () => asked.launches.length, 5_000)
   await asked.clock.advance(20)
-  expect(asked.sent.filter(s => s.path.endsWith('/tunnel')).map(s => s.headers.authorization)).toEqual(['Bearer g', 'Bearer g2'])
+  expect(tunnels(asked).map(t => t.token)).toEqual(['g', 'g2'])
   expect(asked.proxies.at(-1)!.routes.at(-1)?.routes['3340']).toBe(45002)
   await $.command.run({ command: 'stop-sharing', args: '' } as never)
 })
 
-test("a window Open whose tunnel the room refuses stops the proxy it started: nothing is left running for no window; the next Open starts anew", async ($, on) => {
-  const status: Record<string, number> = { 'pv-local': 429 }
-  const asked = windowWorld(on, { tunnelStatus: status })
+test("a window Open whose tunnel doesn't start stops the proxy it started: nothing is left running for no window; the next Open starts anew", async ($, on) => {
+  let fail = true
+  const asked = windowWorld(on, { beforeHelper: () => { if (fail) throw new Error("it didn't start") } })
   await $.prompt.submit({ text: LINK, origin: { kind: 'composer' }, wait: false })
   await asked.clock.advance(10)
   const ui = await $.ui.mount(band('desktop'))
   await ui.press({ key: 'open-preview' })
-  await eventually(asked.clock, () => asked.toasted.includes(WINDOW_BUSY_SAID))
+  await eventually(asked.clock, () => asked.toasted.includes(tunnelUnstarted(3340)))
   await asked.clock.advance(20)
   expect(asked.launches).toHaveLength(0)
   expect(asked.proxies[0]!.stopped).toBe(true)
   expect(asked.state.previewWindow?.port).toBe(0)
-  delete status['pv-local']
+  fail = false
   await ui.press({ key: 'open-preview' })
   await within(asked.clock, () => asked.launches.length, 5_000)
   expect(asked.proxies).toHaveLength(2)
@@ -7278,18 +7225,19 @@ test("a window Open whose tunnel the room refuses stops the proxy it started: no
   await $.command.run({ command: 'stop-sharing', args: '' } as never)
 })
 
-test("an expired window tunnel says nothing and renews when the page next asks for it", async ($, on) => {
+test("a window tunnel that fails once up says nothing, and starts again when the page next asks for it", async ($, on) => {
   const asked = windowWorld(on)
   await openedInWindow($, asked)
-  asked.localHelpers[0]!.send({ state: 'expired' })
+  const before = asked.toasted.length
+  asked.localHelpers[0]!.send({ state: 'error', code: 'STARTUP' })
   await eventually(asked.clock, () => routesOf(asked)?.startable.includes(3340))
   expect(routesOf(asked)).toEqual({ routes: {}, startable: [3340] })
-  expect(asked.toasted.some(t => t.includes('authorization expired'))).toBe(false)
+  expect(asked.toasted.slice(before)).toEqual([])
   asked.proxies[0]!.send({ state: 'want', port: 3340 })
   await eventually(asked.clock, () => routesOf(asked)?.routes['3340'] === 45001)
   expect(asked.localHelpers).toHaveLength(2)
   expect(asked.localHelpers[0]!.stopped).toBe(true)
-  expect(asked.sent.filter(s => s.path.endsWith('/tunnel'))).toHaveLength(2)
+  expect(tunnels(asked)).toHaveLength(2)
   expect(asked.launches).toHaveLength(1)
   await $.command.run({ command: 'stop-sharing', args: '' } as never)
 })
@@ -7981,7 +7929,7 @@ test("a reload whose look at the window fails takes it to be there still: its pr
 
 const WINDOW_BUSY_SAID = 'The preview window reached its connection or request limit. Close unused tabs in it or wait a minute, then reload the page.'
 
-test("seated anew by the room, the window goes on: its failures are still said, and a refused tunnel's next grant is the new seat's", async ($, on) => {
+test("seated anew by the room, the window goes on: its failures are still said, and a refused tunnel starts again with the new seat's token", async ($, on) => {
   const refusals = { count: 0 }
   const asked = windowWorld(on, { streamRefusals: refusals })
   await openedInWindow($, asked)
@@ -7994,12 +7942,12 @@ test("seated anew by the room, the window goes on: its failures are still said, 
   first.send({ state: 'channel-error', code: 'BUSY' })
   await within(asked.clock, () => asked.toasted.includes(WINDOW_BUSY_SAID), 2_000)
   expect(asked.toasted.filter(t => t === WINDOW_BUSY_SAID)).toHaveLength(1)
-  // Its grant was the old seat's: refused, the page's next ask grants it with the new one.
+  // It carries the old seat's token: refused, the page's next ask starts it with the new one.
   first.send({ state: 'channel-error', code: 'AUTH' })
   await eventually(asked.clock, () => first.stopped)
   asked.proxies[0]!.send({ state: 'want', port: 3340 })
   await eventually(asked.clock, () => routesOf(asked)?.routes['3340'] === 45001 && asked.localHelpers.length === 2)
-  expect(asked.sent.filter(s => s.path.endsWith('/tunnel')).at(-1)?.headers.authorization).toBe('Bearer g2')
+  expect(tunnels(asked).at(-1)?.token).toBe('g2')
   // Refused again: said, and only an Open reconnects it.
   asked.localHelpers[1]!.send({ state: 'channel-error', code: 'AUTH' })
   await within(asked.clock, () => asked.toasted.some(t => t.includes("refused the preview window's connection")), 2_000)
@@ -8011,14 +7959,14 @@ test("seated anew by the room, the window goes on: its failures are still said, 
   await $.command.run({ command: 'stop-sharing', args: '' } as never)
 })
 
-test("seated anew while the window's tunnel is being granted, the page's next ask starts it at once, with the new seat", async ($, on) => {
-  let grants = 0
+test("seated anew while the window's tunnel starts again, the page's next ask starts it at once, with the new seat", async ($, on) => {
+  let starts = 0
   let hold: (() => void) | undefined
   const refusals = { count: 0 }
-  const asked = windowWorld(on, { streamRefusals: refusals, beforeTunnel: pid => (pid === 'pv-local' && ++grants === 2 ? new Promise<void>(done => { hold = done }) : Promise.resolve()) })
+  const asked = windowWorld(on, { streamRefusals: refusals, beforeHelper: pid => (pid === 'pv-local' && ++starts === 2 ? new Promise<void>(done => { hold = done }) : undefined) })
   await openedInWindow($, asked)
-  // Its grant ran out: the page asks again, and that grant is on its way, asked with the old seat.
-  asked.localHelpers[0]!.send({ state: 'expired' })
+  // Its tunnel failed: the page asks again, and that start is held, with the old seat's token.
+  asked.localHelpers[0]!.send({ state: 'error', code: 'STARTUP' })
   await eventually(asked.clock, () => routesOf(asked)?.startable.includes(3340))
   asked.proxies[0]!.send({ state: 'want', port: 3340 })
   await eventually(asked.clock, () => Boolean(hold))
@@ -8032,7 +7980,7 @@ test("seated anew while the window's tunnel is being granted, the page's next as
   asked.proxies[0]!.send({ state: 'want', port: 3340 })
   await eventually(asked.clock, () => routesOf(asked)?.routes['3340'] === 45001)
   expect(routesOf(asked)?.routes['3340']).toBe(45001)
-  expect(asked.sent.filter(s => s.path.endsWith('/tunnel')).at(-1)?.headers.authorization).toBe('Bearer g2')
+  expect(tunnels(asked).at(-1)?.token).toBe('g2')
   await $.command.run({ command: 'stop-sharing', args: '' } as never)
 })
 
@@ -8102,9 +8050,8 @@ test("a window whose proxy can't start again for another reason than its port (n
   await ui.press({ key: 'open-preview' })
   await eventually(asked.clock, () => asked.toasted.some(t => t.startsWith('Preview windows need Node')))
   await asked.clock.advance(10)
-  // Nothing else opens it (its listeners need Node too), and there's no Open anyway.
+  // Nothing else opens it (its listeners need Node too).
   expect(asked.toasted).toContain('Preview windows need Node on this computer. Install Node, then press Open preview again, or choose Public link in Room → Shown.')
-  expect(await ui.find({ key: 'open-anyway' })).toBeUndefined()
   expect(asked.windowState.kills).toBe(0)
   expect(asked.windowState.alive).toBe(true)
   expect(asked.launches).toHaveLength(0)
@@ -8809,14 +8756,14 @@ test('an Open whose ports are all free here never waits on the browser look', as
   await $.command.run({ command: 'stop-sharing', args: '' } as never)
 })
 
-test('a preview window that fails to start, with Previews: Always a separate window, opens nothing else by itself; Open anyway opens it at the same address', async ($, on) => {
+test('a preview window that fails to start, with Previews: Always a separate window, opens nothing else, and says how to open it without one', async ($, on) => {
   const asked = windowWorld(on, { launchFails: true })
   const pane = paneCalls(on, false)
   await $.prompt.submit({ text: LINK, origin: { kind: 'composer' }, wait: false })
   await asked.clock.advance(10)
   const ui = await $.ui.mount(band('desktop'))
   await ui.press({ key: 'open-preview' })
-  const failed = "Couldn't open the preview window: Google Chrome didn't start. Press Open anyway, above the prompt, to open Sam's localhost:3340 without one."
+  const failed = "Couldn't open the preview window: Google Chrome didn't start. To open Sam's localhost:3340 without one, change Previews in Room → Settings."
   await eventually(asked.clock, () => asked.toasted.includes(failed))
   expect(asked.toasted).toContain(failed)
   // Neither Claude's browser nor the person's own: their cookies and servers stay apart from Sam's until they say.
@@ -8827,15 +8774,9 @@ test('a preview window that fails to start, with Previews: Always a separate win
   await eventually(asked.clock, () => asked.localHelpers.every(h => h.stopped))
   expect(asked.proxies.every(p => p.stopped)).toBe(true)
   expect(asked.localHelpers.every(h => h.stopped)).toBe(true)
-  expect(await ui.find({ key: 'open-preview' })).toBeUndefined()
-  expect((await ui.find({ key: 'open-anyway' }))?.props.label).toBe('Open anyway')
-  await ui.press({ key: 'open-anyway' })
-  await eventually(asked.clock, () => pane.length)
-  expect(pane).toEqual([WINDOW_URL])
-  expect(tunnels(asked).map(t => [t.port, t.strict])).toEqual([[0, false], [3340, true]])
-  expect(asked.launches).toHaveLength(1)
-  expect(await ui.find({ key: 'open-anyway' })).toBeUndefined()
-  expect(asked.state.localPreviews).toEqual([{ pid: 'pv-local', port: 3340, localPort: 3340 }])
+  // Open preview stays: pressed again, it tries the window again, and nothing else.
+  expect(await ui.find({ key: 'open-preview' })).toBeDefined()
+  expect(asked.state.localPreviews ?? []).toEqual([])
   await $.command.run({ command: 'stop-sharing', args: '' } as never)
 })
 
@@ -8843,7 +8784,7 @@ for (const [why, opts, reason] of [
   ['no browser here can open one', { browser: { platform: 'Darwin', path: '/Applications/Safari.app' } }, "Safari can't be used for preview windows, which need a Chromium-family browser or Firefox"],
   ['the look for a browser failing', { detectFails: { count: 2 } }, "looking for a browser here didn't work (it's tried again at the next Open)"],
 ] as const) {
-  test(`Previews: Always a separate window, with no window possible (${why}), opens nothing else by itself; Open anyway opens it at the same address`, async ($, on) => {
+  test(`Previews: Always a separate window, with no window possible (${why}), opens nothing else, and says how to open it without one`, async ($, on) => {
     const asked = windowWorld(on, opts as Parameters<typeof world>[1])
     const pane = paneCalls(on, true)
     await $.prompt.submit({ text: LINK, origin: { kind: 'composer' }, wait: false })
@@ -8851,7 +8792,7 @@ for (const [why, opts, reason] of [
     const ui = await $.ui.mount(band('desktop'))
     await asked.clock.advance(10)
     await ui.press({ key: 'open-preview' })
-    const failed = `Couldn't open the preview window: ${reason}. Press Open anyway, above the prompt, to open Sam's localhost:3340 without one.`
+    const failed = `Couldn't open the preview window: ${reason}. To open Sam's localhost:3340 without one, change Previews in Room → Settings.`
     await eventually(asked.clock, () => asked.toasted.includes(failed))
     await asked.clock.advance(10)
     // Neither Claude's browser nor the person's own, nor the host's numbers taken here.
@@ -8860,11 +8801,7 @@ for (const [why, opts, reason] of [
     expect(asked.externals).toEqual([])
     expect(tunnels(asked)).toEqual([])
     expect(asked.launches).toHaveLength(0)
-    expect(await ui.find({ key: 'open-preview' })).toBeUndefined()
-    await ui.press({ key: 'open-anyway' })
-    await eventually(asked.clock, () => asked.externals.length)
-    expect(asked.externals).toEqual([WINDOW_URL])
-    expect(tunnels(asked).map(t => [t.port, t.strict])).toEqual([[3340, true]])
+    expect(await ui.find({ key: 'open-preview' })).toBeDefined()
     await $.command.run({ command: 'stop-sharing', args: '' } as never)
   })
 }
@@ -8889,7 +8826,7 @@ test("with Previews: Always a separate window and none possible here, Shown says
   const pane = await $.ui.mount(roomPane())
   await pane.press({ key: 'tab-shown' })
   await asked.clock.advance(20)
-  expect(await pane.find({ type: 'Text', text: `Opens ${WINDOW_URL} in a preview window, which can't open here: Safari can't be used for preview windows, which need a Chromium-family browser or Firefox. Open, then Open anyway above the prompt, opens it without one.` })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: `Opens ${WINDOW_URL} in a preview window, which can't open here: Safari can't be used for preview windows, which need a Chromium-family browser or Firefox. Change Previews in Settings to open it without one.` })).toBeDefined()
   await $.command.run({ command: 'stop-sharing', args: '' } as never)
 })
 
@@ -10015,27 +9952,29 @@ test("a page Claude opens is shared whatever it is, but never a debugger, nor on
   await $.command.run({ command: 'stop-sharing', args: '' } as never)
 })
 
-for (const stopped of [true, false]) {
-  test(`a host back from a restart ${stopped ? "doesn't share again a port it stopped" : 'shares again a page its Claude opened'}, from what it looks back on`, async ($, on) => {
-    const key = 'http://localhost:8787/room0000000000000001'
-    const saved = { ...savedRoom('room0000000000000001', 900), hostMemory: { room: key, declined: stopped ? [3340] : [], stopped: stopped ? [3340] : [], offered: [], askedAt: {} } }
-    const history = [{ role: 'user', content: 'Start the app' }, { role: 'assistant', content: [{ type: 'text', text: 'Running at http://localhost:3340/' }] }]
-    const asked = world(on, { stream: [], history, files: { [checkpointPath('hosting:session-test-0001')]: JSON.stringify({ version: 1, value: saved }) } })
-    on('session.start', ($, e) => ({ cwd: e.cwd }))
-    await $.session.start(START)
-    await asked.clock.advance(500)
-    expect(asked.sent.filter(x => x.path.endsWith('/previews')).map(x => x.body.port)).toEqual(stopped ? [] : [3340])
-    expect(asked.state.hostMemory?.stopped).toEqual(stopped ? [3340] : [])
-    await $.command.run({ command: 'stop-sharing', args: '' } as never)
-  })
-}
+// A host back from a restart takes up what it shared (its saved shares)
+// and reads no history for more: a page its Claude gave out before stays
+// as it was, and a port it stopped stays stopped.
+test('a host back from a restart shares no page of its history again, and a port it stopped stays stopped', async ($, on) => {
+  const key = 'http://localhost:8787/room0000000000000001'
+  const saved = { ...savedRoom('room0000000000000001', 900), hostMemory: { room: key, declined: [3340], stopped: [3340], offered: [], askedAt: {} } }
+  const history = [{ role: 'user', content: 'Start the app' }, { role: 'assistant', content: [{ type: 'text', text: 'Running at http://localhost:3340/ and http://localhost:3341/' }] }]
+  const asked = world(on, { stream: [], history, files: { [checkpointPath('hosting:session-test-0001')]: JSON.stringify({ version: 1, value: saved }) } })
+  on('session.start', ($, e) => ({ cwd: e.cwd }))
+  await $.session.start(START)
+  await asked.clock.advance(500)
+  expect(asked.logged.some(l => l.startsWith('Still sharing this session'))).toBe(true)
+  expect(asked.sent.filter(x => x.path.endsWith('/previews')).map(x => x.body.port)).toEqual([])
+  expect(asked.state.hostMemory?.stopped).toEqual([3340])
+  await $.command.run({ command: 'stop-sharing', args: '' } as never)
+})
 
 // This session's transcript, a line a row, as Claude Code writes it.
 const TRANSCRIPT = '/home/scott/.claude/projects/-tmp-demo/session-test-0001.jsonl'
 const transcriptRow = (uuid: string, at: number, role: 'user' | 'assistant', text: string) =>
   JSON.stringify({ type: role, uuid, parentUuid: null, timestamp: new Date(at).toISOString(), message: { role, content: role === 'user' ? text : [{ type: 'text', text }] } })
 
-test('a room shared Only from now on keeps that with its place: reopened, it shares no dev server Claude gave out before Share', async ($, on) => {
+test('a room shared Only from now on shares no dev server Claude gave out before Share, nor once reopened', async ($, on) => {
   const asked = world(on, { stream: [], transcripts: { [TRANSCRIPT]: [transcriptRow('u1', 500, 'user', 'Start the admin app'), transcriptRow('a1', 600, 'assistant', 'Running at http://localhost:3340/admin')].join('\n') } })
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   on('session.end', ($, e) => ({ sessionId: e.sessionId }))
@@ -10046,34 +9985,13 @@ test('a room shared Only from now on keeps that with its place: reopened, it sha
   await asked.clock.advance(500)
   const previews = () => asked.sent.filter(x => x.path.endsWith('/previews')).map(x => x.body.port)
   expect(previews()).toEqual([])
-  expect(asked.state.room?.fromNow).toBe(true)
   await $.session.end({ reason: 'other', sessionId: 'session-test-0001', resume: {} } as never)
-  expect(savedAt(asked, 'hosting:session-test-0001').room.fromNow).toBe(true)
   await $.session.start(START)
   await asked.clock.advance(500)
   expect(asked.logged.some(l => l.startsWith('Still sharing this session'))).toBe(true)
   expect(previews()).toEqual([])
   await $.command.run({ command: 'stop-sharing', args: '' } as never)
 })
-
-for (const when of ['since Share', 'before Share', 'at a time the history doesn\'t say'] as const) {
-  test(`a host back from a restart in a room shared Only from now on ${when === 'since Share' ? 'shares again a page its Claude opened since Share' : `shares no page its Claude opened ${when}`}`, async ($, on) => {
-    const saved = savedRoom('room0000000000000001', 900)
-    const said = 'Running at http://localhost:3340/'
-    const asked = world(on, {
-      stream: [],
-      // Without the transcript, the history Claude holds: no times.
-      ...(when === "at a time the history doesn't say" ? { history: [{ role: 'assistant', content: [{ type: 'text', text: said }] }] } : { transcripts: { [TRANSCRIPT]: transcriptRow('a1', when === 'since Share' ? 800 : 200, 'assistant', said) } }),
-      files: { [checkpointPath('hosting:session-test-0001')]: JSON.stringify({ version: 1, value: { ...saved, room: { ...saved.room, since: 500, fromNow: true } } }) },
-    })
-    on('session.start', ($, e) => ({ cwd: e.cwd }))
-    await $.session.start(START)
-    await asked.clock.advance(500)
-    expect(asked.logged.some(l => l.startsWith('Still sharing this session'))).toBe(true)
-    expect(asked.sent.filter(x => x.path.endsWith('/previews')).map(x => x.body.port)).toEqual(when === 'since Share' ? [3340] : [])
-    await $.command.run({ command: 'stop-sharing', args: '' } as never)
-  })
-}
 
 // The public link on the host: a guest's browser asking through a preview
 // reaches this machine's localhost at its scheme, bounded, and the answer
@@ -10644,8 +10562,8 @@ test("an open preview outlives Shown's pruning of everything else: still opened,
   await asked.clock.advance(10)
   expect(asked.launches[0]!.at(-1)).toBe(WINDOW_URL)
   expect(routesOf(asked)).toEqual({ routes: { '3340': 45001 }, startable: [] })
-  // Its tunnel gone (expired), it's still there to start, and nobody is asked for it.
-  asked.localHelpers[0]!.send({ state: 'expired' })
+  // Its tunnel gone (it failed), it's still there to start, and nobody is asked for it.
+  asked.localHelpers[0]!.send({ state: 'error', code: 'STARTUP' })
   await eventually(asked.clock, () => routesOf(asked)?.startable.includes(3340))
   asked.proxies[0]!.send({ state: 'blocked', port: 3340 })
   await asked.clock.advance(20)
@@ -11032,8 +10950,7 @@ test('a browser that reports a start and opens no window says so, never that it 
   expect(asked.toasted.some(t => t.includes("doesn't seem to use its proxy"))).toBe(false)
   expect(asked.state.previewWindow?.opened).toEqual([])
   expect(await ui.find({ key: 'open-preview' })).toBeDefined()
-  // Not seen isn't failed: no Open anyway, and nothing opened it at the host's numbers.
-  expect(await ui.find({ key: 'open-anyway' })).toBeUndefined()
+  // Not seen isn't failed: nothing opened it at the host's numbers.
   expect(tunnels(asked).map(t => [t.port, t.strict])).toEqual([[0, false]])
   expect(asked.externals).toEqual([])
   await $.command.run({ command: 'stop-sharing', args: '' } as never)
@@ -11064,7 +10981,7 @@ for (const status of [503, 403, 400]) test(`a routes post the window's proxy ans
   expect(asked.proxies[0]!.stopped).toBe(false)
   expect(routesOf(asked)).toEqual({ routes: { '3340': 45001 }, startable: [] })
   routesFail.count = 3
-  asked.localHelpers[0]!.send({ state: 'expired' })
+  asked.localHelpers[0]!.send({ state: 'error', code: 'STARTUP' })
   await within(asked.clock, () => asked.proxies[0]!.stopped, 5000, 500)
   expect(asked.proxies[0]!.stopped).toBe(true)
   // Ended by this session: its port is no window of this session's any more.
@@ -11083,7 +11000,7 @@ for (const cause of ['its routes refused three times', 'three looks at it failin
     expect(asked.launches[0]).toContain(`--user-data-dir=${host}/chrome`)
     if (cause === 'its routes refused three times') {
       routesFail.count = 3
-      asked.localHelpers[0]!.send({ state: 'expired' })
+      asked.localHelpers[0]!.send({ state: 'error', code: 'STARTUP' })
       await within(asked.clock, () => asked.proxies[0]!.stopped, 5000, 500)
     } else {
       lockFails.count = 3
@@ -11111,16 +11028,16 @@ for (const cause of ['its routes refused three times', 'three looks at it failin
 const WINDOW_AND_B = (people: typeof PREVIEW_PEOPLE) => [{ seq: 4, events: [WINDOW_SHOWN, PAGE_B], people, ended: false, title: 'demo' }]
 const pageRunning = (asked: ReturnType<typeof world>) => asked.localHelpers.filter(h => h.pid === 'pv-local' && !h.stopped).length
 
-test("a second page's Open whose look at the window fails, its tunnel refused, leaves the window open for the first: its proxy and tunnel go on, and Leave closes it", async ($, on) => {
-  const status: Record<string, number> = {}
+test("a second page's Open whose look at the window fails, its tunnel not starting, leaves the window open for the first: its proxy and tunnel go on, and Leave closes it", async ($, on) => {
+  const failB = { now: false }
   const lockFails = { count: 0 }
-  const asked = windowWorld(on, { tunnelStatus: status, lockFails, stream: WINDOW_AND_B(PREVIEW_PEOPLE) })
+  const asked = windowWorld(on, { beforeHelper: pid => { if (pid === 'pv-b' && failB.now) throw new Error("it didn't start") }, lockFails, stream: WINDOW_AND_B(PREVIEW_PEOPLE) })
   const pane = await openedInWindow($, asked)
-  status['pv-b'] = 429
+  failB.now = true
   lockFails.count = 1
   const before = asked.toasted.length
   await pane.press({ key: 'open-preview:pv-b' })
-  await within(asked.clock, () => asked.toasted.includes(WINDOW_BUSY_SAID), 6_000)
+  await within(asked.clock, () => asked.toasted.includes(tunnelUnstarted(3341)), 6_000)
   await asked.clock.advance(6_000)
   expect(lockFails.count).toBe(0)
   // A look that failed knows nothing, and the proxy was the window's already: nothing of it ends.
@@ -11128,25 +11045,25 @@ test("a second page's Open whose look at the window fails, its tunnel refused, l
   expect(asked.proxies.map(p => p.stopped)).toEqual([false])
   expect(pageRunning(asked)).toBe(1)
   expect(asked.state.previewWindow).toMatchObject({ port: 47100, opened: ['pv-local'] })
-  expect(asked.toasted.slice(before)).toEqual([WINDOW_BUSY_SAID])
+  expect(asked.toasted.slice(before)).toEqual([tunnelUnstarted(3341)])
   await $.command.run({ command: 'stop-sharing', args: '' } as never)
   await asked.clock.advance(50)
   expect(asked.windowState.alive).toBe(false)
 })
 
-test("a second page's Open while another session of this person's holds the host's profile, its tunnel refused, leaves this session's window there working through its looks, until Leave closes it", async ($, on) => {
-  const status: Record<string, number> = {}
+test("a second page's Open while another session of this person's holds the host's profile, its tunnel not starting, leaves this session's window there working through its looks, until Leave closes it", async ($, on) => {
+  const failB = { now: false }
   const launchLockHeld = { count: 0 }
-  const asked = windowWorld(on, { tunnelStatus: status, launchLockHeld, stream: WINDOW_AND_B(SIGNED_IN) })
+  const asked = windowWorld(on, { beforeHelper: pid => { if (pid === 'pv-b' && failB.now) throw new Error("it didn't start") }, launchLockHeld, stream: WINDOW_AND_B(SIGNED_IN) })
   const pane = await openedInWindow($, asked)
   const host = await hostProfilePath()
   expect(asked.launches[0]).toContain(`--user-data-dir=${host}/chrome`)
   asked.proxies[0]!.send({ state: 'seen', port: 3340 })
-  status['pv-b'] = 429
+  failB.now = true
   launchLockHeld.count = 20
   const before = asked.toasted.length
   await pane.press({ key: 'open-preview:pv-b' })
-  await within(asked.clock, () => asked.toasted.includes(WINDOW_BUSY_SAID), 6_000)
+  await within(asked.clock, () => asked.toasted.includes(tunnelUnstarted(3341)), 6_000)
   await asked.clock.advance(100)
   // It turned to the room's own profile for that page and opened nothing there.
   expect(asked.launches).toHaveLength(1)
@@ -11160,7 +11077,7 @@ test("a second page's Open while another session of this person's holds the host
   expect(asked.proxies.map(p => p.stopped)).toEqual([false])
   expect(pageRunning(asked)).toBe(1)
   expect(asked.state.previewWindow).toMatchObject({ port: 47100, opened: ['pv-local'] })
-  expect(asked.toasted.slice(before)).toEqual([WINDOW_BUSY_SAID])
+  expect(asked.toasted.slice(before)).toEqual([tunnelUnstarted(3341)])
   await $.command.run({ command: 'stop-sharing', args: '' } as never)
   await asked.clock.advance(50)
   expect(asked.windowState.alive).toBe(false)
@@ -11206,23 +11123,24 @@ test("a second page's Open whose look at the window keeps failing leaves the fir
   expect(asked.windowState.alive).toBe(false)
 })
 
-test("an Open that can't tell whether the window is open keeps the page's refusal as it was: the next Open grants it anew", async ($, on) => {
+test("an Open that can't tell whether the window is open keeps the page's refusal as it was: the next Open starts it anew", async ($, on) => {
   const lockFails = { count: 0 }
   const asked = windowWorld(on, { lockFails })
   const pane = await openedInWindow($, asked)
   const refused = await refuseForGood(asked, 'pv-local', 3340)
   await eventually(asked.clock, () => asked.state.previewNeedsOpen?.includes('pv-local'))
-  const grants = asked.sent.filter(r => r.path.endsWith('/previews/pv-local/tunnel')).length
+  const starts = () => tunnels(asked).filter(t => t.url.endsWith('/previews/pv-local/tunnel')).length
+  const before = starts()
   lockFails.count = 2
   await pane.press({ key: 'open-preview:pv-local' })
   await within(asked.clock, () => asked.toasted.includes(LOOK_UNKNOWN), 3_000)
   await asked.clock.advance(20)
   expect(asked.state.previewNeedsOpen).toContain('pv-local')
-  expect(asked.sent.filter(r => r.path.endsWith('/previews/pv-local/tunnel'))).toHaveLength(grants)
+  expect(starts()).toBe(before)
   expect(refused.stopped).toBe(true)
-  // Asked again with the look answering: its own Open grants it anew.
+  // Asked again with the look answering: its own Open starts it anew.
   await pane.press({ key: 'open-preview:pv-local' })
-  await within(asked.clock, () => asked.sent.filter(r => r.path.endsWith('/previews/pv-local/tunnel')).length > grants, 3_000)
+  await within(asked.clock, () => starts() > before, 3_000)
   await asked.clock.advance(20)
   expect(asked.state.previewNeedsOpen ?? []).not.toContain('pv-local')
   await $.command.run({ command: 'stop-sharing', args: '' } as never)

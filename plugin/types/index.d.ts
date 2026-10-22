@@ -18,11 +18,6 @@ export type ShareRoom = {
   since: number
   /** The team it's shared with: listed for its people, whose access setting says who joins. */
   team?: { id: string; name: string } | null
-  /**
-   * Host: shared Only from now on. A reopened session's look back at its
-   * history shares only the pages Claude opened since `since`.
-   */
-  fromNow?: true
 }
 
 export type SharePerson = {
@@ -397,8 +392,6 @@ declare module 'claude-code' {
       pinRefused: boolean
       /** Auto mode refused the plugin's call to Claude's browser: not tried again until an allow rule names it, which the Room offers to add. */
       paneRefused: boolean
-      /** Guest: a forwarded preview whose window (Always a separate window) couldn't open, and why: Open anyway, above the prompt, opens it without one. */
-      windowFailed: { pid: string; reason: string } | null
       /** The Room's page showing: who's here, the chat, every turn, the files changed, what Claude showed, or the settings. */
       roomTab: 'people' | 'chat' | 'timeline' | 'changes' | 'shown' | 'settings'
       /** Every turn of the session, oldest first (the newest 200). */

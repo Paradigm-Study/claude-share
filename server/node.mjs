@@ -44,13 +44,13 @@ const directoryData = new Map() // accounts and teams (server/teams.mjs)
 
 // When a stream closes, check again once its grace period is over: the seat
 // may not come back, and everyone else should see that. A revocation closes
-// the pairs it covers (revokeMatches: a TCP pair by its grant, a public one by
-// its browser session, seat or preview).
+// the pairs it covers (revokeMatches: a TCP pair by its preview or seat, a
+// public one by its browser session, seat or preview).
 function watch(room) {
   previewRooms.set(room.previewKey, room)
   room.onTCPRevoke = filter => {
     for (const [id, pair] of pairs) {
-      if (pair.scope === 'tcp' && pair.roomId === room.id && revokeMatches(filter, pair.target)) closePair(id, pair, 1008, 'TCP grant revoked')
+      if (pair.scope === 'tcp' && pair.roomId === room.id && revokeMatches(filter, pair.target)) closePair(id, pair, 1008, 'TCP access revoked')
     }
   }
   room.onPreviewRevoke = filter => {
@@ -99,8 +99,8 @@ function save(immediate = false) {
     writeFileSync(tmp, JSON.stringify({ rooms: [...rooms.values()].map(r => r.toJSON()), directory: Object.fromEntries(directoryData) }))
     renameSync(tmp, DATA_FILE)
   }
-  // Forwarding approvals, revocations and grants are durable before their
-  // answers, not after the ordinary room snapshot's half-second debounce.
+  // Forwarding approvals and revocations are durable before their answers,
+  // not after the ordinary room snapshot's half-second debounce.
   if (immediate) {
     clearTimeout(saveTimer)
     write()
@@ -217,8 +217,8 @@ async function route(req) {
   const counters = tcpCounted(room.tcpStats)
   const { response, changed } = await roomRequest(room, req, rest, now, origin, { previewOrigin: previewOrigin(req), admin, directory, isCurrent: () => rooms.get(id) === room })
   // Forwarding approvals and revocations are durable before a successful
-  // response, just as a newly minted TCP grant is.
-  if (changed) save(/^previews(?:$|\/[^/]+\/(?:end|tunnel)$)/.test(rest) || rest === 'end' || rest === 'admin-end')
+  // response.
+  if (changed) save(/^previews(?:$|\/[^/]+\/end$)/.test(rest) || rest === 'end' || rest === 'admin-end')
   // The byte budget changed without the room (a revocation's refund): only the counters.
   if (tcpCounted(room.tcpStats) !== counters) saveStats(true)
   return response
@@ -283,7 +283,7 @@ const serve = handle => async (nodeReq, nodeRes) => {
     const bodyless = nodeReq.method === 'GET' || nodeReq.method === 'HEAD' || (!nodeReq.headers['transfer-encoding'] && !(Number(nodeReq.headers['content-length']) > 0))
     const streamed = !bodyless && handle === route && parts[0] === 'api' && parts[1] === 'rooms' && streamedRoomBody(nodeReq.method, parts.slice(3).join('/'))
     let body
-    // Preview shares/grants/links, needs, proxied answers and host relay
+    // Preview shares, stops and links, needs, proxied answers and host relay
     // rejection authenticate first and bound bytes as they arrive (core's
     // readBody), before any outer buffer.
     if (streamed) body = Readable.toWeb(nodeReq, { strategy: { highWaterMark: 0 } })
@@ -409,14 +409,12 @@ async function rejectRelay(room, req, id) {
   return json({ ok: true })
 }
 
+// A TCP pair the host hasn't taken up by its pairing deadline closes; once
+// paired, it lasts until it finishes or is revoked.
 function armTCP(id, pair) {
   clearTimeout(pair.timer)
-  const due = pair.guest.ready ? pair.target.exp : Math.min(pair.target.exp, pair.guest.deadline)
-  pair.timer = setTimeout(() => {
-    const room = rooms.get(pair.roomId)
-    if (room?.sweepGrants(Date.now())) save()
-    closePair(id, pair, 1008, pair.guest.ready ? 'TCP grant expired' : 'TCP relay timeout')
-  }, Math.max(0, due - Date.now())).unref()
+  if (pair.guest.ready) return
+  pair.timer = setTimeout(() => closePair(id, pair, 1008, 'TCP relay timeout'), Math.max(0, pair.guest.deadline - Date.now())).unref()
 }
 
 // A public pair ends with its browser session, and, like a TCP one, when the
@@ -427,7 +425,7 @@ function armPublic(id, pair) {
   const due = pair.hostWs ? pair.exp : Math.min(pair.exp, pair.deadline)
   pair.timer = setTimeout(() => {
     const room = rooms.get(pair.roomId)
-    if (room?.sweepGrants(Date.now())) save()
+    if (room?.sweepExpired(Date.now())) save()
     closePair(id, pair, pair.hostWs ? 1008 : 1011, pair.hostWs ? 'Preview session expired' : 'Preview relay timeout')
   }, Math.max(0, due - Date.now())).unref()
 }
@@ -436,7 +434,7 @@ function tcpMessage(id, pair, side, message) {
   if (pairs.get(id) !== pair) return
   try {
     const room = rooms.get(pair.roomId)
-    if (!room) throw tcpFailure('TCP grant revoked.')
+    if (!room) throw tcpFailure('TCP access revoked.')
     const from = side === 'guest' ? pair.guest : pair.host
     const to = side === 'guest' ? pair.host : pair.guest
     const frame = tcpFrame(message)
@@ -523,8 +521,8 @@ server.on('upgrade', upgrading((nodeReq, socket, head) => {
   if (!pair || pair.roomId !== room.id) return refuse(socket, 404)
   if (pair.hostWs) return refuse(socket, 409, 'That socket already has a host relay.')
   if (pair.scope === 'tcp') {
-    if (!tcpValid(room, pair.guest, Date.now()) || Date.now() >= pair.guest.deadline) {
-      closePair(m[2], pair, 1008, 'TCP grant expired or relay timed out')
+    if (!tcpValid(room, pair.guest) || Date.now() >= pair.guest.deadline) {
+      closePair(m[2], pair, 1008, 'TCP access revoked or relay timed out')
       return refuse(socket, 410)
     }
     pair.host = tcpState(m[2], pair.target, 'host', Date.now())

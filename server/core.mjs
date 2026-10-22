@@ -114,8 +114,7 @@ const PROXY_HEAD_MAX = 64 * 1024 // a proxied answer's first line: its status an
 // TCP previews use raw binary messages and a receiver-proven credit window.
 // All resource ceilings live here; both transports enforce the same protocol.
 export const TCP_LIMITS = Object.freeze({
-  protocol: 1, capMs: PREVIEW_SESSION_MS, seatPairs: 32, roomPairs: 64,
-  seatCaps: 2, roomCaps: 128, opensPerMinute: 1200, seatOpensPerMinute: 240, openWindowMs: 60_000,
+  seatPairs: 32, roomPairs: 64, opensPerMinute: 1200, seatOpensPerMinute: 240, openWindowMs: 60_000,
   pairMs: 10_000, roomBytes: 1024 ** 3, reserveBytes: 1024 ** 2,
   dataBytes: 65_536, creditFrames: 4, creditBytes: 256 * 1024,
   controlBytes: 256, bufferBytes: 1024 ** 2, checkBytes: 16 * 1024, messageFragments: 4096,
@@ -142,12 +141,12 @@ export const PUBLIC_LIMITS = Object.freeze({
   seatMints: 30, roomMints: 120, mintWindowMs: 60_000,
 })
 
-// Whether a revocation covers a channel or a capability: every field the
-// filter names must match, and a filter naming none covers everything. TCP
-// halves and grants name their `cap` and `ownerSeat`; public pairs and
-// browser sessions their cookie `session` and `ownerSeat`.
+// Whether a revocation covers a channel or a browser session: every field
+// the filter names must match, and a filter naming none covers everything.
+// TCP halves name their `pid` and `ownerSeat`; public pairs and browser
+// sessions their cookie `session` and `ownerSeat` too.
 export function revokeMatches(filter, s) {
-  return (!filter.cap || s.cap === filter.cap) && (!filter.pid || s.pid === filter.pid) &&
+  return (!filter.pid || s.pid === filter.pid) &&
     (!filter.seat || s.ownerSeat === filter.seat) && (!filter.session || s.session === filter.session)
 }
 
@@ -244,8 +243,7 @@ export class Room {
     // joins it): a key made with the room and kept with it, or a Durable
     // Object's own id, which worker.mjs puts here.
     this.previewKey = data.previewKey ?? token(16)
-    // A browser's session on the public link, sid → { pid, exp, seat }, or a
-    // TCP grant, cap → { pid, exp, seat, scope: 'tcp' }.
+    // A browser's session on the public link, sid → { pid, exp, seat }.
     this.previewSessions = new Map(Object.entries(data.previewSessions ?? {}))
     this.tcpStats = data.tcpStats ?? { used: 0, refunded: 0, opens: { start: 0, count: 0 } }
     // Each seat's share of the room's minute of opens (kept in memory only: a
@@ -487,7 +485,7 @@ export class Room {
     if (reason === 'timeout') {
       this.away.set(bearer, seat)
       // The newest hundred: a room's people come back, strangers don't pile up.
-      // A seat dropped for good takes its grants and browsers with it.
+      // A seat dropped for good takes its TCP connections and browsers with it.
       for (const old of [...this.away.keys()].slice(0, Math.max(0, this.away.size - 100))) {
         const dropped = this.away.get(old)
         this.away.delete(old)
@@ -513,16 +511,11 @@ export class Room {
     return changed
   }
 
-  // Expiry and deliberate Leave revoke grants; presence grace never does.
+  // TCP connections close with what let them in (the adapters hold them): a
+  // preview's Stop (pid), a Leave or a seat dropped for good (seat), or the
+  // room's end. Presence grace never closes them. Nothing of them is kept.
   revokeTCP(filter = {}) {
-    let changed = false
-    for (const [cap, grant] of this.previewSessions) {
-      if (grant.scope !== 'tcp' || !revokeMatches(filter, { cap, pid: grant.pid, ownerSeat: grant.seat })) continue
-      this.previewSessions.delete(cap)
-      changed = true
-    }
     this.onTCPRevoke?.(filter)
-    return changed
   }
 
   // Browsers on the public link, by the same filters: a preview's Stop
@@ -533,7 +526,7 @@ export class Room {
   revokePublic(filter = {}) {
     let changed = false
     for (const [sid, s] of this.previewSessions) {
-      if (s.scope === 'tcp' || !revokeMatches(filter, { pid: s.pid, ownerSeat: s.seat, session: sid })) continue
+      if (!revokeMatches(filter, { pid: s.pid, ownerSeat: s.seat, session: sid })) continue
       this.previewSessions.delete(sid)
       changed = true
     }
@@ -548,19 +541,19 @@ export class Room {
     return changed
   }
 
-  // Everything a seat was given for previews: Leave, or a seat dropped for good.
+  // Everything a seat has open for previews: Leave, or a seat dropped for good.
   revokeSeat(seat) {
     this.revokeTCP({ seat })
     this.revokePublic({ seat })
   }
 
-  // What expired goes (TCP grants, browser sessions, links), where requests
-  // and the adapters' alarms already look, never on a timer of its own.
-  sweepGrants(now) {
+  // What expired goes (browser sessions, links), where requests and the
+  // adapters' alarms already look, never on a timer of its own.
+  sweepExpired(now) {
     let changed = false
-    for (const [cap, grant] of this.previewSessions) {
-      if (grant.exp > now) continue
-      changed = (grant.scope === 'tcp' ? this.revokeTCP({ cap }) : this.revokePublic({ session: cap })) || changed
+    for (const [sid, s] of this.previewSessions) {
+      if (s.exp > now) continue
+      changed = this.revokePublic({ session: sid }) || changed
     }
     for (const [ticket, entry] of this.tickets) {
       if (entry.exp > now) continue
@@ -629,11 +622,11 @@ async function readJson(req) {
 }
 
 // These routes authenticate before touching the body, and read it through
-// readBody with their own bound (tunnel and end read none). Both outer
+// readBody with their own bound (end reads none). Both outer
 // adapters must pass a stream, not buffer it first; a Node request whose body
 // wasn't read closes its socket.
 export const streamedRoomBody = (method, rest) => method === 'POST' &&
-  (rest === 'previews' || rest === 'need' || rest === 'peer' || /^previews\/[^/]+\/(?:end|tunnel|ticket)$/.test(rest) || /^ws\/[^/]+\/reject$/.test(rest) || /^proxy\/[^/]+$/.test(rest))
+  (rest === 'previews' || rest === 'need' || rest === 'peer' || /^previews\/[^/]+\/(?:end|ticket)$/.test(rest) || /^ws\/[^/]+\/reject$/.test(rest) || /^proxy\/[^/]+$/.test(rest))
 
 // What an adapter takes of a room route's body (past it, 413): a file's
 // FILE_MAX, a JSON route's JSON_BODY_MAX. Node buffers that much at most; the
@@ -686,10 +679,12 @@ export function shareUrl(origin, id) {
 // clients say theirs in a header. Older than PLUGIN_MIN can't share or join
 // (rooms already open carry on, though an older host's public link no longer
 // answers and its TCP connections close early): this server no longer asks a
-// plugin what it takes, or answers as plugins before 0.11.30 needed, so
-// everyone moves up to it, here.
+// plugin what it takes, or answers as plugins before 0.11.30 needed, and from
+// 0.11.31 a guest's TCP connections come with its seat's token (an older
+// guest's helper sends a grant this server no longer gives), so everyone
+// moves up to it, here.
 export const PLUGIN_LATEST = manifest.version
-export const PLUGIN_MIN = '0.11.30'
+export const PLUGIN_MIN = '0.11.31'
 export const UPDATE_COMMAND = 'claude plugin marketplace update claude-share && claude plugin update shared-session@claude-share'
 
 const versionParts = v => String(v).split('.').map(n => Number.parseInt(n, 10) || 0)
@@ -745,7 +740,6 @@ export const LIMITS = {
   create: { limit: 6, periodMs: 60_000, message: 'Too many new shared sessions from your network. Try again in a minute.' },
   join: { limit: 30, periodMs: 60_000, message: 'Too many joins from your network. Try again in a minute.' },
   events: { limit: 900, periodMs: 60_000, message: 'This session is sending too fast; slowing down.' },
-  tunnel: { limit: 60, periodMs: 60_000, message: 'Too many preview forwarding requests from your network. Try again in a minute.' },
 }
 export const limitedResponse = kind => json({ error: LIMITS[kind].message }, 429)
 // New rooms one network address may make in a day, and the whole server: past
@@ -763,7 +757,6 @@ export function limitOf(req, id, rest, ip) {
   if (rest === 'create') return { kind: 'create', key: `c:${ip}` }
   if (rest === 'join') return { kind: 'join', key: `j:${ip}` }
   if (rest === 'events') return { kind: 'events', key: `e:${id}` }
-  if (/^previews\/[A-Za-z0-9_-]+\/tunnel$/.test(rest)) return { kind: 'tunnel', key: `t:${ip}` }
   return null
 }
 
@@ -847,7 +840,7 @@ const teamOf = room => (room.team ? { id: room.team.id, name: room.team.name } :
 // `ctx.previewOrigin` is where previews are served (a host name of their own,
 // so an app's root-relative paths work); absent, previews are off.
 export async function roomRequest(room, req, rest, now, origin, ctx = {}) {
-  const expired = room.sweepGrants(now)
+  const expired = room.sweepExpired(now)
   const swept = room.sweep(now) || expired
   const versions = versionsOf(room)
   const seated = room.seats.size
@@ -1269,7 +1262,7 @@ async function previewRoutes(room, req, rest, auth, now, ctx) {
     room.wake()
     return { changed: true, response: json({ pid: preview.pid, tcp }) }
   }
-  const match = /^previews\/([A-Za-z0-9_-]+)\/(end|ticket|tunnel)$/.exec(rest)
+  const match = /^previews\/([A-Za-z0-9_-]+)\/(end|ticket)$/.exec(rest)
   if (match && method === 'POST') {
     const preview = room.previews.get(match[1])
     if (!preview) return { response: json({ error: 'No such preview.' }, 404) }
@@ -1284,29 +1277,6 @@ async function previewRoutes(room, req, rest, auth, now, ctx) {
       room.append(fromHost(room), 'preview', { pid: preview.pid, port: preview.port, state: 'closed' }, now)
       room.wake()
       return { changed: true, response: json({ ok: true }) }
-    }
-    if (match[2] === 'tunnel') {
-      // Nothing in a grant's body is used, so none is read: this one check
-      // holds, with nothing awaited between it and the grant.
-      const access = roomAccessError(room, req, ctx)
-      if (access) return { response: access }
-      if (!preview.tcp) return { response: json({ error: 'This preview opens through its link: the host shared it as a page, not for forwarding.' }, 403) }
-      if (!room.connected('host')) return { response: json({ error: 'The host is not connected.' }, 503) }
-      const at = Date.now()
-      // A refusal changes nothing to save but the minute's counters, which
-      // the adapters persist on their own when they moved.
-      if (!tcpAdmit(room, at, auth.seat)) return { response: json({ error: 'Too many TCP preview connections or grants. Try again in a minute.' }, 429) }
-      const caps = [...room.previewSessions].filter(([, s]) => s.scope === 'tcp')
-      const same = caps.filter(([, s]) => s.pid === preview.pid && s.seat === auth.seat).sort((a, b) => a[1].exp - b[1].exp)
-      const replace = Math.max(0, same.length - TCP_LIMITS.seatCaps + 1)
-      if (caps.length - replace >= TCP_LIMITS.roomCaps) return { response: json({ error: 'Too many TCP preview grants in this room. Try again after one expires.' }, 429) }
-      // Open/rebind/resume needs a fresh grant. Roll only this seat/preview's
-      // oldest one, closing its streams rather than locking the listener out.
-      for (const [old] of same.slice(0, replace)) room.revokeTCP({ cap: old })
-      const cap = token(24)
-      const exp = at + TCP_LIMITS.capMs
-      room.previewSessions.set(cap, { pid: preview.pid, seat: auth.seat, scope: 'tcp', exp })
-      return { changed: true, response: json({ token: cap, expiresAt: exp, port: preview.port, protocol: TCP_LIMITS.protocol }) }
     }
     if (!ctx.previewOrigin) return { response: json({ error: 'This server does not serve previews.' }, 501) }
     const check = () => roomAccessError(room, req, ctx) ?? (room.previews.has(preview.pid) ? null : json({ error: 'No such preview.' }, 404))
@@ -1595,12 +1565,12 @@ section.more { padding:0 0 72px; }
     <h2>What this server sees and keeps</h2>
     <ul>
       <li><b>What passes through:</b> while a session is shared, its prompts and the files people attach to them, Claude's replies and, while someone else is in the room, its thinking as it happens (passed along, never kept), the tools it runs with the first lines of their results and the pictures in them (screenshots, images it opens), the side chat, people's reactions to Claude's replies and which replies each person has had on screen, any files or local previews the host's Claude shows, and messages between a teammate's own other sessions and the host's session, which go to the other side alone (passed along, never kept). Sharing a session that already has history asks first whether to include it.</li>
-      <li><b>How long:</b> a room and everything in it is deleted 24 hours after the host stops sharing or was last seen. A room keeps its newest 5000 events, 16 MB of them at most. For TCP previews the room keeps grants (which preview and seat, and when they expire) and coarse connection and byte-budget counters until the room is deleted. For a preview opened through its link, the room keeps the link (which preview, which seat made it, the page it opens) for 10 minutes, and the browser session it starts (which preview and seat) for 12 hours from the last link that browser opened; both end when that seat leaves or the host stops the preview. A seat keeps its newest 4 browser sessions per preview, and a room its newest 128 links and 256 browser sessions. A grant, link or session that expired is removed at the room's next activity, or with the room; one that ended goes at once. Application bytes are relayed, never stored. There are no analytics, and no request logs kept.</li>
+      <li><b>How long:</b> a room and everything in it is deleted 24 hours after the host stops sharing or was last seen. A room keeps its newest 5000 events, 16 MB of them at most. For TCP previews the room keeps only coarse connection and byte-budget counters, until the room is deleted. For a preview opened through its link, the room keeps the link (which preview, which seat made it, the page it opens) for 10 minutes, and the browser session it starts (which preview and seat) for 12 hours from the last link that browser opened; both end when that seat leaves or the host stops the preview. A seat keeps its newest 4 browser sessions per preview, and a room its newest 128 links and 256 browser sessions. A link or session that expired is removed at the room's next activity, or with the room; one that ended goes at once. Application bytes are relayed, never stored. There are no analytics, and no request logs kept.</li>
       <li><b>Previews share a host name:</b> every shared session's previews are served on one preview host name, and their links name the session by a key of its own, which can't join it. A browser not already in a session's previews has that host name's storage and cache, and its domain's cookies, cleared before it enters; browsers clear them only over HTTPS (or on localhost). No preview can register a service worker there.</li>
       <li><b>Accounts, only for teams:</b> sharing and joining need none. If you sign in (GitHub or Google) to use teams, the server keeps your name, username, verified email, which GitHub organizations you're in, the teams you're in and their settings, which open sessions are shared with each team, and invites to a session (who invited whom, until it's joined, dismissed, ends, or 12 hours pass). Signing in finishes only when you press Continue on this server's page. The page and Claude Code show the same code, and you continue only if they match. Until you press Continue, the server keeps who GitHub or Google said you are; after ten minutes that sign-in stops working, and it's deleted the next time Claude Code asks for it or anyone signs in. Claude Code's token is made when it picks up the sign-in, and the server keeps only its hash, never the token itself. Sign-ins stay until you delete your account (<code>/team delete-account</code>), which removes them at once. Signed in, a session you share or join also knows your account for as long as it lasts, so your sessions count as one person.</li>
       <li><b>Who can see it:</b> anyone with the room's link, or for a session shared with a team that keeps it to its people, only the people in that team. Links are long and random; forward one only to people you'd hand the session to. Content is encrypted in transit, not end to end: the server can read what passes through it.</li>
       <li><b>What runs where:</b> a teammate's prompt runs on the host's machine. Reads inside the host's project run without asking; everything else asks the host first, by default.</li>
-      <li><b>Limits:</b> new rooms and joins are rate-limited per network; rooms hold up to 20 people, 100 MB of files (10,240 files at most), 128 open previews, and events of 128 KB each. Previews opened through their link limit request bodies to 1 MB and response bodies to 20 MB, and allow 512 requests waiting per room, 32 WebSockets per seat and 128 per room (one the host's Claude Code doesn't take up within 10 seconds closes, and those waiting hold 8 MB per room at most), and 30 new links a minute per seat (120 per room). Such a WebSocket closes once 1 MB sent through it waits unread; on Cloudflare, which can't see that, once one side sends more than 4 MB in a second. TCP previews instead allow 32 connections per seat across all grants and previews, 64 per room, 2 grants per seat and preview, 128 per room, and 1200 new connections or grants per minute (240 for any one seat). Only a port the host chose to forward can be reached this way. A grant lasts 12 hours; unpaired connections close after 10 seconds. A room has a lifetime 1 GiB TCP byte budget, reserved in 1 MiB chunks per direction, unused parts given back when a connection closes. Data messages are at most 64 KiB, with at most 4 messages / 256 KiB outstanding per direction, and a connection closes if 1 MiB of control messages to one side goes unacknowledged (each acknowledgement covers everything sent before it), however long it lives. Rooms that are abused get ended.</li>
+      <li><b>Limits:</b> new rooms and joins are rate-limited per network; rooms hold up to 20 people, 100 MB of files (10,240 files at most), 128 open previews, and events of 128 KB each. Previews opened through their link limit request bodies to 1 MB and response bodies to 20 MB, and allow 512 requests waiting per room, 32 WebSockets per seat and 128 per room (one the host's Claude Code doesn't take up within 10 seconds closes, and those waiting hold 8 MB per room at most), and 30 new links a minute per seat (120 per room). Such a WebSocket closes once 1 MB sent through it waits unread; on Cloudflare, which can't see that, once one side sends more than 4 MB in a second. TCP previews instead allow 32 connections per seat across all previews, 64 per room, and 1200 new connections per minute (240 for any one seat). Only a port the host chose to forward can be reached this way, and only by someone in the room: their connections close when they leave or the host stops that preview. Unpaired connections close after 10 seconds. A room has a lifetime 1 GiB TCP byte budget, reserved in 1 MiB chunks per direction, unused parts given back when a connection closes. Data messages are at most 64 KiB, with at most 4 messages / 256 KiB outstanding per direction, and a connection closes if 1 MiB of control messages to one side goes unacknowledged (each acknowledgement covers everything sent before it), however long it lives. Rooms that are abused get ended.</li>
       <li><b>Your own server:</b> teams that want their sessions on their own infrastructure can run the same server on Cloudflare or Node in a few minutes (<a href="https://github.com/Paradigm-Study/claude-share#host-a-server">how</a>), and set it in the plugin.</li>
     </ul>
     <p>Questions or abuse reports: open an issue on <a href="https://github.com/Paradigm-Study/claude-share/issues">GitHub</a>.</p>
@@ -1700,7 +1670,7 @@ const namesRoom = (room, key) => Boolean(key) && key === room.previewKey
 function previewSession(room, req, now) {
   const [key, sid] = previewCookie(req)
   const session = namesRoom(room, key) && sid ? room.previewSessions.get(sid) : null
-  return session && session.scope !== 'tcp' && session.exp > now && session.seat && seatKnown(room, session.seat) ? { ...session, sid } : null
+  return session && session.exp > now && session.seat && seatKnown(room, session.seat) ? { ...session, sid } : null
 }
 
 // Every room's previews share one host name, so a browser can carry what
@@ -1728,7 +1698,7 @@ const clearingPage = next =>
 // kept with it): one older is let go, its sockets with it (a reload of a
 // newer one goes on as it was).
 function keepNewestSessions(room, seat, pid) {
-  const browsers = () => [...room.previewSessions].filter(([, s]) => s.scope !== 'tcp').sort((a, b) => a[1].exp - b[1].exp)
+  const browsers = () => [...room.previewSessions].sort((a, b) => a[1].exp - b[1].exp)
   const mine = browsers().filter(([, s]) => s.seat === seat && s.pid === pid)
   for (const [old] of mine.slice(0, Math.max(0, mine.length - PUBLIC_LIMITS.seatSessions))) room.revokePublic({ session: old })
   const all = browsers()
@@ -1743,7 +1713,7 @@ function keepNewestSessions(room, seat, pid) {
 // answers is made before anything changes, so nothing can spend a link and
 // then fail.
 function enterPreview(room, req, url, now, secure) {
-  const pruned = room.sweepGrants(now)
+  const pruned = room.sweepExpired(now)
   const ticket = room.tickets.get(url.searchParams.get('ticket') ?? '')
   const own = previewSession(room, req, now)
   if (!ticket || ticket.used || ticket.exp <= now || !room.previews.has(ticket.pid) || room.endedAt || !seatKnown(room, ticket.seat)) {
@@ -1876,7 +1846,7 @@ export function previewSocketTarget(room, req, now, active = []) {
 // whichever adapter holds them.
 export function publicPairValid(room, pair, now) {
   const session = room?.previewSessions.get(pair?.session)
-  return Boolean(room && !room.endedAt && pair && !pair.closed && pair.exp > now && room.previews.has(pair.pid) && session && session.scope !== 'tcp' && session.pid === pair.pid && session.exp > now &&
+  return Boolean(room && !room.endedAt && pair && !pair.closed && pair.exp > now && room.previews.has(pair.pid) && session && session.pid === pair.pid && session.exp > now &&
     session.seat && seatKnown(room, session.seat))
 }
 
@@ -1916,10 +1886,10 @@ export async function relayRejectCode(req) {
 // …and what that socket is closed with, in words (`what`: TCP, or Preview).
 export const rejectReason = (what, code) => `${what} ${code === 1013 ? 'host busy' : 'local connect failed'}`
 
-// TCP admission: grants and new channels share the room's minute of opens
-// (kept with its counters) and each seat's share of it (in memory). TCP
-// capabilities are never browser sessions: only an Authorization bearer on
-// the main server can open this single preview's data channel.
+// TCP admission: new channels count against the room's minute of opens
+// (kept with its counters) and each seat's share of it (in memory). Only a
+// guest seat's own token, an Authorization bearer on the main server, opens
+// a preview's data channel; a browser's cookie never does.
 export function tcpAdmit(room, now, seat) {
   let w = room.tcpStats.opens
   if (!w || now - w.start >= TCP_LIMITS.openWindowMs) w = room.tcpStats.opens = { start: now, count: 0 }
@@ -1943,19 +1913,22 @@ function seatKnown(room, seat) {
   return false
 }
 
+// A guest's TCP half comes with its seat's own token: a seat here, or away
+// within its grace. It's looked up without seating anyone again, so
+// admission writes nothing.
 export function tcpSocketTarget(room, req, pid, now, active = []) {
-  const cap = /^Bearer\s+([A-Za-z0-9_-]+)$/i.exec(req.headers.get('authorization') ?? '')?.[1]
-  const grant = cap ? room.previewSessions.get(cap) : null
-  if (!grant || grant.scope !== 'tcp' || grant.pid !== pid || !grant.seat || grant.exp <= now || !seatKnown(room, grant.seat)) return { ok: false, status: 401, error: 'Invalid or expired TCP preview grant.' }
+  const bearer = /^Bearer\s+([A-Za-z0-9_-]+)$/i.exec(req.headers.get('authorization') ?? '')?.[1]
+  const seat = bearer ? room.seats.get(bearer) ?? room.away.get(bearer) : null
+  if (!seat) return { ok: false, status: 401, error: 'Not a guest of this session.' }
   const preview = room.previews.get(pid)
   if (!preview || room.endedAt) return { ok: false, status: 410, error: 'This TCP preview has ended.' }
   if (!preview.tcp) return { ok: false, status: 403, error: 'This preview opens through its link, not for forwarding.' }
   if (!room.connected('host')) return { ok: false, status: 503, error: 'The host is not connected.' }
   // Both adapters supply one live guest half per pending or paired channel.
-  // Grants and previews share the seat's ceiling, so rotation cannot bypass it.
-  if (active.length >= TCP_LIMITS.roomPairs || active.filter(s => s.ownerSeat === grant.seat).length >= TCP_LIMITS.seatPairs) return { ok: false, status: 429, error: 'Too many active TCP preview connections.' }
-  if (!tcpAdmit(room, now, grant.seat)) return { ok: false, status: 429, error: 'Too many TCP preview connections or grants. Try again in a minute.' }
-  return { ok: true, room: room.id, pid, port: preview.port, cap, ownerSeat: grant.seat, exp: grant.exp }
+  // A seat's ceiling covers all its previews.
+  if (active.length >= TCP_LIMITS.roomPairs || active.filter(s => s.ownerSeat === seat.id).length >= TCP_LIMITS.seatPairs) return { ok: false, status: 429, error: 'Too many active TCP preview connections.' }
+  if (!tcpAdmit(room, now, seat.id)) return { ok: false, status: 429, error: 'Too many TCP preview connections. Try again in a minute.' }
+  return { ok: true, room: room.id, pid, port: preview.port, ownerSeat: seat.id }
 }
 
 export function announceTCP(room, id, target) {
@@ -1965,21 +1938,20 @@ export function announceTCP(room, id, target) {
 // `out`: the control bytes sent to this half; `read`: how far it has proven
 // it read them (chargeControl); `check`: the room's check it hasn't answered.
 export function tcpState(id, target, side, now) {
-  return { id, room: target.room, pid: target.pid, port: target.port, cap: target.cap, ownerSeat: target.ownerSeat, exp: target.exp,
+  return { id, room: target.room, pid: target.pid, port: target.port, ownerSeat: target.ownerSeat,
     side, deadline: now + TCP_LIMITS.pairMs, ready: false, fin: false, credits: [], remaining: 0, out: 0, read: 0, check: null,
     rate: { start: now, data: 0, control: 0 } }
 }
 
 // A pid's port never changes (a port shared again is a new preview), so the
-// grant, its seat, its expiry and the preview still forwarded say it all.
-export function tcpValid(room, s, now) {
-  const grant = room.previewSessions.get(s.cap)
-  return !room.endedAt && s.room === room.id && grant?.scope === 'tcp' && grant.pid === s.pid && grant.seat === s.ownerSeat && seatKnown(room, s.ownerSeat) && grant.exp === s.exp && s.exp > now && room.previews.get(s.pid)?.tcp === true
+// room, its seat still the room's and the preview still forwarded say it all.
+export function tcpValid(room, s) {
+  return !room.endedAt && s.room === room.id && seatKnown(room, s.ownerSeat) && room.previews.get(s.pid)?.tcp === true
 }
 
 // Reserve once per direction per MiB, persist BEFORE forwarding. Both counters
-// only grow (`used` reserved, `refunded` given back), so a new cap,
-// reconnection or hibernation can't reset usage; what's spent is their difference.
+// only grow (`used` reserved, `refunded` given back), so a new connection,
+// a reconnection or hibernation can't reset usage; what's spent is their difference.
 export function tcpReserve(room, s) {
   if (room.tcpStats.used - (room.tcpStats.refunded ?? 0) + TCP_LIMITS.reserveBytes > TCP_LIMITS.roomBytes) return false
   room.tcpStats.used += TCP_LIMITS.reserveBytes
@@ -2035,7 +2007,7 @@ export function tcpFrame(message) {
 }
 
 export function tcpCheck(from, to, frame, now) {
-  if (!from.ready || !to?.ready || from.id !== to.id || from.room !== to.room || from.pid !== to.pid || from.cap !== to.cap || from.ownerSeat !== to.ownerSeat || from.side === to.side) throw tcpFailure('TCP channel is not paired.')
+  if (!from.ready || !to?.ready || from.id !== to.id || from.room !== to.room || from.pid !== to.pid || from.ownerSeat !== to.ownerSeat || from.side === to.side) throw tcpFailure('TCP channel is not paired.')
   const rate = now - from.rate.start >= TCP_LIMITS.rateWindowMs ? { start: now, data: 0, control: 0 } : { ...from.rate }
   const kind = frame.t === 'data' ? 'data' : 'control'
   if (++rate[kind] > (kind === 'data' ? TCP_LIMITS.dataPerWindow : TCP_LIMITS.controlPerWindow)) throw tcpFailure('TCP message rate exceeded.')
@@ -2086,7 +2058,7 @@ function checkOf(s) {
 // the half again where it can have changed meanwhile, and steps the same frame
 // again: nothing was charged or counted the first time.
 export function tcpStep(room, from, to, frame, now) {
-  if (!tcpValid(room, from, now)) throw tcpFailure('TCP grant revoked or expired.')
+  if (!tcpValid(room, from)) throw tcpFailure('TCP access revoked.')
   tcpCheck(from, to, frame, now)
   if (frame.t === 'data' && from.remaining < frame.n) return { reserve: true }
   return tcpRelay(from, to, frame, now)
