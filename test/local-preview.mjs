@@ -60,6 +60,20 @@ function track(server) {
   server.on('connection', socket => { sockets.add(socket); socket.on('error', () => {}); socket.on('close', () => sockets.delete(socket)) })
   return server
 }
+// Whether a port a helper held can be bound again, within `ms`: one still held then fails.
+async function rebindable(host, port, ms = 3000) {
+  const deadline = Date.now() + ms
+  for (;;) {
+    const server = track(net.createServer())
+    try {
+      await listen(server, host, port)
+      return await close(server)
+    } catch (error) {
+      if (error.code !== 'EADDRINUSE' || Date.now() > deadline) throw error
+      await new Promise(resolve => setTimeout(resolve, 50))
+    }
+  }
+}
 async function freePort() {
   for (let attempt = 0; attempt < 8; attempt++) {
     const v4 = track(net.createServer()), v6 = track(net.createServer())
@@ -893,7 +907,9 @@ async function workerChecks() {
   assert.equal(closed(commands[0].id).length, 2)
   assert.ok(commands.slice(1).every(c => closed(c.id).length === 1), 'shutdown closes each admitted peer exactly once')
   await until(() => localSockets.size === 0 && peers.size === 0, 'worker shutdown owns all TCP/WS sockets')
-  const rebound = track(net.createServer()); await listen(rebound, '127.0.0.1', host.port); await close(rebound)
+  // Its control port is free again. The kernel can hold it a moment after the
+  // process is gone (a kept-alive client here not yet told), so bind until it frees.
+  await rebindable('127.0.0.1', host.port)
   assert.deepEqual(host.rows.filter(r => r.state === 'ready'), [{ state: 'ready', port: host.port }])
   assert.ok(!host.stdout.includes(host.controlToken) && !host.stdout.includes(CAP))
   assert.ok(!host.rows.some(r => r.id === 'REFUSED00000') && !notices.some(r => r.path.includes('REFUSED00000')), 'the open refused 503 never ran')
