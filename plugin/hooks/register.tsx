@@ -145,6 +145,8 @@ const closingA = atom({ plugin: 'shared-session', key: 'closing' } as const, nul
 // `leave:<id>`): the next press does it.
 const stoppingRoomA = atom({ plugin: 'shared-session', key: 'stoppingRoom' } as const, null as string | null)
 const newerA = atom({ plugin: 'shared-session', key: 'newer' } as const, null as string | null)
+// The Update button's run: under way, or what it did and when.
+const updatingA = atom({ plugin: 'shared-session', key: 'updating' } as const, null as { state: 'running' } | { state: 'done'; ok: boolean; text: string; at: number } | null)
 const pagesA = atom({ plugin: 'shared-session', key: 'pages' } as const, {} as Record<string, Record<string, unknown>>)
 const updatesA = atom({ plugin: 'shared-session', key: 'updates' } as const, null as boolean | null)
 const NO_TEAMS: ShareTeams = { server: '', account: null, teams: [], current: null, byLink: false, sessions: [], members: [], providers: [], signingIn: null, invite: null, loaded: 0, error: null }
@@ -2157,7 +2159,12 @@ const UPDATE_TYPED = /^\s*claude\s+plugin\s+(?:marketplace\s+update\s+claude-sha
 // its own Claude Code (\`claude\` on the PATH, else Claude Desktop's newest),
 // then said: in place when this session runs the folder that updates itself,
 // else from a new session.
-async function updateHere($: $) {
+async function updateHere($: $): Promise<{ ok: boolean; text: string }> {
+  // Said in the transcript too, as the typed update command always has.
+  const say = (ok: boolean, text: string) => {
+    $.ui.log(text)
+    return { ok, text }
+  }
   const home = (await $.env.get('HOME')) ?? ''
   const path = (await $.env.get('PATH')) ?? '/usr/bin:/bin'
   const { out, code } = await sh(
@@ -2171,10 +2178,7 @@ async function updateHere($: $) {
       '',
     ].join('\n'),
   )
-  if (code !== 0) {
-    $.ui.log(`Couldn't update Shared Sessions here (${out.trim().split('\n').pop() || 'no output'}). In a terminal on this computer, run: ${UPDATE_COMMAND}`)
-    return
-  }
+  if (code !== 0) return say(false, `Couldn't update Shared Sessions here (${out.trim().split('\n').pop() || 'no output'}). In a terminal on this computer, run: ${UPDATE_COMMAND}`)
   let installed = ''
   try {
     const list = JSON.parse(await $.fs.read(`${(await configDirOf($)) ?? `${home}/.claude`}/plugins/installed_plugins.json`))
@@ -2183,10 +2187,65 @@ async function updateHere($: $) {
   const mine = await ownVersion($)
   if (runsLive($) && installed && newerThan(installed, mine)) {
     await catchUpFromInstalled($)
-    return void $.ui.log(`Shared Sessions ${installed} is installed here and loads into this session in place.`)
+    return say(true, `Shared Sessions ${installed} is installed here and loads into this session in place.`)
   }
-  if (installed && newerThan(installed, mine)) return void $.ui.log(`Shared Sessions ${installed} is installed here. Start a new session to use it (in Claude Desktop, quit and reopen the app); with Updates on in the Room, later releases load in place.`)
-  $.ui.log(`Shared Sessions is up to date here (${installed || mine}).`)
+  if (installed && newerThan(installed, mine)) return say(true, `Shared Sessions ${installed} is installed here. Start a new session to use it (in Claude Desktop, quit and reopen the app); with Updates on in the Room, later releases load in place.`)
+  return say(true, `Shared Sessions is up to date here (${installed || mine}).`)
+}
+
+// The Update button (the Team panel's header, the Room's Settings): the
+// update command run on this computer, as typing it does, and what it did on
+// the button's line. A release that loads in place reloads this module; the
+// line, kept in state, stays.
+async function pressUpdate($: $) {
+  if ((await read($, updatingA))?.state === 'running') return
+  await update($, updatingA, () => ({ state: 'running' }))
+  const done = await updateHere($).catch(error => ({ ok: false, text: `Couldn't update Shared Sessions here: ${String((error as Error)?.message ?? error)}` }))
+  const at = await $.clock.now()
+  await update($, updatingA, () => ({ state: 'done' as const, ...done, at }))
+  // The line goes after two minutes (a module a reload replaced loses this
+  // timer: the line's time, checked as it draws, keeps it from staying).
+  $.clock.after(120_000, () => void update($, updatingA, u => (u?.state === 'done' && u.at === at ? null : u)))
+}
+
+// A newer release, and its Update button, like a Mac app's update prompt:
+// "Update and load here" where releases load in place, "Install update"
+// where only a new session gets it (with Turn on Updates beside it, in full).
+// While it runs and for two minutes after, what it did. Null when there's
+// nothing to say. `compact`: the Team panel's header, the button alone.
+async function updateRow($: $, el: UI, compact: boolean) {
+  const { Box, Text, Button } = el
+  const mine = await ownVersion($)
+  const newer = await read($, newerA)
+  const updates = await read($, updatesA)
+  const updating = await read($, updatingA)
+  const now = await $.clock.now()
+  if (updating?.state === 'running') return <Text key="updating" dimColor>Updating Shared Sessions…</Text>
+  if (updating?.state === 'done' && now - updating.at < 120_000) {
+    return (
+      <Box key="updated" flexDirection="row" gap={1} alignItems="center" justifyContent="space-between">
+        <Box flexShrink={1} minWidth={0}>
+          <Text color={updating.ok ? 'success' : 'error'} wrap={compact ? 'truncate-end' : 'wrap'}>{updating.text}</Text>
+        </Box>
+        {updating.ok || compact ? null : <Button key="copy-update" label="Copy update command" plain onPress={press => void copyText($, UPDATE_COMMAND, 'Update command copied: paste it in a terminal', press.surface)} />}
+      </Box>
+    )
+  }
+  if (!newer || !mine || !newerThan(newer, mine)) return null
+  const inPlace = runsLive($) && Boolean(updates)
+  return (
+    <Box key="update" flexDirection="row" gap={1} alignItems="center" justifyContent="space-between">
+      <Box flexShrink={1} minWidth={0}>
+        <Text color="claude" wrap="truncate-end">{compact ? `● ${newer} is out` : `● Version ${newer} is out (this session runs ${mine})`}</Text>
+      </Box>
+      <Box flexShrink={0} flexDirection="row" gap={1}>
+        {[
+          <Button key="update-now" label={inPlace ? 'Update and load here' : 'Install update'} variant="primary" onPress={() => void pressUpdate($)} />,
+          compact || updates ? null : <Button key="updates-on" label="Turn on Updates" plain dimColor onPress={() => void writeUpdates($, true)} />,
+        ]}
+      </Box>
+    </Box>
+  )
 }
 
 // The newest plugin version this session knows of: its own, or the server's.
@@ -11687,7 +11746,8 @@ export const register: Register = (on, options) => {
     }
 
     // On top: the team (a picker when you're in several), where shares go,
-    // and this session's own place in it.
+    // and this session's own place in it; a newer release and its Update.
+    const teamUpdate = await updateRow($, el, true)
     const header = (
       <Box flexDirection="column" gap={1}>
         <Box flexDirection="row" gap={1} justifyContent="space-between" alignItems="center">
@@ -11698,6 +11758,7 @@ export const register: Register = (on, options) => {
           )}
           <Text dimColor>{team.access === 'link' ? 'anyone with a link joins' : 'members only'}</Text>
         </Box>
+        {teamUpdate}
         {Select
           ? settingOf(
               el,
@@ -12499,16 +12560,10 @@ export const register: Register = (on, options) => {
     const liveUpdates = await read($, liveUpdatesA)
     const switchTo = liveUpdates === 'pinned' ? await switchCommand($) : ''
     const updatesNote = switchTo ? null : updates && liveUpdates === 'running' ? 'This session updates itself: a release loads in place.' : updates && liveUpdates === 'next' ? 'From your next new session on, a release loads in place, no restart.' : null
+    const versionRow = await updateRow($, el, false)
     const settingsPage = (
       <Box flexDirection="column" gap={2}>
-        {newer ? (
-          <Box flexDirection="row" gap={1} alignItems="center" justifyContent="space-between">
-            <Text color="claude" wrap="truncate-end">
-              {updates ? `● Version ${newer} installs by itself; new sessions get it` : `● Version ${newer} is out`}
-            </Text>
-            {updates ? null : <Button key="copy-update" label="Copy update command" plain onPress={press => void copyText($, UPDATE_COMMAND, 'Update command copied: paste it in a terminal', press.surface)} />}
-          </Box>
-        ) : null}
+        {versionRow}
         {pinRefused ? (
           <Box flexDirection="row" gap={1} alignItems="center" justifyContent="space-between">
             <Box flexShrink={1} minWidth={0}>

@@ -390,6 +390,8 @@ declare module 'claude-code' {
       stoppingRoom: string | null
       /** A newer plugin than this one, as the share server last said. */
       newer: string | null
+      /** The Update button's run: under way, or what it did (`text`, `ok`) and when. */
+      updating: { state: 'running' } | { state: 'done'; ok: boolean; text: string; at: number } | null
       /** Whether Claude Code updates this plugin by itself (the marketplace's `autoUpdate`); null when unknown. */
       updates: boolean | null
       /** Updates in place: this session runs the copy that updates itself (`running`), or new sessions will (`next`). */
