@@ -4919,6 +4919,12 @@ async function ensurePreview($: $, room: ShareRoom, port: number, title: string,
     // it answers with a preview of this share's own, never one it then ends
     // (a few seconds at most, in naps the hook's budget doesn't pay for).
     for (let waited = 0; s.endingPorts.has(port) && waited < 5_000; waited += 100) await nap($, 100)
+    // Still being told: the room would answer with the preview that Stop
+    // then ends, whenever it arrives, so nothing is shared yet.
+    if (s.endingPorts.has(port)) {
+      if (sameRoom(room, s)) $.ui.log(`Couldn't share localhost:${port} yet: the room is still being told it stopped. Try again in a moment.`)
+      return null
+    }
     const known = (await read($, sharesA))[String(port)]
     let pid = known && (!said.tcp || known.tcp) ? known.pid : ''
     const made = !pid
