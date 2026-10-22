@@ -51,6 +51,9 @@ function endpoint(value, tcp = false) {
 
 // Socket reads stay paused until ready, and then read only against peer credit.
 // WS reads never pause; an ACK in the reverse direction must always get through.
+// The room may ask this half to prove it read what it was sent (a `check`,
+// once it has sent much it can't see answered: the acks for this half's own
+// data); `x-tcp-checks` says this half answers them, `seen` with the nonce.
 function bridge(socket, url, headers, { emit = notify, timeoutMs = 10_000, onReady = () => {} } = {}) {
   socket.pause()
   let ws, done = false, ready = false, blocked = false, tcpBlocked = false
@@ -160,6 +163,10 @@ function bridge(socket, url, headers, { emit = notify, timeoutMs = 10_000, onRea
       endOutput()
       return
     }
+    if (row.t === 'check' && keys === 'nonce,t') {
+      if (typeof row.nonce !== 'string' || !/^[A-Za-z0-9_-]{16,128}$/.test(row.nonce)) return fail('PROTOCOL')
+      return control({ t: 'seen', nonce: row.nonce })
+    }
     fail('PROTOCOL')
   }
   socket.on('readable', pump)
@@ -168,7 +175,7 @@ function bridge(socket, url, headers, { emit = notify, timeoutMs = 10_000, onRea
   socket.on('error', () => fail('CONNECT'))
   socket.on('close', () => { if (!done && !(sentFin && receivedFin)) fail('CONNECT') })
   try {
-    ws = connect(url, headers, [], { message, drain: () => { blocked = false; pump() }, close: (code, status) => {
+    ws = connect(url, { ...headers, 'x-tcp-checks': '1' }, [], { message, drain: () => { blocked = false; pump() }, close: (code, status) => {
       if (!done && !normalClose(code)) emit({ state: 'error', code: status === 401 || status === 403 ? 'AUTH' : code === 1013 ? 'BUSY' : code === 1009 ? 'BUFFER_LIMIT' : [1002, 1007].includes(code) ? 'PROTOCOL' : 'CONNECT' })
       finish(code)
     } }, { maxMessage: DATA_MAX, timeoutMs })

@@ -55,7 +55,8 @@ class Storage {
   }
   async delete(keys) { for (const key of Array.isArray(keys) ? keys : [keys]) this.data.delete(key) }
   async deleteAll() { this.data.clear() }
-  async setAlarm(at) { this.alarm = at }
+  async setAlarm(at) { this.alarm = at; this.alarms = (this.alarms ?? 0) + 1 }
+  async getAlarm() { return this.alarm }
   async transaction(fn) { return fn(this) }
 }
 class State {
@@ -142,9 +143,15 @@ async function grant(w, bearer = w.member) {
   assert.equal(cap.protocol, 1); assert.equal(cap.port, 34567)
   return cap
 }
-async function open(w, cap, paired = true) {
+// `checks`: both halves say they answer the room's checks, as the plugin's helpers do.
+const upgrade = (w, path, bearer, checks) => {
+  const request = req(w, path, bearer, 'GET', undefined, true)
+  if (checks) request.headers.set('x-tcp-checks', '1')
+  return request
+}
+async function open(w, cap, paired = true, checks = false) {
   const seq = w.obj.room.seq
-  assert.equal((await w.obj.fetch(req(w, `previews/${w.pid}/tunnel`, cap.token, 'GET', undefined, true))).status, 101)
+  assert.equal((await w.obj.fetch(upgrade(w, `previews/${w.pid}/tunnel`, cap.token, checks))).status, 101)
   const notice = jsonControl(w.control).at(-1).tcp
   assert.deepEqual(Object.keys(notice).sort(), ['id', 'pid', 'port'])
   const guest = live(w, 'guest', notice.id)
@@ -154,17 +161,19 @@ async function open(w, cap, paired = true) {
   assert.equal(w.obj.pending.size, 0)
   if (!paired) return { id: notice.id, guest }
   assert.equal((await w.obj.fetch(req(w, `ws/${notice.id}`, w.member, 'GET', undefined, true))).status, 401)
-  assert.equal((await w.obj.fetch(req(w, `ws/${notice.id}`, w.host, 'GET', undefined, true))).status, 101)
+  assert.equal((await w.obj.fetch(upgrade(w, `ws/${notice.id}`, w.host, checks))).status, 101)
   const host = live(w, 'host', notice.id)
   assert.deepEqual(jsonControl(guest), [{ t: 'ready' }]); assert.deepEqual(jsonControl(host), [{ t: 'ready' }])
   assert.equal((await w.obj.fetch(req(w, `ws/${notice.id}`, w.host, 'GET', undefined, true))).status, 409)
   assert.equal(w.obj.room.seq, seq)
   return { id: notice.id, guest, host }
 }
+// An ack as a helper sends it: the credit's n and nonce (the room keeps more beside them).
+const ackOf = c => ({ t: 'ack', n: c.n, nonce: c.nonce })
 async function ack(w, receiver) {
   const c = tcp(receiver).credits[0]
   assert(c)
-  await w.obj.webSocketMessage(receiver, JSON.stringify({ t: 'ack', ...c }))
+  await w.obj.webSocketMessage(receiver, JSON.stringify(ackOf(c)))
   return c
 }
 async function reconstruct(w) {
@@ -603,7 +612,7 @@ try {
       if (mutation === 'reordered') await w.obj.webSocketMessage(q.guest, new Uint8Array([3, 4]).buffer)
       if (mutation === 'reused') await ack(w, q.host)
       const notice = mutation === 'reordered' ? tcp(q.host).credits[1] : { ...c, ...(mutation === 'wrong-n' ? { n: 1 } : {}) }
-      await w.obj.webSocketMessage(mutation === 'wrong-direction' ? q.guest : q.host, JSON.stringify({ t: 'ack', ...notice }))
+      await w.obj.webSocketMessage(mutation === 'wrong-direction' ? q.guest : q.host, JSON.stringify(ackOf(notice)))
       closed(q, 1008)
     }
     const q = await open(w, cap)
@@ -614,50 +623,93 @@ try {
   }
 
   // Control output a half hasn't proven it read is bounded exactly, and the
-  // count survives hibernation. An ack's nonce proves its credit notice read,
-  // so that notice no longer counts (the forwarded ack still does, against
-  // the sender): ACKs cannot make the server queue unbounded control output
-  // to a non-reading sender, and a half that keeps reading isn't cut off.
+  // count survives hibernation. A half's messages arrive in order, so an ack
+  // (its nonce only its credit notice carried) proves everything sent to it
+  // before that notice read; the forwarded ack counts against the sender,
+  // which proves it read those by answering a check. So no ack makes the
+  // server queue unbounded control output to a half that doesn't read, and a
+  // half that keeps reading is never cut off, however long it lives.
   {
     const w = await world(), cap = await grant(w), p = await open(w, cap)
+    const unread = ws => tcp(ws).out - tcp(ws).read
     const n = JSON.stringify({ t: 'credit', n: 1, nonce: 'a'.repeat(22) }).length
-    const s = tcp(p.host); s.controlSent = TCP_LIMITS.bufferBytes - n
+    const s = tcp(p.host); s.out = s.read + TCP_LIMITS.bufferBytes - n
     p.host.serializeAttachment({ tcp: s })
     await w.obj.webSocketMessage(p.guest, new Uint8Array([1]).buffer)
-    assert.equal(tcp(p.host).controlSent, TCP_LIMITS.bufferBytes)
+    assert.equal(unread(p.host), TCP_LIMITS.bufferBytes)
     await reconstruct(w)
-    assert.equal(tcp(p.host).controlSent, TCP_LIMITS.bufferBytes)
-    const sender = tcp(p.guest).controlSent, credit = await ack(w, p.host)
-    assert.equal(tcp(p.host).controlSent, TCP_LIMITS.bufferBytes - n, 'the acknowledged notice is given back')
-    assert.equal(tcp(p.guest).controlSent, sender + JSON.stringify({ t: 'ack', ...credit }).length, 'the forwarded ack is charged to its sender')
-    await w.obj.webSocketMessage(p.guest, new Uint8Array([2]).buffer)
-    assert.equal(p.guest.closes.length, 0); assert.equal(tcp(p.host).controlSent, TCP_LIMITS.bufferBytes)
-    await w.obj.webSocketMessage(p.guest, new Uint8Array([3]).buffer); closed(p, 1008) // not acknowledged: the bound holds
-    const exact = { controlSent: TCP_LIMITS.bufferBytes - 11 }
+    assert.equal(unread(p.host), TCP_LIMITS.bufferBytes)
+    const sender = unread(p.guest), credit = await ack(w, p.host)
+    assert.equal(unread(p.host), 0, 'everything before the acknowledged notice is read')
+    assert.equal(unread(p.guest), sender + JSON.stringify(ackOf(credit)).length, 'the forwarded ack is charged to its sender')
+    assert.equal(jsonControl(p.guest).some(row => row.t === 'check'), false, "a half that didn't say it answers checks gets none")
+    const t = tcp(p.host); t.out = t.read + TCP_LIMITS.bufferBytes - n + 1
+    p.host.serializeAttachment({ tcp: t })
+    await w.obj.webSocketMessage(p.guest, new Uint8Array([2]).buffer); closed(p, 1008) // nothing proven: the bound holds
+    const exact = { out: TCP_LIMITS.bufferBytes - 11, read: 0 }
     assert.equal(chargeControl(exact, { t: 'fin' }).length, 11)
-    assert.equal(exact.controlSent, TCP_LIMITS.bufferBytes)
-    assert.throws(() => chargeControl(exact, { t: 'fin' }), /control output limit/)
-    // One-frame request/response exchanges, every credit acknowledged: past
-    // the 9.8k after which both halves used to close, each half has been
-    // charged only the acks it was forwarded.
+    assert.equal(exact.out - exact.read, TCP_LIMITS.bufferBytes)
+    assert.throws(() => chargeControl(exact, { t: 'fin' }), /unread control output limit/)
+
+    // A half that answers checks: once what it hasn't proven read passes
+    // checkBytes it's asked, one check at a time, and its answer proves all
+    // before the check. A wrong answer, or one with no check out, closes.
+    const q = await open(w, await grant(w), true, true)
+    const checks = () => jsonControl(q.guest).filter(row => row.t === 'check')
+    for (let i = 0; i < 1000 && !checks().length; i++) { await w.obj.webSocketMessage(q.guest, new Uint8Array([i & 255]).buffer); await ack(w, q.host) }
+    assert.equal(checks().length, 1)
+    assert(unread(q.guest) >= TCP_LIMITS.checkBytes && unread(q.guest) < TCP_LIMITS.checkBytes + 128)
+    for (let i = 0; i < 20; i++) { await w.obj.webSocketMessage(q.guest, new Uint8Array([1]).buffer); await ack(w, q.host) }
+    assert.equal(checks().length, 1, 'one check out at a time')
+    await reconstruct(w)
+    await w.obj.webSocketMessage(q.guest, JSON.stringify({ t: 'seen', nonce: checks()[0].nonce }))
+    assert(unread(q.guest) < 21 * 64, 'the answer proves all before its check')
+    assert.equal(tcp(q.guest).check, null)
+    await w.obj.webSocketMessage(q.guest, JSON.stringify({ t: 'seen', nonce: checks()[0].nonce })); closed(q, 1008) // no check out
+    const r = await open(w, await grant(w), true, true)
+    const rs = tcp(r.guest); rs.out = rs.read + TCP_LIMITS.checkBytes
+    r.guest.serializeAttachment({ tcp: rs })
+    await w.obj.webSocketMessage(r.guest, new Uint8Array([1]).buffer); await ack(w, r.host)
+    assert.equal(jsonControl(r.guest).at(-1).t, 'check')
+    await w.obj.webSocketMessage(r.guest, JSON.stringify({ t: 'seen', nonce: 'b'.repeat(22) })); closed(r, 1008) // not its nonce
+
+    // Past the 20,000 frames after which a channel used to close: one-frame
+    // request/response exchanges prove themselves by their acks, and a one-way
+    // stream's sender by its checks; an older helper's one-way sender, which
+    // answers none, still closes where it used to.
     const target = { room: 'r', pid: 'p', port: 1, cap: 'c', ownerSeat: 's', exp: Infinity }
-    const guest = tcpState('id', target, 'guest', 0), host = tcpState('id', target, 'host', 0)
-    guest.ready = host.ready = true; guest.remaining = host.remaining = Number.MAX_SAFE_INTEGER
-    let at = 0
-    const relay = (from, to, frame) => tcpRelay(from, to, frame, at++)
-    const byte = new Uint8Array([7]).buffer
-    for (let i = 0; i < 12_000; i++) {
-      relay(guest, host, { t: 'data', n: 1, data: byte }); relay(host, guest, { t: 'ack', ...host.credits[0] })
-      relay(host, guest, { t: 'data', n: 1, data: byte }); relay(guest, host, { t: 'ack', ...guest.credits[0] })
+    const halves = answers => {
+      const guest = tcpState('id', target, 'guest', 0, answers), host = tcpState('id', target, 'host', 0, answers)
+      guest.ready = host.ready = true; guest.remaining = host.remaining = Number.MAX_SAFE_INTEGER
+      return [guest, host]
     }
-    const ackBytes = JSON.stringify({ t: 'ack', n: 1, nonce: 'a'.repeat(22) }).length
-    assert.equal(guest.controlSent, 12_000 * ackBytes); assert.equal(host.controlSent, 12_000 * ackBytes)
-    // A half that only receives (and acknowledges) is charged nothing at all.
-    const reader = tcpState('id', target, 'host', at), writer = tcpState('id', target, 'guest', at)
-    reader.ready = writer.ready = true; writer.remaining = Number.MAX_SAFE_INTEGER
-    for (let i = 0; i < 12_000; i++) { relay(writer, reader, { t: 'data', n: 1, data: byte }); relay(reader, writer, { t: 'ack', ...reader.credits[0] }) }
-    assert.equal(reader.controlSent, 0); assert.equal(writer.controlSent, 12_000 * ackBytes)
-    console.log('OK exact control-output bound and reconstruction; acknowledged credit notices given back, past 9.8k exchanges')
+    let at = 0
+    const relay = (from, to, frame) => tcpRelay(from, to, frame, at += 2)
+    const byte = new Uint8Array([7]).buffer, most = { both: 0, sender: 0 }
+    const [guest, host] = halves(false)
+    for (let i = 0; i < 100_000; i++) {
+      relay(guest, host, { t: 'data', n: 1, data: byte }); relay(host, guest, ackOf(host.credits[0]))
+      relay(host, guest, { t: 'data', n: 1, data: byte }); relay(guest, host, ackOf(guest.credits[0]))
+      most.both = Math.max(most.both, guest.out - guest.read, host.out - host.read)
+    }
+    assert(most.both < 256, `request/response: ${most.both} bytes unproven at most`)
+    const [reader, writer] = halves(true)
+    let asked = 0
+    for (let i = 0; i < 100_000; i++) {
+      relay(writer, reader, { t: 'data', n: 1, data: byte })
+      for (const message of relay(reader, writer, ackOf(reader.credits[0])).messages) {
+        const row = JSON.parse(message)
+        if (row.t === 'check') { asked++; relay(writer, reader, { t: 'seen', nonce: row.nonce }) }
+      }
+      most.sender = Math.max(most.sender, writer.out - writer.read)
+    }
+    assert(asked > 300 && most.sender < TCP_LIMITS.checkBytes + 128, `one-way: ${asked} checks, ${most.sender} bytes unproven at most`)
+    assert(reader.out - reader.read < 256)
+    const [older, olderReader] = halves(false)
+    let frames = 0
+    assert.throws(() => { for (;;) { relay(older, olderReader, { t: 'data', n: 1, data: byte }); relay(olderReader, older, ackOf(olderReader.credits[0])); frames++ } }, /unread control output limit/)
+    assert(frames > 19_000 && frames < 21_000, `an older helper's one-way sender closes after ${frames} frames, as it did`)
+    console.log('OK exact unread control bound and reconstruction; acks prove all before their notice, checks a sender; past 100k frames both ways')
   }
 
   // Rebind/Open/reload gets a fresh grant: roll this seat/pid's oldest rather
@@ -1513,8 +1565,8 @@ try {
   }
 
   // Streams alone hear room changes: broadcast never opens a TCP or public
-  // attachment (D8b). A refused grant writes nothing but the counters the
-  // room's minute moved (D-m5). The helpers' credit window is the server's (D9g).
+  // attachment (D8b). A refused grant writes nothing: the room's minute of
+  // opens is memory's (D-m5). The helpers' credit window is the server's (D9g).
   {
     const w = await world(), cap = await grant(w), tcpPair = await open(w, cap), publicPair = await openPublic(w, w.pid)
     assert(w.control.tags.includes('stream'))
@@ -1535,10 +1587,28 @@ try {
     const other = (await (await r.obj.fetch(req(r, 'join', null, 'POST', { name: 'Other' }))).json()).token
     writes = r.state.storage.writes.length
     assert.equal((await r.obj.fetch(req(r, `previews/${r.pid}/tunnel`, other, 'POST'))).status, 429)
-    assert.deepEqual(r.state.storage.writes.slice(writes), ['tcp:stats'], "the room's minute moved: its counters alone")
+    assert.deepEqual(r.state.storage.writes.slice(writes), [], "the room's minute moved, in memory: nothing written")
+    assert.equal(r.obj.room.tcpStats.opens.count, TCP_LIMITS.opensPerMinute + 1)
+    // A connection is admitted with no barrier and nothing written, so every
+    // channel's messages go on while a browser opens more; the alarm is
+    // written only when its time is sooner than the one already set.
+    const c = await world(), ccap = await grant(c)
+    let barriers = 0
+    const block = c.state.blockConcurrencyWhile.bind(c.state)
+    c.state.blockConcurrencyWhile = fn => { barriers++; return block(fn) }
+    writes = c.state.storage.writes.length
+    await open(c, ccap, false)
+    assert.equal(c.state.storage.alarm, now + TCP_LIMITS.pairMs, 'the pairing deadline is sooner: set')
+    const alarms = c.state.storage.alarms
+    for (let i = 0; i < 5; i++) await open(c, ccap, false)
+    assert.equal(barriers, 0)
+    assert.deepEqual(c.state.storage.writes.slice(writes), [])
+    assert.equal(c.state.storage.alarms, alarms, 'the same deadline again writes no alarm')
+    await reconstruct(c)
+    assert.equal(c.obj.alarmAt, now + TCP_LIMITS.pairMs, 'a woken room knows the alarm it set')
     const helper = (await import('../plugin/relay/tcp-relay.cjs')).default
     assert.deepEqual([helper.DATA_MAX, helper.WINDOW_FRAMES, helper.WINDOW_BYTES], [TCP_LIMITS.dataBytes, TCP_LIMITS.creditFrames, TCP_LIMITS.creditBytes])
-    console.log("OK broadcast to streams alone; refused grants save only moved counters; the helpers' credit window is the server's")
+    console.log("OK broadcast to streams alone; refused grants and admitted connections write nothing, under no barrier; alarms only when sooner; the helpers' credit window is the server's")
   }
   console.log('PASS TCP Worker/core protocol checks (stdlib stubs; not a deployed Cloudflare test)')
 } finally {

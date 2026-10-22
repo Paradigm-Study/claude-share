@@ -688,10 +688,11 @@ async function publicRelayFailures() {
 async function bridgeChecks() {
   const control = row => frame(1, JSON.stringify(row)), ready = control({ t: 'ready' }), credit = n => control({ t: 'credit', n, nonce: 'N'.repeat(24) })
   let attack
+  const checksSaid = []
   const fixture = track(http.createServer())
-  fixture.on('upgrade', (req, socket, head) => { handshake(req, socket); attack(socket, head) })
+  fixture.on('upgrade', (req, socket, head) => { checksSaid.push(req.headers['x-tcp-checks']); handshake(req, socket); attack(socket, head) })
   const url = `http://127.0.0.1:${await listen(fixture)}/api/rooms/${ROOM}/previews/${PID}/tunnel`
-  for (const bytes of [frame(2, 'before ready'), Buffer.concat([ready, ready]), Buffer.concat([ready, credit(1)]), Buffer.concat([ready, frame(2, 'a'), frame(2, 'b')]), Buffer.concat([ready, frame(2, 'a'), credit(2)]), Buffer.concat([ready, control({ t: 'fin' }), control({ t: 'fin' })]), Buffer.concat([ready, control({ t: 'unknown' })]), Buffer.concat([ready, frame(1, 'x'.repeat(257))])]) {
+  for (const bytes of [frame(2, 'before ready'), Buffer.concat([ready, ready]), Buffer.concat([ready, credit(1)]), Buffer.concat([ready, frame(2, 'a'), frame(2, 'b')]), Buffer.concat([ready, frame(2, 'a'), credit(2)]), Buffer.concat([ready, control({ t: 'fin' }), control({ t: 'fin' })]), Buffer.concat([ready, control({ t: 'unknown' })]), Buffer.concat([ready, frame(1, 'x'.repeat(257))]), Buffer.concat([ready, control({ t: 'check', nonce: 'short' })]), Buffer.concat([ready, control({ t: 'check', n: 1, nonce: 'C'.repeat(24) })])]) {
     const states = []
     attack = socket => socket.write(bytes)
     const listener = await helper.start({ ...dummy(await freePort()), url }, { emit: row => states.push(row) })
@@ -728,6 +729,11 @@ async function bridgeChecks() {
   roomSocket.write(credit(5)); noCredit = false
   await until(() => received.length === 1, 'challenge ACK')
   assert.deepEqual(JSON.parse(received[0].bytes), { t: 'ack', n: 5, nonce: 'N'.repeat(24) })
+  // A check, which this helper said it answers as it connected: its nonce back, and nothing else.
+  assert.ok(checksSaid.length && checksSaid.every(said => said === '1'), JSON.stringify(checksSaid))
+  roomSocket.write(control({ t: 'check', nonce: 'C'.repeat(24) }))
+  await until(() => received.length === 2, 'check answered')
+  assert.deepEqual(JSON.parse(received[1].bytes), { t: 'seen', nonce: 'C'.repeat(24) })
   roomSocket.write(control({ t: 'fin' }))
   await until(() => received.some(row => row.op === 1 && JSON.parse(row.bytes).t === 'fin'), 'reverse FIN')
   roomSocket.end(frame(8, Buffer.from([3, 232])))
@@ -786,7 +792,7 @@ async function bridgeChecks() {
   assert.deepEqual(Buffer.concat(sent), payload)
   assert.equal(windowClient.bytes.toString(), 'reverse')
   await windowRun.close(); running.delete(windowRun)
-  console.log('ok ready/DATA-credit pairing/control validation, no guessed ACK, four-frame window, reverse ACK without deadlock and FIN ordering')
+  console.log('ok ready/DATA-credit pairing/control validation, no guessed ACK, a check answered with its nonce, four-frame window, reverse ACK without deadlock and FIN ordering')
 }
 
 async function workerChecks() {
@@ -1116,12 +1122,16 @@ async function realChain() {
   const base = `/api/rooms/${room.id}`, guest = await api(`${base}/join`, null, { name: 'Guest' })
   const target = new URL(origin)
   const interruptible = target.protocol === 'http:' && (target.hostname === 'localhost' || target.hostname === '[::1]' || (net.isIP(target.hostname) === 4 && target.hostname.startsWith('127.')))
+  // A stand-in for the network between a helper and the room, which can go
+  // down. It passes each write on at once (no Nagle): holding a second small
+  // write for the first's ACK, which Linux delays 40 ms, made every exchange
+  // past it some 80 ms, and the 20,000-frame check below ran out of time on CI.
   async function faultGate() {
     const active = new Set()
     let online = true, refused = 0
-    const server = track(net.createServer({ allowHalfOpen: true }, client => {
+    const server = track(net.createServer({ allowHalfOpen: true, noDelay: true }, client => {
       if (!online) { refused++; client.destroy(); return }
-      const upstream = net.createConnection({ host: target.hostname.replace(/^\[|\]$/g, ''), port: Number(target.port || 80), allowHalfOpen: true })
+      const upstream = net.createConnection({ host: target.hostname.replace(/^\[|\]$/g, ''), port: Number(target.port || 80), allowHalfOpen: true, noDelay: true })
       const destroy = () => { client.destroy(); upstream.destroy() }
       for (const socket of [client, upstream]) {
         active.add(socket); sockets.add(socket)
@@ -1235,6 +1245,52 @@ async function realChain() {
     await stop(v6run)
   }
   console.log('ok real Room/control stream + host/guest helpers, binary/multiframe, exact headers and duplex FIN')
+
+  // One connection past the ~20,000 frames after which a channel used to
+  // close (each forwarded ack charged to its sender for the channel's life):
+  // request/response, one byte a frame each way, its acks proving each half
+  // read; and one way, the host's app writing a byte only once the last one
+  // arrived, so each is a frame of its own and the guest sends nothing back,
+  // the room's checks proving the host's helper read its acks. 800 frames a
+  // second, under the room's 1024 a half (loopback answers far faster than
+  // any room across a network, whose round trip bounds a four-frame window).
+  {
+    const FRAMES = 21_000, began = Date.now()
+    let paced = Date.now()
+    const pace = async i => { if (i % 400 === 399) { await pause(Math.max(0, paced + 500 - Date.now())); paced = Date.now() } }
+    const ping = await wire(raw.port, '127.0.0.1', false)
+    let echoed = 0, arrived
+    ping.client.on('data', bytes => { echoed += bytes.length; arrived?.() })
+    await within((async () => {
+      for (let i = 0; i < FRAMES; i++) {
+        const back = new Promise(resolve => (arrived = resolve))
+        ping.client.write(Buffer.from([i & 255]))
+        await back
+        await pace(i)
+      }
+    })(), 'request/response past 20,000 frames', 120_000).catch(error => { throw new Error(`${error.message}: ${echoed} echoed in ${Date.now() - began} ms, closed ${ping.closed}`) })
+    assert.equal(echoed, FRAMES)
+    ping.client.end()
+    await until(() => ping.closed, 'request/response channel finished', 10_000)
+    let more = () => {}
+    const drip = track(net.createServer({ allowHalfOpen: true }, socket => {
+      let sent = 0
+      more = () => { if (sent < FRAMES) socket.write(Buffer.from([sent++ & 255])); else if (!socket.writableEnded) socket.end() }
+      more()
+    }))
+    const dripRun = await ready(await grant(await share(await listen(drip))))
+    const oneWay = await wire(dripRun.port, '127.0.0.1', false)
+    let dripped = 0
+    paced = Date.now()
+    oneWay.client.on('data', async bytes => {
+      for (let i = 0; i < bytes.length; i++) { await pace(dripped++); more() }
+    })
+    await until(() => oneWay.closed, 'one way past 20,000 frames', 120_000).catch(error => { throw new Error(`${error.message}: ${dripped} arrived`) })
+    assert.equal(dripped, FRAMES)
+    assert.ok(!dripRun.rows.some(row => row.state === 'channel-error') && !hostWorker.rows.some(row => row.state === 'error'), JSON.stringify([...dripRun.rows, ...hostWorker.rows].filter(row => row.state?.includes('error'))))
+    await stop(dripRun)
+    console.log(`ok one connection past 20,000 frames: ${FRAMES} request/response exchanges and ${FRAMES} one-way frames (${((Date.now() - began) / 1000).toFixed(1)} s)`)
+  }
 
   const appRequests = [], upgrades = [], largeResponses = [], LARGE = 24 * 1024 * 1024 + 11, chunk = Buffer.alloc(65536, 0x6a)
   let largeWritten = 0

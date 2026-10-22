@@ -17,7 +17,7 @@ import { readFileSync, writeFileSync, renameSync } from 'node:fs'
 import { Readable } from 'node:stream'
 
 import { Directory, mapStore, providersFrom, BODY_CHARS } from './teams.mjs'
-import { Room, ROOM_ID, SEAT_TIMEOUT_MS, createRoom, roomRequest, previewRequest, previewRoomOf, notFound, json, publicOrigin, token, missingPage, previewMissing, previewTooLarge, homePage, outdatedClient, versionInfo, limitOf, limitedResponse, closedResponse, Windows, SOCKET_ID, previewSocketTarget, publicPairValid, hostHalfClose, announceSocket, hostSocketAllowed, relayRejectCode, streamedRoomBody, bodyLimit, bodyTooLarge, PROXY_BODY_MAX, sendableClose, TCP_LIMITS, PUBLIC_LIMITS, revokeMatches, tcpSocketTarget, announceTCP, tcpState, tcpValid, tcpReserve, tcpRefund, tcpFailure, tcpFrame, tcpStep, chargeControl, mergeTCPStats } from './core.mjs'
+import { Room, ROOM_ID, SEAT_TIMEOUT_MS, createRoom, roomRequest, previewRequest, previewRoomOf, notFound, json, publicOrigin, token, missingPage, previewMissing, previewTooLarge, homePage, outdatedClient, versionInfo, limitOf, limitedResponse, closedResponse, Windows, SOCKET_ID, previewSocketTarget, publicPairValid, hostHalfClose, announceSocket, hostSocketAllowed, relayRejectCode, streamedRoomBody, bodyLimit, bodyTooLarge, PROXY_BODY_MAX, sendableClose, TCP_LIMITS, PUBLIC_LIMITS, revokeMatches, tcpSocketTarget, announceTCP, tcpState, answersChecks, tcpCounted, tcpValid, tcpReserve, tcpRefund, tcpFailure, tcpFrame, tcpStep, chargeControl, mergeTCPStats } from './core.mjs'
 
 const PORT = Number(process.env.PORT ?? 8787)
 const PUBLIC_URL = process.env.PUBLIC_URL
@@ -107,17 +107,17 @@ function save(immediate = false) {
   } else if (!saveTimer) saveTimer = setTimeout(later(DATA_FILE, write), 500)
 }
 
-// Every room's TCP counters, in their own small file: an admission and a
-// reservation are written before the connection or bytes they allow, a
-// refund (budget given back) soon after, since a lost one only undercounts
-// what's left.
+// Every room's TCP byte budget, in its own small file: a reservation is
+// written before the bytes it allows, a refund (budget given back) soon
+// after, since a lost one only undercounts what's left. The minute of opens
+// is memory's (tcpCounted), so no TCP connection waits on a write.
 let statsTimer = null
 function saveStats(immediate = false) {
   if (!STATS_FILE) return
   const write = () => {
     statsTimer = null
     const tmp = `${STATS_FILE}.tmp`
-    const counted = [...rooms.values()].filter(r => r.tcpStats.used || r.tcpStats.opens?.count)
+    const counted = [...rooms.values()].filter(r => r.tcpStats.used)
     writeFileSync(tmp, JSON.stringify({ rooms: Object.fromEntries(counted.map(r => [r.id, r.tcpStats])) }))
     renameSync(tmp, STATS_FILE)
   }
@@ -214,13 +214,13 @@ async function route(req) {
   if (req.method === 'POST' && reject) return rejectRelay(room, req, reject[1])
 
   const admin = Boolean(process.env.ADMIN_TOKEN) && req.headers.get('authorization') === `Bearer ${process.env.ADMIN_TOKEN}`
-  const counters = JSON.stringify(room.tcpStats)
+  const counters = tcpCounted(room.tcpStats)
   const { response, changed } = await roomRequest(room, req, rest, now, origin, { previewOrigin: previewOrigin(req), admin, directory, isCurrent: () => rooms.get(id) === room })
   // Forwarding approvals and revocations are durable before a successful
   // response, just as a newly minted TCP grant is.
   if (changed) save(/^previews(?:$|\/[^/]+\/(?:end|tunnel)$)/.test(rest) || rest === 'end' || rest === 'admin-end')
-  // A grant the room's minute refused still counted in it: only the counters.
-  if (JSON.stringify(room.tcpStats) !== counters) saveStats(true)
+  // The byte budget changed without the room (a revocation's refund): only the counters.
+  if (tcpCounted(room.tcpStats) !== counters) saveStats(true)
   return response
 }
 
@@ -503,14 +503,10 @@ server.on('upgrade', upgrading((nodeReq, socket, head) => {
   if (tunnel) {
     const room = ROOM_ID.test(tunnel[1]) ? rooms.get(tunnel[1]) : null
     if (!room) return refuse(socket, 404)
-    const counters = JSON.stringify(room.tcpStats)
     const target = tcpSocketTarget(room, req, tunnel[2], Date.now(), pairsOf(room, 'tcp').map(p => p.target))
-    try {
-      if (JSON.stringify(room.tcpStats) !== counters) saveStats(true)
-    } catch { return refuse(socket, 503, 'TCP admission could not be saved.') }
     if (!target.ok) return refuse(socket, target.status, target.error)
     const id = token(12)
-    const pair = { roomId: room.id, pid: target.pid, scope: 'tcp', target, guest: tcpState(id, target, 'guest', Date.now()), host: null, guestWs: null, hostWs: null }
+    const pair = { roomId: room.id, pid: target.pid, scope: 'tcp', target, guest: tcpState(id, target, 'guest', Date.now(), answersChecks(req)), host: null, guestWs: null, hostWs: null }
     pairs.set(id, pair)
     if (!announceTCP(room, id, target)) {
       pairs.delete(id)
@@ -534,7 +530,7 @@ server.on('upgrade', upgrading((nodeReq, socket, head) => {
       closePair(m[2], pair, 1008, 'TCP grant expired or relay timed out')
       return refuse(socket, 410)
     }
-    pair.host = tcpState(m[2], pair.target, 'host', Date.now())
+    pair.host = tcpState(m[2], pair.target, 'host', Date.now(), answersChecks(req))
     pair.hostWs = acceptSocket(nodeReq, socket, head, '', { tcp: true,
       message: data => tcpMessage(m[2], pair, 'host', data),
       close: code => closePair(m[2], pair, code === 1000 || code === 1006 ? 1011 : sendableClose(code), 'TCP socket closed'),

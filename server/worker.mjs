@@ -63,6 +63,8 @@ import {
   tcpSocketTarget,
   announceTCP,
   tcpState,
+  answersChecks,
+  tcpCounted,
   tcpValid,
   tcpReserve,
   tcpRefund,
@@ -269,12 +271,17 @@ export class RoomObject {
     // 128 MB is shared). TCP never queues pre-ready payload.
     this.pending = new Map()
     this.pendingBytes = 0
+    // The counters as last saved (tcpCounted): a room that never used TCP never writes them.
+    this.tcpSaved = tcpCounted({ used: 0 })
+    // When the alarm set is due (schedule), null when none is or it's unknown.
+    this.alarmAt = null
     state.blockConcurrencyWhile(async () => {
+      this.alarmAt = (await state.storage.getAlarm()) ?? null
       const meta = await state.storage.get('meta')
       if (!meta) { this.cleanupPublic(Date.now()); return }
       const stored = await state.storage.list({ prefix: 'e:' })
       const tcpStats = (await state.storage.get('tcp:stats')) ?? meta.tcpStats
-      this.tcpSaved = tcpStats ? JSON.stringify(tcpStats) : ''
+      this.tcpSaved = tcpCounted(tcpStats ?? { used: 0 })
       const files = await this.loadFiles(meta.files)
       this.attach(Room.resume({ ...meta, tcpStats, files, events: [...stored.values()] }, Date.now()))
       this.cleanupPublic(Date.now())
@@ -395,7 +402,8 @@ export class RoomObject {
       this.attach(room)
       this.savedSeq = 0
       await this.persist()
-      await this.state.storage.setAlarm(now + ROOM_TTL_MS)
+      this.alarmAt = now + ROOM_TTL_MS
+      await this.state.storage.setAlarm(this.alarmAt)
       return response
     }
 
@@ -435,11 +443,11 @@ export class RoomObject {
 
     const admin = Boolean(this.env?.ADMIN_TOKEN) && req.headers.get('authorization') === `Bearer ${this.env.ADMIN_TOKEN}`
     const ctx = { previewOrigin: req.headers.get('x-preview-origin') ?? '', admin, directory: directoryClient(this.env), isCurrent: () => this.room === room }
-    const counters = JSON.stringify(room.tcpStats)
+    const counters = tcpCounted(room.tcpStats)
     const { response, changed } = await roomRequest(room, req, rest, now, origin, ctx)
     if (changed) await this.persist()
-    // A grant the room's minute refused still counted in it: its key alone.
-    else if (this.room === room && JSON.stringify(room.tcpStats) !== counters) await this.persistTCPStats()
+    // The byte budget changed without the room (a revocation's refund): its key alone.
+    else if (this.room === room && tcpCounted(room.tcpStats) !== counters) await this.persistTCPStats()
     // A grant made is something to sweep when it expires; a refused one isn't.
     if (changed) await this.schedule()
     return response
@@ -527,34 +535,32 @@ export class RoomObject {
       const stats = mergeTCPStats(await storage.get('tcp:stats'), this.room.tcpStats)
       await storage.put('tcp:stats', stats)
       this.room.tcpStats = stats
-      this.tcpSaved = JSON.stringify(stats)
+      this.tcpSaved = tcpCounted(stats)
     })
   }
 
   async tunnelSocket(req, pid, now) {
     if (req.method !== 'GET') return json({ error: 'Expected a WebSocket GET.' }, 405)
-    // Block only admission/storage, not established channels. No process-local
-    // pending queue, HTTP stream or timer survives this short upgrade request.
-    return this.state.blockConcurrencyWhile(async () => {
-      // A half past its pairing deadline holds no place: checked right before
-      // admission, the one check outside the alarm.
-      this.closeStaleTCP(now)
-      const active = this.tcpSockets().map(ws => ws.deserializeAttachment().tcp).filter(s => s.side === 'guest')
-      const count = this.room.tcpStats.opens.count, start = this.room.tcpStats.opens.start
-      const target = tcpSocketTarget(this.room, req, pid, now, active)
-      if (count !== this.room.tcpStats.opens.count || start !== this.room.tcpStats.opens.start) await this.persistTCPStats()
-      if (!target.ok) return json({ error: target.error }, target.status)
-      const id = token(12)
-      const [client, server] = Object.values(new WebSocketPair())
-      this.state.acceptWebSocket(server, ['tcp', `tg:${id}`])
-      server.serializeAttachment({ tcp: tcpState(id, target, 'guest', now) })
-      if (!announceTCP(this.room, id, target)) {
-        this.closeTCP(id, 1011, 'TCP host disconnected')
-        return json({ error: 'The TCP host disconnected.' }, 503)
-      }
-      await this.schedule()
-      return new Response(null, { status: 101, webSocket: client })
-    })
+    // Admission is synchronous up to the socket's acceptance, so no barrier:
+    // one (blockConcurrencyWhile) held every channel's messages in the room
+    // for each connection a browser opened. The minute of opens it counts is
+    // memory's, as every other minute's is; nothing is written for it.
+    // A half past its pairing deadline holds no place: checked right before
+    // admission, the one check outside the alarm.
+    this.closeStaleTCP(now)
+    const active = this.tcpSockets().map(ws => ws.deserializeAttachment().tcp).filter(s => s.side === 'guest')
+    const target = tcpSocketTarget(this.room, req, pid, now, active)
+    if (!target.ok) return json({ error: target.error }, target.status)
+    const id = token(12)
+    const [client, server] = Object.values(new WebSocketPair())
+    this.state.acceptWebSocket(server, ['tcp', `tg:${id}`])
+    server.serializeAttachment({ tcp: tcpState(id, target, 'guest', now, answersChecks(req)) })
+    if (!announceTCP(this.room, id, target)) {
+      this.closeTCP(id, 1011, 'TCP host disconnected')
+      return json({ error: 'The TCP host disconnected.' }, 503)
+    }
+    await this.schedule()
+    return new Response(null, { status: 101, webSocket: client })
   }
 
   sendTCP(ws, data) {
@@ -697,7 +703,7 @@ export class RoomObject {
       }
       const [client, server] = Object.values(new WebSocketPair())
       this.state.acceptWebSocket(server, ['tcp', `th:${wsId}`])
-      const host = tcpState(wsId, s, 'host', now)
+      const host = tcpState(wsId, s, 'host', now, answersChecks(req))
       try {
         s.ready = host.ready = true
         const guestReady = chargeControl(s, { t: 'ready' }), hostReady = chargeControl(host, { t: 'ready' })
@@ -872,7 +878,7 @@ export class RoomObject {
     const room = this.room
     if (!room) return
     // The counters' own key only when they changed: most rooms never use TCP.
-    if (JSON.stringify(room.tcpStats) !== this.tcpSaved) await this.persistTCPStats()
+    if (tcpCounted(room.tcpStats) !== this.tcpSaved) await this.persistTCPStats()
     // Files are kept beside their bytes (store.put), the newest in meta too.
     const { events, meta } = metaOf(room)
     const entries = { meta }
@@ -891,7 +897,9 @@ export class RoomObject {
 
   // The next thing due: a disconnected seat's grace running out, a grant or
   // browser session expiring, a socket's pairing deadline, or the room's
-  // expiry.
+  // expiry. Set only when that's sooner than the alarm already set (or none
+  // is): one set for later fires early, and alarm() looks again and sets the
+  // next, so a connection or a stream's turn writes no alarm of its own.
   async schedule() {
     const room = this.room
     if (!room) return
@@ -913,7 +921,11 @@ export class RoomObject {
       if (att.exp) due.push(att.exp)
       if (att.pb && !att.paired && att.deadline) due.push(att.deadline)
     }
-    await this.state.storage.setAlarm(Math.max(now + 1, Math.min(...due)))
+    const at = Math.max(now + 1, Math.min(...due))
+    if (this.alarmAt !== null && this.alarmAt > now && this.alarmAt <= at) return
+    // Noted before the write: setAlarm calls land in the order made.
+    this.alarmAt = at
+    try { await this.state.storage.setAlarm(at) } catch (error) { this.alarmAt = null; throw error }
   }
 
   // A host with a stream open is active now, however long ago it last spoke.
@@ -924,6 +936,7 @@ export class RoomObject {
   }
 
   async alarm() {
+    this.alarmAt = null
     if (!this.room) return
     const now = Date.now()
     if (now - this.lastActive(now) > ROOM_TTL_MS) {

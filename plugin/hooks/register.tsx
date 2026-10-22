@@ -2497,7 +2497,7 @@ async function closeSteps($: $, s: RoomScope, live: boolean, how: Exit, opts: Ex
     // cookies) out of the way at once; then the room hears of it (5, here).
     if (win) {
       await killWindow($, win.profile, false, onPort).catch(() => {})
-      if (!hostProfile(win.name)) await sh($, trashScript(win.dir, win.profile, randomSecret().slice(0, 12)))
+      if (!hostProfile(win.name)) await sh($, trashScript(win.dir, win.profile, randomSecret().slice(0, 12)), WINDOW_STEP_MS)
     }
     await tellRoom($, room, guest)
     await update($, roomA, () => null)
@@ -3491,7 +3491,7 @@ async function settleReclaim($: $, back: Reclaim, forGood: boolean) {
       const { dir, profile, name } = await profileOf($, room, w.profile)
       if (!hostProfile(name)) {
         await killWindow($, profile, false).catch(() => {})
-        await sh($, trashScript(dir, profile, randomSecret().slice(0, 12)))
+        await sh($, trashScript(dir, profile, randomSecret().slice(0, 12)), WINDOW_STEP_MS)
       } else if (w.port) await killWindow($, profile, false, w.port).catch(() => {})
     }
     await update($, sidebarA, () => saved.sidebar ?? null)
@@ -4795,15 +4795,28 @@ const savedNames = new Map<string, string>()
 let excluded = false
 let toolNames: Set<string> | null = null
 
-async function sh($: $, script: string): Promise<{ out: string; code: number | null }> {
+// `within`: what must answer in that time, as the preview window's steps
+// must (they go one at a time: one that hung would hold every Open after
+// it). Past it the call answers `late`, with no code, and lets the child go.
+async function sh($: $, script: string, within?: number): Promise<{ out: string; code: number | null; late?: true }> {
   let out = ''
-  try {
-    const child = $.process.spawn({ argv: ['/bin/sh', '-s'], input: script })
-    for await (const chunk of child) if (chunk.stream === 'stdout') out += chunk.text
-    return { out, code: (await child.result.catch(() => ({ code: null }))).code }
-  } catch {
-    return { out, code: null }
-  }
+  let child: HookStream<ProcessSpawnChunk, ProcessSpawnResult> | undefined
+  const run = (async () => {
+    try {
+      child = $.process.spawn({ argv: ['/bin/sh', '-s'], input: script })
+      for await (const chunk of child) if (chunk.stream === 'stdout') out += chunk.text
+      return { out, code: (await child.result.catch(() => ({ code: null }))).code }
+    } catch {
+      return { out, code: null }
+    }
+  })()
+  if (within === undefined) return run
+  let timer: Timer | undefined
+  const answer = await Promise.race([run, new Promise<null>(done => { timer = $.clock.after(within, () => done(null)) })])
+  timer?.cancel()
+  if (answer) return answer
+  void child?.return(undefined as never).catch(() => {})
+  return { out, code: null, late: true }
 }
 
 // A room address taken as it is (`globoff`): curl reads [1-9] and {a,b} in
@@ -6025,6 +6038,11 @@ type WindowChoice = { window: true; platform: WindowPlatform; browser: string; n
 // its cost, the window's welcome) are said once in that room (its scope's).
 const saidOnce = new Set<string>()
 const WINDOW_CLOSING = 'The preview window is still closing. Open the preview again in a moment.'
+// How long each of the window's shell steps may take (sh's `within`): a look
+// at a profile, its settings, a close (which waits up to 3 s) and a profile's
+// cleanup all answer well inside it; the browser look can ask a Firefox
+// wrapper's --version under `timeout 10`, so it gets longer.
+const WINDOW_STEP_MS = 15_000, BROWSER_LOOK_MS = 30_000
 // This session closed its own window as its proxy ended under it (routes the proxy refused, looks that failed).
 const windowLost = (host: string) => `The preview window closed: its connection to ${host}'s previews stopped working. Press Open preview to open it again.`
 
@@ -6036,7 +6054,7 @@ async function detectBrowser($: $, s: RoomScope = scope): Promise<BrowserFound &
   detection.task ??= (async () => {
     try {
       const override = ((await $.env.get('SHARED_SESSION_BROWSER')) ?? '').trim()
-      const { out, code } = await sh($, detectScript(override))
+      const { out, code } = await sh($, detectScript(override), BROWSER_LOOK_MS)
       if (code === 0 && /^platform=/m.test(out)) {
         // Another browser is taken before a Firefox whose profile path is too long for Linux (windowChoice says why when there's none).
         const found = parseDetect(out, !(await firefoxTooDeep($)))
@@ -6056,7 +6074,7 @@ async function detectBrowser($: $, s: RoomScope = scope): Promise<BrowserFound &
 async function sessionBus($: $): Promise<boolean> {
   if ((await $.env.get('DBUS_SESSION_BUS_ADDRESS'))?.trim()) return true
   const runtime = (await $.env.get('XDG_RUNTIME_DIR'))?.trim()
-  return Boolean(runtime) && (await sh($, `# shared-session: is there a session bus\n[ -S ${sq(`${runtime}/bus`)} ]\n`)).code === 0
+  return Boolean(runtime) && (await sh($, `# shared-session: is there a session bus\n[ -S ${sq(`${runtime}/bus`)} ]\n`, WINDOW_STEP_MS)).code === 0
 }
 
 // Whether a preview window can open here, and when it can't, why.
@@ -6144,12 +6162,12 @@ async function windowProbe($: $, profile: string): Promise<WindowSeen | null | u
   return 'why' in look ? undefined : look.seen
 }
 
-// The look, and for one that failed, why: the shell never ran, or ended in
-// trouble.
+// The look, and for one that failed, why: the shell never ran, took too long
+// (WINDOW_STEP_MS), or ended in trouble.
 async function windowLook($: $, profile: string): Promise<{ seen: WindowSeen | null } | { why: string }> {
-  const { out, code } = await sh($, lockScript(profile))
+  const { out, code, late } = await sh($, lockScript(profile), WINDOW_STEP_MS)
   if (code === 0) return { seen: windowOf(out, profile) }
-  return { why: code === null ? "the look at its profile didn't run" : `the look at its profile ended with code ${code}` }
+  return { why: late ? 'the look at its profile took too long' : code === null ? "the look at its profile didn't run" : `the look at its profile ended with code ${code}` }
 }
 
 // A window just started is there once a process holds its profile, which
@@ -6168,7 +6186,7 @@ async function windowAppears($: $, profile: string, ms: number, seen: () => bool
 // `port`: only the window on that proxy port, as on a host's profile, which
 // another session's window may hold. Whether there was one to close.
 async function killWindow($: $, profile: string, wait: boolean, port?: number): Promise<boolean> {
-  return (await sh($, killScript(profile, wait, port))).out.includes('killed')
+  return (await sh($, killScript(profile, wait, port), WINDOW_STEP_MS)).out.includes('killed')
 }
 
 // Chrome reads its WebRTC setting as it starts: written before a start, so
@@ -6185,7 +6203,7 @@ async function setChromePrefs($: $, profile: string): Promise<boolean> {
     }
   }
   const merged = chromePrefs(text)
-  return merged === null || (await sh($, chromePrefsScript(profile, merged))).code === 0
+  return merged === null || (await sh($, chromePrefsScript(profile, merged), WINDOW_STEP_MS)).code === 0
 }
 
 type BrowserProxy = {
@@ -6246,7 +6264,7 @@ async function upstreamProxy($: $): Promise<Upstream | null> {
   if (env.invalid) noteOnce($, 'invalid', UPSTREAM_NOT_TAKEN)
   if (env.upstream) return env.upstream
   if ((await detectBrowser($)).platform !== 'darwin') return null
-  const system = upstreamFromScutil((await sh($, 'scutil --proxy 2>/dev/null\n')).out)
+  const system = upstreamFromScutil((await sh($, 'scutil --proxy 2>/dev/null\n', WINDOW_STEP_MS)).out)
   if (system.invalid) noteOnce($, 'invalid', UPSTREAM_NOT_TAKEN)
   if (system.pac) noteOnce($, 'pac', "PAC proxies aren't followed; Google sign-in may fail in the preview window.")
   return system.upstream
@@ -6792,7 +6810,7 @@ async function chooseProfile($: $, open: WindowOpen): Promise<true | WindowOutco
   if (alive && 'unknown' in alive) return unknownLook($, alive.unknown)
   const { dir, profile, name } = chosen
   Object.assign(open, { dir, profile, name, alive })
-  if ((await windowStep(open, sh($, profileScript(dir, profile)))).code !== 0) return { failed: PROFILE_UNMADE }
+  if ((await windowStep(open, sh($, profileScript(dir, profile), WINDOW_STEP_MS))).code !== 0) return { failed: PROFILE_UNMADE }
   // This session's window still up (its port kept) on the profile it fell
   // back from (a host's whose hold was busy) keeps its record:
   // its looks, and Leave, still find it. The room's own is named in its
@@ -6829,7 +6847,7 @@ function unknownLook($: $, why: string): WindowOutcome {
 async function takeProfile($: $, open: WindowOpen, dir: string, profile: string): Promise<boolean> {
   const token = randomSecret()
   for (let waited = 0; ; waited += 500) {
-    const { code } = await sh($, launchLockScript(dir, profile, token))
+    const { code } = await sh($, launchLockScript(dir, profile, token), WINDOW_STEP_MS)
     if (code === 0) {
       open.lock = { profile, token }
       return true
@@ -6843,7 +6861,7 @@ async function letProfileGo($: $, open: WindowOpen) {
   const lock = open.lock
   if (!lock) return
   open.lock = undefined
-  await sh($, launchUnlockScript(lock.profile, lock.token))
+  await sh($, launchUnlockScript(lock.profile, lock.token), WINDOW_STEP_MS)
 }
 
 // The window's proxy for the open (on the port of the window open on the
@@ -6989,7 +7007,7 @@ async function launchWindow($: $, open: WindowOpen, proxy: BrowserProxy): Promis
 // settings, its proxy's port among them (`firefoxProfileScript`), or
 // Chrome's WebRTC setting (`setChromePrefs`).
 async function windowSettings($: $, open: WindowOpen, port: number): Promise<boolean> {
-  return open.choice.family === 'firefox' ? (await sh($, firefoxProfileScript(open.profile!, port))).code === 0 : setChromePrefs($, open.profile!)
+  return open.choice.family === 'firefox' ? (await sh($, firefoxProfileScript(open.profile!, port), WINDOW_STEP_MS)).code === 0 : setChromePrefs($, open.profile!)
 }
 
 // Open: the window's this session's, on its proxy's port, with the page in
@@ -7036,7 +7054,7 @@ async function windowOpened($: $, open: WindowOpen, port: number, withPage = tru
 // removed it). A host's stays for their other rooms.
 async function abandonWindow($: $, s: RoomScope, dir: string, profile: string, launched: boolean, port?: number) {
   if (launched && (await windowAppears($, profile, 3_000))) await killWindow($, profile, true, port)
-  if (s.ending === 'end' && !hostProfile(profile.slice(profile.lastIndexOf('/') + 1))) await sh($, trashScript(dir, profile, randomSecret().slice(0, 12)))
+  if (s.ending === 'end' && !hostProfile(profile.slice(profile.lastIndexOf('/') + 1))) await sh($, trashScript(dir, profile, randomSecret().slice(0, 12)), WINDOW_STEP_MS)
 }
 
 // Leaving: windows being opened finish first (three seconds at most), so
@@ -7118,7 +7136,7 @@ async function endPreviewWindow($: $, room: { server: string; id: string }, save
     return
   }
   await killWindow($, profile, true)
-  await sh($, trashScript(dir, profile, randomSecret().slice(0, 12)))
+  await sh($, trashScript(dir, profile, randomSecret().slice(0, 12)), WINDOW_STEP_MS)
 }
 
 // At start: trash left over, and profiles of a day ago whose window is gone
@@ -7128,7 +7146,7 @@ async function gcPreviewProfiles($: $) {
   if (!(await $.fs.exists(dir).catch(() => false))) return
   const room = await read($, roomA)
   const keep = room && (await read($, modeA)) === 'guest' ? (await profileOf($, room)).name : ''
-  await sh($, gcScript(dir, keep))
+  await sh($, gcScript(dir, keep), WINDOW_STEP_MS)
 }
 
 // What a joined place keeps of its window: the profile is the room's while
