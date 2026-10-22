@@ -47,9 +47,11 @@ import {
   previewSocketTarget,
   publicPairValid,
   hostHalfClose,
+  tcpHalfClose,
   announceSocket,
   hostSocketAllowed,
   relayRejectCode,
+  rejectReason,
   streamedRoomBody,
   bodyLimit,
   bodyTooLarge,
@@ -617,8 +619,8 @@ export class RoomObject {
       const after = check()
       if (after) return after
       if (!code) return json({ error: 'Expected exactly a BUSY or CONNECT code.' }, 400)
-      if (guest) this.closeTCP(id, code, code === 1013 ? 'TCP host busy' : 'TCP local connect failed')
-      else this.unpair(browser, browser.deserializeAttachment(), code, code === 1013 ? 'Preview host busy' : 'Preview local connect failed')
+      if (guest) this.closeTCP(id, code, rejectReason('TCP', code))
+      else this.unpair(browser, browser.deserializeAttachment(), code, rejectReason('Preview', code))
       await this.schedule()
       return json({ ok: true })
     })
@@ -813,7 +815,7 @@ export class RoomObject {
   async webSocketClose(ws, code, reason) {
     const att = ws.deserializeAttachment()
     if (att?.tcp) {
-      this.closeTCP(att.tcp.id, code === 1000 || code === 1006 ? 1011 : sendableClose(code), 'TCP socket closed')
+      this.closeTCP(att.tcp.id, tcpHalfClose(code), 'TCP socket closed')
       await this.schedule()
       return
     }

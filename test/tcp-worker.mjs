@@ -1578,6 +1578,8 @@ try {
     const sent = w.control.sent.length
     w.obj.broadcast()
     assert.equal(opened.n, 0); assert.equal(w.control.sent.length, sent + 1)
+    // The line a stream hears says what's shared now (Room.previewList).
+    assert.deepEqual(JSON.parse(w.control.sent.at(-1)).previews, [{ pid: w.pid, port: 34567, tcp: true, title: 'localhost:34567' }])
     const r = await world()
     while ((await r.obj.fetch(req(r, `previews/${r.pid}/tunnel`, r.member, 'POST'))).status === 200);
     let writes = r.state.storage.writes.length
