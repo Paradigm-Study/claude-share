@@ -3,18 +3,15 @@
 // only the plugin's independent bearer; room credentials arrive once on stdin.
 'use strict'
 
-const http = require('http')
-const https = require('https')
-const { startHost, controlServer, run, endpoint, portOK, tokenOK, notify, failure, safeCode } = require('./tcp-relay.cjs')
+const { startHost, controlServer, run, roomSettings, roomPost, endpoint, portOK, notify, failure, safeCode } = require('./tcp-relay.cjs')
 const LIMITS = Object.freeze({ peers: 64, sockets: 8, body: 4096, headers: 8192, notifications: 64, timeoutMs: 2000 })
 const ID = /^[A-Za-z0-9_-]{8,40}$/, PID = /^[A-Za-z0-9_-]{1,64}$/
 
 function configOf(cfg) {
-  if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg) || Object.keys(cfg).sort().join(',') !== 'controlToken,room,token,version' || !tokenOK(cfg.token) || typeof cfg.controlToken !== 'string' || !/^[A-Za-z0-9_-]{43,128}$/.test(cfg.controlToken) || cfg.controlToken === cfg.token || typeof cfg.version !== 'string' || !/^[\w.-]{0,64}$/.test(cfg.version) || typeof cfg.room !== 'string') throw failure('INVALID_CONFIG')
+  const settings = roomSettings(cfg, 'controlToken,room,token,version')
   // Reuse the transport's origin/path rules; no command supplies a URL or auth.
-  endpoint(`${cfg.room.replace(/^http/, 'ws')}/ws/WWWWWWWW`, true)
-  if (!/^https?:\/\//.test(cfg.room)) throw failure('INVALID_CONFIG')
-  return { ...cfg }
+  endpoint(`${settings.room.replace(/^http/, 'ws')}/ws/WWWWWWWW`, true)
+  return settings
 }
 
 function commandOf(command) {
@@ -22,7 +19,6 @@ function commandOf(command) {
   const keys = Object.keys(command).sort().join(',')
   if (command.op === 'open' && keys === 'id,op,pid,port' && typeof command.id === 'string' && ID.test(command.id) && typeof command.pid === 'string' && PID.test(command.pid) && portOK(command.port)) return command
   if (command.op === 'close-preview' && keys === 'op,pid' && typeof command.pid === 'string' && PID.test(command.pid)) return command
-  if (command.op === 'reject' && keys === 'code,id,op' && typeof command.id === 'string' && ID.test(command.id) && ['BUSY', 'CONNECT'].includes(command.code)) return command
   throw failure('INVALID_CONFIG')
 }
 
@@ -30,21 +26,12 @@ async function start(cfg, { emit = notify, signal } = {}) {
   const settings = configOf(cfg), peers = new Map(), notifications = new Set()
   let stopped = false, closing
 
+  // The room closes a guest's socket this worker couldn't take: BUSY, or CONNECT.
   function remoteReject(id, code) {
     if (stopped || notifications.size >= LIMITS.notifications) return
-    let req
-    try {
-      const body = JSON.stringify({ code })
-      req = (settings.room.startsWith('https:') ? https : http).request(`${settings.room}/ws/${id}/reject`, {
-        method: 'POST', agent: false, maxHeaderSize: LIMITS.headers,
-        headers: { authorization: `Bearer ${settings.token}`, 'x-shared-session-version': settings.version, 'content-type': 'application/json', 'content-length': Buffer.byteLength(body), connection: 'close' },
-      }, res => res.destroy())
-      notifications.add(req)
-      const timer = setTimeout(() => req.destroy(), LIMITS.timeoutMs)
-      req.once('close', () => { clearTimeout(timer); notifications.delete(req) })
-      req.on('error', () => {})
-      req.end(body)
-    } catch { req?.destroy() }
+    const controller = new AbortController()
+    notifications.add(controller)
+    void roomPost(settings, `ws/${id}/reject`, { code }, controller, LIMITS.timeoutMs).finally(() => notifications.delete(controller))
   }
   function release(id, peer) {
     if (peers.get(id) !== peer) return
@@ -53,7 +40,6 @@ async function start(cfg, { emit = notify, signal } = {}) {
     emit({ state: 'closed', id, ...(peer.code ? { code: peer.code } : {}) })
   }
   function command(row) {
-    if (row.op === 'reject') { remoteReject(row.id, row.code); return true }
     if (row.op === 'close-preview') {
       for (const peer of peers.values()) if (peer.pid === row.pid) { peer.cancelled = true; peer.controller.close() }
       return true
@@ -82,7 +68,7 @@ async function start(cfg, { emit = notify, signal } = {}) {
     signal?.removeEventListener('abort', close)
     const ending = control.close() // First: no command is taken after this.
     for (const peer of peers.values()) { peer.cancelled = true; peer.controller.close() }
-    for (const req of notifications) req.destroy()
+    for (const controller of notifications) controller.abort()
     closing = (async () => {
       await ending
       await Promise.all([...peers.values()].map(peer => peer.controller.closed))

@@ -218,7 +218,7 @@ On Cloudflare, `npx wrangler secret put GITHUB_CLIENT_ID` (and `GITHUB_CLIENT_SE
 | `server/core.mjs` | Room logic and the link page, shared by both servers |
 | `server/worker.mjs`, `wrangler.toml` | Cloudflare Worker + Durable Object |
 | `server/node.mjs` | Zero-dependency Node server |
-| `plugin/relay/` | Helpers run under Node: TCP forwarding (`local-preview.cjs`, `tcp-worker.cjs`, `tcp-relay.cjs`), the public preview's WebSockets (`ws-relay.cjs`), the preview window's proxy (`browser-proxy.cjs`), same-project discovery (`discover.cjs`) |
+| `plugin/relay/` | Helpers run under Node: TCP forwarding (`local-preview.cjs`, `tcp-worker.cjs`, `tcp-relay.cjs`), the public preview's WebSockets (`ws-relay.cjs`, over the WebSocket client in `ws.cjs`), the preview window's proxy (`browser-proxy.cjs`), same-project discovery (`discover.cjs`), messages between sessions (`mailbox.cjs`, `receipt.cjs`) |
 | `test/e2e.mjs` | End to end: a real host and guests through a server |
 
 ```bash

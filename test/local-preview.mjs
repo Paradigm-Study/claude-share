@@ -18,6 +18,7 @@ import { fileURLToPath } from 'node:url'
 import { setTimeout as pause } from 'node:timers/promises'
 import helper from '../plugin/relay/local-preview.cjs'
 import wsHelper from '../plugin/relay/ws-relay.cjs'
+import ws from '../plugin/relay/ws.cjs'
 import tcpRelay from '../plugin/relay/tcp-relay.cjs'
 
 const ROOT = fileURLToPath(new URL('../', import.meta.url))
@@ -211,7 +212,7 @@ function handshake(req, socket, extra = '') {
   socket.write(`HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Accept: ${accept}\r\n${extra}\r\n`)
 }
 function connect(url, headers = {}, on = {}, options) {
-  const socket = wsHelper.connect(url, headers, [], on, options)
+  const socket = ws.connect(url, headers, [], on, options)
   websockets.add(socket)
   return socket
 }
@@ -858,14 +859,16 @@ async function workerChecks() {
   assert.equal(notices.at(-1).headers.authorization, `Bearer ${CAP}`)
   assert.equal(notices.at(-1).headers['x-shared-session-version'], VERSION)
 
+  // Each open of a port nobody listens on is refused CONNECT to the room: 64 such at once, at most.
   holdRejects = true
-  const beforeRejects = notices.length
-  for (let i = 0; i < 80; i++) assert.equal((await ipc(host, { op: 'reject', id: `RJ${String(i).padStart(10, '0')}`, code: 'BUSY' })).status, 200)
+  const beforeRejects = notices.length, nobody = await freePort()
+  for (let i = 0; i < 80; i++) assert.equal((await ipc(host, { op: 'open', id: `RJ${String(i).padStart(10, '0')}`, pid: 'pv1', port: nobody })).status, 200)
   await until(() => notices.length >= beforeRejects + 64, 'reject notification bound exercised')
+  await until(() => host.rows.filter(r => r.state === 'closed' && r.id.startsWith('RJ')).length === 80, 'every refused open released')
   assert.equal(notices.length, beforeRejects + 64, 'no unbounded reject queue')
   await pause(2100)
   holdRejects = false
-  assert.equal((await ipc(host, { op: 'reject', id: 'REJECTAGAIN', code: 'CONNECT' })).status, 200)
+  assert.equal((await ipc(host, { op: 'open', id: 'REJECTAGAIN', pid: 'pv1', port: nobody })).status, 200)
   await until(() => notices.at(-1).path.endsWith('/REJECTAGAIN/reject'), 'reject slots recover after timeout')
   assert.equal(notices.length, beforeRejects + 65, 'rejects are never retried')
 

@@ -28,11 +28,11 @@ import { attachmentsOf, delivered, neutralize, PEER_ID, rowsFromMessage, rowsToM
 import type { Media, RoomImage, Row } from './rows'
 import { SERVER_URL } from './server'
 import { readsInside } from './paths'
-import { base64url, browserFamily, browserName, chromeFlags, chromePrefs, chromePrefsScript, detectScript, FIREFOX_MIN, FIREFOX_PATH_MAX, firefoxFlags, firefoxProfileScript, gcScript, hostProfileName, killScript, LAUNCH_LOCK_BUSY, launchArgv, launchLockScript, launchUnlockScript, lockScript, parseDetect, profileName, profileScript, proxyLine, trashScript, windowOf } from './window'
+import { browserFamily, browserName, chromeFlags, chromePrefs, chromePrefsScript, detectScript, FIREFOX_MIN, FIREFOX_PATH_MAX, firefoxFlags, firefoxProfileScript, gcScript, hostProfileName, killScript, LAUNCH_LOCK_BUSY, launchArgv, launchLockScript, launchUnlockScript, lockScript, parseDetect, profileName, profileScript, proxyLine, trashScript, windowOf } from './window'
 import type { BrowserFamily, BrowserFound, WindowPlatform } from './window'
 import { upstreamFromEnv, upstreamFromScutil } from './upstream'
 import type { Upstream } from './upstream'
-import { alsoUses, cleanLabel, dependencyFor, dependencyOf, dependencyTitle, discoverResult, everyName, everyService, pageLook, previewHost, previewScheme, previewUrl, questionsOf, relayedResult, rootMissing, serviceName, servicesOf, shareTooWords, urlHost, urlScheme } from './preview'
+import { alsoUses, cleanLabel, dependencyFor, dependencyOf, dependencyTitle, discoverResult, everyName, everyService, heldResult, pageLook, previewHost, previewScheme, previewUrl, questionsOf, relayedResult, rootMissing, serviceName, servicesOf, shareTooWords, urlHost, urlScheme } from './preview'
 import type { Discovered, DiscoveredService, PageLook, PreviewHost } from './preview'
 import { curlString, localHeaders, pageHead, pageHeaderBlock, PROXY_FETCH_MAX, PROXY_HEAD_MAX, proxyHead, proxyPage } from './proxy'
 
@@ -736,23 +736,7 @@ type LocalPreviewRun = {
 }
 
 type TcpRelayRun = { id: string; pid: string; port: number; scope: RoomScope; worker: TcpWorkerRun }
-type TcpWorkerRun = {
-  room: ShareRoom
-  scope: RoomScope
-  controlToken: string
-  ready: Promise<boolean>
-  settle: (ready: boolean) => void
-  /** Its commands, one at a time (`tcpControl`). */
-  queue: Lane
-  started: boolean
-  stopped: boolean
-  port?: number
-  child?: HookStream<ProcessSpawnChunk, ProcessSpawnResult>
-  timer?: Timer
-  stopping?: Promise<void>
-  /** How it ended, when that's known: NODE, no Node here to run it. */
-  error?: 'NODE'
-}
+type TcpWorkerRun = Helper & { room: ShareRoom; started: boolean }
 const tcpRejecting = new Set<string>()
 const TCP_RELAYS = 64
 const TCP_UNSUPPORTED = 'This server does not support local TCP forwarding. Update the server and host plugin, or choose Public link.'
@@ -882,14 +866,16 @@ class RoomScope {
   live = true
   /** How it ended: left for good (`end`: a room's window profile goes), or kept with the session's place (`keep`). */
   ending: 'end' | 'keep' = 'end'
-  /** Host: raw TCP connections are taken (shared now, or the room's state taken back after a restart or a reload). */
-  tcp = false
   /** By preview: a Stop, Close or Leave of it bumps it, so what began before (an Open, a listener) ends. */
   readonly epochs = new Map<string, number>()
   /** Host: previews being unshared now: their TCP connections end, and none starts. */
   readonly revoking = new Set<string>()
-  /** Host: previews stopped here whose end the room hasn't heard: when each may be told again, how many tries failed, and one being told now (`endPreview`). */
-  readonly unended = new Map<string, { at: number; tries: number; trying?: boolean }>()
+  /** Host: when the Stops the room didn't hear were last told again (`endUnheard`). */
+  toldEnds = -Infinity
+  /** Host: ports a share is being made for now (`ensurePreview`): a Stop told again leaves them alone. */
+  readonly sharingPorts = new Map<number, number>()
+  /** Host: ports whose preview's end the room is being told now (`endPreview`): a share of one waits for it. */
+  readonly endingPorts = new Map<number, number>()
   /** Guest: one Open of a preview at a time (`openShownPreview`). */
   readonly previewOpens = new Map<string, Promise<void>>()
   /** Guest: the room's preview window (`WindowContext`). */
@@ -912,7 +898,6 @@ class RoomScope {
   close(ending: 'end' | 'keep'): Promise<void> {
     if (this.live) {
       this.live = false
-      this.tcp = false
       this.ending = ending
       this.window.stopWatching()
     }
@@ -1811,8 +1796,6 @@ async function absorb($: $, room: ShareRoom, mode: ShareMode, event: ServerEvent
 // more. Long-lived work, so a reseat meanwhile changes nothing here.
 async function previewEnded($: $, room: ShareRoom, s: RoomScope, mode: ShareMode, pid: string, port: unknown) {
   if (!s.live) return
-  // Heard, however: a Stop the room hadn't heard needs telling no more.
-  if (mode === 'host') s.unended.delete(pid)
   if (mode === 'host') await unshare($, room, pid)
   if (!s.live) return
   // Stopped by the host just now: the window asking for it again asks the
@@ -3053,7 +3036,6 @@ async function makeRoom($: $, surface: RenderSurface | undefined, opts: { histor
   }
   // Its scope, before the room is anyone's to see.
   const s = openScope(room, 'host')
-  s.tcp = true
   await update($, roomA, () => room)
   await update($, modeA, () => 'host')
   await update($, invitedA, () => ({}))
@@ -3672,7 +3654,6 @@ async function resumeHosting($: $) {
     // Back: the room's scope from here, and a session ending saves it as it would any room.
     reclaiming = null
     const s = openScope(room, 'host')
-    s.tcp = true
     await update($, modeA, m => (s.live ? 'host' : m))
     // Its mailboxes listen again where they were.
     void restoreMailboxes($).catch(() => {})
@@ -3812,57 +3793,36 @@ async function peerMissing($: $): Promise<string | null> {
 // at a reload ends it (`endOldHelper`) and starts its own. It goes with the
 // room, or once this Claude Code is gone; a failure's next message starts
 // another.
-type MailboxRun = {
+// Why one never started (`error`): NODE, no Node here; UNSUPPORTED, a system
+// it can't run on; STARTUP, anything else.
+type MailboxRun = Helper & {
   room: ShareRoom
-  scope: RoomScope
-  controlToken: string
-  ready: Promise<boolean>
-  settle: (ready: boolean) => void
-  /** Its commands, one at a time (`mailboxControl`). */
-  queue: Lane
-  stopped: boolean
-  port?: number
+  /** The served helper's own pid, once it's ready (the launcher's gone by then). */
   pid?: number
-  /** Why it never started: no Node here, or a system it can't run on. */
-  error?: 'NODE' | 'UNSUPPORTED' | 'STARTUP'
-  timer?: Timer
   /** Tells it to go: an exit command, else its process ended. */
   end?: () => Promise<void>
-  stopping?: Promise<void>
 }
 
 function mailboxOf($: $, room: ShareRoom, s: RoomScope): MailboxRun | null {
   if (!s.live || !stillInRoom(room, s)) return null
   const had = s.children.mailbox
   if (had && !had.stopped) return had
-  let settle!: (ready: boolean) => void
-  const ready = new Promise<boolean>(done => { settle = done })
-  const run: MailboxRun = { room, scope: s, controlToken: randomSecret(), ready, settle, queue: lane(), stopped: false }
+  const run: MailboxRun = { ...newHelper(s), room }
   run.end = () => endMailbox($, run)
   s.children.mailbox = run
-  run.timer = $.clock.after(6_000, () => {
-    $.ui.log("Shared session: the mailboxes' helper didn't start in 6 s", { to: 'debug' })
-    void finishMailbox(run)
-  })
   void runMailbox($, run)
   return run
 }
 
 function finishMailbox(run: MailboxRun): Promise<void> {
-  if (run.stopping) return run.stopping
-  run.stopped = true
-  run.timer?.cancel()
-  run.settle(false)
-  run.stopping = (async () => {
-    try { await run.end?.() } catch {}
+  return finishHelper(run, async () => run.end?.(), () => {
     if (run.scope.children.mailbox === run) run.scope.children.mailbox = null
-  })()
-  return run.stopping
+  })
 }
 
 // Gone: told to, else ended as the one process its pid names (`killHelper`).
 async function endMailbox($: $, run: MailboxRun) {
-  const told = run.port ? await controlPost($, run.port, run.controlToken, { op: 'exit' }, { answers: [200], failed: () => {} }) : 0
+  const told = run.control ? await controlPost($, run.control, run.controlToken, { op: 'exit' }, { answers: [200], failed: () => {} }) : 0
   if (told !== 200 && run.pid) await killHelper($, run.pid)
   if (run.pid) await update($, mailboxHelperA, h => (h?.pid === run.pid ? null : h))
 }
@@ -3883,36 +3843,38 @@ async function endOldHelper($: $) {
   await killHelper($, old.pid)
 }
 
+// The launcher's lines are read to its end, stopped or not: the helper it
+// started lives apart from it, so its ready line is how this one ends it.
 async function runMailbox($: $, run: MailboxRun) {
   try {
     const own = await $.env.get('CLAUDE_CODE_MESSAGING_SOCKET')
     const version = await ownVersion($)
     if (!own || run.stopped || run.scope.children.mailbox !== run || !run.scope.live) return void finishMailbox(run)
-    const input = { room: `${run.room.server}/api/rooms/${run.room.id}`, token: run.room.token, controlToken: run.controlToken, version, own, dir: own.slice(0, own.lastIndexOf('/')) }
-    const child = $.process.spawn({ argv: ['/bin/sh', '-c', FIND_NODE, 'sh', `${$.plugin.root}/relay/mailbox.cjs`], input: JSON.stringify(input) })
-    for await (const line of helperLines(child)) {
-      let message: { state?: string; port?: number; pid?: number; code?: string }
-      try { message = JSON.parse(line) } catch { continue }
-      if (message?.state === 'ready' && validPort(message.port) && Number.isSafeInteger(message.pid) && message.pid! > 1 && !run.port) {
-        run.port = message.port
-        run.pid = message.pid
-        run.timer?.cancel()
-        // A module that replaces this one ends it by this.
-        await update($, mailboxHelperA, () => ({ room: roomIdentity(run.room), pid: message.pid!, port: message.port! }))
-        $.ui.log(`Shared session: the mailboxes' helper (${message.pid}) is ready`, { to: 'debug' })
-        // Stopped meanwhile (the room's end, or a reload): it goes now.
-        if (run.stopped || run.scope.children.mailbox !== run || !run.scope.live) {
-          const first = !run.stopping
-          await finishMailbox(run)
-          if (!first) await endMailbox($, run)
-          return
-        }
-        run.settle(true)
-      } else if (message?.state === 'error') run.error = message.code === 'UNSUPPORTED' ? 'UNSUPPORTED' : 'STARTUP'
+    const settings = { room: `${run.room.server}/api/rooms/${run.room.id}`, token: run.room.token, controlToken: run.controlToken, version, own, dir: own.slice(0, own.lastIndexOf('/')) }
+    const late = () => {
+      $.ui.log("Shared session: the mailboxes' helper didn't start in 6 s", { to: 'debug' })
+      return finishMailbox(run)
     }
+    await runHelper($, run, 'mailbox.cjs', settings, 6_000, late, () => true, async said => {
+      if (said.state === 'error') return void (run.error = said.code === 'UNSUPPORTED' ? 'UNSUPPORTED' : 'STARTUP')
+      if (said.state !== 'ready' || !validPort(said.port) || !Number.isSafeInteger(said.pid) || (said.pid as number) <= 1 || run.control !== undefined) return
+      const pid = said.pid as number
+      helperReady(run, said.port)
+      run.pid = pid
+      // A module that replaces this one ends it by this.
+      await update($, mailboxHelperA, () => ({ room: roomIdentity(run.room), pid, port: said.port as number }))
+      $.ui.log(`Shared session: the mailboxes' helper (${pid}) is ready`, { to: 'debug' })
+      // Stopped meanwhile (the room's end, or a reload): it goes now.
+      if (run.stopped || run.scope.children.mailbox !== run || !run.scope.live) {
+        const first = !run.stopping
+        await finishMailbox(run)
+        if (!first) await endMailbox($, run)
+        return
+      }
+      run.settle(true)
+    })
     // The launcher is gone once the helper is ready; without that, nothing runs.
-    if ((await helperEnded(child)) === 'NODE') run.error = 'NODE'
-    if (!run.port) await finishMailbox(run)
+    if (run.control === undefined) await finishMailbox(run)
   } catch (error) {
     // Its mailboxes go with it; the next message starts another.
     $.ui.log(`Shared session: the mailboxes' helper: ${String((error as Error)?.message ?? error)}`, { to: 'debug' })
@@ -3923,20 +3885,16 @@ async function runMailbox($: $, run: MailboxRun) {
 // One command to the room's mailboxes' helper, in turn: 200, or why not (404
 // a mailbox it doesn't have, 409 one it couldn't open or a frame it couldn't
 // write, 429 full). Anything else, no answer in two seconds included, ends it.
-async function mailboxControl($: $, run: MailboxRun, body: Record<string, unknown>): Promise<number> {
-  return run.queue.run(async () => {
-    if (!(await run.ready) || run.stopped || run.scope.children.mailbox !== run) return 0
-    const failed = () => {
-      $.ui.log(`Shared session: the mailboxes' helper didn't answer ${String(body.op)}, so it was ended`, { to: 'debug' })
-      void finishMailbox(run)
-    }
-    const status = await controlPost($, run.port!, run.controlToken, body, { answers: [200, 404, 409, 429], failed })
-    return !run.stopped && run.scope.children.mailbox === run ? status : 0
-  })
+function mailboxControl($: $, run: MailboxRun, body: Record<string, unknown>): Promise<number> {
+  const failed = () => {
+    $.ui.log(`Shared session: the mailboxes' helper didn't answer ${String(body.op)}, so it was ended`, { to: 'debug' })
+    void finishMailbox(run)
+  }
+  return helperPost($, run, () => run.scope.children.mailbox === run, async () => body, { answers: [200, 404, 409, 429], failed })
 }
 
 // Host: a mailbox listening, its helper started as need be; else why not.
-type MailboxOpen = MailboxRun | { error: NonNullable<MailboxRun['error']> | 'OPEN' }
+type MailboxOpen = MailboxRun | { error: string }
 async function openMailbox($: $, room: ShareRoom, s: RoomScope, box: string, route: Extract<SharePeerRoute, { kind: 'host' }>): Promise<MailboxOpen> {
   const run = mailboxOf($, room, s)
   if (!run) return { error: 'STARTUP' }
@@ -5055,12 +5013,24 @@ function shareOver(old: HostShare | undefined, pid: string, said: Omit<HostShare
 // whatever happens to listen there (a database).
 async function ensurePreview($: $, room: ShareRoom, port: number, title: string, said: Omit<HostShare, 'pid'>): Promise<HostShare | null> {
   const s = scope
-  // A Stop being taken in finishes first: its old preview is never shared again.
-  await sharesLane.idle()
-  const known = (await read($, sharesA))[String(port)]
-  let pid = known && (!said.tcp || known.tcp) ? known.pid : ''
-  const made = !pid
+  // A Stop told again meanwhile leaves this port alone (`endUnheard`).
+  const done = markPort(s.sharingPorts, port)
   try {
+    // A Stop being taken in finishes first: its old preview is never shared again.
+    await sharesLane.idle()
+    // The room still being told of a Stop of this port: once it has heard,
+    // it answers with a preview of this share's own, never one it then ends
+    // (a few seconds at most, in naps the hook's budget doesn't pay for).
+    for (let waited = 0; s.endingPorts.has(port) && waited < 5_000; waited += 100) await nap($, 100)
+    // Still being told: the room would answer with the preview that Stop
+    // then ends, whenever it arrives, so nothing is shared yet.
+    if (s.endingPorts.has(port)) {
+      if (sameRoom(room, s)) $.ui.log(`Couldn't share localhost:${port} yet: the room is still being told it stopped. Try again in a moment.`)
+      return null
+    }
+    const known = (await read($, sharesA))[String(port)]
+    let pid = known && (!said.tcp || known.tcp) ? known.pid : ''
+    const made = !pid
     if (made) pid = (await api<{ pid: string }>($, room.server, `/api/rooms/${room.id}/previews`, { method: 'POST', token: room.token, body: { port, title, ...(said.tcp ? { tcp: true } : {}) } })).pid
     if (!sameRoom(room, s)) return null
     const share = await writeShare($, s, port, old => shareOver(old, pid, said, made))
@@ -5068,6 +5038,19 @@ async function ensurePreview($: $, room: ShareRoom, port: number, title: string,
   } catch (error) {
     if (sameRoom(room, s)) $.ui.log(`Couldn't share localhost:${port}: ${String((error as Error)?.message ?? error)}`)
     return null
+  } finally {
+    done()
+  }
+}
+
+// Host: work under way on a port (a share being made, a Stop being told),
+// counted, so one of two at once finishing leaves the other's mark.
+function markPort(marks: Map<number, number>, port: number): () => void {
+  marks.set(port, (marks.get(port) ?? 0) + 1)
+  return () => {
+    const left = (marks.get(port) ?? 1) - 1
+    if (left > 0) marks.set(port, left)
+    else marks.delete(port)
   }
 }
 
@@ -5154,47 +5137,52 @@ async function stopPreview($: $, pid: string) {
   if (validPort(port)) await stopPorts($, room, [port])
   // Nothing reaches it through this session from now on, whatever the server hears.
   await unshare($, room, pid)
-  if (!sameRoom(room, s) || (await endPreview($, room, s, pid))) return
+  if (!sameRoom(room, s) || (await endPreview($, room, s, pid, port))) return
   if (sameRoom(room, s)) $.ui.toast(`Stopped sharing ${validPort(port) ? `localhost:${port}` : 'that preview'}. The server couldn't be told yet, so guests may still see it listed, but nothing reaches it. The server is told again when this session reconnects, or when you press Stop again.`)
 }
 
 // Host: the room told a preview stopped here has ended. It ends in Shown
-// once the room has heard it (or never had it): until then its Stop stays
-// in the Room, and the room is told again as the stream connects, each try
-// further apart (`endUnheard`), so guests don't see a preview listed that
-// nothing reaches.
-async function endPreview($: $, room: ShareRoom, s: RoomScope, pid: string): Promise<boolean> {
+// once the room has heard it (or never had it): until then it stays open
+// there with its Stop, which, with nothing here sharing it, is a Stop the
+// room didn't hear (`endUnheard`), so guests don't see a preview listed that
+// nothing reaches for long.
+async function endPreview($: $, room: ShareRoom, s: RoomScope, pid: string, port?: number): Promise<boolean> {
+  // A share of its port meanwhile waits for the room to hear it (`ensurePreview`).
+  const done = validPort(port) ? markPort(s.endingPorts, port) : () => {}
   try {
-    await api($, room.server, `/api/rooms/${room.id}/previews/${pid}/end`, { method: 'POST', token: room.token })
-  } catch (error) {
-    // The room has no such preview (404) or is gone (410): nothing to tell.
-    if (!(error instanceof ApiError && (error.status === 404 || error.status === 410))) {
-      const tries = (s.unended.get(pid)?.tries ?? 0) + 1
-      const shared = Object.values(await read($, sharesA)).some(share => share.pid === pid)
-      if (s.live && !shared) s.unended.set(pid, { at: (await $.clock.now()) + Math.min(5 * 60_000, 5_000 * 2 ** tries), tries })
-      return false
+    try {
+      await api($, room.server, `/api/rooms/${room.id}/previews/${pid}/end`, { method: 'POST', token: room.token })
+    } catch (error) {
+      // The room has no such preview (404) or is gone (410): nothing to tell.
+      if (!(error instanceof ApiError && (error.status === 404 || error.status === 410))) return false
     }
+    await update($, shownA, list => (!s.live ? list : list.map(x => (x.pid === pid ? { ...x, closed: true } : x))))
+    return true
+  } finally {
+    done()
   }
-  s.unended.delete(pid)
-  await update($, shownA, list => (!s.live ? list : list.map(x => (x.pid === pid ? { ...x, closed: true } : x))))
-  return true
 }
 
-// Host, connected: the Stops the room didn't hear, told again once each
-// one's wait is over. One shared again since stands.
+// Host, connected: the Stops the room didn't hear (a preview open in Shown
+// that nothing here shares now), told again, once a minute at most. One
+// shared again since (the room gave its port the same preview back) is
+// shared, so it stands. Shown and what's shared are kept through a reload
+// and with the place, so those are told again after one too.
 async function endUnheard($: $, room: ShareRoom, s: RoomScope) {
-  if (!s.unended.size || !sameRoom(room, s)) return
   const now = await $.clock.now()
-  for (const [pid, unheard] of [...s.unended]) {
+  if (!sameRoom(room, s) || now - s.toldEnds < 60_000) return
+  s.toldEnds = now
+  for (const x of await read($, shownA)) {
     if (!sameRoom(room, s)) return
-    if (unheard.at > now || unheard.trying || s.unended.get(pid) !== unheard) continue
-    unheard.trying = true
-    try {
-      if (Object.values(await read($, sharesA)).some(share => share.pid === pid)) s.unended.delete(pid)
-      else await endPreview($, room, s, pid)
-    } finally {
-      unheard.trying = false
-    }
+    if (x.kind !== 'preview' || !x.pid || x.closed) continue
+    // What's shared as it is now, not as this began: one told before may
+    // have waited long, and the host may have shared its port again
+    // meanwhile, which the room answers with the same preview. The look is
+    // a write (`update`): a read would see this dispatch's first moment.
+    await sharesLane.idle()
+    const shares = await update($, sharesA, v => v)
+    if (Object.values(shares).some(share => share.pid === x.pid) || s.revoking.has(x.pid) || (validPort(x.port) && s.sharingPorts.has(x.port))) continue
+    await endPreview($, room, s, x.pid, x.port)
   }
 }
 
@@ -5622,6 +5610,91 @@ async function controlPost($: $, port: number, token: string, body: Record<strin
   } finally {
     timer.cancel()
   }
+}
+
+// The helpers that last (the host's TCP worker and its mailboxes' helper,
+// the window's proxy): one process each for the room, kept with its scope's
+// children (`RoomChildren`). Each has a control secret of its own (256 bits,
+// module memory only) and is ready once it says so in its time (`ready`:
+// true). It's over (false) when it doesn't, says what it shouldn't, or
+// ends: from then on its commands answer nothing (`helperPost`), and its
+// own finish puts it away (`finishHelper`).
+type Helper = {
+  scope: RoomScope
+  controlToken: string
+  ready: Promise<boolean>
+  settle: (ready: boolean) => void
+  /** Its commands, one at a time (`helperPost`). */
+  queue: Lane
+  stopped: boolean
+  stopping?: Promise<void>
+  /** Its control listener's port on 127.0.0.1, once it's ready. */
+  control?: number
+  child?: Child
+  /** Its time to say it's ready (`runHelper`). */
+  timer?: Timer
+  /** How it ended, when that's known: NODE, no Node here to run it; else its own word. */
+  error?: string
+}
+
+function newHelper(scope: RoomScope): Helper {
+  let settle!: (ready: boolean) => void
+  const ready = new Promise<boolean>(done => { settle = done })
+  return { scope, controlToken: randomSecret(), ready, settle, queue: lane(), stopped: false }
+}
+
+// Over, once: its commands answer nothing from now (`ready`: false), and
+// `end` puts it away (its process, or however it lives), then `after`.
+function finishHelper(h: Helper, end: () => Promise<unknown>, after?: () => void): Promise<void> {
+  if (h.stopping) return h.stopping
+  h.stopped = true
+  h.timer?.cancel()
+  h.settle(false)
+  h.stopping = (async () => {
+    try { await end() } catch {}
+    after?.()
+  })()
+  return h.stopping
+}
+
+// Its process, under Node (`FIND_NODE`), its settings on stdin. What it says,
+// a JSON line at a time, goes to `take` (which throws for a line it
+// shouldn't say) until it ends or `still` says no more; not ready in
+// `startMs`, it's over (`finish`). How it ended is kept (`error`).
+async function runHelper($: $, h: Helper, file: string, settings: Record<string, unknown>, startMs: number, finish: () => unknown, still: () => boolean, take: (said: Record<string, unknown>) => unknown) {
+  const child = $.process.spawn({ argv: ['/bin/sh', '-c', FIND_NODE, 'sh', `${$.plugin.root}/relay/${file}`], input: JSON.stringify(settings) })
+  h.child = child
+  h.timer = $.clock.after(startMs, () => void finish())
+  const ended = helperEnded(child)
+  for await (const line of helperLines(child)) {
+    if (!still()) break
+    let said: unknown
+    try { said = JSON.parse(line) } catch { continue }
+    if (said && typeof said === 'object' && !Array.isArray(said)) await take(said as Record<string, unknown>)
+  }
+  // Only a known end: a mailbox's open tells its failure by `error` being there.
+  const end = await ended
+  if (end) h.error ??= end
+}
+
+// It said it's ready: its control port, and its time to start no longer runs.
+function helperReady(h: Helper, control: number) {
+  h.control = control
+  h.timer?.cancel()
+}
+
+// One command to a helper once it's ready, in turn: its answer, or 0 when
+// it's over (or went over meanwhile), `still` says it isn't its room's any
+// more, or `body` has nothing to send by then. Which answers are answers,
+// and what a failure does, are the caller's (`ControlPolicy`).
+async function helperPost($: $, h: Helper, still: () => boolean, body: () => Promise<Record<string, unknown> | null>, policy: ControlPolicy): Promise<number> {
+  return h.queue.run(async () => {
+    if (!(await h.ready) || h.stopped || !still()) return 0
+    const command = await body()
+    if (!command || h.stopped || h.control === undefined) return 0
+    const status = await controlPost($, h.control, h.controlToken, command, policy)
+    return !h.stopped && still() ? status : 0
+  })
 }
 
 // Guest: local and remote ports are independent. Each caller says where a
@@ -6206,25 +6279,14 @@ async function setChromePrefs($: $, profile: string): Promise<boolean> {
   return merged === null || (await sh($, chromePrefsScript(profile, merged), WINDOW_STEP_MS)).code === 0
 }
 
-type BrowserProxy = {
+// Its scope is the room's it serves: closed, it ends. `control` is its
+// control port, `port` the one the window's browser is told to use.
+type BrowserProxy = Helper & {
   room: ShareRoom
   key: string
-  /** The room's scope it serves: closed, it ends. */
-  scope: RoomScope
-  /** A 256-bit secret for its control requests; module memory only. */
-  controlToken: string
   /** The port asked for: the window's own after a reload, else 0 (any). */
   asked: number
   port?: number
-  control?: number
-  ready: Promise<boolean>
-  settle: (ready: boolean) => void
-  child?: HookStream<ProcessSpawnChunk, ProcessSpawnResult>
-  timer?: Timer
-  stopped: boolean
-  stopping?: Promise<void>
-  error?: string
-  queue: Promise<void>
   /** The routes last sent, so the same ones aren't sent again. */
   sent?: string
   /** Routes posts that failed in a row: three, and the proxy is ended. */
@@ -6271,24 +6333,18 @@ async function upstreamProxy($: $): Promise<Upstream | null> {
 }
 
 function startBrowserProxy($: $, room: ShareRoom, port: number, s: RoomScope): BrowserProxy {
-  let settle!: (ready: boolean) => void
-  const ready = new Promise<boolean>(done => { settle = done })
-  const proxy: BrowserProxy = { room, key: roomIdentity(room), scope: s, controlToken: base64url(crypto.getRandomValues(new Uint8Array(32))), asked: port, ready, settle, stopped: false, queue: Promise.resolve(), failures: 0, lan: false, seen: new Set(), asks: new Set(), wants: new Map() }
+  const proxy: BrowserProxy = { ...newHelper(s), room, key: roomIdentity(room), asked: port, failures: 0, lan: false, seen: new Set(), asks: new Set(), wants: new Map() }
   s.children.windowProxy = proxy
   void runBrowserProxy($, proxy)
   return proxy
 }
 
+// Gone from its scope at once: the next Open starts another beside it.
 function finishBrowserProxy(proxy: BrowserProxy): Promise<void> {
-  if (proxy.stopping) return proxy.stopping
-  proxy.stopped = true
-  proxy.timer?.cancel()
-  proxy.settle(false)
-  if (proxy.scope.children.windowProxy === proxy) proxy.scope.children.windowProxy = null
-  proxy.stopping = (async () => {
-    try { await proxy.child?.return(undefined as never) } catch {}
-  })()
-  return proxy.stopping
+  return finishHelper(proxy, async () => {
+    if (proxy.scope.children.windowProxy === proxy) proxy.scope.children.windowProxy = null
+    await proxy.child?.return(undefined as never)
+  })
 }
 
 // Supervised as the host's TCP worker is: five seconds to say it's ready, its
@@ -6301,29 +6357,22 @@ async function runBrowserProxy($: $, proxy: BrowserProxy) {
     const upstream = await upstreamProxy($).catch(() => null)
     proxy.lan = (await $.env.get('SHARED_SESSION_PREVIEW_LAN')) === '1'
     if (proxy.stopped || proxy.scope.children.windowProxy !== proxy || !proxy.scope.live) return
-    const child = $.process.spawn({ argv: ['/bin/sh', '-c', FIND_NODE, 'sh', `${$.plugin.root}/relay/browser-proxy.cjs`], input: JSON.stringify({ port: proxy.asked, controlToken: proxy.controlToken, lan: proxy.lan, upstream }) })
-    proxy.child = child
-    proxy.timer = $.clock.after(5_000, () => {
-      if (!proxy.port) void finishBrowserProxy(proxy)
-    })
-    const ended = helperEnded(child)
-    for await (const said of helperLines(child)) {
-      if (proxy.stopped || proxy.scope.children.windowProxy !== proxy) break
+    const settings = { port: proxy.asked, controlToken: proxy.controlToken, lan: proxy.lan, upstream }
+    await runHelper($, proxy, 'browser-proxy.cjs', settings, 5_000, () => finishBrowserProxy(proxy), () => !proxy.stopped && proxy.scope.children.windowProxy === proxy, async said => {
       const line = proxyLine(said)
-      if (!line) continue
+      if (!line) return
       if (line.state === 'ready') {
         if (proxy.port || (proxy.asked && line.port !== proxy.asked)) throw new Error('Invalid preview proxy readiness')
         const port = line.port
         proxy.port = port
-        proxy.control = line.control
-        proxy.timer?.cancel()
+        helperReady(proxy, line.control)
         await update($, previewWindowA, w => (proxy.stopped || !proxy.scope.live ? w : { room: proxy.key, port, opened: w?.room === proxy.key && w.port === port ? w.opened : [], ...(w?.room === proxy.key && w.profile ? { profile: w.profile } : {}) }))
         proxy.settle(true)
         void syncBrowserRoutes($, proxy.scope)
       } else if (line.state === 'error') {
         proxy.error = line.code
         throw new Error('Preview proxy failed')
-      } else if (!proxy.port) continue
+      } else if (!proxy.port) return
       // It left the person's own proxy out (a host it can't take) and goes on without it.
       else if (line.state === 'upstream') {
         if (line.reason === 'INVALID_UPSTREAM') noteOnce($, 'invalid', UPSTREAM_NOT_TAKEN)
@@ -6339,8 +6388,7 @@ async function runBrowserProxy($: $, proxy: BrowserProxy) {
           if (asks.late) void asks.late().catch(() => {})
         }
       }
-    }
-    proxy.error ??= await ended
+    })
   } catch {
     // Never echo the child's diagnostics: they can name hosts the window asked for.
   } finally {
@@ -6418,7 +6466,7 @@ async function windowInterest($: $, pid: string, s: RoomScope): Promise<boolean>
 async function syncBrowserRoutes($: $, s: RoomScope = scope) {
   const proxy = s.children.windowProxy
   if (!proxy || proxy.stopped) return
-  const task = proxy.queue.then(async () => {
+  await proxy.queue.run(async () => {
     if (!(await proxy.ready) || proxy.stopped || s.children.windowProxy !== proxy || !s.live || s.mode !== 'guest') return
     const routes: Record<string, number> = {}
     for (const run of s.children.listeners.values()) {
@@ -6443,11 +6491,7 @@ async function syncBrowserRoutes($: $, s: RoomScope = scope) {
     if (status !== 200) return
     proxy.sent = text
     proxy.failures = 0
-  })
-  proxy.queue = task.catch(() => {})
-  try {
-    await task
-  } catch {}
+  }).catch(() => {})
 }
 
 // The window asked for a port the host shares and no tunnel serves yet.
@@ -7184,15 +7228,11 @@ const hostAskQueue: HostAskItem[] = []
 // second press, or one for a question gone, answers nothing else.
 let hostAskActive: { id: string; answer: (answer: HostAnswer) => void } | null = null
 let hostAskRunning = false
-// Ports a question is being made about now: discovery, then the question,
+// Ports a question is being made about now: a look, then the question,
 // until it's answered or goes. A question waits behind up to three others,
 // ten minutes each, longer than `askedAt` keeps its port from being asked
 // about again (`claimAsks`), so this is what keeps it from being asked twice.
 const hostAsking = new Set<string>()
-// Guests' needs waiting for discovery: one runs at a time, three wait.
-type NeedItem = { room: ShareRoom; port: number; who: string }
-const needQueue: NeedItem[] = []
-let needRunning = false
 
 // The room's, kept through a reload (and cleared with the room): ports the
 // host said Not now to or stopped, and when each was last asked about.
@@ -7311,7 +7351,22 @@ async function pumpHostAsks($: $) {
 function clearHostAsks() {
   hostAskActive?.answer('later')
   for (const item of hostAskQueue.splice(0)) item.resolve('later')
-  needQueue.length = 0
+}
+
+// One question to the host about ports claimed for it (`claimAsks`) and held
+// meanwhile by its caller (`hostAsking`): Not now declines them for the
+// room; a yes forwards them (`forward`), and what that came to is said.
+// `asked`: once the question is in the row, or waiting for it.
+async function offer($: $, room: ShareRoom, ask: Omit<ShareHostAsk, 'id'>, ports: readonly number[], forward: () => Promise<{ shared: number[]; refused: string[] }>, asked?: () => void): Promise<HostAnswer> {
+  const answering = askHost($, room, ask)
+  asked?.()
+  const answer = await answering
+  if (!hostHere(room)) return 'later'
+  if (answer === 'no') await declinePorts($, room, [...ports])
+  if (answer !== 'yes') return answer
+  const { shared, refused } = await forward()
+  if ((shared.length || refused.length) && hostHere(room)) $.ui.toast([...(shared.length ? [forwardedSaid(shared)] : []), ...refused].join(' '))
+  return answer
 }
 
 // What discovery found for a shared port: its own service, and the web
@@ -7368,7 +7423,8 @@ async function relayedHere($: $, port: number, noMs = RELAYED_NO_MS): Promise<bo
   const now = await $.clock.now(), seen = relayedSeen.get(port)
   if (seen && (!seen.done || now - seen.at < (seen.answer === true ? RELAYED_YES_MS : noMs))) return seen.look
   const entry: { at: number; answer?: boolean; done: boolean; look: Promise<boolean | undefined> } = { at: now, done: false, look: Promise.resolve(undefined) }
-  entry.look = relayedLook($, port).then(answer => {
+  entry.look = ownerLook($, port).then(line => {
+    const answer = line === null ? undefined : relayedResult(line, port)
     entry.answer = answer
     entry.done = true
     return answer
@@ -7379,18 +7435,19 @@ async function relayedHere($: $, port: number, noMs = RELAYED_NO_MS): Promise<bo
   return entry.look
 }
 
-// One owner-mode look: its one line, within its deadline and two seconds more.
-async function relayedLook($: $, port: number): Promise<boolean | undefined> {
+// One owner-mode look: its one line, within its deadline and two seconds
+// more, or null. `web`: a guest's need's, at the port's answer too.
+async function ownerLook($: $, port: number, web = false): Promise<string | null> {
   let child: Child | undefined
   let timer: Timer | undefined
   try {
-    child = $.process.spawn({ argv: ['/bin/sh', '-c', FIND_NODE, 'sh', `${$.plugin.root}/relay/discover.cjs`], input: JSON.stringify({ port, pluginRoot: $.plugin.root, owner: true, deadlineMs: RELAYED_LOOK_MS }) })
+    child = $.process.spawn({ argv: ['/bin/sh', '-c', FIND_NODE, 'sh', `${$.plugin.root}/relay/discover.cjs`], input: JSON.stringify({ port, pluginRoot: $.plugin.root, owner: true, deadlineMs: RELAYED_LOOK_MS, ...(web ? { web: true } : {}) }) })
     const running = child
     timer = $.clock.after(RELAYED_LOOK_MS + 2_000, () => void running.return(undefined as never).catch(() => {}))
-    for await (const line of helperLines(running)) return relayedResult(line, port)
-    return undefined
+    for await (const line of helperLines(running)) return line
+    return null
   } catch {
-    return undefined
+    return null
   } finally {
     timer?.cancel()
     try { await child?.return(undefined as never) } catch {}
@@ -7568,18 +7625,10 @@ async function askRelated($: $, room: ShareRoom, port: number, related: readonly
         if (!told) leave([asking, ...questions.slice(i + 1)].flat())
         break
       }
-      const answering = askHost($, room, { kind: 'related', port, related: asking.map(s => ({ port: s.port, label: s.label })) })
-      tell([asking, ...questions.slice(i + 1)])
-      const answer = await answering
+      const ask = { kind: 'related' as const, port, related: asking.map(s => ({ port: s.port, label: s.label })) }
+      const answer = await offer($, room, ask, asking.map(s => s.port), () => shareRelated($, room, asking, port), () => tell([asking, ...questions.slice(i + 1)]))
       for (const s of asking) release(s)
-      if (!hostHere(room)) break
-      if (answer === 'no') {
-        await declinePorts($, room, asking.map(s => s.port))
-        continue
-      }
-      if (answer !== 'yes') break
-      const { shared, refused } = await shareRelated($, room, asking, port)
-      if ((shared.length || refused.length) && hostHere(room)) $.ui.toast([...(shared.length ? [forwardedSaid(shared)] : []), ...refused].join(' '))
+      if (!hostHere(room) || (answer !== 'yes' && answer !== 'no')) break
     }
   } finally {
     for (const s of ask) release(s)
@@ -7628,15 +7677,13 @@ async function offerSameAddress($: $, room: ShareRoom, port: number, path: strin
     if (!(await claimAsks($, room, [port])).length) return
     const found = await discoverPort($, port)
     if (found?.target && (found.target.web === 'no' || found.target.devtools)) return
-    const answer = await askHost($, room, { kind: 'mention', port, ...(found?.target?.label ? { label: found.target.label } : {}), related: [] })
-    if (!hostHere(room)) return
-    if (answer === 'no') return void (await declinePorts($, room, [port]))
-    if (answer !== 'yes') return
-    const forwarded = await hostForwards($, room, { port, title: `localhost:${port}`, path, host, scheme })
-    if (!hostHere(room)) return
-    if (!forwarded || 'refused' in forwarded) return void $.ui.toast(forwarded?.refused ?? `Couldn't allow forwarding localhost:${port}`)
-    $.ui.toast(forwardedSaid([port]))
-    beside = found?.related ?? []
+    let allowed = false
+    await offer($, room, { kind: 'mention', port, ...(found?.target?.label ? { label: found.target.label } : {}), related: [] }, [port], async () => {
+      const forwarded = await hostForwards($, room, { port, title: `localhost:${port}`, path, host, scheme })
+      allowed = Boolean(forwarded && 'pid' in forwarded)
+      return allowed ? { shared: [port], refused: [] } : { shared: [], refused: [(forwarded && 'refused' in forwarded && forwarded.refused) || `Couldn't allow forwarding localhost:${port}`] }
+    })
+    if (allowed && hostHere(room)) beside = found?.related ?? []
   } finally {
     hostAsking.delete(flight)
   }
@@ -7646,62 +7693,33 @@ async function offerSameAddress($: $, room: ShareRoom, port: number, path: strin
 // A guest's preview window asked for a localhost port nobody shared. Asked
 // only about a web server (never a debugging port), with the host's say:
 // once in ten minutes a port, never after Not now or Stop, never with what
-// Claude shows kept to the host, and only where the row draws. Discovery
-// runs for one need at a time; three more wait, and the rest go.
+// Claude shows kept to the host, and only where the row draws. One look at
+// the port first, two seconds at most (`ownerLook` with `web`: who holds
+// it, and what it answers); another session's preview held here is never
+// put to the host, nor counted asked.
 async function hostNeed($: $, room: ShareRoom, need: Record<string, unknown>) {
   const port = Number(need.port)
   const who = cleanLabel(need.name, 40) || 'A guest'
-  if (!validPort(port) || !hostHere(room)) return
-  if ((await read($, policyA)).files === 'off' || (await forwardedPort($, port))) return
-  const key = roomIdentity(room), memory = await hostMemoryOf($, room), now = await $.clock.now()
-  if (memory.declined.includes(port) || askedLately(memory, port, now) || hostAsking.has(`${key} ${port}`)) return
-  if (!(await canAskHost($))) return
-  if (needQueue.some(n => roomIdentity(n.room) === key && n.port === port) || needQueue.filter(n => roomIdentity(n.room) === key).length >= 3) return
-  needQueue.push({ room, port, who })
-  void pumpNeeds($).catch(() => {})
-}
-
-async function pumpNeeds($: $) {
-  if (needRunning) return
-  needRunning = true
-  try {
-    for (let item = needQueue.shift(); item; item = needQueue.shift()) await askNeed($, item).catch(() => {})
-  } finally {
-    needRunning = false
-  }
-}
-
-// One need's discovery, then (a web server) its question, which waits in
-// the row's own line without holding the next need's discovery.
-async function askNeed($: $, { room, port, who }: NeedItem) {
   const flight = `${roomIdentity(room)} ${port}`
-  if (!hostHere(room) || (await read($, policyA)).files === 'off' || (await forwardedPort($, port)) || hostAsking.has(flight)) return
+  if (!validPort(port) || !hostHere(room) || hostAsking.has(flight)) return
+  if ((await read($, policyA)).files === 'off' || (await forwardedPort($, port))) return
+  const memory = await hostMemoryOf($, room), now = await $.clock.now()
+  if (memory.declined.includes(port) || askedLately(memory, port, now) || hostAsking.has(flight) || !(await canAskHost($))) return
   hostAsking.add(flight)
-  let asking = false
   try {
-    // Another session's preview forwarded here: never put to the host, nor counted asked.
-    if (await relayedHere($, port)) return
-    if (!hostHere(room) || !(await claimAsks($, room, [port])).length) return
-    const target = (await discoverPort($, port))?.target
-    if (!target || target.port !== port || target.web === 'no' || target.devtools || !hostHere(room)) return
-    asking = true
-    void (async () => {
-      try {
-        const answer = await askHost($, room, { kind: 'need', port, who, ...(target.label ? { label: target.label } : {}), related: [] })
-        if (!hostHere(room)) return
-        if (answer === 'no') return void (await declinePorts($, room, [port]))
-        if (answer !== 'yes' || (await forwardedPort($, port))) return
-        // For a page of the guest's window, which one the need doesn't say;
-        // a page shared through its link stays that page (`forwardFor`).
-        const pid = await forwardFor($, room, port, target.label, true)
-        if (!hostHere(room)) return
-        $.ui.toast(typeof pid === 'string' ? forwardedSaid([port]) : (pid?.refused ?? `Couldn't share localhost:${port}`))
-      } finally {
-        hostAsking.delete(flight)
-      }
-    })().catch(() => {})
+    const line = await ownerLook($, port, true)
+    const target = line === null ? null : heldResult(line, port)
+    if (target?.relay === true || !hostHere(room) || !(await claimAsks($, room, [port])).length) return
+    if (!target || target.web === 'no' || target.devtools || !hostHere(room)) return
+    await offer($, room, { kind: 'need', port, who, ...(target.label ? { label: target.label } : {}), related: [] }, [port], async () => {
+      if (await forwardedPort($, port)) return { shared: [], refused: [] }
+      // For a page of the guest's window, which one the need doesn't say;
+      // a page shared through its link stays that page (`forwardFor`).
+      const pid = await forwardFor($, room, port, target.label, true)
+      return typeof pid === 'string' ? { shared: [port], refused: [] } : { shared: [], refused: [pid?.refused ?? `Couldn't share localhost:${port}`] }
+    })
   } finally {
-    if (!asking) hostAsking.delete(flight)
+    hostAsking.delete(flight)
   }
 }
 
@@ -8070,7 +8088,7 @@ let proxyBusy = 0
 
 async function answerProxy($: $, room: ShareRoom, ask: Record<string, unknown>) {
   const id = typeof ask.id === 'string' && /^[A-Za-z0-9_-]{8,40}$/.test(ask.id) ? ask.id : ''
-  const pid = typeof ask.pid === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(ask.pid) ? ask.pid : ''
+  const pid = typeof ask.pid === 'string' && PREVIEW_ID.test(ask.pid) ? ask.pid : ''
   if (!id || !pid) return
   const at = await $.clock.now()
   // No await from here to its place in a run or the queue. The same ask
@@ -8119,7 +8137,7 @@ async function proxyOnce($: $, run: ProxyRun) {
     // One this session shared and stopped (a Stop under way, or one the room
     // didn't hear, whose link it still sends here): ended, said at once, not
     // at the room's own deadline.
-    const stopped = s.revoking.has(pid) || s.unended.has(pid) || (await read($, shownA)).some(x => x.kind === 'preview' && x.pid === pid)
+    const stopped = s.revoking.has(pid) || (await read($, shownA)).some(x => x.kind === 'preview' && x.pid === pid)
     if (stopped && !run.stopped && sameRoom(room, s) && s.mode === 'host') await answerPage($, run, 404, 'This preview has ended', `${room.host} is no longer sharing it.`)
     return
   }
@@ -8290,7 +8308,7 @@ type PublicRelay = { pid: string; stopped: boolean; child?: Child }
 
 async function relaySocket($: $, room: ShareRoom, ask: Record<string, unknown>) {
   const id = typeof ask.id === 'string' && /^[A-Za-z0-9_-]{8,40}$/.test(ask.id) ? ask.id : ''
-  const pid = typeof ask.pid === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(ask.pid) ? ask.pid : ''
+  const pid = typeof ask.pid === 'string' && PREVIEW_ID.test(ask.pid) ? ask.pid : ''
   const port = Number(ask.port)
   const path = typeof ask.path === 'string' && ask.path.startsWith('/') ? ask.path : '/'
   const protocols = (Array.isArray(ask.protocols) ? ask.protocols : []).filter((p): p is string => typeof p === 'string' && /^[\w.-]{1,64}$/.test(p)).slice(0, 4)
@@ -8301,11 +8319,11 @@ async function relaySocket($: $, room: ShareRoom, ask: Record<string, unknown>) 
   // a step before its share goes, and one let in between would outlive it.
   if (share?.pid !== pid || !sameRoom(room, s) || s.revoking.has(pid)) return
   // Another session's preview holds the port now: its socket is refused, never relayed.
-  if (await relayedNow($, s, port)) return void (sameRoom(room, s) && rejectPublic($, room, id, 'CONNECT'))
+  if (await relayedNow($, s, port)) return void (sameRoom(room, s) && rejectSocket($, room, id, 'CONNECT'))
   if (!sameRoom(room, s) || s.revoking.has(pid)) return
   const key = tcpKey(room, id), relays = s.children.relays
   if (relays.has(key)) return
-  if (relays.size >= PUBLIC_RELAYS) return void rejectPublic($, room, id, 'BUSY')
+  if (relays.size >= PUBLIC_RELAYS) return void rejectSocket($, room, id, 'BUSY')
   const relay: PublicRelay = { pid, stopped: false }
   relays.set(key, relay) // No await since the capacity check.
   let exit: number | null = null
@@ -8335,16 +8353,21 @@ async function relaySocket($: $, room: ShareRoom, ask: Record<string, unknown>) 
   // dials the room only once the dev server took the socket, so the room
   // hears nothing else, and the browser's socket closes now (1011), not at
   // its deadline. One that had paired gets only a refusal from the room.
-  if (exit !== null && exit !== 0 && !relay.stopped) void rejectPublic($, room, id, 'CONNECT')
+  if (exit !== null && exit !== 0 && !relay.stopped) void rejectSocket($, room, id, 'CONNECT')
 }
 
-// Host: a public socket the room should close (C-reject), one bounded curl.
-async function rejectPublic($: $, room: ShareRoom, id: string, code: 'BUSY' | 'CONNECT') {
+// Host: a socket the room should close (`ws/<id>/reject`: a TCP pair's, or
+// the public link's), BUSY or CONNECT, never a relay's error text: one
+// bounded curl, TCP_RELAYS at most at once. Curl is already required for the
+// host's feed; credentials stay on stdin here too.
+async function rejectSocket($: $, room: ShareRoom, id: string, code: 'BUSY' | 'CONNECT') {
   const key = tcpKey(room, id)
   if (tcpRejecting.has(key) || tcpRejecting.size >= TCP_RELAYS) return
   tcpRejecting.add(key)
   try {
-    await postReject($, room, id, code)
+    const input = `${roomConfig(room, `ws/${id}/reject`)}\nrequest = "POST"\nheader = "content-type: application/json"\ndata = ${cfg(JSON.stringify({ code }))}\n`
+    const child = $.process.spawn({ argv: ['curl', '--silent', '--max-time', '2', '--output', '/dev/null', '--config', '-'], input })
+    for await (const _chunk of child) { /* Never log credentials or a server's answer. */ }
   } catch {} finally {
     tcpRejecting.delete(key)
   }
@@ -8357,11 +8380,11 @@ function tcpKey(room: ShareRoom, id: string): string {
   return `${room.server}/${room.id}/${id}`
 }
 
-// A connection still to be made: its room's scope taking TCP, its preview
-// not being unshared, its worker the one running, and still the one for its id.
+// A connection still to be made: its room's scope open, its preview not
+// being unshared, its worker the one running, and still the one for its id.
 function tcpCurrent(run: TcpRelayRun): boolean {
   const s = run.scope
-  return s.tcp && s.live && !run.worker.stopped && s.children.worker === run.worker && run.worker.scope === s && !s.revoking.has(run.pid) && s.children.connections.get(tcpKey(run.worker.room, run.id)) === run
+  return s.live && !run.worker.stopped && s.children.worker === run.worker && run.worker.scope === s && !s.revoking.has(run.pid) && s.children.connections.get(tcpKey(run.worker.room, run.id)) === run
 }
 
 // …and still forwarded: its port shared as its preview, which the host
@@ -8371,43 +8394,41 @@ async function tcpAllowed($: $, run: TcpRelayRun): Promise<boolean> {
   return tcpCurrent(run) && sameRoom(run.worker.room, run.scope) && run.scope.mode === 'host' && share?.pid === run.pid && share.tcp === true
 }
 
+// A worker that failed holds the room's place until its process has gone
+// (`relayTcp`), and its connections go from the room's at once.
 function finishTcpWorker(worker: TcpWorkerRun): Promise<void> {
-  if (worker.stopping) return worker.stopping
-  worker.stopped = true
-  worker.timer?.cancel()
-  worker.settle(false)
-  const { connections } = worker.scope.children
-  for (const [key, run] of connections) if (run.worker === worker) connections.delete(key)
-  worker.stopping = (async () => {
-    try { await worker.child?.return(undefined as never) } catch {}
-    if (worker.scope.children.worker === worker) worker.scope.children.worker = null
-  })()
-  return worker.stopping
+  return finishHelper(
+    worker,
+    async () => {
+      const { connections } = worker.scope.children
+      for (const [key, run] of connections) if (run.worker === worker) connections.delete(key)
+      await worker.child?.return(undefined as never)
+    },
+    () => {
+      if (worker.scope.children.worker === worker) worker.scope.children.worker = null
+    },
+  )
 }
 
+const tcpWorking = (worker: TcpWorkerRun) => !worker.stopped && worker.scope.children.worker === worker && worker.scope.live
+
+// A connection it closed (`closed`) goes from the room's: the same id asked
+// for again while it was open was taken for the one it had.
 async function runTcpWorker($: $, worker: TcpWorkerRun) {
   try {
     const version = await ownVersion($)
-    if (worker.stopped || worker.scope.children.worker !== worker || !worker.scope.tcp || !worker.scope.live) return
-    const config = { room: `${worker.room.server}/api/rooms/${worker.room.id}`, token: worker.room.token, controlToken: worker.controlToken, version }
-    const child = $.process.spawn({ argv: ['/bin/sh', '-c', FIND_NODE, 'sh', `${$.plugin.root}/relay/tcp-worker.cjs`], input: JSON.stringify(config) })
-    worker.child = child
-    const ended = helperEnded(child)
-    for await (const line of helperLines(child)) {
-      if (worker.stopped || worker.scope.children.worker !== worker || !worker.scope.live) break
-      let message: { state?: string; port?: number; id?: string }
-      try { message = JSON.parse(line) } catch { continue }
-      if (message?.state === 'ready') {
-        if (worker.port || !validPort(message.port)) throw new Error('Invalid TCP worker readiness')
-        worker.port = message.port
-        worker.timer?.cancel()
-        worker.settle(true)
-      } else if (message?.state === 'closed' && typeof message.id === 'string' && /^[A-Za-z0-9_-]{8,40}$/.test(message.id)) {
-        const key = tcpKey(worker.room, message.id), { connections } = worker.scope.children
+    if (!tcpWorking(worker)) return
+    const settings = { room: `${worker.room.server}/api/rooms/${worker.room.id}`, token: worker.room.token, controlToken: worker.controlToken, version }
+    await runHelper($, worker, 'tcp-worker.cjs', settings, 5_000, () => finishTcpWorker(worker), () => tcpWorking(worker), said => {
+      if (said.state === 'closed' && typeof said.id === 'string' && /^[A-Za-z0-9_-]{8,40}$/.test(said.id)) {
+        const key = tcpKey(worker.room, said.id), { connections } = worker.scope.children
         if (connections.get(key)?.worker === worker) connections.delete(key)
+      } else if (said.state === 'ready') {
+        if (worker.control !== undefined || !validPort(said.port)) throw new Error('Invalid TCP worker readiness')
+        helperReady(worker, said.port)
+        worker.settle(true)
       }
-    }
-    worker.error = await ended
+    })
   } catch {
     // Owned sockets fail. Only a new independent request may start another
     // worker; no open command or application bytes are replayed.
@@ -8416,65 +8437,34 @@ async function runTcpWorker($: $, worker: TcpWorkerRun) {
   }
 }
 
-async function tcpControl($: $, worker: TcpWorkerRun, body: Record<string, unknown>, run?: TcpRelayRun): Promise<number> {
-  return worker.queue.run(async () => {
-    if (!(await worker.ready) || worker.stopped || worker.scope.children.worker !== worker) return 0
-    if (run && (!(await tcpAllowed($, run)) || !tcpCurrent(run))) return 0
-    // BUSY (429): its connections all taken, which it told the room. Anything
-    // else, no answer in two seconds included, ends it: only a new connection
-    // starts another, and nothing it was asked is asked again.
-    const status = await controlPost($, worker.port!, worker.controlToken, body, { answers: [200, 429], failed: () => void finishTcpWorker(worker) })
-    return !worker.stopped && worker.scope.children.worker === worker ? status : 0
-  })
-}
-
-// Failures before a worker is ready still get a bounded refusal. Curl is
-// already required for the Host's TCP feed; credentials stay on stdin here too.
-async function rejectTcp($: $, room: ShareRoom, s: RoomScope, id: string, code: 'BUSY' | 'CONNECT') {
-  const key = tcpKey(room, id)
-  if (tcpRejecting.has(key) || tcpRejecting.size >= TCP_RELAYS) return
-  tcpRejecting.add(key)
-  try {
-    const worker = s.children.worker
-    if (worker?.port && !worker.stopped && sameRoomId(worker.room, room)) {
-      if (await tcpControl($, worker, { op: 'reject', id, code }) === 200) return
-    }
-    await postReject($, room, id, code)
-  } catch {} finally {
-    tcpRejecting.delete(key)
-  }
-}
-
-// The room hears a socket refused (`ws/<id>/reject`, a TCP pair's or a
-// public one's): BUSY or CONNECT, never a relay's error text.
-async function postReject($: $, room: ShareRoom, id: string, code: 'BUSY' | 'CONNECT') {
-  const input = `${roomConfig(room, `ws/${id}/reject`)}\nrequest = "POST"\nheader = "content-type: application/json"\ndata = ${cfg(JSON.stringify({ code }))}\n`
-  const child = $.process.spawn({ argv: ['curl', '--silent', '--max-time', '2', '--output', '/dev/null', '--config', '-'], input })
-  for await (const _chunk of child) { /* Never log credentials or a server's answer. */ }
+// BUSY (429): its connections all taken, which it told the room. Anything
+// else, no answer in two seconds included, ends it: only a new connection
+// starts another, and nothing it was asked is asked again.
+function tcpControl($: $, worker: TcpWorkerRun, body: Record<string, unknown>, run?: TcpRelayRun): Promise<number> {
+  const stands = async () => (run && (!(await tcpAllowed($, run)) || !tcpCurrent(run)) ? null : body)
+  return helperPost($, worker, () => worker.scope.children.worker === worker, stands, { answers: [200, 429], failed: () => void finishTcpWorker(worker) })
 }
 
 async function relayTcp($: $, room: ShareRoom, ask: Record<string, unknown>) {
   const id = typeof ask.id === 'string' && /^[A-Za-z0-9_-]{8,40}$/.test(ask.id) ? ask.id : ''
-  const pid = typeof ask.pid === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(ask.pid) ? ask.pid : ''
+  const pid = typeof ask.pid === 'string' && PREVIEW_ID.test(ask.pid) ? ask.pid : ''
   const port = ask.port
   // A drained old stream can still have a notification in its current chunk.
   // Never let it install an unstarted worker for the room that replaced it.
   const s = scope
-  if (!id || !pid || !validPort(port) || !s.tcp || !sameRoom(room, s) || s.mode !== 'host') return
+  if (!id || !pid || !validPort(port) || !sameRoom(room, s) || s.mode !== 'host') return
   const key = tcpKey(room, id), { connections } = s.children
   if (connections.has(key)) return
-  if (connections.size >= TCP_RELAYS) return void rejectTcp($, room, s, id, 'BUSY')
+  if (connections.size >= TCP_RELAYS) return void rejectSocket($, room, id, 'BUSY')
   let worker = s.children.worker
   if (!worker) {
-    let settle!: (ready: boolean) => void
-    const ready = new Promise<boolean>(done => { settle = done })
-    worker = { room, scope: s, controlToken: randomSecret(), ready, settle, queue: lane(), started: false, stopped: false }
+    worker = { ...newHelper(s), room, started: false }
     s.children.worker = worker
   }
   // A worker that failed holds the room's place until its process has gone:
   // a connection meanwhile is refused now, not left to the room's deadline,
   // and the next one starts another.
-  if (worker.stopped) return void rejectTcp($, room, s, id, 'CONNECT')
+  if (worker.stopped) return void rejectSocket($, room, id, 'CONNECT')
   if (worker.scope !== s || !sameRoomId(worker.room, room)) return
   const run: TcpRelayRun = { id, pid, port, scope: s, worker }
   connections.set(key, run) // No await since the capacity check: queued + connecting + active.
@@ -8484,7 +8474,6 @@ async function relayTcp($: $, room: ShareRoom, ask: Record<string, unknown>) {
     if (!(await tcpAllowed($, run)) || (await relayedNow($, s, port)) || !tcpCurrent(run)) return
     if (!worker.started) {
       worker.started = true
-      worker.timer = $.clock.after(5_000, () => void finishTcpWorker(worker!))
       void runTcpWorker($, worker)
     }
     const status = await tcpControl($, worker, { op: 'open', id, pid, port }, run)
@@ -8494,7 +8483,7 @@ async function relayTcp($: $, room: ShareRoom, ask: Record<string, unknown>) {
     if (!accepted) {
       if (connections.get(key) === run) connections.delete(key)
       if (!worker.started && s.children.worker === worker && ![...connections.values()].some(r => r.worker === worker)) await finishTcpWorker(worker)
-      if (!refused && s.tcp && s.live) void rejectTcp($, room, s, id, 'CONNECT')
+      if (!refused && s.live) void rejectSocket($, room, id, 'CONNECT')
       // No Node here to run the worker: the host hears it, once a room (the
       // next connection starts one again, so installing Node is enough).
       if (worker.error === 'NODE') noteOnce($, 'tcp-node', `Forwarding localhost:${port} to teammates needs Node on this computer, and none was found. Install Node; their next connection tries again.`, s)
@@ -10129,7 +10118,6 @@ export const register: Register = (on, options) => {
       // below. Still open (the same module, started again), it goes on.
       const s = scope.live && scope.key === roomIdentity(room) && scope.mode === mode ? scope : openScope(room, mode)
       s.token = room.token
-      if (mode === 'host') s.tcp = true
       startFeed($)
       // Teammates' prompts the module before this one had waiting go on.
       if (mode === 'host') nextGuestPromptSoon($)

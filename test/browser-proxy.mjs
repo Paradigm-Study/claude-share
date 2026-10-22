@@ -181,7 +181,7 @@ async function configChecks() {
   const up = { kind: 'http', host: '127.0.0.1', port: 8080, bypass: [] }
   const bad = ['{bad', 'x'.repeat(20_000), '[]', {}, { ...BASE, extra: 1 }, { port: 0, controlToken: TOKEN }, { controlToken: TOKEN, upstream: null },
     { ...BASE, port: -1 }, { ...BASE, port: 65536 }, { ...BASE, port: '0' }, { ...BASE, port: 1.5 }, { ...BASE, port: null },
-    { ...BASE, controlToken: TOKEN.slice(1) }, { ...BASE, controlToken: `${TOKEN}A` }, { ...BASE, controlToken: `${TOKEN.slice(1)}=` }, { ...BASE, controlToken: `${TOKEN.slice(1)}.` }, { ...BASE, controlToken: 7 },
+    { ...BASE, controlToken: TOKEN.slice(1) }, { ...BASE, controlToken: 'A'.repeat(129) }, { ...BASE, controlToken: `${TOKEN.slice(1)}=` }, { ...BASE, controlToken: `${TOKEN.slice(1)}.` }, { ...BASE, controlToken: 7 },
     { ...BASE, lan: 'yes' }, { ...BASE, lan: 1 }, { ...BASE, lan: null }, { ...BASE, lan: true, extra: 1 }]
   for (const cfg of bad) await startupError(cfg, 'INVALID_CONFIG')
   // An upstream it can't use isn't fatal: it starts without one and says so

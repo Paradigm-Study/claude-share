@@ -11,7 +11,9 @@
 // user's listeners on it, any family, and whether any of them is one of this
 // plugin's own helpers (a guest's listener for another shared session's
 // preview, a preview window's proxy, a relay's control port), which the host
-// never shares on. No project, git or HTTP: it's on the share path.
+// never shares on. No project, git or HTTP: it's on the share path. With
+// `web: true` (a guest's need), the port is asked too, beside the listing:
+// whether it answers HTTP, and whether it's a debugger.
 'use strict'
 
 const fs = require('fs')
@@ -42,10 +44,10 @@ const CODE = new Set(['-e', '--eval', '-p', '--print'])
 
 // Owner mode takes no exclude (or an empty one): it looks at its one port alone.
 function configOf(cfg) {
-  const owner = cfg?.owner === true
-  if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg) || Object.keys(cfg).some(k => !['port', 'pluginRoot', 'exclude', 'deadlineMs', 'owner'].includes(k)) || (cfg.owner !== undefined && !owner) || !portOK(cfg.port) || typeof cfg.pluginRoot !== 'string' || !cfg.pluginRoot || cfg.pluginRoot.length > 4096 || /[\0-\x1f\x7f]/.test(cfg.pluginRoot) || !path.isAbsolute(cfg.pluginRoot) || (owner ? cfg.exclude !== undefined && !(Array.isArray(cfg.exclude) && cfg.exclude.length === 0) : !Array.isArray(cfg.exclude) || cfg.exclude.length > LIMITS.exclude || !cfg.exclude.every(portOK)) || (cfg.deadlineMs !== undefined && !(Number.isInteger(cfg.deadlineMs) && cfg.deadlineMs >= 1000 && cfg.deadlineMs <= 15_000))) throw failure('INVALID_CONFIG')
+  const owner = cfg?.owner === true, web = cfg?.web === true
+  if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg) || Object.keys(cfg).some(k => !['port', 'pluginRoot', 'exclude', 'deadlineMs', 'owner', 'web'].includes(k)) || (cfg.owner !== undefined && !owner) || (cfg.web !== undefined && !(web && owner)) || !portOK(cfg.port) || typeof cfg.pluginRoot !== 'string' || !cfg.pluginRoot || cfg.pluginRoot.length > 4096 || /[\0-\x1f\x7f]/.test(cfg.pluginRoot) || !path.isAbsolute(cfg.pluginRoot) || (owner ? cfg.exclude !== undefined && !(Array.isArray(cfg.exclude) && cfg.exclude.length === 0) : !Array.isArray(cfg.exclude) || cfg.exclude.length > LIMITS.exclude || !cfg.exclude.every(portOK)) || (cfg.deadlineMs !== undefined && !(Number.isInteger(cfg.deadlineMs) && cfg.deadlineMs >= 1000 && cfg.deadlineMs <= 15_000))) throw failure('INVALID_CONFIG')
   const root = path.resolve(cfg.pluginRoot)
-  return { port: cfg.port, owner, exclude: new Set(cfg.exclude ?? []), deadlineMs: cfg.deadlineMs ?? (owner ? LIMITS.ownerMs : LIMITS.deadlineMs), markers: [...new Set([root, real(root)].map(dir => `${dir.replace(/\/+$/, '')}/relay/`))] }
+  return { port: cfg.port, owner, web, exclude: new Set(cfg.exclude ?? []), deadlineMs: cfg.deadlineMs ?? (owner ? LIMITS.ownerMs : LIMITS.deadlineMs), markers: [...new Set([root, real(root)].map(dir => `${dir.replace(/\/+$/, '')}/relay/`))] }
 }
 
 const real = file => { try { return fs.realpathSync.native(file) } catch { return file } }
@@ -447,6 +449,12 @@ async function discover(settings, adapter, ctx, out) {
 // or a holder's command couldn't be read (time ran out, lsof or ps failed):
 // the caller can't tell. `target` is null only once the listing said nobody.
 async function owners(settings, adapter, ctx, out) {
+  const answer = out.answer = { web: 'no', devtools: false }
+  const asked = settings.web ? check(settings.port, ctx, { target: true, onConnect: () => { if (answer.web === 'no') answer.web = 'slow' } }).then(result => Object.assign(answer, result)) : null
+  await holders(settings, adapter, ctx, out)
+  await asked
+}
+async function holders(settings, adapter, ctx, out) {
   const unknown = () => { out.target = { port: settings.port, label: 'unknown', relay: null } }
   const listed = await adapter.listeners(ctx, settings.port)
   if (!listed) return unknown()
@@ -484,7 +492,7 @@ async function start(cfg, { emit = notify, signal, platform = process.platform, 
     close()
     if (signal?.aborted) return
     const t = settings.owner && adapter && !finished ? out.target ?? { port: settings.port, label: 'unknown', relay: null } : out.target
-    if (settings.owner) return emit({ state: 'done', platform: out.platform, target: t && { port: t.port, label: t.label, relay: t.relay }, related: [] })
+    if (settings.owner) return emit({ state: 'done', platform: out.platform, target: t && { port: t.port, label: t.label, relay: t.relay, ...(settings.web ? { web: out.answer?.web ?? 'no', devtools: out.answer?.devtools ?? false } : {}) }, related: [] })
     emit({ state: 'done', platform: out.platform, target: t && { port: t.port, label: t.label, web: t.web, devtools: t.devtools }, related: pick(out.related) })
   }
   if (adapter && !signal?.aborted) {

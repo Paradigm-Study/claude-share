@@ -10,6 +10,7 @@ import { createServer, createConnection } from 'node:net'
 import { request as httpRequest, createServer as createHTTPServer } from 'node:http'
 import { createHash, randomBytes } from 'node:crypto'
 import relay from '../plugin/relay/ws-relay.cjs'
+import ws from '../plugin/relay/ws.cjs'
 import { spawn } from 'node:child_process'
 import { once } from 'node:events'
 import { Room, PLUGIN_LATEST, roomRequest, token, versionInfo, tcpSocketTarget, NEED_LIMIT, LIMITS, limitOf, streamedRoomBody, previewRequest, previewSocketTarget, publicPairValid, PUBLIC_LIMITS, TCP_LIMITS, SEAT_TIMEOUT_MS, EVENT_BYTES, HISTORY_BYTES, ROOM_FILES_COUNT, ROOM_PREVIEWS_MAX, ROOM_SEATS_MAX, hostHalfClose, homePage } from '../server/core.mjs'
@@ -943,7 +944,7 @@ async function nodeChecks() {
     // so neither the counters' small file nor every room's snapshot (D6).
     const stats = () => readFile(`${database}.tcp`, 'utf8').then(text => JSON.parse(text).rooms[room.id]).catch(() => null)
     const snapshot = await readFile(database, 'utf8')
-    const tunnel = relay.connect(`${origin.replace('http', 'ws')}${base}/previews/${forwarded.pid}/tunnel`, { authorization: `Bearer ${cap.token}` }, [], { message() {}, close() {} })
+    const tunnel = ws.connect(`${origin.replace('http', 'ws')}${base}/previews/${forwarded.pid}/tunnel`, { authorization: `Bearer ${cap.token}` }, [], { message() {}, close() {} })
     for (let i = 0; i < 300 && !tunnel.isOpen(); i++) await wait(10)
     assert(tunnel.isOpen(), 'the TCP tunnel opened')
     assert.equal((await stats()) ?? null, null, 'no counters written for the grant or the open')
@@ -972,10 +973,10 @@ async function nodeChecks() {
       assert(live.paged, "the host's stream is open")
       const fresh = await ok(`${base}/previews/${forwarded.pid}/tunnel`, guest.token, 'POST', {})
       let ready = false, delivered = false
-      const guestWs = relay.connect(`${origin.replace('http', 'ws')}${base}/previews/${forwarded.pid}/tunnel`, { authorization: `Bearer ${fresh.token}` }, [], { message(data, binary) { if (!binary && JSON.parse(data).t === 'ready') ready = true }, close() {} })
+      const guestWs = ws.connect(`${origin.replace('http', 'ws')}${base}/previews/${forwarded.pid}/tunnel`, { authorization: `Bearer ${fresh.token}` }, [], { message(data, binary) { if (!binary && JSON.parse(data).t === 'ready') ready = true }, close() {} })
       for (let i = 0; i < 300 && !asks.length; i++) await wait(10)
       assert(asks.length, 'the host stream names the channel')
-      const hostWs = relay.connect(`${origin.replace('http', 'ws')}${base}/ws/${asks[0].id}`, { authorization: `Bearer ${room.token}` }, [], { message(_data, binary) { if (binary) delivered = true }, close() {} })
+      const hostWs = ws.connect(`${origin.replace('http', 'ws')}${base}/ws/${asks[0].id}`, { authorization: `Bearer ${room.token}` }, [], { message(_data, binary) { if (binary) delivered = true }, close() {} })
       for (let i = 0; i < 300 && !ready; i++) await wait(10)
       assert(ready, 'both halves ready')
       guestWs.send(Buffer.from([1]), true)
@@ -1080,7 +1081,7 @@ async function publicSocketChecks(http, ok, origin, previewPort) {
   }
   const connect = (url, headers) => {
     const p = { messages: [], closes: [] }
-    p.client = relay.connect(url, headers, [], { message: data => p.messages.push(data), close: (code, status) => p.closes.push({ code, status }) })
+    p.client = ws.connect(url, headers, [], { message: data => p.messages.push(data), close: (code, status) => p.closes.push({ code, status }) })
     clients.push(p.client)
     return p
   }
@@ -1232,7 +1233,7 @@ async function publicLimitChecks(http, ok, origin, previewPort) {
     }
     const socket = (url, headers, path) => {
       const p = { messages: [], closes: [], path }
-      p.client = relay.connect(url, headers, [], { message: data => p.messages.push(data), close: (code, status) => p.closes.push({ code, status }) })
+      p.client = ws.connect(url, headers, [], { message: data => p.messages.push(data), close: (code, status) => p.closes.push({ code, status }) })
       clients.push(p.client)
       return p
     }
@@ -1320,7 +1321,7 @@ async function publicPendingChecks(http, ok, origin, port, preview) {
     const cookie = (await admitted(ticket.url)).headers.get('set-cookie').split(';')[0]
     const socket = (url, headers, path) => {
       const p = { messages: [], closes: [], path }
-      p.client = relay.connect(url, headers, [], { message: data => p.messages.push(data), close: (code, status) => p.closes.push({ code, status }) })
+      p.client = ws.connect(url, headers, [], { message: data => p.messages.push(data), close: (code, status) => p.closes.push({ code, status }) })
       clients.push(p.client)
       return p
     }

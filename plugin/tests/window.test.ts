@@ -5,7 +5,6 @@
 import { expect, test } from 'claude-code/testing'
 import {
   appBundle,
-  base64url,
   browserFamily,
   browserName,
   chromeFlags,
@@ -371,12 +370,6 @@ test("cleaning up touches only what the plugin makes there: .trash-*, 16-hex-dig
   for (const name of ['h-0123456789abcde', 'h-0123456789abcdef0', 'H-0123456789abcdef', 'hh-0123456789abcdef', 'h_0123456789abcdef', '0123456789abcdef']) expect(host.test(name)).toBe(false)
 })
 
-test('a control secret is 43 base64url characters', () => {
-  const token = base64url(new Uint8Array(32).fill(255))
-  expect(token).toHaveLength(43)
-  expect(token).toMatch(/^[A-Za-z0-9_-]+$/)
-})
-
 test("a window's two settings files are written by one private writer: a private folder, a new file renamed over the old", () => {
   // Each says what it writes on its first line (the shell's own name for it), then the same steps.
   const steps = (what: string, dir: string, name: string, text: string) => [
@@ -418,18 +411,18 @@ test("a host's profile is taken before its window is looked for and started: one
 })
 
 test("the proxy's lines are checked, anything else ignored", () => {
-  expect(proxyLine('{"state":"ready","port":47100,"control":47001}')).toEqual({ state: 'ready', port: 47100, control: 47001 })
-  expect(proxyLine('{"state":"ready","port":0,"control":47001}')).toBeNull()
-  expect(proxyLine('{"state":"want","port":3610}')).toEqual({ state: 'want', port: 3610 })
-  expect(proxyLine('{"state":"blocked","port":5432}')).toEqual({ state: 'blocked', port: 5432 })
-  expect(proxyLine('{"state":"seen","port":3000}')).toEqual({ state: 'seen', port: 3000 })
+  expect(proxyLine(JSON.parse('{"state":"ready","port":47100,"control":47001}'))).toEqual({ state: 'ready', port: 47100, control: 47001 })
+  expect(proxyLine(JSON.parse('{"state":"ready","port":0,"control":47001}'))).toBeNull()
+  expect(proxyLine(JSON.parse('{"state":"want","port":3610}'))).toEqual({ state: 'want', port: 3610 })
+  expect(proxyLine(JSON.parse('{"state":"blocked","port":5432}'))).toEqual({ state: 'blocked', port: 5432 })
+  expect(proxyLine(JSON.parse('{"state":"seen","port":3000}'))).toEqual({ state: 'seen', port: 3000 })
   // A request to the guest's own network refused: no address, never the host it named.
-  expect(proxyLine('{"state":"lan","host":"10.0.0.5"}')).toEqual({ state: 'lan' })
+  expect(proxyLine(JSON.parse('{"state":"lan","host":"10.0.0.5"}'))).toEqual({ state: 'lan' })
   // The person's own proxy left out, said once after ready; never what it was.
-  expect(proxyLine('{"state":"upstream","reason":"INVALID_UPSTREAM"}')).toEqual({ state: 'upstream', reason: 'INVALID_UPSTREAM' })
-  expect(proxyLine('{"state":"upstream","reason":"<b>","host":"proxy.corp"}')).toEqual({ state: 'upstream', reason: 'UPSTREAM' })
-  expect(proxyLine('{"state":"error","code":"EADDRINUSE"}')).toEqual({ state: 'error', code: 'EADDRINUSE' })
-  expect(proxyLine('{"state":"error","code":"<script>"}')).toEqual({ state: 'error', code: 'ERROR' })
-  expect(proxyLine('{"state":"connect","host":"mail.google.com"}')).toBeNull()
+  expect(proxyLine(JSON.parse('{"state":"upstream","reason":"INVALID_UPSTREAM"}'))).toEqual({ state: 'upstream', reason: 'INVALID_UPSTREAM' })
+  expect(proxyLine(JSON.parse('{"state":"upstream","reason":"<b>","host":"proxy.corp"}'))).toEqual({ state: 'upstream', reason: 'UPSTREAM' })
+  expect(proxyLine(JSON.parse('{"state":"error","code":"EADDRINUSE"}'))).toEqual({ state: 'error', code: 'EADDRINUSE' })
+  expect(proxyLine(JSON.parse('{"state":"error","code":"<script>"}'))).toEqual({ state: 'error', code: 'ERROR' })
+  expect(proxyLine(JSON.parse('{"state":"connect","host":"mail.google.com"}'))).toBeNull()
   expect(proxyLine('not json')).toBeNull()
 })

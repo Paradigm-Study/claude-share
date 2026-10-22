@@ -96,6 +96,27 @@ export function relayedResult(line: string, port: number): boolean | undefined {
 }
 
 /**
+ * What owner mode with `web` printed for `port` (a guest's need's look),
+ * checked: what runs there, whether it answers HTTP or is a debugger, and
+ * whether one of the plugin's own helpers holds it (`relay`, as
+ * `relayedResult` reads it: undefined when it can't tell). Null when
+ * nobody listens there, or it can't tell anything.
+ */
+export type HeldPort = DiscoveredService & { relay?: boolean }
+export function heldResult(line: string, port: number): HeldPort | null {
+  let v: { state?: unknown; target?: { port?: unknown } | null }
+  try {
+    v = JSON.parse(line)
+  } catch {
+    return null
+  }
+  const service = v && typeof v === 'object' && v.state === 'done' && v.target?.port === port ? serviceOf(v.target) : null
+  if (!service) return null
+  const relay = relayedResult(line, port)
+  return relay === undefined ? service : { ...service, relay }
+}
+
+/**
  * What a look at a port's `/` says of sharing it through its link
  * (`pageProbe`'s output: `exit=`, `code=<status> <content type>`, then, after
  * `--`, what `/json/version` answered). `page`: share it. `not`: never (a
