@@ -2920,8 +2920,43 @@ test('every request says the plugin version, and a newer one shows in the Room w
   expect(asked.logged.some(line => line.includes('9.9.9 is out'))).toBe(true)
   const pane = await $.ui.mount({ plugin: 'shared-session', surface: 'desktop', component: 'Pane', requestId: 'shared-room', props: PANE })
   await pane.press({ key: 'tab-settings' })
-  expect(await pane.find({ type: 'Text', text: /Version 9\.9\.9 is out/ })).toBeDefined()
-  expect(await pane.find({ key: 'copy-update' })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /Version 9\.9\.9 is out \(this session runs 0\.7\.1\)/ })).toBeDefined()
+  // Updates off: it installs for new sessions, and offers to load later ones in place.
+  expect((await pane.find({ key: 'update-now' }))?.props.label).toBe('Install update')
+  expect(await pane.find({ key: 'updates-on' })).toBeDefined()
+})
+
+test("the Room's Update runs the update command on this computer and says on its line what it did", async ($, on) => {
+  const installed = JSON.stringify({ version: 2, plugins: { 'shared-session@claude-share': [{ scope: 'user', installPath: '/home/scott/.claude/plugins/cache/claude-share/shared-session/9.9.9', version: '9.9.9' }] } })
+  const asked = world(on, { latest: '9.9.9', settings: '{}', files: { '/home/scott/.claude/plugins/installed_plugins.json': installed } })
+  await $.prompt.submit({ text: LINK, origin: { kind: 'composer' }, wait: false })
+  await asked.clock.advance(10)
+  const pane = await $.ui.mount({ plugin: 'shared-session', surface: 'desktop', component: 'Pane', requestId: 'shared-room', props: PANE })
+  await pane.press({ key: 'tab-settings' })
+  await pane.press({ key: 'update-now' })
+  await asked.clock.advance(100)
+  const run = asked.spawned.find(s => s.input?.includes('plugin update shared-session@claude-share'))
+  expect(run?.input).toContain('plugin marketplace update claude-share')
+  const said = "Shared Sessions 9.9.9 is installed here. Start a new session to use it (in Claude Desktop, quit and reopen the app); with Updates on in the Room, later releases load in place."
+  expect(await pane.find({ type: 'Text', text: said })).toBeDefined()
+  expect(asked.logged).toContain(said)
+  // Two minutes on, the line goes.
+  await asked.clock.advance(121_000)
+  expect(await pane.find({ type: 'Text', text: said })).toBeUndefined()
+})
+
+test("the Team panel's header says a newer release is out, with its Update", async ($, on) => {
+  const asked = world(on, { latest: '9.9.9', team: { signedIn: true, sessions: [teamSession(2, 'Kim')] } })
+  // The server names the newest release in its answers (a join's here).
+  await $.prompt.submit({ text: LINK, origin: { kind: 'composer' }, wait: false })
+  await asked.clock.advance(10)
+  await $.command.run({ command: 'team' } as never)
+  await asked.clock.advance(10)
+  const pane = await $.ui.mount(TEAM_PANE)
+  expect(await pane.find({ type: 'Text', text: '● 9.9.9 is out' })).toBeDefined()
+  expect((await pane.find({ key: 'update-now' }))?.props.label).toBe('Install update')
+  // The header keeps to the button: Turn on Updates is the Room's.
+  expect(await pane.find({ key: 'updates-on' })).toBeUndefined()
 })
 
 test("the Room's Updates setting turns on auto-update in the person's settings, keeping the rest", async ($, on) => {
