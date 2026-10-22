@@ -8,7 +8,8 @@
 // The room server drives it over the container's own port, never a public
 // address, each request carrying the key it was started with (SS_CONTROL_KEY):
 //   POST /start    the room, the session and the Claude sign-in (JSON)
-//   PUT  /bundle   the packed session (tar.gz: repo/…, transcript.jsonl); it starts
+//   PUT  /bundle   the packed session (tar.gz: project.tgz and transcript.jsonl, as
+//                  the plugin packs it); it starts
 //   POST /stop     stops Claude Code and answers with the project's changes
 //                  since the move (a binary git diff), then exits
 //   GET  /health   whether Claude Code runs and the plugin has the room
@@ -312,6 +313,13 @@ const control = createServer(async (req, res) => {
         req.pipe(tar.stdin)
         tar.on('exit', code => (code === 0 ? resolve() : reject(new Error(`tar: ${err.trim().split('\n').pop() ?? code}`))))
       })
+      // The plugin packs the project as project.tgz (paths from its root) beside the conversation.
+      const inner = join(STAGE, 'project.tgz')
+      if (existsSync(inner)) {
+        mkdirSync(join(STAGE, 'repo'), { recursive: true, mode: 0o700 })
+        execFileSync('tar', ['-xzf', inner, '--no-same-owner', '--no-same-permissions', '-C', join(STAGE, 'repo')])
+        rmSync(inner)
+      }
       layOut()
       saveCheckpoint()
       startClaude()

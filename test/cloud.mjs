@@ -262,10 +262,12 @@ if (image && process.env.ANTHROPIC_AUTH_TOKEN) {
       const made = (await call('/api/rooms', { body: { name: 'Scott', title: 'cloud test' } })).body
       const kyle = (await call(`/api/rooms/${made.id}/join`, { body: { name: 'Kyle' } })).body
       // The packed session: a small project, no conversation yet.
+      // As the plugin packs it (packSession): project.tgz from the project's root, beside the conversation.
       const work = mkdtempSync(join(tmpdir(), 'ss-cloud-'))
-      mkdirSync(join(work, 'repo'))
-      writeFileSync(join(work, 'repo', 'README.md'), '# demo\n')
-      const bundle = execFileSync('tar', ['-czf', '-', '-C', work, 'repo'])
+      mkdirSync(join(work, 'project'))
+      writeFileSync(join(work, 'project', 'README.md'), '# demo\n')
+      execFileSync('tar', ['-czf', join(work, 'project.tgz'), '-C', join(work, 'project'), 'README.md'])
+      const bundle = execFileSync('tar', ['-czf', '-', '-C', work, 'project.tgz'])
       rmSync(work, { recursive: true, force: true })
       const moved = await call(`/api/rooms/${made.id}/cloud`, {
         token: made.token,
@@ -291,17 +293,22 @@ if (image && process.env.ANTHROPIC_AUTH_TOKEN) {
       }
       assert.ok(answered, 'the cloud host answered')
       // A teammate's write is asked of the approver, through the room; their yes lets it run there.
-      await call(`/api/rooms/${made.id}/events`, { token: kyle.token, body: { events: [{ type: 'prompt', body: { text: 'Use the Write tool to create hello.txt in your current working directory (the project folder, /Users/scott/demo) containing exactly: hi from the cloud', pid: 'p2' } }] } })
+      await call(`/api/rooms/${made.id}/events`, { token: kyle.token, body: { events: [{ type: 'prompt', body: { text: 'Use the Read tool on /Users/scott/demo/README.md, then use the Write tool to create /Users/scott/demo/hello.txt containing exactly: hi from the cloud, then that file\'s first line', pid: 'p2' } }] } })
       let question = null
+      let readThere = false
       for (let i = 0; i < 90 && !question; i++) {
         await sleep(1000)
         const page = (await call(`/api/rooms/${made.id}/events?after=${seq}&wait=0`, { token: moved.body.token })).body
         for (const e of page.events ?? []) {
           seq = Math.max(seq, e.seq)
+          if (process.env.CLOUD_DEBUG && e.type !== 'delta') console.log('     ', e.seq, e.type, e.from?.role, JSON.stringify(e.body).slice(0, 220))
           if (e.type === 'ask') question = e.body
+          if (e.type === 'row' && e.body?.kind === 'result' && /# demo/.test(e.body.text ?? '')) readThere = true
         }
       }
       assert.ok(question, 'the approver was asked')
+      // The project came along: Claude read it there.
+      assert.ok(readThere, 'the project was laid out')
       assert.match(question.what, /hello\.txt/)
       // Kyle isn't the approver: his answer isn't taken.
       await call(`/api/rooms/${made.id}/events`, { token: kyle.token, body: { events: [{ type: 'answer', body: { id: question.id, answer: 'Allow once' } }] } })
