@@ -66,3 +66,21 @@ new_sqlite_classes = ["GateObject"]
 [[migrations]]
 tag = "v5"
 new_sqlite_classes = ["DirectoryObject"]
+
+# Sessions kept running in the cloud (docs/cloud-host.md): a container a room,
+# running Claude Code with the plugin (cloud/Dockerfile). Deploying builds the
+# image, so it needs Docker running where you deploy, and Workers Paid.
+[[containers]]
+class_name = "HostContainer"
+image = "./cloud/Dockerfile"
+image_build_context = "."
+max_instances = 20
+instance_type = "standard-1"
+
+[[durable_objects.bindings]]
+name = "HOSTS"
+class_name = "HostContainer"
+
+[[migrations]]
+tag = "v6"
+new_sqlite_classes = ["HostContainer"]

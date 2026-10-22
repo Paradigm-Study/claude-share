@@ -290,8 +290,39 @@ if (image && process.env.ANTHROPIC_AUTH_TOKEN) {
         }
       }
       assert.ok(answered, 'the cloud host answered')
+      // A teammate's write is asked of the approver, through the room; their yes lets it run there.
+      await call(`/api/rooms/${made.id}/events`, { token: kyle.token, body: { events: [{ type: 'prompt', body: { text: 'Use the Write tool to create hello.txt in your current working directory (the project folder, /Users/scott/demo) containing exactly: hi from the cloud', pid: 'p2' } }] } })
+      let question = null
+      for (let i = 0; i < 90 && !question; i++) {
+        await sleep(1000)
+        const page = (await call(`/api/rooms/${made.id}/events?after=${seq}&wait=0`, { token: moved.body.token })).body
+        for (const e of page.events ?? []) {
+          seq = Math.max(seq, e.seq)
+          if (e.type === 'ask') question = e.body
+        }
+      }
+      assert.ok(question, 'the approver was asked')
+      assert.match(question.what, /hello\.txt/)
+      // Kyle isn't the approver: his answer isn't taken.
+      await call(`/api/rooms/${made.id}/events`, { token: kyle.token, body: { events: [{ type: 'answer', body: { id: question.id, answer: 'Allow once' } }] } })
+      await call(`/api/rooms/${made.id}/events`, { token: moved.body.token, body: { events: [{ type: 'answer', body: { id: question.id, answer: 'Allow once' } }] } })
+      let written = false
+      for (let i = 0; i < 90 && !written; i++) {
+        await sleep(1000)
+        const page = (await call(`/api/rooms/${made.id}/events?after=${seq}&wait=0`, { token: moved.body.token })).body
+        for (const e of page.events ?? []) {
+          seq = Math.max(seq, e.seq)
+          if (process.env.CLOUD_DEBUG && e.type !== 'delta') console.log('     ', e.seq, e.type, e.from?.role, JSON.stringify(e.body).slice(0, 220))
+          if (e.type === 'turn' && e.body?.state === 'end') written = true
+        }
+      }
+      assert.ok(written, 'the turn ended')
       const home = await call(`/api/rooms/${made.id}/cloud/home`, { token: moved.body.token, body: {} })
       assert.equal(home.status, 200, JSON.stringify(home.body))
+      assert.equal(home.body.changes?.name, 'cloud-changes.patch')
+      const patch = await fetch(`${S}/api/rooms/${made.id}/files/${home.body.changes.id}`, { headers: { authorization: `Bearer ${home.body.token}`, 'x-shared-session-version': '0.11.31' } }).then(r => r.text())
+      assert.match(patch, /hello\.txt/)
+      assert.match(patch, /hi from the cloud/)
       assert.equal((await call(`/api/rooms/${made.id}/events?after=0&wait=0`, { token: home.body.token })).status, 200)
       assert.ok(!execFileSync('docker', ['ps', '-q', '--filter', `name=ss-host-${made.id}`]).toString().trim(), 'the container is gone')
     })

@@ -65,6 +65,8 @@ function world(
     joinHold?: () => Promise<void>
     /** Events the room takes as too large: a post holding one is refused (413) and nothing of it is taken, as for a guest's event past 128 KB. */
     tooLarge?: (event: { type: string; body: Record<string, unknown> }) => boolean
+    /** The room's cloud host: a server without containers (`refuse`), Bring home with changes, what the clipboard holds, a bundle the runner didn't take. */
+    cloud?: { refuse?: boolean; changes?: boolean; clipboard?: string; bundleStatus?: string; apply?: 'clean' | 'conflict' }
     /** The guest's localhost helper, without starting a real listener. */
     localPreview?: 'wait' | 'busy' | 'missing'
     localPreviewPort?: number
@@ -583,6 +585,23 @@ function world(
         return { value: { code: 0, signal: null } }
       }
     }
+    // The cloud host: the project packed, the clipboard read, the packed session sent, the cloud's changes applied.
+    if (e.argv[0] === '/bin/sh' && e.input?.includes('"$dir/session.tgz"')) {
+      yield { stream: 'stdout' as const, text: 'dir=/tmp/pack-1\nsize=2048\n' }
+      return { value: { code: 0, signal: null } }
+    }
+    if (e.argv[0] === '/bin/sh' && e.input?.includes('pbpaste')) {
+      yield { stream: 'stdout' as const, text: opts.cloud?.clipboard ?? '' }
+      return { value: { code: 0, signal: null } }
+    }
+    if (e.argv[0] === '/bin/sh' && e.input?.includes('/cloud/bundle')) {
+      yield { stream: 'stdout' as const, text: opts.cloud?.bundleStatus ?? '200' }
+      return { value: { code: 0, signal: null } }
+    }
+    if (e.argv[0] === '/bin/sh' && e.input?.includes('git apply --check')) {
+      yield { stream: 'stdout' as const, text: opts.cloud?.apply === 'conflict' ? 'kept\n' : 'applied=2\n' }
+      return { value: { code: 0, signal: null } }
+    }
     if (e.argv[0] === '/bin/sh' && e.input?.startsWith('umask 077')) {
       if (opts.beforeProfile && e.input.includes('mkdir -p "$p"')) await opts.beforeProfile()
       // Private files: written to a temporary file on stdin, then renamed, as in production.
@@ -903,6 +922,11 @@ function world(
       if (opts.paged.failRest) return { value: { status: 500, ok: false, headers: {}, text: '{"error":"boom"}' } }
       const row = (seq: number, text: string) => ({ seq, type: 'row', from: { seat: 'host', name: 'Sam', role: 'host' }, ts: 900, body: { kind: 'user', who: 'Sam', text } })
       body = withList({ seq: 3, events: [row(2, 'second page'), row(3, 'third')], people, ended: false, title: 'demo' })
+    } else if (method === 'POST' && /\/api\/rooms\/[^/]+\/cloud$/.test(path)) {
+      if (opts.cloud?.refuse) return { value: { status: 501, ok: false, headers: {}, text: JSON.stringify({ error: "This share server can't keep sessions running in the cloud." }) } }
+      body = { token: 'g-cloud', seat: 'seatC', ticket: 'ticket-cloud' }
+    } else if (method === 'POST' && /\/api\/rooms\/[^/]+\/cloud\/home$/.test(path)) {
+      body = { token: 't-home', changes: opts.cloud?.changes ? { id: 'c'.repeat(64), name: 'cloud-changes.patch', type: 'text/x-diff', size: 40 } : null }
     } else if (path.endsWith('/join')) {
       joins += 1
       const history = opts.joinHistory ?? []
@@ -11960,4 +11984,199 @@ test('what you hear is yours to set, and kept for your next session', async ($, 
   await pane.press({ key: 'tab-settings' })
   await pane.select({ key: 'pref-voice', value: 'on' })
   expect(asked.store.get('prefs')).toMatchObject({ sounds: 'all', voice: true, statusLine: false })
+})
+
+// ---------------------------------------------------------------------------
+// The cloud host (docs/cloud-host.md).
+
+const CLOUD_PEOPLE = [{ id: 'host', name: 'scott', role: 'host', online: true }, { id: 'seat2', name: 'Alex', role: 'guest', online: true }]
+const CLOUD_TOKEN_FILE = '/home/scott/.claude/shared-session/cloud-token'
+const SETUP_TOKEN = `sk-ant-oat01-${'x'.repeat(40)}`
+// What every page of a room says while its host is in the cloud.
+const IN_CLOUD = { state: 'running', approver: 'scott', since: 900 }
+
+// A cloud host (cloud/runner.mjs starts it with SHARED_SESSION_RUNNER=1) has
+// nobody at its screen: a teammate's call goes to the room's approver as a
+// question, never a dialog, and their answer settles it. A room set to ask
+// nothing still asks there: the runner holds its approver's sign-in.
+test("a cloud host puts a teammate's call to its approver through the room, never a dialog, and the approver's answer settles it", async ($, on) => {
+  const prompt = { seq: 2, type: 'prompt', ts: 900, from: { seat: 'seat2', name: 'Alex', role: 'guest' }, body: { text: 'Run the tests', pid: 'p1' } }
+  const lines = liveLines({ seq: 2, events: [prompt], people: CLOUD_PEOPLE, ended: false, title: 'demo', cloud: { state: 'running', approver: 'scott', since: 900 } })
+  const asked = world(on, { live: lines, env: { SHARED_SESSION_RUNNER: '1' } })
+  on('turn.start', ($, e) => ({ turnId: e.turnId }))
+  on('tool.check', () => ({ decision: 'allow', reason: 'Allowed in this mode' }))
+  let dialogs = 0
+  on('tool.call', { tool: 'AskUserQuestion' }, () => {
+    dialogs += 1
+    throw new Error('no dialog here')
+  })
+  const ui = await $.ui.mount(band('desktop'))
+  await ui.press({ key: 'share' })
+  expect(await within(asked.clock, () => asked.submitted.some(p => p.text === 'Alex: Run the tests'), 5_000)).toBe(true)
+  await $.turn.start({ turnId: 'alex-1', text: 'Alex: Run the tests' })
+  // The room asks nothing: a cloud host asks anyway.
+  asked.state.policy = { prompts: 'everyone', approvals: 'none', files: 'on' }
+  let verdict: unknown
+  void $.tool.check({ tool: 'Bash', input: { command: 'npm test' }, tool_use_id: 'toolu_t1' } as never).then(v => void (verdict = v))
+  const question = await eventually(asked.clock, () => asked.posted.find(e => e.type === 'ask'))
+  expect(question?.body).toMatchObject({ who: 'Alex', what: 'Bash npm test', options: ['Allow once', 'Always allow Alex', 'Decline'] })
+  expect(dialogs).toBe(0)
+  expect(asked.state.approving ?? null).toBeNull() // nothing drawn here
+  // Not settled by anyone but its answer.
+  await asked.clock.advance(60_000)
+  expect(verdict).toBeUndefined()
+  lines.push({ seq: 4, events: [{ seq: 4, type: 'answer', ts: 950, from: { seat: 'seatC', name: 'scott', role: 'guest' }, body: { id: question!.body.id, answer: 'Allow once' } }], people: CLOUD_PEOPLE, ended: false, title: 'demo' })
+  expect(await eventually(asked.clock, () => verdict)).toEqual({ decision: 'allow', reason: 'scott allowed it' })
+  await asked.clock.advance(50)
+  expect(asked.posted.filter(e => e.type === 'approval').at(-1)?.body).toEqual({ pending: false, what: 'Bash npm test', allowed: true, by: 'Alex', id: question!.body.id })
+  await $.command.run({ command: 'stop-sharing', args: '' } as never)
+})
+
+// Ten minutes unanswered is a no, as in the row above a host's prompt.
+test("a cloud host's question unanswered for ten minutes is a no", async ($, on) => {
+  const prompt = { seq: 2, type: 'prompt', ts: 900, from: { seat: 'seat2', name: 'Alex', role: 'guest' }, body: { text: 'Run the tests', pid: 'p1' } }
+  const asked = world(on, { live: liveLines({ seq: 2, events: [prompt], people: CLOUD_PEOPLE, ended: false, title: 'demo' }), env: { SHARED_SESSION_RUNNER: '1' } })
+  on('turn.start', ($, e) => ({ turnId: e.turnId }))
+  on('tool.check', () => ({ decision: 'allow', reason: 'Allowed in this mode' }))
+  const ui = await $.ui.mount(band('desktop'))
+  await ui.press({ key: 'share' })
+  expect(await within(asked.clock, () => asked.submitted.some(p => p.text === 'Alex: Run the tests'), 5_000)).toBe(true)
+  await $.turn.start({ turnId: 'alex-1', text: 'Alex: Run the tests' })
+  let verdict: { decision?: string } | undefined
+  void $.tool.check({ tool: 'Bash', input: { command: 'npm test' }, tool_use_id: 'toolu_t2' } as never).then(v => void (verdict = v as never))
+  expect(await eventually(asked.clock, () => asked.posted.some(e => e.type === 'ask'))).toBe(true)
+  await asked.clock.advance(10 * 60_000 + 1_000)
+  expect((await eventually(asked.clock, () => verdict))?.decision).toBe('deny')
+  await $.command.run({ command: 'stop-sharing', args: '' } as never)
+})
+
+// The approver (the session that moved it) sees the cloud host's question
+// above the prompt and in the Room, answers it there, and it's off the list;
+// one answered elsewhere (another of their sessions) goes too.
+test("the approver answers the cloud host's question above the prompt, and the room hears only that", async ($, on) => {
+  const saved = {
+    at: 900,
+    room: { server: 'http://share.test', id: 'room0000000000000001', url: LINK, title: 'demo', host: 'scott', token: 'g-cloud', seat: 'seatC', seq: 2, since: 1 },
+    autoOpen: true, policy: { prompts: 'everyone', approvals: 'edits', files: 'on' }, shown: [], activity: [], chat: [], sidebar: null, cloudMine: true,
+  }
+  const ask = (id: string, what: string, seq: number) => ({ seq, type: 'ask', ts: 1_000, from: { seat: 'host', name: 'scott', role: 'host' }, body: { id, who: 'Alex', what, preview: `\`\`\`\n${what}\n\`\`\``, always: 'Always allow Alex', options: ['Allow once', 'Always allow Alex', 'Decline'] } })
+  const lines = liveLines({ seq: 3, events: [ask('q1', 'Bash npm test', 3)], people: CLOUD_PEOPLE, ended: false, title: 'demo', cloud: IN_CLOUD })
+  const asked = world(on, { live: lines, files: { [checkpointPath('joined:session-test-0001')]: JSON.stringify({ version: 1, value: saved }) } })
+  on('session.start', ($, e) => ({ cwd: e.cwd }))
+  on('session.end', ($, e) => ({ sessionId: e.sessionId }))
+  await $.session.start(START)
+  expect(await within(asked.clock, () => asked.state.cloudAsks?.length === 1, 5_000)).toBe(true)
+  expect(asked.state.cloud).toMatchObject({ state: 'running', mine: true })
+  const row = await $.ui.mount(band('desktop'))
+  expect((await row.find({ type: 'Text', text: /wants the cloud host to run/ }))?.text).toBe('Alex wants the cloud host to run Bash npm test')
+  await row.press({ key: 'cloud-once' })
+  await asked.clock.advance(50)
+  expect(asked.posted.filter(e => e.type === 'answer').map(e => e.body)).toEqual([{ id: 'q1', answer: 'Allow once' }])
+  expect(asked.state.cloudAsks).toEqual([])
+  // The Room shows the next one whole, and one answered elsewhere leaves it.
+  lines.push({ seq: 5, events: [ask('q2', 'Bash rm -rf build', 5)], people: CLOUD_PEOPLE, ended: false, title: 'demo', cloud: IN_CLOUD })
+  expect(await within(asked.clock, () => asked.state.cloudAsks?.length === 1, 5_000)).toBe(true)
+  const pane = await $.ui.mount({ plugin: 'shared-session', surface: 'desktop', component: 'Pane', requestId: 'shared-room', props: PANE })
+  expect(await pane.find({ type: 'Text', text: 'In the cloud' })).toBeDefined()
+  expect(await pane.find({ key: 'cloud-ask-once-q2' })).toBeDefined()
+  expect(await pane.find({ key: 'cloud-home' })).toBeDefined()
+  lines.push({ seq: 6, events: [{ seq: 6, type: 'answer', ts: 1_100, from: { seat: 'seatD', name: 'scott', role: 'guest' }, body: { id: 'q2', answer: 'Decline' } }], people: CLOUD_PEOPLE, ended: false, title: 'demo', cloud: IN_CLOUD })
+  expect(await within(asked.clock, () => asked.state.cloudAsks?.length === 0, 5_000)).toBe(true)
+  await $.session.end({ reason: 'other', sessionId: 'session-test-0001', resume: {} } as never)
+})
+
+// A guest who isn't the approver never sees the cloud host's questions.
+test("a teammate who isn't the approver isn't asked", async ($, on) => {
+  const ask = { seq: 2, type: 'ask', ts: 1_000, from: { seat: 'host', name: 'Sam', role: 'host' }, body: { id: 'q1', who: 'Alex', what: 'Bash npm test', always: 'Always allow Alex', options: ['Allow once', 'Always allow Alex', 'Decline'] } }
+  const asked = world(on, { stream: [{ seq: 2, events: [ask], people: CLOUD_PEOPLE, ended: false, title: 'demo', cloud: { state: 'running', approver: 'Sam', since: 900 } }] })
+  await $.prompt.submit({ text: LINK, origin: { kind: 'composer' }, wait: false })
+  await eventually(asked.clock, () => asked.state.cloud)
+  expect(asked.state.cloud).toMatchObject({ approver: 'Sam', mine: false })
+  await asked.clock.advance(100)
+  expect(asked.state.cloudAsks ?? []).toEqual([])
+})
+
+// Move to cloud: without a token kept here, the Room says how to make one;
+// the copied token is taken from the clipboard (never shown), kept 0600, and
+// the move goes on: the project packed, the room told, the packed session
+// sent with its ticket on stdin, and this session goes on as the approver.
+test('Move to cloud asks for a token once, then hands the host over and goes on here as its approver', async ($, on) => {
+  const asked = world(on, { stream: [{ seq: 1, events: [], people: [{ id: 'host', name: 'scott', role: 'host', online: true }], ended: false, title: 'demo' }], cloud: { clipboard: `${SETUP_TOKEN}\n` } })
+  on('session.start', ($, e) => ({ cwd: e.cwd }))
+  const ui = await $.ui.mount(band('desktop'))
+  await ui.press({ key: 'share' })
+  await eventually(asked.clock, () => asked.state.mode === 'host')
+  let pane = await $.ui.mount({ plugin: 'shared-session', surface: 'desktop', component: 'Pane', requestId: 'shared-room', props: PANE })
+  await pane.press({ key: 'tab-settings' })
+  await pane.press({ key: 'cloud-move' })
+  expect(asked.state.cloudMove).toEqual({ stage: 'token' })
+  await pane.unmount()
+  pane = await $.ui.mount({ plugin: 'shared-session', surface: 'desktop', component: 'Pane', requestId: 'shared-room', props: PANE })
+  expect(await pane.find({ type: 'Text', text: /claude setup-token/ })).toBeDefined()
+  await pane.press({ key: 'cloud-use-token' })
+  expect(await eventually(asked.clock, () => asked.state.mode === 'guest', 300)).toBe(true)
+  // The token kept here, private, and never on screen or in what the room keeps.
+  expect(asked.files.get(CLOUD_TOKEN_FILE)).toBe(SETUP_TOKEN)
+  const move = asked.sent.find(r => r.path.endsWith('/cloud'))!
+  expect(move.headers.authorization).toBe('Bearer t')
+  expect(move.body).toMatchObject({ session: expect.any(String), cwd: expect.any(String), auth: { oauthToken: SETUP_TOKEN } })
+  const upload = asked.spawned.find(s => s.input?.includes('/cloud/bundle'))!
+  expect(upload.input).toContain('Authorization: Bearer ticket-cloud')
+  expect(upload.argv.join(' ')).not.toContain('ticket-cloud')
+  expect(asked.state.room).toMatchObject({ token: 'g-cloud', seat: 'seatC' })
+  expect(asked.state.cloud).toMatchObject({ mine: true })
+  expect(asked.state.cloudMove).toBeNull()
+  expect(JSON.stringify(asked.posted)).not.toContain(SETUP_TOKEN)
+})
+
+// A server that can't host in the cloud says so, and nothing moves.
+test("a server without cloud hosts says so, and the session stays here", async ($, on) => {
+  const asked = world(on, { stream: [{ seq: 1, events: [], people: [{ id: 'host', name: 'scott', role: 'host', online: true }], ended: false, title: 'demo' }], files: { [CLOUD_TOKEN_FILE]: SETUP_TOKEN }, cloud: { refuse: true } })
+  const ui = await $.ui.mount(band('desktop'))
+  await ui.press({ key: 'share' })
+  await eventually(asked.clock, () => asked.state.mode === 'host')
+  const pane = await $.ui.mount({ plugin: 'shared-session', surface: 'desktop', component: 'Pane', requestId: 'shared-room', props: PANE })
+  await pane.press({ key: 'tab-settings' })
+  await pane.press({ key: 'cloud-move' })
+  expect(await eventually(asked.clock, () => asked.state.cloudMove?.stage === 'failed', 300)).toBe(true)
+  expect(asked.state.cloudMove?.note).toMatch(/can't keep sessions running in the cloud/)
+  expect(asked.state.mode).toBe('host')
+  expect(asked.state.room?.token).toBe('t')
+})
+
+// A packed session the runner didn't take brings the host straight back.
+test("a packed session that doesn't reach the cloud host leaves the session here", async ($, on) => {
+  const asked = world(on, { stream: [{ seq: 1, events: [], people: [{ id: 'host', name: 'scott', role: 'host', online: true }], ended: false, title: 'demo' }], files: { [CLOUD_TOKEN_FILE]: SETUP_TOKEN }, cloud: { bundleStatus: '502' } })
+  const ui = await $.ui.mount(band('desktop'))
+  await ui.press({ key: 'share' })
+  await eventually(asked.clock, () => asked.state.mode === 'host')
+  const pane = await $.ui.mount({ plugin: 'shared-session', surface: 'desktop', component: 'Pane', requestId: 'shared-room', props: PANE })
+  await pane.press({ key: 'tab-settings' })
+  await pane.press({ key: 'cloud-move' })
+  expect(await eventually(asked.clock, () => asked.state.cloudMove?.stage === 'failed', 300)).toBe(true)
+  expect(asked.sent.some(r => r.path.endsWith('/cloud/home') && r.headers.authorization === 'Bearer g-cloud')).toBe(true)
+  expect(asked.state.mode).toBe('host')
+})
+
+// Bring home: the approver's press. The room hands the host back, this
+// session hosts again, and the cloud's changes go into the project.
+test('Bring home takes the host back here with the cloud host’s changes', async ($, on) => {
+  const saved = {
+    at: 900,
+    room: { server: 'http://share.test', id: 'room0000000000000001', url: LINK, title: 'demo', host: 'scott', token: 'g-cloud', seat: 'seatC', seq: 2, since: 1 },
+    autoOpen: true, policy: { prompts: 'everyone', approvals: 'edits', files: 'on' }, shown: [], activity: [], chat: [], sidebar: null, cloudMine: true,
+  }
+  const asked = world(on, { stream: [{ seq: 2, events: [], people: CLOUD_PEOPLE, ended: false, title: 'demo', cloud: { state: 'running', approver: 'scott', since: 900 } }], files: { [checkpointPath('joined:session-test-0001')]: JSON.stringify({ version: 1, value: saved }) }, cloud: { changes: true } })
+  on('session.start', ($, e) => ({ cwd: e.cwd }))
+  await $.session.start(START)
+  expect(await eventually(asked.clock, () => asked.state.mode === 'guest' && asked.state.cloud?.mine)).toBe(true)
+  const pane = await $.ui.mount({ plugin: 'shared-session', surface: 'desktop', component: 'Pane', requestId: 'shared-room', props: PANE })
+  await pane.press({ key: 'cloud-home' })
+  expect(await eventually(asked.clock, () => asked.state.mode === 'host', 300)).toBe(true)
+  expect(asked.state.room).toMatchObject({ token: 't-home', seat: 'host' })
+  expect(asked.sent.find(r => r.path.endsWith('/cloud/home'))?.headers.authorization).toBe('Bearer g-cloud')
+  const applied = asked.spawned.find(s => s.input?.includes('git apply --check'))!
+  expect(applied.input).toContain(`/files/${'c'.repeat(64)}`)
+  expect(applied.input).toContain('Authorization: Bearer t-home')
+  expect(await eventually(asked.clock, () => asked.logged.some(l => /with the cloud host's changes to 2 files/.test(l)))).toBe(true)
 })
