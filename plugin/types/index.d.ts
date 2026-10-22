@@ -386,6 +386,8 @@ declare module 'claude-code' {
        * room than the one set clears nothing.
        */
       closing: { how: 'leave' | 'stop' | 'ended' | 'keep' | 'clear'; room: string } | null
+      /** The Team panel's Stop pressed once on this room id: the next press ends it. */
+      stoppingRoom: string | null
       /** A newer plugin than this one, as the share server last said. */
       newer: string | null
       /** Whether Claude Code updates this plugin by itself (the marketplace's `autoUpdate`); null when unknown. */
