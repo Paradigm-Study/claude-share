@@ -65,7 +65,6 @@ import {
   tcpSocketTarget,
   announceTCP,
   tcpState,
-  answersChecks,
   tcpCounted,
   tcpValid,
   tcpReserve,
@@ -82,17 +81,12 @@ import { Directory, providersFrom, BODY_CHARS } from './teams.mjs'
 const ROOM_TTL_MS = 24 * 60 * 60 * 1000
 const pad = seq => String(seq).padStart(12, '0')
 const CHUNK = 512 * 1024 // file bytes per storage value
-// A room's one value (meta, 2 MB at most): the room without its events, which
-// have keys of their own, and with the newest META_FILES of its files, whose
-// records are kept beside their bytes (bm:<id>) too. 0.11.24 kept every file
-// in meta and reads them there alone, so rolled back to, it still finds those;
-// loadFiles takes bm:'s record over meta's. Needed while 0.11.24 may come back.
-export const META_FILES = 512
+// A room's one value (meta, 2 MB at most): the room without its events and its
+// files' records, which have keys of their own (e:<seq>, and bm:<id> beside
+// each file's bytes).
 export function metaOf(room) {
   const { events, files, ...meta } = room.toJSON()
-  let newest = Object.values(files)
-  if (newest.length > META_FILES) newest = newest.sort((a, b) => b.ts - a.ts).slice(0, META_FILES)
-  return { events, meta: { ...meta, files: Object.fromEntries(newest.map(f => [f.id, f])) } }
+  return { events, meta }
 }
 // The directory reads a body whole, so the Worker reads it first, bounded:
 // its characters at three bytes each, as node.mjs does.
@@ -110,15 +104,13 @@ function previewOriginOf(req, env) {
 
 // A preview names its room by the room's Durable Object id (its preview key),
 // never by the room's id, which joins it: idFromName can't be undone, so the
-// key leads here and nowhere else. A link made or a cookie set before rooms
-// had keys names the room's id, and goes where 0.11.24's preview Worker sent
-// it (idFromName), so it keeps working whichever Worker a deploy puts first.
-// A key reaches only this version's rooms, so on an update this Worker is
-// deployed first (wrangler.preview.toml, scripts/setup.mjs).
+// key leads here and nowhere else. A preview Worker before keys can't route
+// them, so on an update this Worker is deployed first (wrangler.preview.toml,
+// scripts/setup.mjs).
 async function previewFetch(req, env) {
   const key = previewRoomOf(req) ?? ''
   let stub = null
-  try { stub = OBJECT_ID.test(key) ? env.ROOMS.get(env.ROOMS.idFromString(key)) : ROOM_ID.test(key) ? env.ROOMS.get(env.ROOMS.idFromName(key)) : null } catch {}
+  try { stub = OBJECT_ID.test(key) ? env.ROOMS.get(env.ROOMS.idFromString(key)) : null } catch {}
   if (!stub) return previewMissing()
   const url = new URL(req.url)
   // The body as it comes: the room bounds it (PROXY_BODY_MAX) as it arrives.
@@ -284,7 +276,7 @@ export class RoomObject {
       const stored = await state.storage.list({ prefix: 'e:' })
       const tcpStats = (await state.storage.get('tcp:stats')) ?? meta.tcpStats
       this.tcpSaved = tcpCounted(tcpStats ?? { used: 0 })
-      const files = await this.loadFiles(meta.files)
+      const files = await this.loadFiles()
       this.attach(Room.resume({ ...meta, tcpStats, files, events: [...stored.values()] }, Date.now()))
       this.cleanupPublic(Date.now())
       if (this.cleanupTCP(Date.now())) await this.persist()
@@ -301,7 +293,6 @@ export class RoomObject {
     room.previewKey = this.state.id?.toString() ?? room.previewKey
     room.connected = seat => this.state.getWebSockets(seat).some(ws => !this.closed.has(ws))
     room.onChange = () => this.broadcast()
-    room.tcpSupported = () => this.state.getWebSockets('host').some(ws => !this.closed.has(ws) && ws.deserializeAttachment()?.tcpSupport === true)
     // A revocation closes the channels it covers (revokeMatches): a TCP pair
     // by its grant, a public one by its browser session, seat or preview.
     room.onTCPRevoke = filter => {
@@ -316,36 +307,20 @@ export class RoomObject {
         if (revokeMatches(filter, att)) this.unpair(ws, att, 1008, 'Preview ended')
       }
     }
-    // A TCP channel or a guest's need only to a host stream that takes them.
-    room.toHost = message => {
-      let sent = false
-      for (const ws of this.state.getWebSockets('host')) {
-        if (this.closed.has(ws) || (message.tcp && ws.deserializeAttachment()?.tcpSupport !== true) || (message.need && ws.deserializeAttachment()?.needSupport !== true)) continue
-        try {
-          ws.send(JSON.stringify(message))
-          sent = true
-        } catch {}
-      }
-      return sent
-    }
-    // A message between sessions only to that seat's streams (the host's
-    // or a guest's), and only those that take them (room.toSeat): found by
-    // the seat's tag, and its attachment, which outlives the object sleeping,
-    // says so.
+    // A message for one seat's streams only (the host's asks, a message
+    // between sessions; room.toHost and room.toSeat): found by the seat's tag,
+    // which only streams carry.
     room.toSeat = (seat, message) => {
-      let open = false
       let sent = false
       for (const ws of this.state.getWebSockets(seat)) {
         const att = ws.deserializeAttachment()
         if (this.closed.has(ws) || att?.seat !== seat || att.tcp || att.pb || att.ph) continue
-        open = true
-        if (att.peerSupport !== true) continue
         try {
           ws.send(JSON.stringify(message))
           sent = true
         } catch {}
       }
-      return sent ? 'delivered' : open ? 'unsupported' : 'offline'
+      return sent ? 'delivered' : 'offline'
     }
     // File bytes in storage, in chunks, with what `files` holds for each
     // beside them (bm:<id>); deleteAll() at expiry takes them too.
@@ -374,19 +349,12 @@ export class RoomObject {
   }
 
   // A room's files as `files` holds them, from beside their bytes (bm:<id>),
-  // where this version keeps every record: so how many a room keeps isn't
-  // bounded by what one value holds. Meta's records (`saved`: the newest,
-  // metaOf, or all of a room 0.11.24 saved) count only for a file whose bm:
-  // has none, one 0.11.24 uploaded (before this version, or rolled back to),
-  // and move beside its bytes here, once: a record in bm: wins.
-  async loadFiles(saved = {}) {
-    const storage = this.state.storage
-    const kept = await storage.list({ prefix: 'bm:' })
+  // where every record is kept: so how many a room keeps isn't bounded by
+  // what one value holds.
+  async loadFiles() {
+    const kept = await this.state.storage.list({ prefix: 'bm:' })
     const files = {}
     for (const { chunks, ...file } of kept.values()) if (file.id) files[file.id] = file
-    const moved = Object.values(saved).filter(f => f?.id && !files[f.id] && kept.has(`bm:${f.id}`))
-    for (let i = 0; i < moved.length; i += 100) await storage.put(Object.fromEntries(moved.slice(i, i + 100).map(f => [`bm:${f.id}`, { ...kept.get(`bm:${f.id}`), ...f }])))
-    for (const f of moved) files[f.id] = f
     return files
   }
 
@@ -410,8 +378,7 @@ export class RoomObject {
     }
 
     // A preview's request names the room by its preview key (the preview
-    // Worker's only way here), or by its id for a link made or a cookie set
-    // before rooms had keys (core's namesRoom); everything else, by its id.
+    // Worker's only way here); everything else, by its id.
     const preview = rest === '__preview' || rest.startsWith('__preview/')
     if (!this.room) {
       return preview ? previewMissing() : rest === 'page'
@@ -420,7 +387,7 @@ export class RoomObject {
     }
 
     const room = this.room
-    if (preview ? id !== room.previewKey && id !== room.id : id !== room.id) return preview ? previewMissing() : notFound()
+    if (preview ? id !== room.previewKey : id !== room.id) return preview ? previewMissing() : notFound()
     // What expired is swept by the alarm, and by roomRequest for ordinary
     // requests; upgrades check what they need where they admit.
     if (req.method === 'POST') {
@@ -469,11 +436,7 @@ export class RoomObject {
     // Tagged as a stream, so a change goes to streams alone (broadcast), and
     // by seat, for who is connected.
     this.state.acceptWebSocket(server, ['stream', auth.seat])
-    // A host's stream says which asks it takes (room.toHost), and either
-    // side's whether it takes messages between sessions (room.toSeat).
-    const takes = name => auth.role === 'host' && url.searchParams.get(name) === '1'
-    const peerSupport = url.searchParams.get('peer') === '1'
-    server.serializeAttachment({ seat: auth.seat, role: auth.role, after: Number(url.searchParams.get('after') ?? 0) || 0, tcpSupport: takes('tcp'), needSupport: takes('need'), peerSupport })
+    server.serializeAttachment({ seat: auth.seat, role: auth.role, after: Number(url.searchParams.get('after') ?? 0) || 0 })
     this.room.touch(auth, now)
     this.send(server, now)
     if (auth.role === 'host') this.broadcast() // the host is back: everyone sees it
@@ -556,7 +519,7 @@ export class RoomObject {
     const id = token(12)
     const [client, server] = Object.values(new WebSocketPair())
     this.state.acceptWebSocket(server, ['tcp', `tg:${id}`])
-    server.serializeAttachment({ tcp: tcpState(id, target, 'guest', now, answersChecks(req)) })
+    server.serializeAttachment({ tcp: tcpState(id, target, 'guest', now) })
     if (!announceTCP(this.room, id, target)) {
       this.closeTCP(id, 1011, 'TCP host disconnected')
       return json({ error: 'The TCP host disconnected.' }, 503)
@@ -705,7 +668,7 @@ export class RoomObject {
       }
       const [client, server] = Object.values(new WebSocketPair())
       this.state.acceptWebSocket(server, ['tcp', `th:${wsId}`])
-      const host = tcpState(wsId, s, 'host', now, answersChecks(req))
+      const host = tcpState(wsId, s, 'host', now)
       try {
         s.ready = host.ready = true
         const guestReady = chargeControl(s, { t: 'ready' }), hostReady = chargeControl(host, { t: 'ready' })
@@ -881,7 +844,7 @@ export class RoomObject {
     if (!room) return
     // The counters' own key only when they changed: most rooms never use TCP.
     if (tcpCounted(room.tcpStats) !== this.tcpSaved) await this.persistTCPStats()
-    // Files are kept beside their bytes (store.put), the newest in meta too.
+    // Files are kept beside their bytes (store.put), never in meta.
     const { events, meta } = metaOf(room)
     const entries = { meta }
     for (const event of events) if (event.seq > this.savedSeq) entries[`e:${pad(event.seq)}`] = event

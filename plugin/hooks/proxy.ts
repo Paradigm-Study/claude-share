@@ -6,14 +6,14 @@
 /** The most of one response the host fetches for the link (curl's max-filesize), under the room's 20 MiB. */
 export const PROXY_FETCH_MAX = 20_000_000
 
-/** Format 2's first line at most, in bytes: the room reads no further for its newline. */
+/** An answer's first line at most, in bytes: the room reads no further for its newline. */
 export const PROXY_HEAD_MAX = 64 * 1024
 
 // A header's name as HTTP spells one (RFC 9110 token).
 const TOKEN = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/
 
 /**
- * Format 2's head, `{"status":N,"headers":[["name","value"],…]}`, for what
+ * An answer's head, `{"status":N,"headers":[["name","value"],…]}`, for what
  * curl fetched: the header lines of the last response in what `-D` wrote
  * (base64; a 100 Continue or an early hint comes before it). A header is
  * bytes: a value keeps them as they came, one character a byte, and the
@@ -43,11 +43,8 @@ export function proxyHead(status: number, dump: string): string | null {
   return JSON.stringify({ status, headers }).replace(/[\u007f-￿]/g, c => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`)
 }
 
-/** Format 2's head for one of the plugin's own pages (`proxyPage`). */
+/** The head for one of the plugin's own pages (`proxyPage`). */
 export const pageHead = (status: number) => JSON.stringify({ status, headers: [['content-type', 'text/html; charset=utf-8']] })
-
-/** The same for a 0.11.24 room: the header block curl would have written, base64 (x-proxy-headers). */
-export const pageHeaderBlock = (status: number) => btoa(`HTTP/1.1 ${status} \r\ncontent-type: text/html; charset=utf-8\r\n\r\n`)
 
 const html = (text: string) => text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
 

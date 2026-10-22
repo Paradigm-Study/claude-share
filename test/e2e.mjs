@@ -298,11 +298,13 @@ async function sharing() {
   const outdatedBody = await outdated.json().catch(() => ({}))
   const home = await fetch(`${SERVER}/`).then(r => r.text()).catch(() => '')
   check("the server's page says how to install and what it keeps", home.includes('claude plugin install shared-session@claude-share') && home.includes('What this server sees and keeps'))
-  // The room knows which plugin its host runs, so a guest's can say what an older one can't show.
-  const older = await fetch(`${SERVER}/api/rooms`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-shared-session-version': '0.10.1' }, body: JSON.stringify({ name: 'host', title: 'versions' }) }).then(r => r.json())
-  await fetch(`${SERVER}/api/rooms/${older.id}/events?after=0&wait=0`, { headers: { authorization: `Bearer ${older.token}`, 'x-shared-session-version': '0.10.7' } })
-  check('the room says which plugin its host runs now', (await roomInfo(older.id)).hostVersion === '0.10.7')
-  await fetch(`${SERVER}/api/rooms/${older.id}/end`, { method: 'POST', headers: { authorization: `Bearer ${older.token}`, 'x-shared-session-version': '0.10.7' } })
+  // The room knows which plugin its host runs now, one an update in place loaded included.
+  const current = JSON.parse(readFileSync(join(ROOT, 'plugin/.claude-plugin/plugin.json'), 'utf8')).version
+  const later = current.replace(/\d+$/, n => String(Number(n) + 1))
+  const versioned = await fetch(`${SERVER}/api/rooms`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-shared-session-version': current }, body: JSON.stringify({ name: 'host', title: 'versions' }) }).then(r => r.json())
+  await fetch(`${SERVER}/api/rooms/${versioned.id}/events?after=0&wait=0`, { headers: { authorization: `Bearer ${versioned.token}`, 'x-shared-session-version': later } })
+  check('the room says which plugin its host runs now', (await roomInfo(versioned.id)).hostVersion === later)
+  await fetch(`${SERVER}/api/rooms/${versioned.id}/end`, { method: 'POST', headers: { authorization: `Bearer ${versioned.token}`, 'x-shared-session-version': later } })
   const tooOld = await fetch(`${SERVER}/api/rooms`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-shared-session-version': '0.9.7' }, body: JSON.stringify({ name: 'old', title: 'old' }) })
   check('a plugin older than the minimum is turned away with the update command', tooOld.status === 426 && String((await tooOld.json()).error).includes(UPDATE_LINE))
   check('an out-of-date plugin is told how to update', outdated.status === 426 && String(outdatedBody.error).includes('claude plugin update shared-session@claude-share'), `HTTP ${outdated.status}`)

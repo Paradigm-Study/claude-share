@@ -65,7 +65,7 @@ export function patchOf(hunks: unknown): Patch | null {
 
 /**
  * An edit's change worked out from its two texts when the tool's own hunks
- * aren't at hand (a guest's copy, an older host): a line diff, its numbers
+ * aren't at hand (a guest's copy): a line diff, its numbers
  * counted from the edit's own first line.
  */
 export function diffOf(before: string, after: string): Patch {

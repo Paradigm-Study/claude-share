@@ -1,14 +1,14 @@
-// The public link's answers, the pure parts: format 2's head from what curl
+// The public link's answers, the pure parts: an answer's head from what curl
 // wrote, a request's Origin and Referer at the preview's own address, and
 // the plugin's own pages. Run with `claude plugin test plugin`.
 
 import { expect, test } from 'claude-code/testing'
-import { curlString, localHeaders, pageHead, pageHeaderBlock, PROXY_HEAD_MAX, proxyHead, proxyPage } from '../hooks/proxy'
+import { curlString, localHeaders, pageHead, PROXY_HEAD_MAX, proxyHead, proxyPage } from '../hooks/proxy'
 
 // Bytes as curl's -D writes them, base64 as the fetch prints them.
 const dump = (text: string) => btoa(text)
 
-test("format 2's head is the last response's headers, each value's bytes kept, all of it ASCII", () => {
+test("an answer's head is the last response's headers, each value's bytes kept, all of it ASCII", () => {
   const raw = 'HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 OK\r\nContent-Type: text/html\r\nSet-Cookie: a=1\r\nSet-Cookie: b=2\r\nX-Name: cafÃ©\r\nX-Latin: été\r\n\r\n'
   const head = proxyHead(200, dump(raw))!
   expect(/^[\x20-\x7e]+$/.test(head)).toBe(true)
@@ -20,7 +20,7 @@ test("format 2's head is the last response's headers, each value's bytes kept, a
   expect(head).not.toContain('Continue')
 })
 
-test("format 2's head leaves out what no Headers would take, and is null without a response in it", () => {
+test("an answer's head leaves out what no Headers would take, and is null without a response in it", () => {
   const raw = 'HTTP/2 302 \r\nlocation: http://localhost:3000/login\r\n folded: on\r\nbad name: x\r\n: empty\r\nx-cr: a\rb\r\nvalue-trim:  spaced \t\r\n\r\n'
   expect(JSON.parse(proxyHead(302, dump(raw))!).headers).toEqual([['location', 'http://localhost:3000/login'], ['value-trim', 'spaced']])
   expect(proxyHead(200, dump(''))).toBeNull()
@@ -57,9 +57,8 @@ test("a request reaches the host's localhost as from the preview's own page", ()
   expect(localHeaders([['origin', 'null'], ['referer', 'not a url']], 'http://localhost:3000')).toEqual([['origin', 'null'], ['referer', 'http://localhost:3000/']])
 })
 
-test("the plugin's own pages: format 2's head, the header block a 0.11.24 room reads, nothing unescaped", () => {
+test("the plugin's own pages: their head, nothing unescaped", () => {
   expect(JSON.parse(pageHead(503))).toEqual({ status: 503, headers: [['content-type', 'text/html; charset=utf-8']] })
-  expect(atob(pageHeaderBlock(502))).toBe('HTTP/1.1 502 \r\ncontent-type: text/html; charset=utf-8\r\n\r\n')
   const page = proxyPage('The preview is busy', 'Sam <b>& co</b> "here"')
   expect(page.startsWith('<!doctype html>')).toBe(true)
   expect(page).toContain('Sam &lt;b&gt;&amp; co&lt;/b&gt; &quot;here&quot;')

@@ -250,7 +250,6 @@ try {
     await failed(200, { delivered: false, reason: 'offline' }, 'dropped')
     await failed(429, { error: 'busy' }, 'dropped', 'rate-limited')
     await failed(413, { error: 'big' }, 'dropped')
-    await failed(200, { delivered: false, reason: 'unsupported' }, 'refused')
     await failed(410, { error: 'ended' }, 'refused')
     await failed(403, { error: 'not a seat' }, 'refused')
     answer = () => [200, { delivered: true }]

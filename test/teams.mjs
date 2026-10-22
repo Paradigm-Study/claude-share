@@ -19,6 +19,7 @@ import { access, mkdtemp, realpath, rm } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
 import { basename, join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { PLUGIN_LATEST } from '../server/core.mjs'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const PORT = Number(process.env.TEAMS_PORT ?? 8899)
@@ -26,7 +27,7 @@ const S = (process.env.TEAMS_SERVER ?? `http://127.0.0.1:${PORT}`).replace(/\/+$
 const srv = process.env.TEAMS_SERVER ? { kill() {} } : spawn(process.execPath, [join(ROOT, 'server/node.mjs')], { env: { ...process.env, PORT: String(PORT), PREVIEW_PORT: String(PORT + 1), AUTH_TEST: '1', DATA_FILE: '' }, stdio: ['ignore', 'pipe', 'inherit'] })
 if (!process.env.TEAMS_SERVER) await new Promise(r => srv.stdout.once('data', r))
 
-const V = { 'x-shared-session-version': '0.11.0', 'content-type': 'application/json' }
+const V = { 'x-shared-session-version': PLUGIN_LATEST, 'content-type': 'application/json' }
 // `tok`: a sign-in, as the team API takes it; `acct`: as a share or a join
 // sends it; `form`: fields a browser's form posts.
 const call = async (path, { method = 'GET', body, tok, acct, form } = {}) => {
@@ -60,7 +61,7 @@ const formOf = html => {
 const signIn = async (email, name, invite = '', teamName = '') => {
   const verifier = secret()
   const login = sha(verifier)
-  const page = await call(`/auth/test/start?login=${login}&email=${encodeURIComponent(email)}&name=${name}&code=1${invite ? `&invite=${invite}` : ''}`)
+  const page = await call(`/auth/test/start?login=${login}&email=${encodeURIComponent(email)}&name=${name}${invite ? `&invite=${invite}` : ''}`)
   ok((await call('/api/auth/poll', { method: 'POST', body: { verifier: 'W'.repeat(40) } })).data.status === 'expired', 'a wrong secret gets nothing')
   // The provider's answer only asks: who, and the code Claude Code shows.
   const form = formOf(page.data)
@@ -142,7 +143,7 @@ async function continueInChrome() {
     const { result: { sessionId } } = await send('Target.attachToTarget', { targetId, flatten: true })
     const s = (method, params) => send(method, params, sessionId)
     if (emulate) await s('Emulation.setFocusEmulationEnabled', { enabled: true })
-    await s('Page.navigate', { url: `${S}/auth/test/start?login=${login}&email=${name.toLowerCase()}@acme.com&name=${name}&code=1` })
+    await s('Page.navigate', { url: `${S}/auth/test/start?login=${login}&email=${name.toLowerCase()}@acme.com&name=${name}` })
     const value = async expression => (await s('Runtime.evaluate', { expression, returnByValue: true })).result?.result?.value
     for (let i = 0; i < 250 && (await value("document.readyState !== 'loading' && Boolean(document.getElementById('continue'))")) !== true; i++) await wait(20)
     const at = await value("(r => ({ x: r.left + r.width / 2, y: r.top + r.height / 2 }))(document.getElementById('continue').getBoundingClientRect())")
@@ -284,8 +285,8 @@ try {
     ok(script.includes("getElementById('continue')") && !/unsafe-inline|unsafe-eval/.test(h.get('content-security-policy')) && String(page.data).match(/<script/g).length === 1, 'that script is the Continue guard, allowed by hash alone')
     // Its Continue starts disabled and the guard enables it; without script, the noscript one is there.
     ok(String(page.data).includes('<button type="submit" class="btn-primary" id="continue" disabled>Continue</button><noscript><style>#continue{display:none}</style><button type="submit" class="btn-primary">Continue</button></noscript></form>'), "Continue starts disabled, and a browser without script gets one that isn't")
-    // A start link without code=1 (0.11.24's Claude Code shows no code): no code to match.
-    ok(says(page.data, 'Claude Code is signing in as Victim (victim@acme.com). Continue only if you started signing in from Claude Code just now.') && !says(page.data, 'the code <b>') && !says(page.data, 'codes match') && !formOf(page.data).code, 'a start link without code=1 asks without a code')
+    // Every start link's page shows the code Claude Code shows, whatever else the link says.
+    ok(says(page.data, `Claude Code is signing in as Victim (victim@acme.com). It shows the code <b>${codeOf(login)}</b>. Continue only if you started signing in from Claude Code just now and the codes match.`), 'the page shows the code to match')
     const forged = await call('/auth/confirm', { method: 'POST', form: { login, nonce: 'x'.repeat(24) } })
     const bare = await call('/auth/confirm', { method: 'POST', form: { login } })
     const got = await call('/api/auth/poll', { method: 'POST', body: { verifier } })
@@ -489,7 +490,7 @@ try {
   const ghPoll = async verifier => (await ghAt('/api/auth/poll', { method: 'POST', body: JSON.stringify({ verifier }) })).json()
   const vic = secret()
   const vicLogin = sha(vic)
-  const stateOf = async (login = vicLogin, more = '&code=1') => new URL((await ghAt(`/auth/github/start?login=${login}${more}`)).headers.get('location')).searchParams.get('state')
+  const stateOf = async (login = vicLogin) => new URL((await ghAt(`/auth/github/start?login=${login}`)).headers.get('location')).searchParams.get('state')
   const [s1, s2] = [await stateOf(), await stateOf()]
   const back = await ghAt(`/auth/github/callback?state=${s1}&code=c1`)
   const backPage = await back.text()
@@ -499,15 +500,11 @@ try {
   const second = await (await ghAt(`/auth/github/callback?state=${s2}&code=c2`)).text()
   const vicGot = await ghPoll(vic)
   ok(says(second, "You're already signed in") && vicGot.status === 'done' && /^ssa_/.test(vicGot.token) && vicGot.account?.name === 'Vic', "another answer for a sign-in already continued leaves it for Claude Code to collect")
-  // code=1 rides with the sign-in to the provider's answer, and past it to a
-  // second answer before Continue; a start without it shows no code.
+  // The provider's answer shows the code, and so does a second answer before Continue.
   const wyn = sha(secret())
   const [w1, w2] = [await stateOf(wyn), await stateOf(wyn)]
   const answered = [await (await ghAt(`/auth/github/callback?state=${w1}&code=c1`)).text(), await (await ghAt(`/auth/github/callback?state=${w2}&code=c2`)).text()]
-  ok(answered.every(html => formOf(html).code === codeOf(wyn) && says(html, 'and the codes match.')), "a start with code=1 shows the code on GitHub's answer, and on a second answer too")
-  const xia = sha(secret())
-  const plain = await (await ghAt(`/auth/github/callback?state=${await stateOf(xia, '')}&code=c3`)).text()
-  ok(says(plain, 'Claude Code is signing in as Vic (vic@corp.dev). Continue only if you started signing in from Claude Code just now.') && !formOf(plain).code && !says(plain, 'codes match'), "a start without code=1 asks on GitHub's answer without a code")
+  ok(answered.every(html => formOf(html).code === codeOf(wyn) && says(html, 'and the codes match.')), "GitHub's answer shows the code, and a second answer too")
   // Expired sign-ins go when they're asked for, finished or not, and a late Continue does nothing.
   const unanswered = await begin('una@first.test', 'Una')
   const uncollected = await begin('uli@first.test', 'Uli')
@@ -595,12 +592,12 @@ try {
   const verifier = secret()
   const login = sha(verifier)
   const poll = async () => (await at('/api/auth/poll', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ verifier }) })).json()
-  const started = await at(`/auth/test/start?login=${login}&email=wes@acme.dev&name=Wes&code=1`)
+  const started = await at(`/auth/test/start?login=${login}&email=wes@acme.dev&name=Wes`)
   const form = formOf(await started.text())
   const early = await poll()
   const done = await at('/auth/confirm', { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ login, nonce: form.nonce ?? '' }) })
   const page = await done.text()
   const got = await poll()
   ok(early.status === 'confirm' && done.status === 200 && says(page, "You're signed in, Wes") && got.status === 'done' && /^ssa_/.test(got.token) && !JSON.stringify([...kept.values()]).includes('ssa_'), "on the Worker too, the sign-in waits for its Continue, and only the token's hash is stored")
-  ok(form.code === codeOf(login) && /^frame-ancestors 'none'; script-src 'sha256-[A-Za-z0-9+/]{43}='$/.test(started.headers.get('content-security-policy') ?? ''), 'and its page shows the code code=1 asks for, under the same script policy')
+  ok(form.code === codeOf(login) && /^frame-ancestors 'none'; script-src 'sha256-[A-Za-z0-9+/]{43}='$/.test(started.headers.get('content-security-policy') ?? ''), 'and its page shows the code, under the same script policy')
 }

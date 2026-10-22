@@ -20,16 +20,9 @@ export type ShareRoom = {
   team?: { id: string; name: string } | null
   /**
    * Host: shared Only from now on. A reopened session's look back at its
-   * history shares only the pages Claude opened since `since`. Older plugins
-   * ignore it.
+   * history shares only the pages Claude opened since `since`.
    */
   fromNow?: true
-  /**
-   * The room's server passes messages between a teammate's own sessions and
-   * the host's session on (its create or join answered `peer`): only then do
-   * they go. Older plugins ignore it.
-   */
-  peer?: true
 }
 
 export type SharePerson = {
@@ -116,7 +109,7 @@ export type ShareShown = {
   key: string
   kind: 'send' | 'widget' | 'file' | 'page' | 'preview' | 'link'
   name: string
-  /** A preview's title as its artifact (or the room) gave it, without what `name` adds to it. Absent from entries saved before it was kept. */
+  /** A preview's title as its artifact (or the room) gave it, without what `name` adds to it. */
   title?: string
   ts: number
   files?: ShareFileMeta[]
@@ -130,19 +123,18 @@ export type ShareShown = {
   /**
    * A preview the host chose to share for forwarding to a guest's localhost
    * (raw TCP); else it opens through its link. A guest takes it from the
-   * room (its preview events, and what it lists as shared), and a later
-   * artifact that doesn't say it (a page Claude opened there) keeps it.
+   * room's list of what's shared, whatever an artifact says.
    */
   tcp?: boolean
   /** A preview's address as the host gave it (`0.0.0.0` is `localhost`): a preview window opens exactly this origin. */
   host?: 'localhost' | '127.0.0.1' | '[::1]'
-  /** A preview the host serves over TLS (`https://localhost:3000`); absent is http. Older plugins ignore it. */
+  /** A preview the host serves over TLS (`https://localhost:3000`); absent is http. */
   scheme?: 'https'
   /**
    * A preview shared for another page's sake (an API the app calls): the
    * host port of the page that uses it, or `true` when that isn't known.
    * Pages in a guest's preview window reach it at its own address; it is
-   * never what Open preview opens. Older plugins ignore it.
+   * never what Open preview opens.
    */
   dependency?: number | true
 }
@@ -245,18 +237,11 @@ export type ShareLocalPreview = {
   pid: string
   /** Host's target port. */
   port: number
-  /** Its actual local port (0.11.24 binds there first): a reload or resume binds exactly there again, or not at all. */
+  /** Its actual local port: a reload or resume binds exactly there again, or not at all. */
   localPort?: number
-  /**
-   * 0.11.24's Local port, a port the person chose (which it binds exactly).
-   * No longer written; read only where `localPort` is missing (0.11.24
-   * saved a chosen port before its listener was up), as where it was.
-   */
-  requestedPort?: number
   /**
    * What a page uses, opened by its own Open (its row in Room → Shown), not
    * only for a page: it stays when a page that uses it is Closed or Stopped.
-   * Absent from what 0.11.24 and older saved.
    */
   own?: true
 }
@@ -301,9 +286,9 @@ export type ShareTeams = {
   /**
    * A sign-in waiting in the browser. `code`: what the server's page shows
    * too (the first eight hex of the hash sent, `XXXX-XXXX`), to continue
-   * only if they match; absent in one an older version began.
+   * only if they match.
    */
-  signingIn: { provider: string; url: string; until: number; code?: string } | null
+  signingIn: { provider: string; url: string; until: number; code: string } | null
   /** An invite link to take once signed in. */
   invite: { server: string; code: string } | null
   /** When the list was last asked for, ms since the epoch (0: never). */
@@ -342,12 +327,6 @@ declare module 'claude-code' {
       autoOpen: boolean
       /** Host: what this session shares, by port: its preview, and whether (and as what) it's forwarded. */
       shares: Record<string, HostShare>
-      /** 0.11.24's (host): the previews it shared, port → preview id. An update in place moves them into `shares` as it loads, and empties them; nothing else is kept here. */
-      previews: Record<string, string>
-      /** 0.11.24's (host): the shared ports it forwarded over raw TCP, moved into `shares` with `previews`. */
-      forwardPorts: string[]
-      /** An unreleased build's (host): the shared previews whose server speaks TLS, by preview id, moved into `shares` with `previews`. */
-      previewSchemes: Record<string, 'https'>
       /** Guest: previews opened on this machine's localhost, restored after reload/resume. */
       localPreviews: ShareLocalPreview[]
       /** Guest: the room's preview window, its proxy port kept through a reload. */

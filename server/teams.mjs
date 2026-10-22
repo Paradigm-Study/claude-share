@@ -9,8 +9,7 @@
 //   tok:<sha256>              a signed-in Claude Code { account, at } (the token itself is never kept)
 //   login:<hash>              a sign-in under way (ten minutes): 'pending', then 'confirm' (who the provider
 //                             said, waiting for the browser's Continue), then 'done' (the account id, until
-//                             Claude Code collects it: its token is made then); `code` when that Claude Code
-//                             shows the code its page shows
+//                             Claude Code collects it: its token is made then)
 //   state:<id>                a provider's sign-in under way (ten minutes)
 //   team:<id>                 { id, name, createdAt, access: 'members' | 'link', domains, githubOrgs, invite }
 //   inv:<code>                → team id
@@ -591,11 +590,7 @@ export class Directory {
     if (known?.status === 'done') return alreadyIn()
     // Sign-ins nobody finished or collected go after their ten minutes.
     for (const prefix of ['login:', 'state:']) for (const [key, rec] of await this.kv.list(prefix)) if (rec.exp < now) await this.kv.delete(key)
-    // `code=1`: this Claude Code shows the code the page shows (0.11.25 and
-    // newer say so); kept with the sign-in for the page the provider's answer
-    // brings (ask).
-    const code = url.searchParams.get('code') === '1'
-    await this.kv.put(`login:${login}`, { status: 'pending', exp: now + LOGIN_MS, ...(code ? { code } : {}) })
+    await this.kv.put(`login:${login}`, { status: 'pending', exp: now + LOGIN_MS })
     if (provider === 'test') {
       // The end-to-end test's own provider: who to be comes in the link. It
       // asks in the browser as the others do.
@@ -632,22 +627,19 @@ export class Directory {
   // is signed in. The page shows the code Claude Code shows (the start of
   // `login`), so someone who opened another person's start link can tell
   // it isn't theirs, and only its Continue, a POST carrying this page's
-  // nonce, goes on (CONTINUE_SCRIPT: not a click timed for it). A start
-  // link without `code=1` (0.11.24's) asks without the code, which that
-  // Claude Code doesn't show.
+  // nonce, goes on (CONTINUE_SCRIPT: not a click timed for it).
   async ask(identity, login, invite, now) {
     const known = await this.kv.get(`login:${login}`)
     if (known?.status === 'done') return alreadyIn()
     const nonce = token(18)
-    const shows = known?.code === true
-    await this.kv.put(`login:${login}`, { status: 'confirm', identity, invite, nonce, exp: now + LOGIN_MS, ...(shows ? { code: true } : {}) })
+    await this.kv.put(`login:${login}`, { status: 'confirm', identity, invite, nonce, exp: now + LOGIN_MS })
     const email = clean(identity.email, 120)
     const name = clean(identity.name || identity.login || email.split('@')[0] || 'teammate')
     const team = invite ? await this.inviteTeam(invite) : null
     const code = `${login.slice(0, 4)}-${login.slice(4, 8)}`.toUpperCase()
     const who = `Claude Code is signing in as ${esc(name)}${email ? ` (${esc(email)})` : ''}.`
     return guarded(page('Sign-in', 'Finish signing in', [
-      shows ? `${who} It shows the code <b>${code}</b>. Continue only if you started signing in from Claude Code just now and the codes match.` : `${who} Continue only if you started signing in from Claude Code just now.`,
+      `${who} It shows the code <b>${code}</b>. Continue only if you started signing in from Claude Code just now and the codes match.`,
       ...(team ? [`Continuing also joins you to the team <b>${esc(team.name)}</b>.`] : []),
     ], {
       after: `<form class="cta" method="post" action="/auth/confirm"><input type="hidden" name="login" value="${esc(login)}"><input type="hidden" name="nonce" value="${esc(nonce)}"><button type="submit" class="btn-primary" id="continue" disabled>Continue</button><noscript><style>#continue{display:none}</style><button type="submit" class="btn-primary">Continue</button></noscript></form>`,
@@ -701,8 +693,8 @@ export class Directory {
     if (!rec || rec.exp < now) return json({ status: 'expired' })
     if (rec.status !== 'done') return json({ status: rec.status === 'confirm' ? 'confirm' : 'pending' })
     await this.kv.delete(`login:${login}`)
-    // The account went since (deleted from another session), or the sign-in
-    // finished before tokens were made here: nothing to hand over.
+    // The account went since (deleted from another session): nothing to
+    // hand over.
     const account = rec.account ? await this.kv.get(`acct:${rec.account}`) : null
     if (!account) return json({ status: 'expired' })
     return json({ status: 'done', token: await this.mint(account.id, now), joined: rec.joined ?? null, account: this.accountView(account), teams: await this.teamsOf(account) })
