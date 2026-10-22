@@ -463,6 +463,50 @@ try {
   r2.sweep(60_000)
   ok(r2.away.has(idle2.token) && !r2.keepTeam('teamB', [], 60_000), "an away seat is the room's still, and another team's word changes nothing")
   ok(r2.keepTeam('teamA', ['k'], 61_000) && Boolean(r2.auth(kept2.token, 61_000)) && r2.auth(gone2.token, 61_000) === null && r2.auth(idle2.token, 61_000) === null && !r2.away.has(idle2.token), 'its own team keeps its members, and lets the others go, here or away, for good')
+  // A join that holds its body open while its joiner is removed from the
+  // team gets no seat: the team is asked after the wait, and asked again
+  // when it let someone go meanwhile. A member's join waiting through
+  // someone else's removal is seated.
+  const { roomRequest } = await import('../server/core.mjs')
+  const inTeam = new Set(['k', 'm'])
+  let duringCheck = null // a removal landing while the room waits for the directory's word
+  const directory = {
+    joinCheck: async (_team, account) => {
+      const member = inTeam.has(account)
+      if (duringCheck) await duringCheck()
+      return member ? { ok: true } : { ok: false, status: 403, error: 'Only people in the team join.' }
+    },
+    whoIs: async account => (account ? { id: account } : null),
+  }
+  const heldJoin = (room, account, name) => {
+    let release
+    const body = new ReadableStream({ start: c => void (release = () => { c.enqueue(new TextEncoder().encode(JSON.stringify({ name }))); c.close() }) })
+    const request = new Request(`https://share.test/api/rooms/${room.id}/join`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-shared-session-version': PLUGIN_LATEST, 'x-shared-session-account': account }, body, duplex: 'half' })
+    return { answer: roomRequest(room, request, 'join', 1_000, 'https://share.test', { directory }), release: () => release() }
+  }
+  const r3 = Room.create({ id: 'r3', name: 'Host', title: 't', now: 0, team: { id: 'teamA', name: 'A', account: 'h' } })
+  const ned = heldJoin(r3, 'n0', 'Ned')
+  inTeam.add('n0')
+  const kim = heldJoin(r3, 'k', 'Kim')
+  await new Promise(done => setTimeout(done, 20))
+  inTeam.delete('n0')
+  r3.keepTeam('teamA', [...inTeam], 1_100)
+  ned.release()
+  kim.release()
+  const [nedAnswer, kimAnswer] = await Promise.all([ned.answer, kim.answer])
+  ok(nedAnswer.response.status === 403 && ![...r3.seats.values()].some(seat => seat.name === 'Ned'), 'a join held open while its joiner is removed from the team gets no seat')
+  ok(kimAnswer.response.status === 200 && [...r3.seats.values()].some(seat => seat.name === 'Kim' && seat.account === 'k'), "a member's join waiting through someone else's removal is seated")
+  // Removed while the directory's yes is on its way: asked again, and no seat.
+  inTeam.add('p0')
+  duringCheck = async () => {
+    duringCheck = null
+    inTeam.delete('p0')
+    r3.keepTeam('teamA', [...inTeam], 1_200)
+  }
+  const pat = heldJoin(r3, 'p0', 'Pat')
+  pat.release()
+  const patAnswer = await pat.answer
+  ok(patAnswer.response.status === 403 && ![...r3.seats.values()].some(seat => seat.name === 'Pat'), "a join whose joiner is removed while the team's yes is on its way gets no seat")
 } catch (error) {
   // Reported, so the checks below still run.
   console.error(error)
@@ -640,6 +684,35 @@ try {
   data.set('email:left@old.test', alice.id)
   const stale = await dir.signIn(google('g3', 'left@old.test'), now)
   ok(stale.id !== alice.id && data.get('email:left@old.test') === stale.id, "an index entry whose account doesn't have that address any more takes nobody's account")
+  data.set('email:alice@new.test', alice.id)
+  // Its provider no longer vouching for the address (signed in again, none
+  // verified now): shown still, but it leads nowhere, and takes no team.
+  const bob = await dir.signIn(github('7', 'bob@old.test'), now)
+  const unvouched = await dir.signIn({ ...github('7', ''), emailVerified: false }, now)
+  ok(unvouched.id === bob.id && unvouched.email === 'bob@old.test' && unvouched.emailVerified === false && !data.has('email:bob@old.test'), "an address its provider stops vouching for is shown still, but leaves the index")
+  const taker = await dir.signIn(google('g7', 'bob@old.test'), now)
+  ok(taker.id !== bob.id && (await dir.kv.get('ident:google:g7')) === taker.id, "another provider's identity with that address signs in to an account of its own")
+  data.set('email:bob@old.test', bob.id)
+  const left = await dir.signIn(google('g8', 'bob@old.test'), now)
+  ok(left.id !== bob.id, 'an index entry for an address its account no longer has proved takes nobody')
+  // GitHub's answer about addresses lost (the call failed): no sign-in,
+  // never taken as none; an answer with none verified is none.
+  const answers = { emails: null }
+  const gh = new Directory(mapStore(new Map()), {
+    providers: { github: { id: 'cid', secret: 'cs' } },
+    fetch: async url => {
+      const reply = body => ({ ok: body !== null, json: async () => body })
+      if (String(url).includes('/login/oauth/access_token')) return reply({ access_token: 'gho_test' })
+      if (String(url).endsWith('/user')) return reply({ id: 42, login: 'octo', name: 'Octo' })
+      if (String(url).includes('/user/emails')) return reply(answers.emails)
+      return reply([])
+    },
+  })
+  const failed = await gh.identity('github', 'code', 'https://share.test/auth/github/callback').then(() => null, error => String(error.message))
+  ok(/couldn't read your email addresses/.test(failed ?? ''), "GitHub's addresses unread fail the sign-in, never read as none")
+  answers.emails = [{ email: 'octo@x.test', primary: true, verified: false }]
+  const none = await gh.identity('github', 'code', 'https://share.test/auth/github/callback')
+  ok(none.emailVerified === false && none.email === '', 'an answer with no verified address is none')
   data.set('email:alice@new.test', alice.id)
   const mine = await dir.signIn(github('5', 'mine@test.test'), now)
   data.set('email:mine@test.test', alice.id)

@@ -246,6 +246,9 @@ export class Room {
     this.team = data.team ?? null // { id, name, account }: shared with a team, whose access setting says who joins
     // Hosted in the cloud (docs/cloud-host.md): { state, approver: { seat, account, name }, since, until }.
     this.cloud = data.cloud ?? null
+    // Each word from its team's directory on whom it has now (`keepTeam`):
+    // a join that waited meanwhile asks the team again (in memory alone).
+    this.teamGen = 0
     this.seq = data.seq ?? 0
     this.events = data.events ?? []
     // Their bytes, kept as they come and go (a room loaded larger than its
@@ -559,6 +562,7 @@ export class Room {
   // with what it holds for previews. Returns whether anyone was.
   keepTeam(teamId, allowed, now) {
     if (this.team?.id !== teamId || this.endedAt) return false
+    this.teamGen += 1
     const keep = new Set(allowed)
     let changed = false
     for (const [bearer, seat] of [...this.seats, ...this.away]) {
@@ -963,15 +967,24 @@ async function handleRoom(room, req, rest, now, origin, ctx) {
     if (room.endedAt) return { response: json({ error: 'This session is no longer shared.' }, 410) }
     const outdated = outdatedClient(req)
     if (outdated) return { response: outdated }
-    // Shared with a team: its access setting, as it is now, says who joins.
-    if (room.team) {
-      if (!ctx.directory) return { response: json({ error: `This session is for ${room.team.name}, and this server can't check who's in it.` }, 503) }
-      const check = await ctx.directory.joinCheck(room.team.id, accountOf(req))
-      if (!check.ok) return { response: json({ error: check.error, team: room.team.name, signIn: check.status === 401 || undefined }, check.status === 401 ? 403 : check.status) }
-    }
+    if (room.team && !ctx.directory) return { response: json({ error: `This session is for ${room.team.name}, and this server can't check who's in it.` }, 503) }
     if (room.seats.size >= ROOM_SEATS_MAX) return { response: json({ error: `This session is full: ${ROOM_SEATS_MAX} people have joined.` }, 403) }
     const body = await readJson(req)
-    const { token: seatToken, seat } = room.join(body.name, now, clientVersion(req), await whoIs(req, ctx))
+    const account = await whoIs(req, ctx)
+    // Shared with a team: its access setting, as it is now, says who joins,
+    // asked after the waits above (a body held open, the sign-in's look) and
+    // again if the team let someone go meanwhile, so a removal while this
+    // join waited never ends in a seat.
+    for (let tries = 0; room.team; tries++) {
+      const gen = room.teamGen
+      const check = await ctx.directory.joinCheck(room.team.id, accountOf(req))
+      if (!check.ok) return { response: json({ error: check.error, team: room.team.name, signIn: check.status === 401 || undefined }, check.status === 401 ? 403 : check.status) }
+      if (room.teamGen === gen) break
+      if (tries >= 2) return { response: json({ error: 'Who is in the team changed while you joined. Try again.' }, 409) }
+    }
+    if (room.endedAt) return { response: json({ error: 'This session is no longer shared.' }, 410) }
+    if (room.seats.size >= ROOM_SEATS_MAX) return { response: json({ error: `This session is full: ${ROOM_SEATS_MAX} people have joined.` }, 403) }
+    const { token: seatToken, seat } = room.join(body.name, now, clientVersion(req), account)
     // A long history in pages (see PAGE_BYTES_CAP): the first here, the rest
     // from events?after=historySeq.
     const max = maxOf(url)
@@ -1962,7 +1975,7 @@ section.more { padding:0 0 72px; }
       <li><b>What passes through:</b> while a session is shared, its prompts and the files people attach to them, Claude's replies and, while someone else is in the room, its thinking as it happens (passed along, never kept), the tools it runs with the first lines of their results and the pictures in them (screenshots, images it opens), the side chat, people's reactions to Claude's replies and which replies each person has had on screen, any files or local previews the host's Claude shows, and messages between a teammate's own other sessions and the host's session, which go to the other side alone (passed along, never kept). Sharing a session that already has history asks first whether to include it.</li>
       <li><b>How long:</b> a room and everything in it is deleted 24 hours after the host stops sharing or was last seen. A room keeps its newest 5000 events, 16 MB of them at most. For TCP previews the room keeps only coarse connection and byte-budget counters, until the room is deleted. For a preview opened through its link, the room keeps the link (which preview, which seat made it, the page it opens) for 10 minutes, and the browser session it starts (which preview and seat) for 12 hours from the last link that browser opened; both end when that seat leaves or the host stops the preview. A seat keeps its newest 4 browser sessions per preview, and a room its newest 128 links and 256 browser sessions. A link or session that expired is removed at the room's next activity, or with the room; one that ended goes at once. Application bytes are relayed, never stored. To count the rooms each network makes in a day, the server on Cloudflare keeps a hash of each new room's network address, keyed by a random key made for that day, with that count, until the day (UTC) ends; then all of it goes, the key too. There are no analytics, and no request logs kept.</li>
       <li><b>Previews share a host name:</b> every shared session's previews are served on one preview host name, and their links name the session by a key of its own, which can't join it. A browser not already in a session's previews has that host name's storage and cache, and its domain's cookies, cleared before it enters; browsers clear them only over HTTPS (or on localhost). No preview can register a service worker there. Clearing can't stop a page that's still open, though: a preview page of one session left open in a browser can reach the previews of another session that browser opens after it. Close the previews of a session you don't trust before opening another's, or open them in a browser profile of their own. A server of your own can give each session's previews a host name of its own, which closes this (<a href="https://github.com/Paradigm-Study/claude-share/blob/main/docs/guide.md#host-a-server">how</a>).</li>
-      <li><b>Accounts, only for teams:</b> sharing and joining need none. If you sign in (GitHub or Google) to use teams, the server keeps your name, username, verified email, which GitHub organizations you're in, the teams you're in and their settings, which open sessions are shared with each team, and invites to a session (who invited whom, until it's joined, dismissed, ends, or 12 hours pass). Signing in finishes only when you press Continue on this server's page. The page and Claude Code show the same code, and you continue only if they match. Until you press Continue, the server keeps who GitHub or Google said you are; after ten minutes that sign-in stops working, and it's deleted then. Claude Code's token is made when it picks up the sign-in, and the server keeps only its hash, never the token itself. Sign-ins stay until you delete your account (<code>/team delete-account</code>), which removes them at once. Signed in, a session you share or join also knows your account for as long as it lasts, so your sessions count as one person.</li>
+      <li><b>Accounts, only for teams:</b> sharing and joining need none. If you sign in (GitHub or Google) to use teams, the server keeps your name, username, the email your provider last verified (once it stops verifying one, it's shown but no longer signs anyone in or matches a team's domain), which GitHub organizations you're in, the teams you're in and their settings, which open sessions are shared with each team, and invites to a session (who invited whom, until it's joined, dismissed, ends, or 12 hours pass). Signing in finishes only when you press Continue on this server's page. The page and Claude Code show the same code, and you continue only if they match. Until you press Continue, the server keeps who GitHub or Google said you are; after ten minutes that sign-in stops working, and it's deleted then. Claude Code's token is made when it picks up the sign-in, and the server keeps only its hash, never the token itself. Sign-ins stay until you delete your account (<code>/team delete-account</code>), which removes them at once. Signed in, a session you share or join also knows your account for as long as it lasts, so your sessions count as one person.</li>
       <li><b>In the cloud, if a host chooses it:</b> Move to cloud sends the session's project files, its conversation and the host's Claude token to a container this server starts for that room, which runs Claude Code as the host. The server passes them on and keeps none of them. The container, with everything in it, is deleted when the host brings the session home, the room ends, or a week after the move; its changes are kept as a room file for Bring home, deleted with the room.</li>
       <li><b>Who can see it:</b> anyone with the room's link, or for a session shared with a team that keeps it to its people, only the people in that team. Links are long and random; forward one only to people you'd hand the session to. Content is encrypted in transit, not end to end: the server can read what passes through it.</li>
       <li><b>What runs where:</b> a teammate's prompt runs on the host's machine. Reads inside the host's project run without asking (one through a link out of it asks); everything else asks the host first, by default. A local page the host's Claude opens or gives the address of is shared only once the host says so.</li>

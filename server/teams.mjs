@@ -5,6 +5,7 @@
 // Everything lives in one key-value store (a Durable Object's storage on
 // Cloudflare, a JSON file for the Node server):
 //   acct:<id>                 an account { id, provider, subject, name, login, email, emailVerified, githubOrgs }
+//                             (email: the address it's shown with; emailVerified: its newest sign-in proved it)
 //   ident:<provider>:<sub>    → account id; email:<address> → account id (verified emails only)
 //   tok:<sha256>              a signed-in Claude Code { account, at } (the token itself is never kept)
 //   login:<hash>              a sign-in under way (ten minutes): 'pending', then 'confirm' (who the provider
@@ -194,8 +195,11 @@ export class Directory {
       subject: String(identity.subject),
       name: clean(identity.name || identity.login || email.split('@')[0] || 'teammate'),
       login: identity.login ? clean(identity.login) : before?.login,
+      // Shown as it was, but proof only of what this sign-in proved: an
+      // address the provider no longer vouches for leads nowhere, and takes
+      // no team by its domain.
       email: email || before?.email || '',
-      emailVerified: Boolean(email) || Boolean(before?.emailVerified),
+      emailVerified: Boolean(email),
       githubOrgs: identity.githubOrgs ? listOf(identity.githubOrgs, ORG) : before?.githubOrgs ?? [],
       idents: [...new Set([...(before?.idents ?? []), ident])],
       createdAt: before?.createdAt ?? now,
@@ -203,9 +207,10 @@ export class Directory {
     }
     await this.kv.put(`acct:${id}`, account)
     await this.kv.put(ident, id)
-    // An address the account moved from is no longer its way in: whoever has
-    // it next (an address reassigned, a domain sold) is someone else.
-    if (before?.email && before.email !== account.email) await this.unindex(before.email, id)
+    // An address the account moved from, or that its provider stopped
+    // vouching for, is no longer its way in: whoever has it next (an address
+    // reassigned, a domain sold) is someone else.
+    if (before?.email && before.email !== email) await this.unindex(before.email, id)
     if (email) await this.kv.put(`email:${email}`, id)
     await this.autoJoin(account, now)
     return account
@@ -219,7 +224,7 @@ export class Directory {
   async byEmail(email, provider) {
     const id = await this.kv.get(`email:${email}`)
     const account = id ? await this.kv.get(`acct:${id}`) : null
-    if (!account || account.email !== email) return null
+    if (!account || !account.emailVerified || account.email !== email) return null
     const idents = new Set([...(account.idents ?? []), `ident:${account.provider}:${account.subject}`])
     return [...idents].some(i => i.startsWith(`ident:${provider}:`)) ? null : account.id
   }
@@ -795,7 +800,9 @@ export class Directory {
       const gh = path => this.fetch(`https://api.github.com${path}`, { headers: { authorization: `Bearer ${tok.access_token}`, accept: 'application/vnd.github+json', 'user-agent': 'claude-share' } }).then(r => (r.ok ? r.json() : null))
       const [user, emails, orgs] = await Promise.all([gh('/user'), gh('/user/emails'), gh('/user/orgs?per_page=100')])
       if (!user?.id) throw new Error('GitHub sign-in failed: no user')
-      const primary = Array.isArray(emails) ? emails.find(e => e.primary && e.verified) ?? emails.find(e => e.verified) : null
+      // Its addresses unread say nothing either way: try again, rather than take that as none.
+      if (!Array.isArray(emails)) throw new Error("GitHub sign-in failed: couldn't read your email addresses. Try again.")
+      const primary = emails.find(e => e.primary && e.verified) ?? emails.find(e => e.verified) ?? null
       return { provider, subject: String(user.id), login: user.login, name: user.name || user.login, email: primary?.email ?? '', emailVerified: Boolean(primary), githubOrgs: Array.isArray(orgs) ? orgs.map(o => o.login) : [] }
     }
     if (provider === 'google') {

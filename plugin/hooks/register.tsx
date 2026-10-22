@@ -635,6 +635,9 @@ class PlainServer extends Error {
     super(`The share server ${url} is plain http, which would send everyone's tokens unencrypted. Use its https:// address (plain http works only for a server on this computer).`)
   }
 }
+// A room saved on such a server isn't taken up again (`resumeHosting`,
+// `resumeJoined`): its token would go with the first request.
+const plainSaved = (server: string) => `This session's room is on ${server}, plain http, which would send its tokens unencrypted, so it isn't taken up again. Share or join again through an https:// server.`
 let myName: string | undefined
 // An entry held (`hold`) waits for its pictures to go up, and what follows it waits too.
 let outbox: { type: string; body: Record<string, unknown>; hold?: boolean }[] = []
@@ -1053,6 +1056,8 @@ async function api<T>(
   path: string,
   init: { method?: string; token?: string; body?: unknown; account?: string } = {},
 ): Promise<T> {
+  // Nothing to a share server over plain http elsewhere, whatever brought it here.
+  if (!secureServer(server)) throw new PlainServer(server)
   const headers: Record<string, string> = { 'content-type': 'application/json' }
   if (init.token) headers.authorization = `Bearer ${init.token}`
   // Who's signed in, for a team's session: a header, never the address.
@@ -1396,7 +1401,7 @@ async function runStream($: $, generation: number) {
   let failures = 0
   while (generation === pollGeneration) {
     const room = await read($, roomA)
-    if (!room || (await read($, modeA)) === 'idle') return
+    if (!room || (await read($, modeA)) === 'idle' || !secureServer(room.server)) return
     if ((await $.env.get('SHARED_SESSION_TRANSPORT')) === 'poll') return void startPolls($, generation, 'SHARED_SESSION_TRANSPORT=poll')
     // Messages between sessions (`peer`) come only on a stream: a poll gets
     // none, and the other side is told this one isn't connected.
@@ -3263,6 +3268,8 @@ type Joined = {
   peerRoutes?: Record<string, SharePeerRoute>
   /** This session moved the room's host to the cloud: its approver. */
   cloudMine?: boolean
+  /** The approver's: whom the cloud host always allows, as this session knew it (Ask again's). */
+  cloudTrusted?: string[]
 }
 
 // What a guest's place keeps, to take its seat back.
@@ -3279,7 +3286,7 @@ async function joinedPlace($: $, room: ShareRoom): Promise<Joined> {
     sidebar: await read($, sidebarA),
     place: (await placeOf($)) || undefined,
     peerRoutes: await read($, peerRoutesA),
-    ...((await read($, cloudA))?.mine ? { cloudMine: true } : {}),
+    ...((await read($, cloudA))?.mine ? { cloudMine: true, cloudTrusted: await read($, cloudTrustedA) } : {}),
     ...(await windowCheckpoint($, room)),
   }
 }
@@ -3462,14 +3469,16 @@ async function resumeJoined($: $) {
     const current = () => reclaiming === back
     // Over while this was closed: only now does the sidebar row go back, and
     // the room's preview window profile goes.
-    const over = async () => {
+    const over = async (said = `${saved.room.host}'s session ended while this one was closed.`) => {
       if (!current()) return
       reclaiming = null
       await update($, sidebarA, () => saved.sidebar ?? null)
       await unmarkSidebar($, `${saved.room.host}'s session · ${saved.room.title}`.slice(0, 120))
       if (saved.previewWindow) await endPreviewWindow($, saved.room, saved.previewWindow).catch(() => {})
-      $.ui.log(`${saved.room.host}'s session ended while this one was closed.`)
+      $.ui.log(said)
     }
+    // Joined over plain http elsewhere: never taken up again, its token unsent.
+    if (!secureServer(saved.room.server)) return void (await over(plainSaved(saved.room.server)))
     let room = saved.room
     let missed: ServerEvent[] = []
     let people: SharePerson[] | null = null
@@ -3534,6 +3543,7 @@ async function resumeJoined($: $) {
     await update($, peerRoutesA, v => (reclaiming === back ? peerRoutesSaved(saved.peerRoutes, 'guest') : v))
     // The approver of the room's cloud host, as it was: its questions come here.
     await update($, cloudA, v => (reclaiming === back ? (saved.cloudMine ? { state: 'running' as const, approver: saved.room.host, since: saved.at, mine: true } : null) : v))
+    await update($, cloudTrustedA, v => (reclaiming === back ? (saved.cloudMine && Array.isArray(saved.cloudTrusted) ? [...new Set(saved.cloudTrusted.filter((n): n is string => typeof n === 'string').map(n => n.slice(0, 40)))].slice(0, 64) : []) : v))
     if (!current()) return
     // Back in: the room's scope from here, and a session ending saves it as it would any room.
     reclaiming = null
@@ -3592,6 +3602,8 @@ async function resumeHosting($: $) {
     await back.deleted
     if (now - saved.at > HOSTING_KEEP_MS) return
     const current = () => reclaiming === back
+    // Shared over plain http elsewhere: never taken up again, its token unsent.
+    if (!secureServer(saved.room.server)) return void (current() && $.ui.log(plainSaved(saved.room.server)))
     let page: EventsPage | null = null
     try {
       page = await eventsSince($, saved.room, saved.room.seq)
@@ -4496,12 +4508,12 @@ async function moveToCloud($: $) {
       sidebar: await read($, sidebarA),
       place: (await placeOf($)) || undefined,
       cloudMine: true,
+      // Whom it always allowed here, the cloud host's now: Ask again in the Room asks about them again.
+      cloudTrusted: [...new Set(state.trusted.map(t => t.who))],
     }
     await closeRoom($, 'ended', { room })
     await writeRoomCheckpoint($, `${JOINED_KEY}${await $.session.id()}`, place)
     await resumeJoined($)
-    // Whom it always allowed here, the cloud host's now: Ask again in the Room asks about them again.
-    await update($, cloudTrustedA, () => [...new Set(state.trusted.map(t => t.who))])
     await update($, cloudMoveA, () => null)
   } catch (error) {
     await update($, cloudMoveA, () => cloudMove('failed', String((error as Error)?.message ?? error).slice(0, 300)))

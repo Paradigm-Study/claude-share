@@ -3123,6 +3123,39 @@ test('a host session reopened takes its room back, on the same link', async ($, 
   expect(asked.logged).toContain('Still sharing this session: http://localhost:8787/s/room0000000000000009')
 })
 
+// A room saved on a plain http server elsewhere isn't taken up again, a
+// host's or a guest's: its token would go with the first request. (One on
+// this computer is: the test above.)
+const PLAIN_SAVED = "This session's room is on http://share.test, plain http, which would send its tokens unencrypted, so it isn't taken up again. Share or join again through an https:// server."
+const tokenWent = (asked: ReturnType<typeof world>, token: string) => [
+  ...asked.sent.filter(x => JSON.stringify(x.headers).includes(token) || JSON.stringify(x.body).includes(token)),
+  ...asked.spawned.filter(p => JSON.stringify(p).includes(token)),
+]
+test("a host's room saved on a plain http server elsewhere isn't taken up again, and its token goes nowhere", async ($, on) => {
+  const saved = savedRoom('room0000000000000009', 900)
+  const plain = { ...saved, room: { ...saved.room, server: 'http://share.test', url: 'http://share.test/s/room0000000000000009' } }
+  const asked = world(on, { files: { [checkpointPath('hosting:cli-1')]: JSON.stringify({ version: 1, value: plain }) }, sessionId: 'cli-1' })
+  on('session.start', ($, e) => ({ cwd: e.cwd }))
+  await $.session.start(START)
+  await asked.clock.advance(5_000)
+  expect(asked.logged).toContain(PLAIN_SAVED)
+  expect(asked.state.room ?? null).toBeNull()
+  expect(tokenWent(asked, plain.room.token)).toEqual([])
+  expect(asked.urls.filter(u => u.startsWith('http://share.test'))).toEqual([])
+})
+
+test("a guest's place saved on a plain http server elsewhere isn't taken up again, and its token goes nowhere", async ($, on) => {
+  const plain = { ...JOINED_PLACE, room: { ...JOINED_PLACE.room, server: 'http://share.test', url: 'http://share.test/s/room0000000000000001', token: 'g-plain-token' } }
+  const asked = world(on, { files: { [checkpointPath('joined:session-test-0001')]: JSON.stringify({ version: 1, value: plain }) } })
+  on('session.start', ($, e) => ({ cwd: e.cwd }))
+  await $.session.start(START)
+  await asked.clock.advance(5_000)
+  expect(asked.logged).toContain(PLAIN_SAVED)
+  expect(asked.state.room ?? null).toBeNull()
+  expect(tokenWent(asked, 'g-plain-token')).toEqual([])
+  expect(asked.urls.filter(u => u.startsWith('http://share.test'))).toEqual([])
+})
+
 // A guest's place, as a session closing saves it.
 const JOINED_PLACE = {
   at: 900,
@@ -12327,7 +12360,7 @@ test("a cloud host's question unanswered for ten minutes is a no", async ($, on)
 test("the approver answers the cloud host's question above the prompt, and the room hears only that", async ($, on) => {
   const saved = {
     at: 900,
-    room: { server: 'http://share.test', id: 'room0000000000000001', url: LINK, title: 'demo', host: 'scott', token: 'g-cloud', seat: 'seatC', seq: 2, since: 1 },
+    room: { server: 'https://share.test', id: 'room0000000000000001', url: LINK, title: 'demo', host: 'scott', token: 'g-cloud', seat: 'seatC', seq: 2, since: 1 },
     autoOpen: true, policy: { prompts: 'everyone', approvals: 'edits', files: 'on' }, shown: [], activity: [], chat: [], sidebar: null, cloudMine: true,
   }
   const ask = (id: string, what: string, seq: number) => ({ seq, type: 'ask', ts: 1_000, from: { seat: 'host', name: 'scott', role: 'host' }, body: { id, who: 'Alex', what, preview: `\`\`\`\n${what}\n\`\`\``, always: 'Always allow Alex', options: ['Allow once', 'Always allow Alex', 'Decline'] } })
@@ -12651,6 +12684,32 @@ test("the approver sets the cloud host's settings in the Room, and asks it again
   await $.session.end({ reason: 'other', sessionId: 'session-test-0001', resume: {} } as never)
 })
 
+// The approver's names for Ask again go with their place: closed and
+// opened again, Always allowed and its Ask again are still there.
+test("the approver's Always allowed survives their session closing and reopening, and so does its Ask again", async ($, on) => {
+  const call = { seq: 3, type: 'ask', ts: 1_000, from: { seat: 'host', name: 'scott', role: 'host' }, body: { id: 'q1', who: 'Alex', seat: 'seat2', what: 'Bash npm test', always: 'Always allow Alex', options: ['Allow once', 'Always allow Alex', 'Decline'] } }
+  const lines = liveLines(cloudPage(3, [call]))
+  const asked = await approverHere($, on, lines)
+  expect(await within(asked.clock, () => asked.state.cloudAsks?.length === 1, 5_000)).toBe(true)
+  const row = await $.ui.mount(band('desktop'))
+  await row.press({ key: 'cloud-always' })
+  await asked.clock.advance(50)
+  expect(asked.state.cloudTrusted).toEqual(['Alex'])
+  await $.session.end({ reason: 'other', sessionId: 'session-test-0001', resume: {} } as never)
+  await asked.clock.advance(50)
+  expect(asked.state.cloudTrusted).toEqual([])
+  await $.session.start(START)
+  expect(await within(asked.clock, () => asked.state.cloud?.mine === true, 5_000)).toBe(true)
+  expect(asked.state.cloudTrusted).toEqual(['Alex'])
+  const pane = await $.ui.mount({ plugin: 'shared-session', surface: 'desktop', component: 'Pane', requestId: 'shared-room', props: PANE })
+  await pane.press({ key: 'tab-settings' })
+  expect(await pane.find({ type: 'Text', text: 'Always allowed: Alex' })).toBeDefined()
+  await pane.press({ key: 'untrust' })
+  await asked.clock.advance(50)
+  expect(asked.posted.filter(e => e.type === 'set').map(e => e.body)).toEqual([{ untrust: true }])
+  await $.session.end({ reason: 'other', sessionId: 'session-test-0001', resume: {} } as never)
+})
+
 // At the cloud host: the approver's settings set as its own and said to
 // everyone; watch-only turns teammates away, never the approver (the room
 // says which prompt is theirs).
@@ -12781,7 +12840,7 @@ test("a packed session that doesn't reach the cloud host leaves the session here
 test('Bring home takes the host back here with the cloud host’s changes', async ($, on) => {
   const saved = {
     at: 900,
-    room: { server: 'http://share.test', id: 'room0000000000000001', url: LINK, title: 'demo', host: 'scott', token: 'g-cloud', seat: 'seatC', seq: 2, since: 1 },
+    room: { server: 'https://share.test', id: 'room0000000000000001', url: LINK, title: 'demo', host: 'scott', token: 'g-cloud', seat: 'seatC', seq: 2, since: 1 },
     autoOpen: true, policy: { prompts: 'everyone', approvals: 'edits', files: 'on' }, shown: [], activity: [], chat: [], sidebar: null, cloudMine: true,
   }
   const asked = world(on, { stream: [{ seq: 2, events: [], people: CLOUD_PEOPLE, ended: false, title: 'demo', cloud: { state: 'running', approver: 'scott', since: 900 } }], files: { [checkpointPath('joined:session-test-0001')]: JSON.stringify({ version: 1, value: saved }) }, cloud: { changes: true } })
