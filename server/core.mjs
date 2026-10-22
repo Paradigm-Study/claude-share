@@ -515,6 +515,16 @@ export class Room {
     this.wake()
   }
 
+  // Whether a seat (its id) is still the room's: the host's, seated, or away
+  // within its grace. A stream whose seat isn't ends at the room's next change
+  // (one its person left from elsewhere), and its next connect hears why.
+  holdsSeat(id) {
+    if (id === 'host') return true
+    for (const seat of this.seats.values()) if (seat.id === id) return true
+    for (const seat of this.away.values()) if (seat.id === id) return true
+    return false
+  }
+
   // Every seat of this account leaves, here and away, its tokens kept as
   // left; returns how many.
   leaveAccount(account, now) {
@@ -1323,6 +1333,8 @@ function streamResponse(room, auth, after) {
         seat: auth.seat,
         send,
         push: () => {
+          // Its seat left from elsewhere: it ends here, and its next connect hears so (410).
+          if (!room.holdsSeat(sub.seat)) return close()
           const page = room.page(cursor, Date.now())
           cursor = page.seq
           send(page)

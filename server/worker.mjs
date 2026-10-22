@@ -735,6 +735,15 @@ export class RoomObject {
   send(ws, now = Date.now()) {
     const att = ws.deserializeAttachment()
     if (!att?.seat || !this.room) return
+    // Its seat left from elsewhere (the Team panel's Leave): the stream ends,
+    // and its next connect hears so (410). It never gets the room's news again.
+    if (!this.room.holdsSeat(att.seat)) {
+      this.closed.add(ws)
+      try {
+        ws.close(1000, 'left')
+      } catch {}
+      return
+    }
     const page = this.room.page(att.after, now)
     try {
       ws.send(JSON.stringify(page))

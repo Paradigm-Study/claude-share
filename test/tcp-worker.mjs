@@ -273,6 +273,21 @@ try {
     console.log('OK forwarding only for previews the host chose to forward')
   }
 
+  // A seat its person left from elsewhere (the Team panel's Leave): its open
+  // stream ends at the room's next change, and connecting again hears why.
+  {
+    const w = await world()
+    await w.obj.fetch(req(w, 'socket?after=0', w.member, 'GET', undefined, true))
+    const viewer = w.state.getWebSockets(w.seat).at(-1)
+    for (const seat of w.obj.room.seats.values()) if (seat.id === w.seat) seat.account = 'acct-guest'
+    assert.equal(w.obj.room.leaveAccount('acct-guest', now), 1)
+    w.obj.room.wake()
+    assert.deepEqual(viewer.closes, [{ code: 1000, reason: 'left' }])
+    assert.equal(w.control.closes.length, 0, "the host's stream goes on")
+    assert.equal((await w.obj.fetch(req(w, 'socket?after=0', w.member, 'GET', undefined, true))).status, 410)
+    console.log('OK a stream whose seat left from elsewhere ends, and connecting again hears it left')
+  }
+
   // A preview's Stop ends its own channels and no other's; what the room
   // says about previews comes from its state, not trimmed history.
   {
