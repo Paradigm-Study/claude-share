@@ -346,6 +346,27 @@ function defaultServer() {
   return /export const SERVER_URL = ['"]([^'"]*)['"]/.exec(source)?.[1]
 }
 
+// The cloud host's image (docs/cloud-host.md) is kept in this project's
+// Cloudflare account's registry (scripts/push-image.mjs), so deploying there
+// needs no Docker. Another account can't pull it: there the image is built
+// from cloud/Dockerfile, with Docker, through a config of its own. The extra
+// arguments for the main Worker's deploy, or null when a person must act.
+function cloudImageConfig(whoami) {
+  const file = new URL('../wrangler.toml', import.meta.url)
+  if (!existsSync(file)) return []
+  const toml = readFileSync(file, 'utf8')
+  const owner = /^image = "registry\.cloudflare\.com\/([0-9a-f]{32})\//m.exec(toml)?.[1]
+  const accounts = [...whoami.matchAll(/\b([0-9a-f]{32})\b/g)].map(m => m[1])
+  if (!owner || !accounts.length || accounts.includes(owner)) return []
+  if (run('docker', ['buildx', 'version']).code !== 0) {
+    human("This Cloudflare account builds the cloud host's image from cloud/Dockerfile, which needs Docker with buildx: start Docker (or add buildx), then run `node scripts/setup.mjs deploy` again.")
+    return null
+  }
+  writeFileSync(new URL('../wrangler.selfhost.toml', import.meta.url), toml.replace(/^image = ".*"$/m, 'image = "./cloud/Dockerfile"\nimage_build_context = "."'))
+  note("the cloud host's image is built here from cloud/Dockerfile: this project's prebuilt one is in another Cloudflare account")
+  return ['-c', 'wrangler.selfhost.toml']
+}
+
 async function deploy(claude) {
   const npx = process.platform === 'win32' ? 'npx.cmd' : 'npx'
   const env = { ...process.env, WRANGLER_SEND_METRICS: 'false' }
@@ -356,6 +377,8 @@ async function deploy(claude) {
   }
   if (who.code !== 0) return fail(`checking Cloudflare sign-in: ${who.out.trim().split('\n').pop()}`)
   ok('signed in to Cloudflare')
+  const config = cloudImageConfig(who.out)
+  if (!config) return
   // Previews of a host's localhost: the same script as a second Worker, on its
   // own host name. An update deploys it first: the new rooms name themselves in
   // preview links by a key only the new preview Worker routes, and it still
@@ -377,7 +400,7 @@ async function deploy(claude) {
     if (!preview.deployed) return fail(`the preview Worker didn't deploy (${preview.why}), so nothing was updated and previews of localhost work as they did; fix that, then run \`node scripts/setup.mjs deploy\` again`)
     ok(preview.said)
   }
-  const out = run(npx, ['-y', 'wrangler@4', 'deploy'], { env, timeout: 300_000 }).out
+  const out = run(npx, ['-y', 'wrangler@4', 'deploy', ...config], { env, timeout: 600_000 }).out
   const account = /accounts\/([0-9a-f]{32})/.exec(out)?.[1]
   if (/code: 10063|workers\.dev subdomain/i.test(out)) {
     human(

@@ -3,5 +3,7 @@ node_modules/
 plugin/.claude/
 rooms.json
 rooms.json.tcp
+# Written by scripts/setup.mjs deploy for another Cloudflare account.
+wrangler.selfhost.toml
 .DS_Store
 *.log

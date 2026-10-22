@@ -219,7 +219,7 @@ async function route(req) {
 
   const admin = Boolean(process.env.ADMIN_TOKEN) && req.headers.get('authorization') === `Bearer ${process.env.ADMIN_TOKEN}`
   const counters = tcpCounted(room.tcpStats)
-  const { response, changed } = await roomRequest(room, req, rest, now, origin, { previewOrigin: previewOrigin(req), admin, directory, isCurrent: () => rooms.get(id) === room, cloud })
+  const { response, changed } = await roomRequest(room, req, rest, now, origin, { previewOrigin: previewOrigin(req), admin, directory, isCurrent: () => rooms.get(id) === room, cloud, pluginSource: process.env.PLUGIN_SOURCE })
   // Forwarding approvals and revocations are durable before a successful
   // response.
   if (changed) save(/^previews(?:$|\/[^/]+\/end$)/.test(rest) || rest === 'end' || rest === 'admin-end')

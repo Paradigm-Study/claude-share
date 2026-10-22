@@ -234,6 +234,12 @@ await check('a saved room keeps its cloud host, never the sign-in', async () => 
   assert.ok(!JSON.stringify(room).includes('sk-ant-oat01-test'))
 })
 
+await check('wrangler.toml names the image built from cloud/ as it is (node scripts/push-image.mjs after changing it)', async () => {
+  const { imageTag } = await import('../scripts/push-image.mjs')
+  const named = /^image = "registry\.cloudflare\.com\/[0-9a-f]{32}\/claude-share-host:(r-[0-9a-f]{10})"$/m.exec(readFileSync(join(ROOT, 'wrangler.toml'), 'utf8'))?.[1]
+  assert.equal(named, imageTag())
+})
+
 // ---------------------------------------------------------------------------
 // The real thing: a Node server starting the image in Docker.
 const image = process.env.CLOUD_IMAGE

@@ -47,6 +47,11 @@ The room's end, its expiry, and the approver leaving for good stop the runner.
 - **Node** (`server/node.mjs`, self-hosting and tests): the same through
   `docker run` when `CLOUD_IMAGE` names the image; otherwise the server says it
   can't host in the cloud.
+- **The image** is built once and kept in this project's Cloudflare registry,
+  so deploying needs no Docker (`scripts/push-image.mjs` makes a new one after
+  `cloud/` changes). It doesn't change with releases: the runner takes the
+  plugin from GitHub's `main` at the room server's version, falling back to
+  the one built in.
 
 ## Secrets
 

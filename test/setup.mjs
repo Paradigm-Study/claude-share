@@ -22,7 +22,11 @@ const finish = (code, value) => { console.log(typeof value === 'string' ? value 
 const command = args.join(' ')
 // pathVersion: the terminal's claude is that old, the one CLAUDE_BIN names (desk/claude) new enough.
 if (command === '--version') finish(0, (s.pathVersion && !process.argv[1].endsWith('/desk/claude') ? s.pathVersion : '2.1.295') + ' (Claude Code)')
-if (command.includes('whoami')) finish(s.whoFail ? 1 : 0, s.whoFail ? 'network unavailable' : 'signed in')
+// account: the Cloudflare account wrangler is signed in to, as its table shows it.
+if (command.includes('whoami')) finish(s.whoFail ? 1 : 0, s.whoFail ? 'network unavailable' : s.account ? '│ Account Name │ Account ID │\n│ Team │ ' + s.account + ' │' : 'signed in')
+// docker: Docker with buildx is here.
+if (command === 'buildx version') finish(s.docker ? 0 : 1, s.docker ? 'github.com/docker/buildx v0.38.0' : 'docker: unknown command: buildx')
+if (command === '-y wrangler@4 deploy -c wrangler.selfhost.toml') finish(0, 'Deployed claude-share\n  https://claude-share.team.workers.dev')
 // deployed: the main Worker is there already (an update); previewFail: the preview Worker's deploy fails
 // ('late': after printing its workers.dev address); previewCustom: it deploys to a custom domain, printing none.
 if (command === '-y wrangler@4 deployments list') finish(s.deployed ? 0 : 1, s.deployed ? 'Created: 2026-10-01T00:00:00Z' : 'This Worker does not exist on your account. [code: 10007]')
@@ -91,7 +95,9 @@ function setup(args, scenario = {}) {
     writeFileSync(join(dir, 'plugin/hooks/server.ts'), defaultSource.replace(defaultUrl, buildServer))
     writeFileSync(join(dir, 'scenario.json'), JSON.stringify({ ...scenario, buildServer }))
     writeFileSync(join(dir, 'fetch.mjs'), fakeFetch)
-    for (const name of ['bin/claude', 'bin/npx', 'desk/claude']) {
+    // withToml: the repository's wrangler.toml, which names the cloud host's prebuilt image.
+    if (scenario.withToml) writeFileSync(join(dir, 'wrangler.toml'), readFileSync(join(root, 'wrangler.toml')))
+    for (const name of ['bin/claude', 'bin/npx', 'desk/claude', 'bin/docker']) {
       writeFileSync(join(dir, name), `#!${process.execPath}\n${fakeCli}`)
       chmodSync(join(dir, name), 0o755)
     }
@@ -120,7 +126,7 @@ function setup(args, scenario = {}) {
     }
     const list = path => existsSync(path) ? readdirSync(path) : []
     return {
-      code: result.status, out: result.stdout + result.stderr, calls, configDir,
+      code: result.status, out: result.stdout + result.stderr, calls, configDir, selfhost: read(join(dir, 'wrangler.selfhost.toml')),
       settings: read(settingsPath), homeSettings: read(homeSettingsPath), projects: list(join(configDir, 'projects')),
     }
   } finally {
@@ -325,6 +331,36 @@ test('an update deploys the preview Worker before the main one', () => {
   const [preview, main] = ['OK previews deployed to https://claude-share-preview.team.workers.dev', 'OK deployed to https://claude-share.team.workers.dev'].map(line => result.out.indexOf(line))
   assert(preview >= 0 && preview < main, result.out)
   assert(commands(result).includes(`plugin install ${pluginId} --config server=https://claude-share.team.workers.dev`))
+})
+
+// The cloud host's image is kept in this project's Cloudflare account
+// (scripts/push-image.mjs): deploying there needs no Docker; another account
+// builds it from cloud/Dockerfile, which does.
+const IMAGE_ACCOUNT = /registry\.cloudflare\.com\/([0-9a-f]{32})\//.exec(readFileSync(join(root, 'wrangler.toml'), 'utf8'))[1]
+
+test("deploying to the account that keeps the cloud host's image needs no Docker", () => {
+  const result = setup(['deploy'], { deployed: true, missing: true, withToml: true, account: IMAGE_ACCOUNT })
+  assert.equal(result.code, 0, result.out)
+  assert.deepEqual(wrangler(result), [PROBE, PREVIEW, MAIN])
+  assert(!commands(result).includes('buildx version'), result.out)
+  assert.equal(result.selfhost, null)
+})
+
+test("another account builds the cloud host's image from cloud/Dockerfile", () => {
+  const result = setup(['deploy'], { deployed: true, missing: true, withToml: true, account: 'f'.repeat(32), docker: true })
+  assert.equal(result.code, 0, result.out)
+  assert.deepEqual(wrangler(result), [PROBE, PREVIEW, '-y wrangler@4 deploy -c wrangler.selfhost.toml'])
+  assert.match(result.selfhost, /^image = "\.\/cloud\/Dockerfile"$/m)
+  assert.match(result.selfhost, /^image_build_context = "\."$/m)
+  assert.doesNotMatch(result.selfhost, /registry\.cloudflare\.com/)
+  assert.match(result.out, /NOTE the cloud host's image is built here/)
+})
+
+test('another account without Docker is told to start it, and nothing deploys', () => {
+  const result = setup(['deploy'], { deployed: true, missing: true, withToml: true, account: 'f'.repeat(32) })
+  assert.equal(result.code, 2, result.out)
+  assert.match(result.out, /NEEDS HUMAN This Cloudflare account builds the cloud host's image from cloud\/Dockerfile/)
+  assert.deepEqual(wrangler(result), [])
 })
 
 test('a first deploy deploys the main Worker before the preview one', () => {

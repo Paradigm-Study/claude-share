@@ -19,11 +19,14 @@
 // the `runner` user; Claude Code runs as that user. Nothing here logs a token.
 import { spawn, execFileSync } from 'node:child_process'
 import { createServer } from 'node:http'
-import { mkdirSync, writeFileSync, chmodSync, chownSync, existsSync, createWriteStream, statSync, renameSync, rmSync, readdirSync, cpSync } from 'node:fs'
+import { mkdirSync, writeFileSync, chmodSync, chownSync, existsSync, createWriteStream, statSync, renameSync, rmSync, readdirSync, cpSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { timingSafeEqual } from 'node:crypto'
 
-const PLUGIN = process.env.SS_PLUGIN_DIR ?? '/opt/shared-session/plugin'
+// The plugin built into the image: what runs when the room's own version
+// can't be had (GitHub unreachable, or older there than the room server).
+const BUILT_IN = process.env.SS_PLUGIN_DIR ?? '/opt/shared-session/plugin'
+let plugin = BUILT_IN
 const USER = { uid: 1001, gid: 1001, home: '/home/runner' }
 const LOG = process.env.SS_LOG ?? '/tmp/claude.log'
 const LOG_MAX = 5 * 1024 * 1024
@@ -80,6 +83,8 @@ function takeConfig(body) {
     model: text(c.model, 100) ?? '',
     state: c.state && typeof c.state === 'object' ? c.state : {},
     auth: c.auth && typeof c.auth === 'object' ? c.auth : {},
+    // The plugin the room server runs with: its version, and the repository it's released from.
+    plugin: c.plugin && typeof c.plugin === 'object' && /^\d+(\.\d+)*$/.test(String(c.plugin.version)) && /^[\w.-]+\/[\w.-]+$/.test(String(c.plugin.source)) ? { version: String(c.plugin.version), source: String(c.plugin.source) } : null,
   }
   if (!out.server || !/^https?:\/\//.test(out.server)) return 'server'
   if (!out.room || !/^[A-Za-z0-9_-]{16,64}$/.test(out.room)) return 'room'
@@ -157,6 +162,44 @@ function saveCheckpoint() {
   renameSync(tmp, file)
 }
 
+// The plugin the room server runs with, so the image needn't be rebuilt for
+// each release: its repository's main, as the plugin's own updates take it,
+// used when it's at least the server's version; else the built-in one.
+const newer = (a, b) => {
+  const x = a.split('.').map(Number), y = b.split('.').map(Number)
+  for (let i = 0; i < Math.max(x.length, y.length); i++) if ((x[i] ?? 0) !== (y[i] ?? 0)) return (x[i] ?? 0) > (y[i] ?? 0)
+  return false
+}
+const versionOf = dir => {
+  try {
+    return String(JSON.parse(readFileSync(join(dir, '.claude-plugin', 'plugin.json'), 'utf8')).version ?? '')
+  } catch {
+    return ''
+  }
+}
+async function takePlugin() {
+  const want = config.plugin
+  const built = versionOf(BUILT_IN)
+  status.plugin = built
+  if (!want || !newer(want.version, built)) return
+  const dir = '/tmp/plugin-src'
+  try {
+    rmSync(dir, { recursive: true, force: true })
+    mkdirSync(dir, { recursive: true, mode: 0o755 })
+    const res = await fetch(`https://codeload.github.com/${want.source}/tar.gz/refs/heads/main`, { signal: AbortSignal.timeout(60_000) })
+    if (!res.ok) throw new Error(`GitHub answered ${res.status}`)
+    writeFileSync(join(dir, 'main.tgz'), Buffer.from(await res.arrayBuffer()))
+    execFileSync('tar', ['-xzf', join(dir, 'main.tgz'), '-C', dir, '--strip-components=1', '--no-same-owner'])
+    const got = versionOf(join(dir, 'plugin'))
+    if (!got || newer(want.version, got)) throw new Error(`main has ${got || 'no plugin'}`)
+    rmSync(join(dir, 'plugin', 'tests'), { recursive: true, force: true })
+    plugin = join(dir, 'plugin')
+    status.plugin = got
+  } catch (error) {
+    say(`the room runs ${want.version}; using the built-in ${built} (${String(error?.message ?? error).slice(0, 120)})`)
+  }
+}
+
 // Claude Code keeps a session's conversation under its folder's name.
 const projectDir = () => join(configDir, 'projects', config.cwd.replace(/[^a-zA-Z0-9]/g, '-'))
 const hasConversation = () => existsSync(join(projectDir(), `${config.session}.jsonl`))
@@ -200,7 +243,7 @@ function startClaude() {
     '--output-format', 'stream-json',
     '--verbose',
     ...(hasConversation() ? ['--resume', config.session] : ['--session-id', config.session]),
-    '--plugin-dir', PLUGIN,
+    '--plugin-dir', plugin,
     '--permission-mode', 'bypassPermissions',
     '--allow-dangerously-skip-permissions',
     ...(config.model ? ['--model', config.model] : []),
@@ -322,6 +365,7 @@ const control = createServer(async (req, res) => {
       }
       layOut()
       saveCheckpoint()
+      await takePlugin()
       startClaude()
       status.stage = 'running'
       return reply(res, 200, { ok: true })

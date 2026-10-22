@@ -1101,6 +1101,8 @@ async function unlist(room, ctx) {
 // move, and Bring home mints the mover a new one. The Claude sign-in in
 // `auth` goes to the runner and is never kept here.
 export const CLOUD_MAX_MS = 7 * 24 * 60 * 60 * 1000
+// Where the runner takes the plugin from (its main), at the server's version or newer.
+export const PLUGIN_SOURCE = 'Paradigm-Study/claude-share'
 // The packed session (the project's files and the conversation): a request
 // body Cloudflare passes on a workers.dev name.
 export const CLOUD_BUNDLE_MAX = 95 * 1024 * 1024
@@ -1176,7 +1178,7 @@ async function cloudRoutes(room, req, rest, auth, now, ctx, origin) {
     try {
       await ctx.cloud.start(room.id, {
         ticket,
-        config: { server: origin, room: room.id, token: runner, session, cwd, title: room.title, host: room.host.name, url: shareUrl(origin, room.id), seq: room.seq, model, state, auth: signIn },
+        config: { server: origin, room: room.id, token: runner, session, cwd, title: room.title, host: room.host.name, url: shareUrl(origin, room.id), seq: room.seq, model, state, auth: signIn, plugin: { version: PLUGIN_LATEST, source: ctx.pluginSource || PLUGIN_SOURCE } },
       })
     } catch (error) {
       // Nothing moved: the host keeps its room as it was.

@@ -431,7 +431,7 @@ export class RoomObject {
     }
 
     const admin = Boolean(this.env?.ADMIN_TOKEN) && req.headers.get('authorization') === `Bearer ${this.env.ADMIN_TOKEN}`
-    const ctx = { previewOrigin: req.headers.get('x-preview-origin') ?? '', admin, directory: directoryClient(this.env), isCurrent: () => this.room === room, cloud: hostsClient(this.env) }
+    const ctx = { previewOrigin: req.headers.get('x-preview-origin') ?? '', admin, directory: directoryClient(this.env), isCurrent: () => this.room === room, cloud: hostsClient(this.env), pluginSource: this.env.PLUGIN_SOURCE }
     const counters = tcpCounted(room.tcpStats)
     const { response, changed } = await roomRequest(room, req, rest, now, origin, ctx)
     if (changed) await this.persist()
