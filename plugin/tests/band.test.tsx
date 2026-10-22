@@ -5578,6 +5578,28 @@ test("the Team panel opens a session you're already in, and Join all leaves out 
   expect(asked.spawned.some(s => s.input?.includes("claude://claude.ai/epitaxy/local_0000aaaa-0000-4000-8000-000000000001"))).toBe(true)
 })
 
+test('the Team panel stops a session of yours by your sign-in, after asking once', async ($, on) => {
+  const away = { ...teamSession(1, 'Scott'), hostAccount: ME.id, hostOnline: false }
+  const asked = world(on, { team: { signedIn: true, sessions: [away, teamSession(2, 'Kim')] } })
+  await $.command.run({ command: 'team' } as never)
+  await asked.clock.advance(10)
+  const pane = await $.ui.mount(TEAM_PANE)
+  // Yours: Stop, never Join; someone else's: no Stop.
+  expect(await pane.find({ key: 'join-room0000000000000101' })).toBeUndefined()
+  expect((await pane.find({ key: 'stop-room0000000000000101' }))?.props.label).toBe('Stop')
+  expect(await pane.find({ key: 'stop-room0000000000000102' })).toBeUndefined()
+  await pane.press({ key: 'stop-room0000000000000101' })
+  await asked.clock.advance(10)
+  expect((await pane.find({ key: 'stop-room0000000000000101' }))?.props.label).toBe('Stop for everyone?')
+  expect(asked).not.toContain('POST /api/rooms/room0000000000000101/end')
+  await pane.press({ key: 'stop-room0000000000000101' })
+  await eventually(asked.clock, () => asked.some(a => a === 'POST /api/rooms/room0000000000000101/end'))
+  const end = asked.sent.find(r => r.path === '/api/rooms/room0000000000000101/end')
+  // The sign-in, not a room token: the session that shared it may be gone.
+  expect(end?.headers['x-shared-session-account']).toBe(TEAM_TOKEN)
+  expect(end?.headers.authorization).toBeUndefined()
+})
+
 test('a link to a room another session here is in opens that one; pasted again, it joins here too', async ($, on) => {
   const asked = world(on, { store: { 'live:room0000000000000001:session-other-0002': HOLD('room0000000000000001') } })
   await $.prompt.submit({ text: LINK, origin: { kind: 'composer' }, wait: false })

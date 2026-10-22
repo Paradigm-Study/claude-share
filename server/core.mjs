@@ -949,6 +949,17 @@ async function handleRoom(room, req, rest, now, origin, ctx) {
     return { changed: true, response: json({ ok: true }) }
   }
 
+  // The host's sign-in ends it too, with no room token: the Team panel's Stop,
+  // from any session or computer, even after the session that shared it
+  // closed without saving its token.
+  if (rest === 'end' && method === 'POST' && !bearerOf(req) && accountOf(req)) {
+    const who = await whoIs(req, ctx)
+    if (!who || (who !== room.host.account && who !== room.team?.account)) return { response: json({ error: 'Only the host can stop sharing.' }, 403) }
+    room.end(now)
+    await unlist(room, ctx)
+    return { changed: true, response: json({ ok: true }) }
+  }
+
   // An away seat can still deliberately leave even when all seats are full.
   if (rest === 'leave' && method === 'POST' && room.away.has(bearerOf(req))) {
     room.leave(bearerOf(req), 'left', now)

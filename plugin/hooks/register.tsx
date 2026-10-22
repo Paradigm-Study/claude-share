@@ -141,6 +141,8 @@ const askingA = atom({ plugin: 'shared-session', key: 'asking' } as const, null 
 const connectionA = atom({ plugin: 'shared-session', key: 'connection' } as const, 'live' as 'live' | 'reconnecting')
 const confirmingA = atom({ plugin: 'shared-session', key: 'confirming' } as const, null as 'stop' | null)
 const closingA = atom({ plugin: 'shared-session', key: 'closing' } as const, null as { how: Exit; room: string } | null)
+// The Team panel's Stop pressed once on this room: the next press ends it.
+const stoppingRoomA = atom({ plugin: 'shared-session', key: 'stoppingRoom' } as const, null as string | null)
 const newerA = atom({ plugin: 'shared-session', key: 'newer' } as const, null as string | null)
 const pagesA = atom({ plugin: 'shared-session', key: 'pages' } as const, {} as Record<string, Record<string, unknown>>)
 const updatesA = atom({ plugin: 'shared-session', key: 'updates' } as const, null as boolean | null)
@@ -9724,6 +9726,32 @@ async function continueJoins($: $, joined: string) {
   await openExternal($, deepLink(next.url))
 }
 
+// The Team panel's Stop on a session of yours: ends it for everyone by your
+// sign-in, whichever session or computer shared it, even one that closed
+// without saving its token. The first press asks, as the band's Stop does.
+async function stopFromTeam($: $, roomId: string) {
+  if ((await read($, stoppingRoomA)) !== roomId) {
+    await update($, stoppingRoomA, () => roomId)
+    $.clock.after(5_000, () => void update($, stoppingRoomA, r => (r === roomId ? null : r)))
+    return
+  }
+  await update($, stoppingRoomA, () => null)
+  const server = await serverOf($)
+  const saved = await signInFor($, server)
+  if (!saved) return void $.ui.toast('Sign in first: /team')
+  try {
+    await api($, server, `/api/rooms/${roomId}/end`, { method: 'POST', account: saved.token })
+    $.ui.toast('Stopped sharing. The link no longer works.')
+  } catch (error) {
+    // Already over: it only had to leave the list.
+    if (!(error instanceof ApiError && (error.status === 404 || error.status === 410))) {
+      $.ui.toast("Couldn't stop it")
+      $.ui.log(`Couldn't stop sharing: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+  await refreshTeams($)
+}
+
 // The Team panel's Open: the session here that's in that room.
 async function openHere($: $, roomId: string) {
   const hold = await heldElsewhere($, roomId)
@@ -11541,6 +11569,7 @@ export const register: Register = (on, options) => {
     // You're one person across sessions: what you share or are in already
     // isn't offered again (another session here opens instead).
     const here = t.here ?? {}
+    const stopping = await read($, stoppingRoomA)
     const yours = (s: ShareTeamSession) => s.hostAccount === account.id || Boolean(here[s.id]) || Boolean(s.accounts?.includes(account.id))
     const joinable = t.sessions.filter(s => s.id !== room?.id && s.hostOnline && !yours(s))
     const invite = inviteUrl(t, team)
@@ -11576,14 +11605,23 @@ export const register: Register = (on, options) => {
               </Text>
             </Box>
           </Box>
-          <Box flexShrink={0}>
+          <Box flexShrink={0} flexDirection="row" gap={1}>
             {inIt ? (
               <Text color="claude">{mode === 'host' ? 'This session' : "You're in it"}</Text>
+            ) : mine ? (
+              [
+                here[s.id] ? <Button key={`open-${s.id}`} label="Open" plain onPress={() => void openHere($, s.id)} /> : null,
+                stopping === s.id ? (
+                  <Button key={`stop-${s.id}`} label="Stop for everyone?" variant="primary" onPress={() => void stopFromTeam($, s.id)} />
+                ) : (
+                  <Button key={`stop-${s.id}`} label="Stop" plain dimColor onPress={() => void stopFromTeam($, s.id)} />
+                ),
+              ]
             ) : here[s.id] ? (
               <Button key={`open-${s.id}`} label="Open" plain onPress={() => void openHere($, s.id)} />
             ) : canJoin ? (
               <Button key={`join-${s.id}`} label="Join" variant={joinable.length === 1 ? 'primary' : undefined} onPress={press => void joinFromTeam($, [s], press.surface)} />
-            ) : mine ? null : (
+            ) : (
               <Button key={`join-${s.id}`} label="Join" plain dimColor onPress={press => void joinFromTeam($, [s], press.surface)} />
             )}
           </Box>

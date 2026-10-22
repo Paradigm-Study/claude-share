@@ -378,6 +378,15 @@ try {
   const aliceAgain = await signIn('alice@acme.com', 'Alice')
   ok(!(await call('/api/me', { tok: aliceAgain })).data.teams.some(t => t.id === team.id), 'someone who left is not pulled back in by the domain')
   const dave = await signIn('dave@solo.dev', 'Dave')
+  // The host's sign-in ends a room without its token (the Team panel's Stop),
+  // and nobody else's does.
+  const ownTeam = (await call('/api/teams', { method: 'POST', tok: dave, body: { name: 'Own' } })).data.team
+  const ownRoom = (await call('/api/rooms', { method: 'POST', acct: dave, body: { name: 'Dave', title: 'kept', team: ownTeam.id } })).data
+  const eve = await signIn('eve@else.dev', 'Eve')
+  ok((await call(`/api/rooms/${ownRoom.id}/end`, { method: 'POST', acct: eve })).status === 403, "someone else's sign-in doesn't end a room")
+  ok((await call(`/api/rooms/${ownRoom.id}/end`, { method: 'POST' })).status === 401, 'no sign-in and no token ends nothing')
+  ok((await call(`/api/rooms/${ownRoom.id}/end`, { method: 'POST', acct: dave })).status === 200, "the host's sign-in ends it")
+  ok((await call(`/api/rooms/${ownRoom.id}`)).data.ended && !(await call(`/api/teams/${ownTeam.id}/sessions`, { tok: dave })).data.sessions.some(s => s.id === ownRoom.id), "and it's off the team's list")
   const solo = (await call('/api/teams', { method: 'POST', tok: dave, body: { name: 'Solo' } })).data.team
   const soloRoom = (await call('/api/rooms', { method: 'POST', acct: dave, body: { name: 'Dave', title: 's', team: solo.id } })).data
   await call(`/api/teams/${solo.id}/members/me`, { method: 'DELETE', tok: dave })
