@@ -222,7 +222,7 @@ type ServerEvent = {
   body: Record<string, unknown>
 }
 
-type EventsPage = { seq: number; events: ServerEvent[]; people: SharePerson[]; ended: boolean; title: string; more?: boolean }
+type EventsPage = { seq: number; events: ServerEvent[]; people: SharePerson[]; previews?: unknown; ended: boolean; title: string; more?: boolean }
 
 // The engine hands a plugin at most 4 MiB of a response body, in bytes, cut
 // without a word (measured), and a long session's history is many times
@@ -722,18 +722,22 @@ type LocalPreviewRun = {
   expired: boolean
   error: string
   channelError?: string
-  channelSeen?: boolean
   ipv6?: boolean
   stopping?: Promise<void>
   /** Whose it is: a listener here, or the preview window's own tunnel (`RunOwner`). */
   owner: RunOwner
   /** The window's: a failure waiting to be said, by its code (`sayWindowLater`). */
   saying?: Map<string, Timer>
-  /** Its port was taken on this computer (something answered there, or the bind failed), or the system refused it (`denied`). */
-  inUse?: boolean
-  /** The system refused the bind (EACCES, EPERM: on Linux, a port below 1024): taken, for the fallbacks, and said as what it is. */
-  denied?: boolean
+  /** Its port refused here (`Refusal`). */
+  refused?: Refusal
 }
+
+// Why a bind here failed at the port it asked: taken on this computer
+// (something answered there, or the bind failed), or refused by the system
+// (`denied`: EACCES or EPERM, a port below 1024 on Linux). Taken either way
+// for the fallbacks (the window, else elsewhere); said as what it is.
+type Refusal = 'taken' | 'denied'
+type RefusedPort = { port: number; refused: Refusal }
 
 type TcpRelayRun = { id: string; pid: string; port: number; scope: RoomScope; worker: TcpWorkerRun }
 type TcpWorkerRun = Helper & { room: ShareRoom; started: boolean }
@@ -767,7 +771,7 @@ type Detection = { done?: BrowserFound; task?: Promise<BrowserFound & { failed?:
 // finds that at its next step (`windowStep`) and puts away what it made.
 class WindowContext {
   /** Its opens, one at a time; a Leave waits for them (briefly) before the profile goes. */
-  queue: Promise<void> = Promise.resolve()
+  readonly opens = lane()
   readonly openings = new Set<Promise<void>>()
   /**
    * By preview: a window tunnel that failed to start isn't offered again for
@@ -882,8 +886,10 @@ class RoomScope {
   readonly window = new WindowContext()
   /** The room's notes said once (`noteOnce`): the window's welcome, what an Open costs, and the like. */
   readonly said = new Set<string>()
-  /** Lists of what's shared being asked for, each with the previews the room spoke of meanwhile (`noteSaid`). */
-  readonly listsAsked = new Set<Set<string>>()
+  /** Guest: what the room shares, as its newest list said (`takeRoomList`); an artifact after it shows a preview it has. */
+  listed: ReadonlyMap<string, RoomPreview> = new Map()
+  /** Guest: what waits for the room's next list (`nextList`): a reload's listeners. */
+  private listWaiters: (() => void)[] = []
   /** What runs here for it (`RoomChildren`). */
   readonly children = new RoomChildren()
   constructor(
@@ -893,6 +899,13 @@ class RoomScope {
     public token: string,
     readonly mode: 'host' | 'guest',
   ) {}
+  // Settles as the room's next list is taken here (`takeRoomList`).
+  nextList(): Promise<void> {
+    return new Promise(done => this.listWaiters.push(done))
+  }
+  tookList() {
+    for (const done of this.listWaiters.splice(0)) done()
+  }
   // Closed at once: nothing of it starts or lands from here on, and what runs
   // for it is told to stop; settled once that has.
   close(ending: 'end' | 'keep'): Promise<void> {
@@ -1055,14 +1068,13 @@ type Reseat = { ok: true } | { ok: false; gone: boolean; why?: string }
 let reseating: Promise<Reseat> | null = null
 function reseat($: $, room: ShareRoom): Promise<Reseat> {
   reseating ??= (async (): Promise<Reseat> => {
-    const s = scope, said = new Set<string>()
-    s.listsAsked.add(said)
+    const s = scope
     try {
       // A room this session is leaving, or has left: no seat is taken in it
       // (a refused request then drops what it carried, as for a room gone).
       if (!(s.live && s.key === roomIdentity(room))) return { ok: false, gone: true }
       // The smallest page of history: this seat already has it.
-      const joined = await api<{ token: string; seat: string; previews?: unknown }>($, room.server, `/api/rooms/${room.id}/join?max=64000`, {
+      const joined = await api<{ token: string; seat: string }>($, room.server, `/api/rooms/${room.id}/join?max=64000`, {
         method: 'POST',
         body: { name: await whoami($) },
         account: (await signInFor($, room.server))?.token,
@@ -1072,15 +1084,14 @@ function reseat($: $, room: ShareRoom): Promise<Reseat> {
       if (s.live && s.key === roomIdentity(room)) s.token = joined.token
       await update($, roomA, r => (r && r.id === room.id && s.live ? { ...r, token: joined.token, seat: joined.seat } : r))
       $.ui.log('Shared session: the room let this seat go; took a new one', { to: 'debug' })
-      // What's shared now, as the new seat heard it: the room's events of its
-      // previews may have gone past while this seat was away.
-      await takeRoomList($, room, s, joined.previews, said).catch(() => {})
+      // Its answer's list isn't taken: the stream or a poll may have brought
+      // a newer one meanwhile, which it would undo (a preview opened since
+      // would end here for good), and the room's next page brings its list.
       return { ok: true }
     } catch (error) {
       const refused = error instanceof ApiError && error.status >= 400 && error.status < 500 && error.status !== 429
       return { ok: false, gone: refused, why: refused ? (error as ApiError).message : undefined }
     } finally {
-      s.listsAsked.delete(said)
       reseating = null
     }
   })()
@@ -1478,12 +1489,6 @@ async function setConnection($: $, state: 'live' | 'reconnecting') {
   const was = await read($, connectionA)
   if (was === state) return
   await update($, connectionA, () => state)
-  // Back after a gap: a guest asks what's shared now, since some of what the
-  // room said of its previews may have gone past meanwhile.
-  if (state === 'live' && was === 'reconnecting' && (await read($, modeA)) === 'guest') {
-    const room = await read($, roomA)
-    if (room) void syncPreviews($, room)
-  }
 }
 
 function startPolls($: $, generation: number, why: string) {
@@ -1701,7 +1706,6 @@ async function absorb($: $, room: ShareRoom, mode: ShareMode, event: ServerEvent
       const shown = shownOf(event)
       if (!shown) break
       const guest = mode === 'guest', preview = shown.kind === 'preview'
-      if (preview && shown.pid) noteSaid(shown.pid)
       let kept = shown
       await update($, shownA, list => {
         const old = list.find(s => s.key === shown.key)
@@ -1711,7 +1715,7 @@ async function absorb($: $, room: ShareRoom, mode: ShareMode, event: ServerEvent
           kept = old
           return list
         }
-        kept = preview ? previewOver(old, shown, body.title) : shown
+        kept = guest && preview ? listedAs(s, shown) : shown
         return keptShown([...list.filter(s => s.key !== shown.key), kept])
       })
       await note({ ts: event.ts, who: room.host, kind: 'shown', text: kept.name })
@@ -1765,35 +1769,25 @@ async function absorb($: $, room: ShareRoom, mode: ShareMode, event: ServerEvent
       }
       break
     case 'preview': {
+      // The host's own preview ended (a guest takes that from the room's
+      // list, `takeRoomList`): its Stop, or the room's.
       const pid = typeof body.pid === 'string' && PREVIEW_ID.test(body.pid) ? body.pid : ''
-      if (!pid) break
-      if (body.state === 'closed') {
-        noteSaid(pid)
-        // The window, Open preview and the Room reach it no more, from now.
-        let port = body.port
-        await update($, shownA, list => {
-          if (!s.live) return list
-          port = list.find(x => x.kind === 'preview' && x.pid === pid)?.port ?? body.port
-          return list.map(x => (x.pid === pid ? { ...x, closed: true, tcp: false } : x))
-        })
-        await previewEnded($, room, s, mode, pid, port)
-      } else if (body.state === 'open' && mode === 'guest') {
-        // Opened, or forwarded since (Allow forwarding): there now, and
-        // forwarded as the room says. How it shows stays its artifact's.
-        const said = roomPreviewOf(body)
-        if (!said) break
-        noteSaid(pid)
-        await update($, shownA, list => (s.live ? roomSays(list, said, event.ts) : list))
-        void syncBrowserRoutes($, s)
-      }
+      if (!pid || mode !== 'host' || body.state !== 'closed') break
+      let port = body.port
+      await update($, shownA, list => {
+        if (!s.live) return list
+        port = list.find(x => x.kind === 'preview' && x.pid === pid)?.port ?? body.port
+        return list.map(x => (x.pid === pid ? { ...x, closed: true, tcp: false } : x))
+      })
+      await previewEnded($, room, s, mode, pid, port)
       break
     }
   }
 }
 
-// A preview the room says has ended (its `closed` event, or its list of
-// what's shared leaving it out): nothing reaches it through this session any
-// more. Long-lived work, so a reseat meanwhile changes nothing here.
+// A preview the room says has ended (the host: its `closed` event; a guest:
+// the room's list leaving it out): nothing reaches it through this session
+// any more. Long-lived work, so a reseat meanwhile changes nothing here.
 async function previewEnded($: $, room: ShareRoom, s: RoomScope, mode: ShareMode, pid: string, port: unknown) {
   if (!s.live) return
   if (mode === 'host') await unshare($, room, pid)
@@ -1845,20 +1839,6 @@ function forwardedAs(s: Pick<ShareShown, 'tcp' | 'host' | 'scheme' | 'dependency
   return { ...(s.tcp ? { tcp: true } : {}), ...(s.host ? { host: s.host } : {}), ...(s.scheme ? { scheme: s.scheme } : {}), ...(s.dependency !== undefined ? { dependency: s.dependency } : {}) }
 }
 
-// A preview's newest artifact over what Shown has of it: its page, title and
-// time. One that doesn't say `tcp` (a page Claude opened there, or a 0.11.24
-// host's Claude mentioning its address) moves the page, never the
-// forwarding: what it was forwarded as stays (the window keeps its origin,
-// and a dependency stays one).
-function previewOver(old: ShareShown | undefined, next: ShareShown, title: unknown): ShareShown {
-  if (!old?.tcp || old.closed || next.tcp) return next
-  const merged: ShareShown = { ...next, ...forwardedAs(old), name: previewName(title, old.dependency) }
-  if (!old.host) delete merged.host
-  if (!old.scheme) delete merged.scheme
-  if (old.dependency === undefined) delete merged.dependency
-  return merged
-}
-
 // What an artifact event shows in the Room panel.
 function shownOf(event: ServerEvent): ShareShown | null {
   const body = event.body
@@ -1893,14 +1873,11 @@ function shownOf(event: ServerEvent): ShareShown | null {
 }
 
 // ---------------------------------------------------------------------------
-// Guest: what the room says is shared. Whether a preview is there, and
-// whether it's forwarded, are the room's to say: its `open` events (when one
-// opens, and again when Allow forwarding forwards it), its `closed` ones, and
-// the list of what's shared now that join answers with and GET previews
-// gives on a resume, a reload and a reconnect. How one shows (its page,
-// address, scheme, what it's used by) stays its artifact's. An older server
-// lists nothing (no field, or a 404), and says `open` only as a preview
-// opens, never as it's forwarded later: its artifacts say that, as before.
+// Guest: what the room says is shared. The join answer and every page the
+// room sends (each stream line, each events answer) list what's shared now:
+// whether a preview is there, and whether it's forwarded, are that list's to
+// say, taken before the page's events (`takeRoomList`). How one shows (its
+// page, address, scheme, what it's used by) stays its artifact's (`listedAs`).
 
 type RoomPreview = { pid: string; port: number; tcp: boolean; title?: string }
 
@@ -1910,70 +1887,72 @@ function roomPreviewOf(value: unknown): RoomPreview | null {
   return { pid: v.pid, port: v.port, tcp: v.tcp === true, ...(typeof v.title === 'string' && v.title ? { title: v.title.slice(0, 200) } : {}) }
 }
 
-// A preview as the room says it is. New here, it shows by its title until an
-// artifact says more (`first`: older than what Shown has, as one listed but
-// out of the room's history is); known, its forwarding is the room's say.
-// One ended stays ended.
-function roomSays(list: ShareShown[], said: RoomPreview, ts: number, first = false): ShareShown[] {
-  const at = list.findIndex(s => s.kind === 'preview' && s.pid === said.pid)
-  if (at < 0) {
-    const shown: ShareShown = { key: `preview:${said.pid}`, kind: 'preview', name: previewName(said.title ?? `localhost:${said.port}`, undefined), ts, pid: said.pid, port: said.port, ...(said.tcp ? { tcp: true } : {}) }
-    return keptShown(first ? [shown, ...list] : [...list, shown])
-  }
-  const old = list[at]!
-  if (old.closed || (old.port === said.port && Boolean(old.tcp) === said.tcp)) return list
-  const next: ShareShown = { ...old, port: said.port, tcp: true }
-  if (!said.tcp) delete next.tcp
-  return list.map((s, i) => (i === at ? next : s))
+// Shown as the room's list says: each preview it lists is there, as
+// forwarded as it says, and an open one it doesn't list has ended (one ended
+// stays ended: its id never comes back). One new here shows by its title,
+// first in Shown (its artifact older, or out of the room's history), until
+// its artifact says more.
+function listedShown(list: readonly ShareShown[], listed: ReadonlyMap<string, RoomPreview>, now: number): { next: readonly ShareShown[]; ended: ShareShown[] } {
+  const ended: ShareShown[] = [], known = new Set<string>()
+  let changed = false
+  const kept = list.map(x => {
+    if (x.kind !== 'preview' || !x.pid) return x
+    known.add(x.pid)
+    const said = listed.get(x.pid)
+    if (x.closed || (said && x.port === said.port && Boolean(x.tcp) === said.tcp)) return x
+    changed = true
+    if (!said) {
+      ended.push(x)
+      return { ...x, closed: true, tcp: false }
+    }
+    const moved: ShareShown = { ...x, port: said.port, tcp: true }
+    if (!said.tcp) delete moved.tcp
+    return moved
+  })
+  const fresh = [...listed.values()].filter(p => !known.has(p.pid)).map((p): ShareShown => ({ key: `preview:${p.pid}`, kind: 'preview', name: previewName(p.title ?? `localhost:${p.port}`, undefined), ts: now, pid: p.pid, port: p.port, ...(p.tcp ? { tcp: true } : {}) }))
+  return { next: fresh.length ? keptShown([...fresh, ...kept]) : changed ? kept : list, ended }
 }
 
-// The previews the room spoke of (an event, or a need's answer) while a list
-// of what's shared was being asked for (the scope's `listsAsked`): what it
-// said then is newer than the list, which has no say on them.
-function noteSaid(pid: string) {
-  for (const said of scope.listsAsked) said.add(pid)
-}
-
-// The room's list of what's shared now: each preview it lists is there, as
-// forwarded as it says, and an open one it doesn't list has ended. A list
-// that isn't one (an older server's answer) changes nothing.
-async function takeRoomList($: $, room: ShareRoom, s: RoomScope, value: unknown, said: ReadonlySet<string>) {
-  if (!Array.isArray(value)) return
+// The room's list of what's shared now (the join answer's, or a page's):
+// Shown follows it, and the previews it ended end here too. An artifact
+// after it reads it (`RoomScope.listed`).
+async function takeRoomList($: $, room: ShareRoom, s: RoomScope, value: unknown) {
+  if (!Array.isArray(value) || !s.live || s.mode !== 'guest') return
   const listed = new Map<string, RoomPreview>()
   for (const raw of value.slice(0, 512)) {
     const preview = roomPreviewOf(raw)
-    if (preview && !said.has(preview.pid)) listed.set(preview.pid, preview)
+    if (preview) listed.set(preview.pid, preview)
   }
-  if (!s.live || s.mode !== 'guest') return
-  const now = await $.clock.now()
-  let ended: ShareShown[] = []
-  await update($, shownA, list => {
-    ended = []
-    if (!s.live) return list
-    ended = list.filter(x => openPreview(x) && !said.has(x.pid!) && !listed.has(x.pid!))
-    let next = list.map(x => (ended.includes(x) ? { ...x, closed: true, tcp: false } : x))
-    // Listed but not in Shown: older than what is (out of the room's history).
-    for (const preview of [...listed.values()].reverse()) next = roomSays(next, preview, now, true)
-    return next
-  })
-  for (const x of ended) await previewEnded($, room, s, 'guest', x.pid!, x.port)
-  void syncBrowserRoutes($, s)
+  s.listed = listed
+  // What waits for the list (a reload's listeners) goes on once Shown says it.
+  try {
+    const now = await $.clock.now()
+    // Most pages change nothing of it: those write nothing.
+    const before = await read($, shownA)
+    if (listedShown(before, listed, now).next === before) return
+    let ended: ShareShown[] = []
+    await update($, shownA, list => {
+      ended = []
+      if (!s.live) return list
+      const taken = listedShown(list, listed, now)
+      ended = taken.ended
+      return [...taken.next]
+    })
+    for (const x of ended) await previewEnded($, room, s, 'guest', x.pid!, x.port)
+    void syncBrowserRoutes($, s)
+  } finally {
+    s.tookList()
+  }
 }
 
-// Asked of the room (a resume, a reload, a reconnect): its events of its
-// previews may have gone past this session meanwhile. Not answered (an older
-// server's 404, a seat let go, no network): the events go on deciding.
-async function syncPreviews($: $, room: ShareRoom) {
-  const s = scope, said = new Set<string>()
-  if (!stillInRoom(room, s)) return
-  s.listsAsked.add(said)
-  try {
-    const answer = await api<{ previews?: unknown }>($, room.server, `/api/rooms/${room.id}/previews`, { token: room.token })
-    await takeRoomList($, room, s, answer.previews, said)
-  } catch {
-  } finally {
-    s.listsAsked.delete(said)
-  }
+// A guest's preview as its artifact shows it, there and forwarded as the
+// room's newest list says (taken before the artifact's page): one the list
+// doesn't have has ended.
+function listedAs(s: RoomScope, shown: ShareShown): ShareShown {
+  const said = shown.pid ? s.listed.get(shown.pid) : undefined
+  const next: ShareShown = { ...shown }
+  delete next.tcp
+  return said ? { ...next, port: said.port, ...(said.tcp ? { tcp: true } : {}) } : { ...next, closed: true, tcp: false }
 }
 
 // Guest: what the host forwards this moment, oldest first: Shown's open
@@ -1989,7 +1968,7 @@ async function forwardedNow($: $): Promise<Forwarded[]> {
 // every page (`dependency: true`); and the other way, the pages a
 // dependency is for. One rule, read both ways.
 const dependenciesOf = (forwarded: readonly Forwarded[], page: { pid: string; port: number }) => forwarded.filter(f => f.pid !== page.pid && (f.dependency === true || f.dependency === page.port))
-const pagesOf = (forwarded: readonly Forwarded[], dependency: Forwarded) => forwarded.filter(f => f.dependency === undefined && (dependency.dependency === true || f.port === dependency.dependency))
+const pagesOf = (forwarded: readonly Forwarded[], dependency: Pick<ShareShown, 'dependency'>) => forwarded.filter(f => f.dependency === undefined && (dependency.dependency === true || f.port === dependency.dependency))
 // Where a forwarded page opens: the host's own address, as the host spelled it.
 const pageUrl = (page: Forwarded) => previewUrl(page.host, page.port, page.path, page.scheme)
 // The room beside the transcript: every turn, the files Claude changed,
@@ -2217,6 +2196,9 @@ async function receive($: $, mode: ShareMode, room: ShareRoom, page: EventsPage)
   if (mode === 'guest' && hostWas !== undefined && hostIs !== undefined && hostWas !== hostIs) {
     $.ui.toast(hostIs ? `${room.host} is back` : `${room.host}'s Claude Code closed; the room waits for them`)
   }
+  // What's shared now, before the page's events: an artifact among them
+  // shows a preview the list has.
+  if (mode === 'guest' && !page.ended) await takeRoomList($, room, s, page.previews)
   let seq = room.seq
   for (const event of page.events) {
     if (!s.live) return
@@ -2478,10 +2460,7 @@ async function closeSteps($: $, s: RoomScope, live: boolean, how: Exit, opts: Ex
   else if (how === 'clear') {
     // In the bound: told to close, and a room's profile (its sign-ins and
     // cookies) out of the way at once; then the room hears of it (5, here).
-    if (win) {
-      await killWindow($, win.profile, false, onPort).catch(() => {})
-      if (!hostProfile(win.name)) await sh($, trashScript(win.dir, win.profile, randomSecret().slice(0, 12)), WINDOW_STEP_MS)
-    }
+    if (win) await endPreviewWindow($, room, { profile: win.name, port: win.port }, false).catch(() => {})
     await tellRoom($, room, guest)
     await update($, roomA, () => null)
   } else if (guest) await endWindow($, s, room, win)
@@ -3469,13 +3448,7 @@ async function settleReclaim($: $, back: Reclaim, forGood: boolean) {
   } else {
     await tellRoom($, room, guest)
     const w = guest ? (saved as Joined).previewWindow : undefined
-    if (w) {
-      const { dir, profile, name } = await profileOf($, room, w.profile)
-      if (!hostProfile(name)) {
-        await killWindow($, profile, false).catch(() => {})
-        await sh($, trashScript(dir, profile, randomSecret().slice(0, 12)), WINDOW_STEP_MS)
-      } else if (w.port) await killWindow($, profile, false, w.port).catch(() => {})
-    }
+    if (w) await endPreviewWindow($, room, w, false).catch(() => {})
     await update($, sidebarA, () => saved.sidebar ?? null)
     await unmarkSidebar($, guest ? `${room.host}'s session · ${room.title}`.slice(0, 120) : undefined)
   }
@@ -3506,15 +3479,15 @@ async function resumeJoined($: $) {
     let room = saved.room
     let missed: ServerEvent[] = []
     let people: SharePerson[] | null = null
-    // Whether the room answered: only then is it asked what it shares.
-    let reached = false
+    // What the room shares now, as its answer said (none: unreachable for now).
+    let listed: unknown
     try {
       const page = await eventsSince($, room, room.seq)
       if (page.ended) return void (await over())
       missed = page.events
       people = page.people
+      listed = page.previews
       room = { ...room, seq: page.seq }
-      reached = true
     } catch (error) {
       if (error instanceof ApiError && (error.status === 404 || error.status === 410)) return void (await over())
       if (error instanceof ApiError && error.status === 401) {
@@ -3523,7 +3496,7 @@ async function resumeJoined($: $) {
         if (!current()) return
         // The seat was let go: a new one, and what happened since the old one's last.
         try {
-          const joined = await api<{ token: string; seat: string; seq: number; title: string; history: ServerEvent[]; people: SharePerson[]; more?: boolean; historySeq?: number }>(
+          const joined = await api<{ token: string; seat: string; seq: number; title: string; history: ServerEvent[]; people: SharePerson[]; previews?: unknown; more?: boolean; historySeq?: number }>(
             $,
             room.server,
             `/api/rooms/${room.id}/join?max=${PAGE_BYTES}`,
@@ -3539,8 +3512,8 @@ async function resumeJoined($: $) {
             missed.push(...rest.events.filter(e => e.seq > saved.room.seq && e.type !== 'delta'))
           }
           people = joined.people
+          listed = joined.previews
           room = { ...room, token: joined.token, seat: joined.seat, seq: joined.seq, title: joined.title }
-          reached = true
         } catch (again) {
           if (again instanceof ApiError && (again.status === 404 || again.status === 410)) return void (await over())
           throw again
@@ -3574,15 +3547,14 @@ async function resumeJoined($: $) {
     tookBack($, back)
     if (people) await update($, peopleA, p => (s.live ? people : p))
     await readyReplay($)
+    // What the room shares now, before a listener comes back: a preview it
+    // ended, or forwarded, while this was closed. Then what happened since.
+    await takeRoomList($, room, s, listed)
     for (const event of missed) {
       if (!s.live) return
       await absorb($, room, 'guest', event, false)
     }
     await flushCalls($, s)
-    // What the room shares now, before a listener comes back: a preview it
-    // ended, or forwarded, while this was closed (its events of it out of the
-    // room's history, or this place saved by a version that kept fewer).
-    if (reached && s.live) await syncPreviews($, room)
     if (!s.live) return
     const starts = missed.filter(e => e.type === 'turn' && e.body.state === 'start')
     const ends = new Set(missed.filter(e => e.type === 'turn' && e.body.state === 'end').map(e => e.body.turnId))
@@ -4654,12 +4626,12 @@ async function joinRoom($: $, server: string, id: string) {
     await readyReplay($)
     await update($, peopleA, () => joined.people)
     await update($, workingA, () => null)
-    // The room as it stands: its timeline, its chat, the host's policy, and
-    // what's shared now (a preview whose artifact is out of the history is
-    // still listed; one whose end is out of it, ended).
+    // The room as it stands: what's shared now (a preview whose artifact is
+    // out of the history is still listed), then its timeline, its chat and
+    // the host's policy.
+    await takeRoomList($, room, s, joined.previews)
     for (const event of history) await absorb($, room, 'guest', event, false)
     await flushCalls($, s)
-    await takeRoomList($, room, s, joined.previews, new Set())
 
     // A turn still running on the host plays out live; everything before it is
     // shown as it was, one exchange per prompt.
@@ -5736,7 +5708,7 @@ function listenerUrl(shown: ShareShown, run: LocalPreviewRun): string {
 // `made`: the run this call started, up or not (what an Open that fails
 // stops again); `run`, the one it got, up and current; `inWindow`: the
 // preview's tunnel serves the window, left to it (`keepWindow`).
-type LocalPreviewReady = { url?: string; error?: string; run?: LocalPreviewRun; made?: LocalPreviewRun; inUse?: boolean; denied?: boolean; inWindow?: true }
+type LocalPreviewReady = { url?: string; error?: string; run?: LocalPreviewRun; made?: LocalPreviewRun; refused?: Refusal; inWindow?: true }
 
 // The window's own tunnel for a preview serves the window now: up, and the
 // room's window proxy with it (a page in the window uses it, or is it).
@@ -5756,7 +5728,7 @@ async function ensureLocalPreview($: $, room: ShareRoom, s: RoomScope, shown: Sh
   const port = shown.port, path = shown.path ?? '/', pid = shown.pid
   const epoch = pid ? s.epoch(pid) : 0
   if (!sameRoom(room, s) || s.mode !== 'guest') return { error: 'This shared session is no longer open.' }
-  if (!pid || !/^[A-Za-z0-9_-]{1,64}$/.test(pid) || shown.closed || !validPort(port) || !path.startsWith('/') || /[\x00-\x20\\]/.test(path)) return { error: 'That preview has ended or has no valid localhost address.' }
+  if (!pid || !PREVIEW_ID.test(pid) || shown.closed || !validPort(port) || !path.startsWith('/') || /[\x00-\x20\\]/.test(path)) return { error: 'That preview has ended or has no valid localhost address.' }
   const owner: RunOwner = 'window' in ask ? 'window' : 'listener', runs = s.children.listeners
   const bind: LocalBind = 'window' in ask ? { port: 0, strict: false } : ask.bind
   // Still one run per pid: the window uses any current one; a listener asked
@@ -5782,7 +5754,7 @@ async function ensureLocalPreview($: $, room: ShareRoom, s: RoomScope, shown: Sh
     void startLocalPreview($, room, pid, run)
   }
   const ready = await run.ready
-  if (!ready || !run.localPort || run.expired || !(await localRunCurrent($, pid, run)) || !localRequestCurrent(room, s, pid, epoch)) return { error: run.error, ...(made ? { made } : {}), ...(run.inUse ? { inUse: true } : {}), ...(run.denied ? { denied: true } : {}) }
+  if (!ready || !run.localPort || run.expired || !(await localRunCurrent($, pid, run)) || !localRequestCurrent(room, s, pid, epoch)) return { error: run.error, ...(made ? { made } : {}), ...(run.refused ? { refused: run.refused } : {}) }
   return { url: listenerUrl(shown, run), run, ...(made ? { made } : {}) }
 }
 
@@ -5850,7 +5822,6 @@ async function startLocalPreview($: $, room: ShareRoom, pid: string, run: LocalP
         await $.ui.invalidate('ui.render')
         void syncBrowserRoutes($, run.scope)
       } else if (message.state === 'channel-ready') {
-        run.channelSeen = true
         run.channelError = undefined
         // The window's: working again, a failure waiting to be said isn't.
         if (run.owner === 'window') {
@@ -5864,10 +5835,7 @@ async function startLocalPreview($: $, room: ShareRoom, pid: string, run: LocalP
         // channel doesn't stop the run or any of its other channels.
         await runTrouble($, room, pid, run, 'channel', message.code)
       } else if (message.state === 'error') {
-        // Refused by the system (DENIED: EACCES or EPERM, a port below 1024
-        // on Linux): taken, for the fallbacks (the window, else elsewhere).
-        if (message.code === 'EADDRINUSE' || message.code === 'DENIED') run.inUse = true
-        if (message.code === 'DENIED') run.denied = true
+        if (message.code === 'EADDRINUSE' || message.code === 'DENIED') run.refused = message.code === 'DENIED' ? 'denied' : 'taken'
         run.error = message.code === 'EADDRINUSE'
           ? `localhost:${run.bind.port} is already in use on this computer. Nothing of yours was stopped.`
           : message.code === 'DENIED'
@@ -6063,8 +6031,8 @@ async function restoreLocalPreviews($: $) {
     if (!opened.error || !sameRoom(room, s)) continue
     // Left as it was: the Room says where it was (`Last:`), and Open may move it.
     failed.push(preview.port)
-    if (opened.denied) denied.push(at)
-    else if (opened.inUse) busy.push(at)
+    if (opened.refused === 'denied') denied.push(at)
+    else if (opened.refused) busy.push(at)
   }
   const why = [
     busy.length ? `${portsSaid(busy)} ${busy.length === 1 ? 'is' : 'are'} in use here now` : '',
@@ -6531,7 +6499,7 @@ async function noteNeedAsked($: $, s: RoomScope, port: number) {
 // (five ports a minute at most) and this person told. A port counts as asked
 // only once the room answered (or has no way to ask: an older server); a
 // request refused for too many, or not answered, is asked again later. One
-// the host stopped isn't asked about (`absorb`).
+// the host stopped isn't asked about (`previewEnded`).
 async function blockedPort($: $, proxy: BrowserProxy, port: number) {
   const s = proxy.scope, room = await read($, roomA)
   if (!room || roomIdentity(room) !== proxy.key) return
@@ -6553,45 +6521,22 @@ async function blockedPort($: $, proxy: BrowserProxy, port: number) {
       return slot ? { ...cur, times: [...times, now] } : n
     })
     if (!slot) return
-    let answer: { delivered?: boolean; shared?: boolean; pid?: unknown } = {}
+    let answer: { delivered?: boolean; shared?: boolean } = {}
     try {
-      answer = await api<{ delivered?: boolean; shared?: boolean; pid?: unknown }>($, room.server, `/api/rooms/${room.id}/need`, { method: 'POST', token: room.token, body: { port } })
+      answer = await api<{ delivered?: boolean; shared?: boolean }>($, room.server, `/api/rooms/${room.id}/need`, { method: 'POST', token: room.token, body: { port } })
     } catch (error) {
       if (!(error instanceof ApiError) || error.status !== 404) return
     }
     if (!live()) return
     await noteNeedAsked($, s, port)
-    // Forwarded already: what this session knows of the room is behind (its
-    // row is on its way, or went before this session joined). It's taken up
-    // as the room says, and the routes follow.
-    if (answer.shared) {
-      if (typeof answer.pid === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(answer.pid) && live()) await recoverForwarded($, room, answer.pid, port, s).catch(() => {})
-      return void syncBrowserRoutes($, s)
-    }
+    // Forwarded already, just now: the room's next page lists it, and the
+    // routes follow it (`takeRoomList`).
+    if (answer.shared) return void syncBrowserRoutes($, s)
     const said = `Your preview tried localhost:${port}, which ${room.host} hasn't shared.`
     $.ui.toast(answer.delivered ? `${said} The request went to ${room.host}.` : `${said} Ask ${room.host} to share it.`)
   } finally {
     s.window.needAsking.delete(port)
   }
-}
-
-// The room says a port the window asked for is forwarded, as `pid`, a
-// preview whose artifact this session never saw (it went before this
-// session joined, say) or saw at another port, or whose forwarding it hasn't
-// heard of yet: taken up as the room says, in Shown. New here, it's what a
-// page in the window uses, at localhost: a dependency, never offered as a
-// page of its own. One known keeps how it shows.
-async function recoverForwarded($: $, room: ShareRoom, pid: string, port: number, s: RoomScope) {
-  if (!stillInRoom(room, s) || s.mode !== 'guest') return
-  noteSaid(pid)
-  const now = await $.clock.now()
-  await update($, shownA, list => {
-    if (!s.live) return list
-    const old = list.find(s => s.kind === 'preview' && s.pid === pid)
-    if (old?.closed) return list
-    if (old) return list.map(s => (s === old ? { ...s, port, tcp: true } : s))
-    return keptShown([...list, { key: `preview:${pid}`, kind: 'preview', name: previewName(`localhost:${port}`, true), ts: now, pid, port, tcp: true, host: 'localhost', dependency: true }])
-  })
 }
 
 // What a refused tunnel was for: a page Open preview opens, or a page's
@@ -6671,17 +6616,13 @@ async function clearRefusals($: $, pids: readonly string[], s: RoomScope) {
   for (const pid of pids) s.window.backoff.delete(pid)
 }
 
-async function openClears($: $, page: { pid: string; port: number }): Promise<string[]> {
-  return [page.pid, ...dependenciesOf(await forwardedNow($), page).map(f => f.pid)]
-}
-
 // The person's own Open: a refusal before, the page's or of what it uses, is
 // theirs to retry. A run the host's side refused (AUTH: its grant's gone)
 // stops, so this Open grants it anew: what the page uses kept as it is would
 // refuse the page's every request, a listener's and the window's alike (the
 // window routes to whatever run serves a port).
 async function retryRefused($: $, page: { pid: string; port: number }, s: RoomScope) {
-  const clears = await openClears($, page)
+  const clears = [page.pid, ...dependenciesOf(await forwardedNow($), page).map(f => f.pid)]
   await clearRefusals($, clears, s)
   for (const pid of clears) if (refusedRun(s, pid)) await stopLocalPreview($, pid, false, s)
 }
@@ -6726,14 +6667,13 @@ async function bandEntry($: $): Promise<Forwarded | null> {
 // it: open; a definite failure, and why (the Open goes on as its policy says
 // without the window, `openForwarded`); or nothing more to do (said, left
 // meanwhile, or not seen yet: a window that shows late opens by itself).
-type WindowWhy = { always: true } | { again: true } | { taken: number; denied?: true }
+type WindowWhy = { always: true } | { again: true } | RefusedPort
 type WindowOutcome = 'opened' | 'done' | { failed: string }
 
 async function openInWindow($: $, room: ShareRoom, s: RoomScope, choice: Extract<WindowChoice, { window: true }>, page: Forwarded, why: WindowWhy): Promise<WindowOutcome> {
   const win = s.window
-  const task = win.queue.then((): WindowOutcome | Promise<WindowOutcome> => (s.live ? openWindow($, room, s, choice, page, why) : 'done'))
+  const task = win.opens.run(async (): Promise<WindowOutcome> => (s.live ? openWindow($, room, s, choice, page, why) : 'done'))
   const opening = task.then(() => {}, () => {})
-  win.queue = opening
   win.openings.add(opening)
   try {
     return await task
@@ -6750,9 +6690,9 @@ async function windowRemedy($: $, why: WindowWhy, ifNone: boolean): Promise<stri
     const setting = (await isDesktop($)) ? "Claude's browser" : 'Your browser'
     return `${lead}${ifNone ? 'set' : 'Set'} Previews to ${setting} in Room → Settings, and a preview whose ports are free here opens there instead.`
   }
-  if ('taken' in why && !why.denied) {
+  if ('refused' in why && why.refused === 'taken') {
     const viewer = (await shownIn($)) === 'pane' ? "Claude's browser" : 'your browser'
-    return `${lead}${ifNone ? 'free' : 'Free'} localhost:${why.taken} on this computer and press Open preview to open it in ${viewer} instead.`
+    return `${lead}${ifNone ? 'free' : 'Free'} localhost:${why.port} on this computer and press Open preview to open it in ${viewer} instead.`
   }
   return ifNone ? 'If none opens, press Open preview to try again.' : ''
 }
@@ -6951,19 +6891,17 @@ async function readyProxy($: $, open: WindowOpen): Promise<BrowserProxy | Window
   }
   // Its grant asked with the seat this session holds now (the window goes on
   // through a reseat, `windowStep`); seated anew while it was asked for, what
-  // that started (the old seat's) stops, and it's asked once more with the new.
+  // that started (the old seat's) stops, and the Open asks to be pressed again.
   const asked = s.token
-  let tunnel = await windowStep(open, ensureLocalPreview($, { ...room, token: asked }, s, page, { window: true }))
-  if (!tunnel.run && s.token !== asked) {
-    if (tunnel.made && s.children.listeners.get(page.pid) === tunnel.made) await stopLocalPreview($, page.pid, false, s)
-    tunnel = await windowStep(open, ensureLocalPreview($, { ...room, token: s.token }, s, page, { window: true }))
-  }
+  const tunnel = await windowStep(open, ensureLocalPreview($, { ...room, token: asked }, s, page, { window: true }))
+  const reseated = s.token !== asked
+  if (!tunnel.run && reseated && tunnel.made && s.children.listeners.get(page.pid) === tunnel.made) await stopLocalPreview($, page.pid, false, s)
   // The preview's own trouble (the host's side, no Node for the tunnel): it
   // would be the same without the window. A proxy this open started, and
   // nothing else, may go with it (`idleProxy`).
   if (!tunnel.run) {
     await idleProxy(open, proxy)
-    $.ui.toast(tunnel.error ?? 'That preview could not be opened.')
+    $.ui.toast(reseated ? RESEATED : tunnel.error ?? 'That preview could not be opened.')
     return 'done'
   }
   await windowStep(open, syncBrowserRoutes($, s))
@@ -7098,7 +7036,7 @@ async function windowOpened($: $, open: WindowOpen, port: number, withPage = tru
 // removed it). A host's stays for their other rooms.
 async function abandonWindow($: $, s: RoomScope, dir: string, profile: string, launched: boolean, port?: number) {
   if (launched && (await windowAppears($, profile, 3_000))) await killWindow($, profile, true, port)
-  if (s.ending === 'end' && !hostProfile(profile.slice(profile.lastIndexOf('/') + 1))) await sh($, trashScript(dir, profile, randomSecret().slice(0, 12)), WINDOW_STEP_MS)
+  if (s.ending === 'end' && !hostProfile(profile.slice(profile.lastIndexOf('/') + 1))) await trashProfile($, dir, profile)
 }
 
 // Leaving: windows being opened finish first (three seconds at most), so
@@ -7172,14 +7110,20 @@ async function restorePreviewWindow($: $) {
 // Leaving the room for good: the window closes, and a room's profile (its
 // sign-ins and cookies) goes, out of the way at once and removed behind. A
 // host's stays for their other rooms, and its window closes only if it's
-// this session's (on its proxy port).
-async function endPreviewWindow($: $, room: { server: string; id: string }, saved?: { profile?: string; port?: number }) {
+// this session's (on its proxy port). `wait`: until the window's gone (up to
+// 3 s), which a session's end has no time for.
+async function endPreviewWindow($: $, room: { server: string; id: string }, saved?: { profile?: string; port?: number }, wait = true) {
   const { dir, profile, name } = await profileOf($, room, saved?.profile)
   if (hostProfile(name)) {
-    if (saved?.port) await killWindow($, profile, true, saved.port)
+    if (saved?.port) await killWindow($, profile, wait, saved.port)
     return
   }
-  await killWindow($, profile, true)
+  await killWindow($, profile, wait)
+  await trashProfile($, dir, profile)
+}
+
+// A profile moved out of the way at once, and removed behind.
+async function trashProfile($: $, dir: string, profile: string) {
   await sh($, trashScript(dir, profile, randomSecret().slice(0, 12)), WINDOW_STEP_MS)
 }
 
@@ -7856,14 +7800,14 @@ function listening(pid: string, s: RoomScope = scope): LocalPreviewRun | null {
 // Open started and changes nothing else. Its grants are asked with the seat
 // this session holds as it starts; seated anew while it binds (the room let
 // the old seat go: grants asked with it are its), what it started stops and
-// it binds once more with the new seat (`again`: a second reseat is said).
+// the Open asks to be pressed again (`RESEATED`).
 // What's up is saved only once the page is (`commitMappings`), so nothing
 // an Open only tried comes back; the page, when it's what another page uses,
 // as opened on its own (`own`).
 type Bound = { url: string; run: LocalPreviewRun; taken: number[]; denied: number[]; failed: string[] }
-type BindResult = Bound | { taken: number; denied?: true } | { inWindow: true } | { error: string }
+type BindResult = Bound | RefusedPort | { inWindow: true } | { error: string }
 const RESEATED = 'The room reconnected you while the preview was opening. Press Open again.'
-async function bindForOpen($: $, room: ShareRoom, s: RoomScope, page: Forwarded, uses: readonly Forwarded[], policy: 'same' | 'elsewhere', keepWindow = false, again = false): Promise<BindResult> {
+async function bindForOpen($: $, room: ShareRoom, s: RoomScope, page: Forwarded, uses: readonly Forwarded[], policy: 'same' | 'elsewhere', keepWindow = false): Promise<BindResult> {
   const seat = { ...room, token: s.token }
   const saved = await read($, localPreviewsA)
   const made: { pid: string; run: LocalPreviewRun }[] = [], bound: { pid: string; run: LocalPreviewRun; own?: true }[] = []
@@ -7879,27 +7823,23 @@ async function bindForOpen($: $, room: ShareRoom, s: RoomScope, page: Forwarded,
     const open = listening(want.pid, s)
     if (open) {
       if (flexible || open.localPort === want.port) up(want, open)
-      else if (policy === 'same') return undo({ taken: want.port })
+      else if (policy === 'same') return undo({ port: want.port, refused: 'taken' })
       else taken.push(want.port)
       continue
     }
     const at = flexible ? savedPort(saved.find(p => p.pid === want.pid && p.port === want.port) ?? want) : want.port
     const opened = await ensureLocalPreview($, seat, s, want, { bind: { port: at, strict: !flexible }, ...(keepWindow ? { keepWindow: true as const } : {}) })
     if (opened.made) made.push({ pid: want.pid, run: opened.made })
-    if (!sameRoom(seat, s)) {
-      const left = !stillInRoom(seat, s)
-      const result = await undo({ error: left ? 'This shared session is no longer open.' : RESEATED })
-      return left || again ? result : bindForOpen($, room, s, page, uses, policy, keepWindow, true)
-    }
+    if (!sameRoom(seat, s)) return undo({ error: stillInRoom(seat, s) ? RESEATED : 'This shared session is no longer open.' })
     if (opened.run) {
       up(want, opened.run)
       continue
     }
     if (opened.inWindow) return undo({ inWindow: true })
-    if (policy === 'same' && opened.inUse) return undo({ taken: want.port, ...(opened.denied ? { denied: true as const } : {}) })
+    if (policy === 'same' && opened.refused) return undo({ port: want.port, refused: opened.refused })
     if (policy === 'same' || flexible) return undo({ error: opened.error ?? `Couldn't forward localhost:${want.port}.` })
-    if (opened.denied) denied.push(want.port)
-    else if (opened.inUse) taken.push(want.port)
+    if (opened.refused === 'denied') denied.push(want.port)
+    else if (opened.refused) taken.push(want.port)
     else failed.push(opened.error ?? `Couldn't forward localhost:${want.port}.`)
   }
   const top = bound.find(b => b.pid === page.pid)!
@@ -7911,9 +7851,9 @@ async function bindForOpen($: $, room: ShareRoom, s: RoomScope, page: Forwarded,
 // sign-ins registered for its own number won't work at another), what it
 // uses that's taken or refused here, what failed, and why no window keeps
 // the host's addresses.
-function elsewhereNote(room: ShareRoom, page: Forwarded, bound: Bound, why: { taken: number; denied?: true }, noWindow: string): string {
+function elsewhereNote(room: ShareRoom, page: Forwarded, bound: Bound, why: RefusedPort, noWindow: string): string {
   const moved = bound.run.localPort !== page.port
-  const refused = why.denied === true && why.taken === page.port
+  const refused = why.refused === 'denied' && why.port === page.port
   return [
     moved ? `${room.host}'s preview opened at localhost:${bound.run.localPort} here, not localhost:${page.port}, ${refused ? "which this computer doesn't let Claude Code listen on" : 'which is in use on this computer'}, so sign-ins registered for localhost:${page.port} won't work.` : `${room.host}'s preview opened at localhost:${page.port} here.`,
     bound.taken.length ? `${portsSaid(bound.taken)}, which it uses, ${bound.taken.length === 1 ? 'is' : 'are'} in use here too: the page may reach your own ${bound.taken.length === 1 ? 'server' : 'servers'} there.` : '',
@@ -7935,8 +7875,9 @@ async function openForwarded($: $, room: ShareRoom, s: RoomScope, shown: ShareSh
   const page = shown, pid = page.pid, epoch = s.epoch(pid)
   // Still this Open: its room's scope, and no Stop, Close or Leave of the
   // preview since. A reseat isn't one: what the Open asks for goes with the
-  // seat held as it's asked (`bindForOpen`, the window's `readyProxy`), and the
-  // page still opens, rather than an Open that ends without a word.
+  // seat held as it's asked (`bindForOpen`, the window's `readyProxy`), and
+  // one seated anew meanwhile says so (`RESEATED`) rather than end without a
+  // word.
   const live = async () => stillInRoom(room, s) && s.epoch(pid) === epoch
   // A window that couldn't open for it before: this Open answers that.
   await update($, windowFailedA, f => (s.live && f?.pid === pid ? null : f))
@@ -7948,7 +7889,7 @@ async function openForwarded($: $, room: ShareRoom, s: RoomScope, shown: ShareSh
   const uses = dependenciesOf(await forwardedNow($), page)
   // No window here: the page where it can be, what it uses at their numbers
   // where free; one note of what that costs, said once a room.
-  const elsewhere = async (why: { taken: number; denied?: true }, noWindow: string) => {
+  const elsewhere = async (why: RefusedPort, noWindow: string) => {
     const bound = await bindForOpen($, room, s, page, uses, 'elsewhere')
     if (!(await live())) return
     if (!('url' in bound)) return void $.ui.toast('error' in bound ? bound.error : 'That preview could not be opened.')
@@ -7968,7 +7909,7 @@ async function openForwarded($: $, room: ShareRoom, s: RoomScope, shown: ShareSh
     if (typeof outcome !== 'object' || !(await live())) return
     if ('always' in why) return alwaysFailed(outcome.failed)
     // A port taken here: the page elsewhere, its note saying why there's no window.
-    if ('taken' in why) return elsewhere(why, outcome.failed)
+    if ('refused' in why) return elsewhere(why, outcome.failed)
     // Open in the window before (its ports may be free here): the host's numbers, else elsewhere.
     $.ui.toast(`Couldn't open the preview window: ${outcome.failed}.`)
     return openForwarded($, room, s, page, surface, outcome.failed)
@@ -10112,12 +10053,18 @@ export const register: Register = (on, options) => {
     // Updated in place from 0.11.24: what it shares, as this version keeps
     // it, before the room's stream asks anything of it.
     await takeLegacyShares($, Boolean(room) && mode === 'host').catch(error => $.ui.log(`Shared session: taking up what was shared: ${String((error as Error)?.message ?? error)}`, { to: 'debug' }))
+    // A guest's reload (an update in place included): what the room shares
+    // now first, as its next page lists it (a preview it ended or forwarded
+    // meanwhile, or one forwarded before the update that Shown lost a sign
+    // of), then each listener it had (below).
+    let listed: Promise<void> = Promise.resolve()
     if (room && mode !== 'idle') {
       // The module came back without its room's scope (a reload): it opens
       // again, its long-lived work (listeners, the window's proxy) restored
       // below. Still open (the same module, started again), it goes on.
       const s = scope.live && scope.key === roomIdentity(room) && scope.mode === mode ? scope : openScope(room, mode)
       s.token = room.token
+      if (mode === 'guest') listed = s.nextList()
       startFeed($)
       // Teammates' prompts the module before this one had waiting go on.
       if (mode === 'host') nextGuestPromptSoon($)
@@ -10126,13 +10073,9 @@ export const register: Register = (on, options) => {
     if (reloaded) await readyReplay($)
     if (!room) await resumeHosting($).catch(error => $.ui.log(`Couldn't pick the shared session back up: ${String(error?.message ?? error)}`))
     if (!(await read($, roomA))) await resumeJoined($).catch(error => $.ui.log(`Couldn't get back into the shared session: ${String(error?.message ?? error)}`))
-    // A guest's reload (an update in place included): what the room shares
-    // now first (a preview it ended or forwarded meanwhile, or one forwarded
-    // before the update that Shown lost a sign of), then each listener it had.
-    // Shown is the record of what the host forwards, as it was for 0.11.24.
-    // A room that doesn't answer holds the listeners back only so long.
+    // A room that doesn't answer holds a reload's listeners back only so long.
     void (async () => {
-      if (reloaded) await Promise.race([syncPreviews($, room), new Promise<void>(done => $.clock.after(3_000, done))])
+      if (reloaded) await Promise.race([listed, new Promise<void>(done => $.clock.after(3_000, done))])
       await restoreLocalPreviews($)
     })().catch(() => {})
     // A question asked before a reload has no one to answer it now: it goes.
@@ -11783,7 +11726,8 @@ export const register: Register = (on, options) => {
     const refusedHere = isHost ? [] : await read($, previewNeedsOpenA)
     // Ports are a guest's concern only once the room forwards one: before
     // that, no Previews setting, and no browser is looked for.
-    const forwards = !isHost && forwardedIn(shown).length > 0
+    const forwardedShown = forwardedIn(shown)
+    const forwards = !isHost && forwardedShown.length > 0
     // Whether a preview window could open here, for Settings to say.
     const windowing = forwards ? await windowChoice($, false) : null
     const previewOpen = isHost ? null : await previewOpenOf($)
@@ -12200,7 +12144,7 @@ export const register: Register = (on, options) => {
             // own: while that page is here (any forwarded page, for one used
             // by every page), it has no Open or Public link. Left alone (its
             // page stopped, or never forwarded), its Open is the way to it.
-            const usedBy = forwarded && item.dependency !== undefined && shown.some(p => p.kind === 'preview' && p.pid && !p.closed && p.tcp && p.dependency === undefined && (item.dependency === true || p.port === item.dependency))
+            const usedBy = forwarded && item.dependency !== undefined && pagesOf(forwardedShown, item).length > 0
             return (
               <Box key={`shown-${item.key}`} flexDirection="column" gap={1}>
                 <Box flexDirection="row" gap={1} alignItems="center" justifyContent="space-between">

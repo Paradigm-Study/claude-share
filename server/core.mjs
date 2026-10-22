@@ -1209,7 +1209,6 @@ async function fileRoutes(room, req, rest, auth, now) {
 // ---------------------------------------------------------------------------
 // Previews: the host shares a localhost port; members get tickets (one browser each)
 // that open it on the preview host name.
-//   GET previews (any member) → { previews: [{ pid, port, tcp, title }] }, what's open now
 //   POST previews { port, title, tcp? } (host) → { pid, tcp }
 //   POST previews/<pid>/end (host)
 //   POST previews/<pid>/ticket { path } (any member) → { url }
@@ -1281,10 +1280,6 @@ const enterUrl = (origin, room, ticket, pid) => `${origin}/__share/enter?room=${
 
 async function previewRoutes(room, req, rest, auth, now, ctx) {
   const method = req.method
-  if (rest === 'previews' && method === 'GET') {
-    if (room.endedAt) return { response: json({ error: 'This session is no longer shared.' }, 410) }
-    return { response: json({ previews: room.previewList() }) }
-  }
   if (rest === 'previews' && method === 'POST') {
     if (auth.role !== 'host') return { response: json({ error: 'Only the host shares previews.' }, 403) }
     const before = roomAccessError(room, req, ctx, true)
