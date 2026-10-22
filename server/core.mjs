@@ -155,8 +155,9 @@ export function revokeMatches(filter, s) {
 // `declined` answers a guest prompt the host's policy turned away. `react` is
 // someone's reaction to one of Claude's replies, and `seen` the replies that
 // came on someone's screen, each filed under the reply's key.
-const HOST_TYPES = new Set(['row', 'delta', 'turn', 'approval', 'title', 'policy', 'declined', 'chat', 'artifact', 'react', 'seen'])
-const GUEST_TYPES = new Set(['prompt', 'stop', 'chat', 'react', 'seen'])
+const HOST_TYPES = new Set(['row', 'delta', 'turn', 'approval', 'title', 'policy', 'declined', 'chat', 'artifact', 'react', 'seen', 'ask'])
+// `answer`: the cloud host's approver answering an `ask`, from the approver's seats alone.
+const GUEST_TYPES = new Set(['prompt', 'stop', 'chat', 'react', 'seen', 'answer'])
 const REACTIONS = new Set(['👍', '🎉', '👀'])
 const REPLY_KEY = /^[a-z0-9]{1,16}\.\d{1,5}$/
 
@@ -222,6 +223,8 @@ export class Room {
     this.endedAt = data.endedAt ?? null
     this.fromNow = data.fromNow === true // shared without what came before
     this.team = data.team ?? null // { id, name, account }: shared with a team, whose access setting says who joins
+    // Hosted in the cloud (docs/cloud-host.md): { state, approver: { seat, account, name }, since, until }.
+    this.cloud = data.cloud ?? null
     this.seq = data.seq ?? 0
     this.events = data.events ?? []
     // Their bytes, kept as they come and go (a room loaded larger than its
@@ -308,6 +311,7 @@ export class Room {
       endedAt: this.endedAt,
       fromNow: this.fromNow || undefined,
       team: this.team ?? undefined,
+      cloud: this.cloud ?? undefined,
       seq: this.seq,
       events: this.events,
       seats: Object.fromEntries(this.seats),
@@ -362,7 +366,14 @@ export class Room {
   }
 
   touch(auth, now) {
-    if (auth.role === 'host') this.host.lastSeen = now
+    if (auth.role === 'host') {
+      this.host.lastSeen = now
+      // The cloud host's first word: it has the room.
+      if (this.cloud?.state === 'starting') {
+        this.cloud.state = 'running'
+        this.append({ seat: 'host', name: this.host.name, role: 'host' }, 'cloud', { state: 'running' }, now)
+      }
+    }
     else for (const seat of this.seats.values()) if (seat.id === auth.seat) seat.lastSeen = now
   }
 
@@ -374,7 +385,7 @@ export class Room {
     // Each one's plugin version, as their requests say it: who needs to update.
     const v = version => (version ? { version } : {})
     const a = account => (account ? { account } : {})
-    const host = { id: 'host', name: this.host.name, role: 'host', online, seats: ['host'], ...v(this.host.version), ...a(this.host.account) }
+    const host = { id: 'host', name: this.host.name, role: 'host', online, seats: ['host'], ...v(this.host.version), ...a(this.host.account), ...(this.cloud ? { cloud: true } : {}) }
     const out = [host]
     const byAccount = new Map(this.host.account ? [[this.host.account, host]] : [])
     for (const s of this.seats.values()) {
@@ -441,7 +452,7 @@ export class Room {
   // What a client is sent: everything after its cursor, and the room now:
   // who's here and what's shared.
   page(after, now) {
-    return { seq: this.seq, events: this.since(after), people: this.people(now), previews: this.previewList(), ended: Boolean(this.endedAt), title: this.title, team: this.team?.name }
+    return { seq: this.seq, events: this.since(after), people: this.people(now), previews: this.previewList(), ended: Boolean(this.endedAt), title: this.title, team: this.team?.name, cloud: cloudSummary(this) }
   }
 
   since(after) {
@@ -625,8 +636,10 @@ async function readJson(req) {
 // readBody with their own bound (end reads none). Both outer
 // adapters must pass a stream, not buffer it first; a Node request whose body
 // wasn't read closes its socket.
-export const streamedRoomBody = (method, rest) => method === 'POST' &&
-  (rest === 'previews' || rest === 'need' || rest === 'peer' || /^previews\/[^/]+\/(?:end|ticket)$/.test(rest) || /^ws\/[^/]+\/reject$/.test(rest) || /^proxy\/[^/]+$/.test(rest))
+export const streamedRoomBody = (method, rest) => (method === 'POST' &&
+  (rest === 'previews' || rest === 'need' || rest === 'peer' || rest === 'cloud' || /^previews\/[^/]+\/(?:end|ticket)$/.test(rest) || /^ws\/[^/]+\/reject$/.test(rest) || /^proxy\/[^/]+$/.test(rest))) ||
+  // The cloud host's packed session goes on to it as it comes (cloud-docker.mjs, HostContainer).
+  (method === 'PUT' && rest === 'cloud/bundle')
 
 // What an adapter takes of a room route's body (past it, 413): a file's
 // FILE_MAX, a JSON route's JSON_BODY_MAX. Node buffers that much at most; the
@@ -844,11 +857,15 @@ export async function roomRequest(room, req, rest, now, origin, ctx = {}) {
   const swept = room.sweep(now) || expired
   const versions = versionsOf(room)
   const seated = room.seats.size
+  const cloudWas = room.cloud?.state
   const result = await handleRoom(room, req, rest, now, origin, ctx).catch(error => {
     // A JSON body past its bound is said as such, not as a crash.
     if (error?.status === 413) return { response: json({ error: error.message }, 413) }
     throw error
   })
+  // The cloud host's time is up: stopped, its changes kept for Bring home.
+  if (room.cloud && room.cloud.state !== 'stopped' && now > room.cloud.until && ctx.cloud) await stopCloud(room, ctx, now, 'expired')
+  if (room.cloud?.state !== cloudWas) return { ...result, changed: true }
   if (room.seats.size !== seated) return { ...result, changed: true } // a seat came back, or left
   // Someone on a new plugin version (an update, a restart) is kept, so a room
   // loaded back from storage says the versions that run now, and everyone's
@@ -878,6 +895,7 @@ async function handleRoom(room, req, rest, now, origin, ctx) {
         ended: Boolean(room.endedAt),
         hostVersion: room.host.version,
         team: teamOf(room),
+        cloud: cloudSummary(room),
       }),
     }
   }
@@ -917,6 +935,7 @@ async function handleRoom(room, req, rest, now, origin, ctx) {
         team: teamOf(room),
         // What's shared now, whatever history was pruned.
         previews: room.previewList(),
+        cloud: cloudSummary(room),
       }),
     }
   }
@@ -926,6 +945,7 @@ async function handleRoom(room, req, rest, now, origin, ctx) {
     if (!ctx.admin) return { response: json({ error: 'Not found' }, 404) }
     room.end(now)
     await unlist(room, ctx)
+    await endCloud(room, ctx)
     return { changed: true, response: json({ ok: true }) }
   }
 
@@ -946,6 +966,8 @@ async function handleRoom(room, req, rest, now, origin, ctx) {
   if (previews) return previews
   if (rest === 'need' && method === 'POST') return needRoute(room, req, auth, now, ctx)
   if (rest === 'peer' && method === 'POST') return peerRoute(room, req, auth, now, ctx)
+  const cloud = await cloudRoutes(room, req, rest, auth, now, ctx, origin)
+  if (cloud) return cloud
 
   if (rest === 'stream' && method === 'GET') {
     if (room.endedAt) return { response: json({ error: 'This session is no longer shared.' }, 410) }
@@ -974,6 +996,7 @@ async function handleRoom(room, req, rest, now, origin, ctx) {
         ended: Boolean(room.endedAt),
         title: room.title,
         team: room.team?.name,
+        cloud: cloudSummary(room),
       }),
     }
   }
@@ -996,6 +1019,13 @@ async function handleRoom(room, req, rest, now, origin, ctx) {
       if (item.type === 'title' && typeof item.body?.title === 'string') {
         room.title = item.body.title.slice(0, 120)
       }
+      // Only the approver answers the cloud host's questions, one answer each.
+      if (item.type === 'answer') {
+        const answer = cloudAnswer(room, auth, item.body)
+        if (answer) room.append(from, 'answer', answer, now)
+        if (answer) changed = true
+        continue
+      }
       if (item.type === 'react' || item.type === 'seen') {
         const mark = tidyMark(item.type, item.body)
         if (mark) room.append(from, item.type, mark, now)
@@ -1015,9 +1045,10 @@ async function handleRoom(room, req, rest, now, origin, ctx) {
   }
 
   if (rest === 'end' && method === 'POST') {
-    if (auth.role !== 'host') return { response: json({ error: 'Only the host can stop sharing.' }, 403) }
+    if (auth.role !== 'host' && !isApprover(room, auth)) return { response: json({ error: 'Only the host can stop sharing.' }, 403) }
     room.end(now)
     await unlist(room, ctx)
+    await endCloud(room, ctx)
     return { changed: true, response: json({ ok: true }) }
   }
 
@@ -1054,6 +1085,158 @@ async function handleRoom(room, req, rest, now, origin, ctx) {
 
 async function unlist(room, ctx) {
   if (room.team && ctx.directory) await ctx.directory.unregister(room.team.id, room.id).catch(() => {})
+}
+
+// ---------------------------------------------------------------------------
+// The cloud host (docs/cloud-host.md). The host hands its session to a runner
+// the server starts and stops (`ctx.cloud`: a container on Cloudflare, Docker
+// under Node), and becomes the room's approver: a guest whose seats alone
+// answer the runner's questions (`ask`, `answer`) and bring the session home.
+//   POST cloud { session, cwd, model?, state?, auth } (host)
+//        → { token, seat, ticket }: the mover's seat, and the ticket its
+//          `PUT cloud/bundle` carries (Authorization), which the adapter checks
+//   POST cloud/home (the approver) → { token, changes: file meta | null }
+//   GET  cloud → { state, approver, since, until } or { state: 'none' }
+// The runner's host token is minted for it, the mover's stops working at the
+// move, and Bring home mints the mover a new one. The Claude sign-in in
+// `auth` goes to the runner and is never kept here.
+export const CLOUD_MAX_MS = 7 * 24 * 60 * 60 * 1000
+// The packed session (the project's files and the conversation): a request
+// body Cloudflare passes on a workers.dev name.
+export const CLOUD_BUNDLE_MAX = 95 * 1024 * 1024
+const CLOUD_CONFIG_MAX = 256 * 1024
+const CLOUD_CHANGES_MAX = 50 * 1024 * 1024
+const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+
+export function cloudSummary(room) {
+  const c = room.cloud
+  return c ? { state: c.state, approver: c.approver.name, since: c.since, until: c.until } : undefined
+}
+
+// The approver: the seat the move made, or another seat of the same account.
+export function isApprover(room, auth) {
+  const c = room.cloud
+  if (!c || auth?.role !== 'guest') return false
+  if (auth.seat === c.approver.seat) return true
+  if (!c.approver.account) return false
+  for (const seat of room.seats.values()) if (seat.id === auth.seat) return seat.account === c.approver.account
+  return false
+}
+
+// An answer as the room keeps it: the approver's, to a question asked, once.
+function cloudAnswer(room, auth, body) {
+  if (!isApprover(room, auth)) return null
+  const id = typeof body?.id === 'string' && /^[A-Za-z0-9_-]{1,32}$/.test(body.id) ? body.id : null
+  const answer = typeof body?.answer === 'string' && body.answer.length <= 120 ? body.answer : null
+  if (!id || !answer) return null
+  const asked = room.events.some(e => e.type === 'ask' && e.body?.id === id)
+  const answered = room.events.some(e => e.type === 'answer' && e.body?.id === id)
+  return asked && !answered ? { id, answer } : null
+}
+
+// What the runner is told to sign in with: one shape, nothing else.
+function cloudAuth(auth) {
+  const text = v => (typeof v === 'string' && v.length > 0 && v.length <= 512 ? v : null)
+  if (text(auth?.oauthToken)) return { oauthToken: auth.oauthToken }
+  if (text(auth?.apiKey)) return { apiKey: auth.apiKey }
+  if (text(auth?.baseUrl) && /^https?:\/\//.test(auth.baseUrl) && text(auth?.authToken)) return { baseUrl: auth.baseUrl, authToken: auth.authToken }
+  return null
+}
+
+async function cloudRoutes(room, req, rest, auth, now, ctx, origin) {
+  if (rest !== 'cloud' && !rest.startsWith('cloud/')) return null
+  const method = req.method
+  if (rest === 'cloud' && method === 'GET') return { response: json(cloudSummary(room) ?? { state: 'none' }) }
+  if (room.endedAt) return { response: json({ error: 'This session is no longer shared.' }, 410) }
+  if (!ctx.cloud) return { response: json({ error: "This share server can't keep sessions running in the cloud." }, 501) }
+
+  if (rest === 'cloud' && method === 'POST') {
+    if (auth.role !== 'host') return { response: json({ error: 'Only the host moves the session to the cloud.' }, 403) }
+    if (room.cloud) return { response: json({ error: 'This session is in the cloud already.' }, 409) }
+    let body
+    try {
+      body = JSON.parse(new TextDecoder().decode(await readBody(req, CLOUD_CONFIG_MAX)))
+    } catch (error) {
+      return error?.status === 413 ? { response: json({ error: error.message }, 413) } : { response: json({ error: 'Expected JSON.' }, 400) }
+    }
+    const session = typeof body.session === 'string' && SESSION_ID.test(body.session) ? body.session : null
+    const cwd = typeof body.cwd === 'string' && body.cwd.startsWith('/') && body.cwd.length <= 1024 && !body.cwd.split('/').includes('..') ? body.cwd : null
+    const signIn = cloudAuth(body.auth)
+    if (!session || !cwd) return { response: json({ error: 'The session and its folder are needed.' }, 400) }
+    if (!signIn) return { response: json({ error: 'A Claude sign-in for the cloud host is needed.' }, 400) }
+    const model = typeof body.model === 'string' && body.model.length <= 100 ? body.model : ''
+    const state = body.state && typeof body.state === 'object' ? body.state : {}
+    const was = room.host.token
+    // The mover goes on as a guest (one of the host's own sessions, by account).
+    const { token: seatToken, seat } = room.join(room.host.name, now, clientVersion(req), room.host.account ?? null)
+    const runner = token(24)
+    const ticket = token(32)
+    room.host.token = runner
+    room.cloud = { state: 'starting', approver: { seat: seat.id, account: room.host.account ?? null, name: room.host.name }, since: now, until: now + CLOUD_MAX_MS }
+    try {
+      await ctx.cloud.start(room.id, {
+        ticket,
+        config: { server: origin, room: room.id, token: runner, session, cwd, title: room.title, host: room.host.name, url: shareUrl(origin, room.id), seq: room.seq, model, state, auth: signIn },
+      })
+    } catch (error) {
+      // Nothing moved: the host keeps its room as it was.
+      room.host.token = was
+      room.seats.delete(seatToken)
+      room.cloud = null
+      return { changed: true, response: json({ error: `The cloud host didn't start: ${String(error?.message ?? error).slice(0, 200)}` }, 502) }
+    }
+    room.append(fromHost(room), 'cloud', { state: 'starting', by: room.host.name }, now)
+    room.wake()
+    return { changed: true, response: json({ token: seatToken, seat: seat.id, ticket, cloud: cloudSummary(room) }) }
+  }
+
+  if (rest === 'cloud/home' && method === 'POST') {
+    if (!room.cloud) return { response: json({ error: "This session isn't in the cloud." }, 409) }
+    if (!isApprover(room, auth)) return { response: json({ error: `Only ${room.cloud.approver.name} brings this session home.` }, 403) }
+    const changes = room.cloud.state === 'stopped' ? room.cloud.changes ?? null : await stopCloud(room, ctx, now, 'home')
+    // Their seat is the host again, with a token of its own.
+    const host = token(24)
+    room.host.token = host
+    room.host.lastSeen = now
+    room.seats.delete(bearerOf(req))
+    room.cloud = null
+    room.append(fromHost(room), 'cloud', { state: 'home', by: auth.name, changes: changes?.id ?? null }, now)
+    room.wake()
+    return { changed: true, response: json({ token: host, changes }) }
+  }
+  return { response: json({ error: 'Not found' }, 404) }
+}
+
+// The runner stops and answers with its changes, kept as a room file for Bring
+// home; the room has no host meanwhile. Returns the changes' file, or null.
+async function stopCloud(room, ctx, now, why) {
+  let changes = null
+  try {
+    const diff = await ctx.cloud.stop(room.id)
+    if (diff?.byteLength && diff.byteLength <= CLOUD_CHANGES_MAX) {
+      const bytes = diff instanceof Uint8Array ? diff : new Uint8Array(diff)
+      const id = await sha256(bytes)
+      changes = { id, name: 'cloud-changes.patch', type: 'text/x-diff', size: bytes.byteLength, ts: now }
+      await room.store.put(id, bytes, changes)
+      room.files.set(id, changes)
+    }
+  } catch {}
+  if (room.cloud) {
+    room.cloud.state = 'stopped'
+    room.cloud.changes = changes
+    // No one holds the host's token now.
+    room.host.token = token(24)
+    room.append(fromHost(room), 'cloud', { state: 'stopped', why, changes: changes?.id ?? null }, now)
+    room.wake()
+  }
+  return changes
+}
+
+// The room ended: its runner goes, its changes with it.
+async function endCloud(room, ctx) {
+  if (!room.cloud) return
+  room.cloud = null
+  await ctx.cloud?.stop(room.id).catch(() => {})
 }
 
 // One open stream: a JSON line now (everything after `after`), another each

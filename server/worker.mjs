@@ -57,6 +57,7 @@ import {
   bodyTooLarge,
   readBody,
   badRequest,
+  CLOUD_BUNDLE_MAX,
   noteVersion,
   sendableClose,
   TCP_LIMITS,
@@ -188,6 +189,21 @@ export default {
     const limit = limitOf(req, id, rest, req.headers.get('cf-connecting-ip') ?? 'unknown')
     const limiter = limit && { create: env.CREATE_LIMIT, join: env.JOIN_LIMIT, events: env.EVENTS_LIMIT }[limit.kind]
     if (limiter && !(await limiter.limit({ key: limit.key })).success) return limitedResponse(limit.kind)
+
+    // The packed session for the room's cloud host goes straight to it, as it
+    // comes: its ticket (the room minted it with the move) is checked there.
+    if (rest === 'cloud/bundle' && req.method === 'PUT') {
+      if (!env.HOSTS) return notFound()
+      if (!(Number(req.headers.get('content-length')) <= CLOUD_BUNDLE_MAX)) return bodyTooLarge(CLOUD_BUNDLE_MAX)
+      return env.HOSTS.get(env.HOSTS.idFromName(id)).fetch(
+        new Request('https://host.internal/bundle', {
+          method: 'PUT',
+          headers: { authorization: req.headers.get('authorization') ?? '', 'content-length': req.headers.get('content-length') },
+          body: req.body,
+          duplex: 'half',
+        }),
+      )
+    }
 
     const stub = env.ROOMS.get(env.ROOMS.idFromName(id))
     const headers = new Headers(req.headers)
@@ -415,7 +431,7 @@ export class RoomObject {
     }
 
     const admin = Boolean(this.env?.ADMIN_TOKEN) && req.headers.get('authorization') === `Bearer ${this.env.ADMIN_TOKEN}`
-    const ctx = { previewOrigin: req.headers.get('x-preview-origin') ?? '', admin, directory: directoryClient(this.env), isCurrent: () => this.room === room }
+    const ctx = { previewOrigin: req.headers.get('x-preview-origin') ?? '', admin, directory: directoryClient(this.env), isCurrent: () => this.room === room, cloud: hostsClient(this.env) }
     const counters = tcpCounted(room.tcpStats)
     const { response, changed } = await roomRequest(room, req, rest, now, origin, ctx)
     if (changed) await this.persist()
@@ -919,6 +935,119 @@ export class RoomObject {
 // Counts new rooms exactly: per address this minute and today, and for the
 // whole server today (kept in storage, so a restart doesn't reset the day).
 // Only a Share reaches it, so it costs one request per room made.
+// What a room asks of its cloud host (docs/cloud-host.md): HostContainer, one
+// a room, by the room's id.
+function hostsClient(env) {
+  if (!env.HOSTS) return null
+  const stub = id => env.HOSTS.get(env.HOSTS.idFromName(id))
+  return {
+    async start(id, payload) {
+      const res = await stub(id).fetch('https://host.internal/start', { method: 'POST', body: JSON.stringify(payload) })
+      if (!res.ok) throw new Error((await res.json().catch(() => null))?.error ?? `status ${res.status}`)
+    },
+    async stop(id) {
+      const res = await stub(id).fetch('https://host.internal/stop', { method: 'POST' })
+      return res.ok ? new Uint8Array(await res.arrayBuffer()) : new Uint8Array()
+    },
+  }
+}
+
+// One room's cloud host: a container running cloud/runner.mjs. It starts the
+// container with a control key of its own, hands the runner the room and the
+// session over the container's port (never a public address), streams it the
+// packed session against the ticket the room minted, and stops it, answering
+// with its changes. An alarm each minute keeps it (and so the container)
+// going while the runner runs, and notices when it stopped.
+const HOST_PORT = 8080
+const HOST_START_MS = 120_000
+const HOST_ALARM_MS = 60_000
+
+export class HostContainer {
+  constructor(state, env) {
+    this.state = state
+    this.env = env
+  }
+
+  runner() {
+    return this.state.container.getTcpPort(HOST_PORT)
+  }
+
+  async control(path, key, init = {}) {
+    return this.runner().fetch(`http://runner${path}`, { ...init, headers: { ...(init.headers ?? {}), authorization: `Bearer ${key}` } })
+  }
+
+  async fetch(req) {
+    const url = new URL(req.url)
+    const container = this.state.container
+    if (!container) return json({ error: 'This server has no containers.' }, 501)
+    const saved = (await this.state.storage.get('runner')) ?? null
+
+    if (url.pathname === '/start' && req.method === 'POST') {
+      const { ticket, config } = await req.json()
+      if (container.running) await container.destroy().catch(() => {})
+      const key = token(32)
+      container.start({ enableInternet: true, env: { SS_CONTROL_KEY: key } })
+      // Up once the runner answers on its port (the image may be pulled first).
+      const until = Date.now() + HOST_START_MS
+      let up = false
+      while (!up && Date.now() < until) {
+        up = await this.control('/health', key).then(r => r.ok, () => false)
+        if (!up) await new Promise(r => setTimeout(r, 1_000))
+      }
+      if (!up) {
+        await container.destroy().catch(() => {})
+        return json({ error: "the container didn't come up" }, 504)
+      }
+      const started = await this.control('/start', key, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(config) })
+      if (!started.ok) {
+        await container.destroy().catch(() => {})
+        return json({ error: (await started.json().catch(() => null))?.error ?? 'the runner refused its configuration' }, 502)
+      }
+      await this.state.storage.put('runner', { key, ticket, room: config.room, at: Date.now() })
+      await this.state.storage.setAlarm(Date.now() + HOST_ALARM_MS)
+      return json({ ok: true })
+    }
+
+    if (url.pathname === '/bundle' && req.method === 'PUT') {
+      const given = req.headers.get('authorization') ?? ''
+      if (!saved?.ticket || !container.running || !safeEqual(given, `Bearer ${saved.ticket}`)) return json({ error: 'Not a member of this session.' }, 401)
+      // Once: the ticket goes as the bundle starts.
+      await this.state.storage.put('runner', { ...saved, ticket: null })
+      const res = await this.control('/bundle', saved.key, { method: 'PUT', headers: { 'content-length': req.headers.get('content-length') ?? '' }, body: req.body, duplex: 'half' })
+      return new Response(res.body, { status: res.status, headers: { 'content-type': 'application/json' } })
+    }
+
+    if (url.pathname === '/stop' && req.method === 'POST') {
+      let diff = new Uint8Array()
+      if (saved && container.running) {
+        const res = await this.control('/stop', saved.key, { method: 'POST' }).catch(() => null)
+        if (res?.ok) diff = new Uint8Array(await res.arrayBuffer())
+      }
+      await container.destroy().catch(() => {})
+      await this.state.storage.deleteAll()
+      return new Response(diff, { headers: { 'content-type': 'application/octet-stream' } })
+    }
+
+    return json({ error: 'Not found' }, 404)
+  }
+
+  // Kept going while the runner runs; a container that stopped by itself is
+  // forgotten (the room sees its host away, and Bring home still works).
+  async alarm() {
+    const saved = await this.state.storage.get('runner')
+    if (!saved) return
+    if (!this.state.container?.running) return void (await this.state.storage.deleteAll())
+    await this.state.storage.setAlarm(Date.now() + HOST_ALARM_MS)
+  }
+}
+
+function safeEqual(a, b) {
+  if (a.length !== b.length) return false
+  let diff = 0
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i)
+  return diff === 0
+}
+
 export class GateObject {
   constructor(state) {
     this.state = state
