@@ -1461,7 +1461,9 @@ async function runStream($: $, generation: number) {
           if (feedStream !== child) return
           if (now - lastLine <= STREAM_STALE_MS) return void $.clock.after(STREAM_WATCH_MS, watch)
           // Said at once: until now it looked live while nothing could arrive.
-          await setConnection($, 'reconnecting').catch(() => {})
+          // Only while it's still the feed once the state is read: a room
+          // made meanwhile is its own stream's to describe.
+          await update($, connectionA, state => (feedStream === child ? 'reconnecting' : state)).catch(() => {})
           if (feedStream === child) stopStream()
         })
         .catch(() => {}) // this module unloaded meanwhile

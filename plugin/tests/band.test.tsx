@@ -3013,6 +3013,43 @@ test('a stream quiet for 35 s is given up, says Reconnecting at once, and opens 
   await $.command.run({ command: 'stop-sharing', args: '' } as never)
 })
 
+// The watchdog's own look at the row's state takes a moment; a room made
+// meanwhile is another stream's to describe.
+test("a quiet stream's Reconnecting never lands on the room that replaced it", async ($, on) => {
+  const hold = { armed: false, held: false }
+  let release!: () => void
+  const holding = new Promise<void>(done => (release = done))
+  on('state.get', async ($, e, next) => {
+    const got = await next(e)
+    if (hold.armed && !hold.held && e.plugin === 'shared-session' && e.key === 'connection') {
+      hold.held = true
+      await holding
+    }
+    return got
+  })
+  const asked = await guestJoined($, on)
+  const streams = () => asked.spawned.filter(s => s.argv[0] === 'curl' && s.input?.includes('/stream?after=')).length
+  const connection = () => asked.state.connection ?? 'live'
+  expect(await within(asked.clock, () => streams() === 1, 1_000)).toBe(true)
+  // Past 35 s quiet: its watchdog looks at the row's state, held there.
+  hold.armed = true
+  await asked.clock.advance(42_000)
+  expect(hold.held).toBe(true)
+  // Meanwhile this session leaves and shares a room of its own, whose stream answers.
+  await $.command.run({ command: 'stop-sharing', args: '' } as never)
+  const ui = await $.ui.mount(band('desktop'))
+  await ui.press({ key: 'share' })
+  expect(await within(asked.clock, () => streams() === 2 && asked.state.mode === 'host', 5_000)).toBe(true)
+  release()
+  // Healthy keepalives on the new stream: it stays live.
+  for (let i = 0; i < 3; i++) {
+    asked.lines.push({ t: i })
+    await asked.clock.advance(10_000)
+  }
+  expect([streams(), connection()]).toEqual([2, 'live'])
+  await $.command.run({ command: 'stop-sharing', args: '' } as never)
+})
+
 test('every request says the plugin version, and a newer one shows in the Room with its command', async ($, on) => {
   const asked = world(on, { latest: '9.9.9', settings: '{}' })
   await $.prompt.submit({ text: LINK, origin: { kind: 'composer' }, wait: false })
