@@ -157,7 +157,7 @@ export class Directory {
     this.roomInfo = opts.roomInfo ?? (async () => null)
     this.keepTeam = opts.keepTeam ?? (async () => {})
     this.onDue = opts.onDue ?? (() => {})
-    this.fetch = opts.fetch ?? ((...a) => fetch(...a))
+    this.fetch = opts.fetch ?? ((input, init) => fetch(input, init))
     this.changes = new Map() // account id → { start, count }: its minute (CHANGES)
   }
 
@@ -759,7 +759,7 @@ export class Directory {
     let joined = null
     if (invite) {
       const res = await this.acceptInvite(account, invite, now)
-      if (res.ok) joined = (await res.json()).team ?? null
+      if (res.ok) joined = (/** @type {{ team?: { id: string, name: string } }} */ (await res.json())).team ?? null
     }
     await this.kv.put(`login:${login}`, { status: 'done', account: account.id, joined: joined?.id ?? null, exp: now + LOGIN_MS })
     return page('Signed in', `You're signed in, ${account.name}`, [

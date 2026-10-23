@@ -1,0 +1,7 @@
+// What runs on Cloudflare, checked against the Worker's types alone: core and
+// teams run on Node too, and whatever passes here uses no Node-only API.
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": { "types": [] },
+  "include": ["worker-configuration.d.ts", "worker.mjs", "core.mjs", "teams.mjs", "brand.mjs"]
+}

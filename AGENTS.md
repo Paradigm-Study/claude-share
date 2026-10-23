@@ -35,6 +35,7 @@ Facts that matter:
 
 ```bash
 cd plugin && npx -y -p typescript@5 tsc -p .          # type-check against the engine's API (needs plugin/.claude/types, below)
+npm run typecheck:server                                # tsc over server/*.mjs (checkJs): Worker code against the Worker's types alone (wrangler writes them), Node code against Node's (npm install first)
 claude plugin validate --strict plugin                  # what the engine and the plugin directory check
 claude plugin test plugin                               # plugin/tests: the UI tests (band.test.tsx, desktop and terminal) and the pure modules' (window, preview, proxy, upstream)
 node test/setup.mjs                                     # setup.mjs against a fake CLI and a temporary home, the deploy order included

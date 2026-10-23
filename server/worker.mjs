@@ -216,6 +216,7 @@ export default {
           method: 'PUT',
           headers: { authorization: req.headers.get('authorization') ?? '', 'content-length': req.headers.get('content-length') },
           body: req.body,
+          // @ts-expect-error Workers' types lack it, and Workers ignore it: harmless here
           duplex: 'half',
         }),
       )
@@ -1099,6 +1100,7 @@ export class GateObject {
     this.addresses = new Map() // a:<date>:<hash> → rooms today, as read or written here
     this.day = { key: '', count: 0, secret: '' }
     // One Share at a time: each reads and writes its address's count across awaits no gate holds.
+    /** @type {Promise<unknown>} */
     this.queue = Promise.resolve()
   }
 

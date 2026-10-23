@@ -1,0 +1,7 @@
+// What runs on Node, checked against Node's types alone: core and teams again,
+// so neither leans on a Worker-only API such as WebSocketPair.
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": { "types": ["node"] },
+  "include": ["node.mjs", "cloud-docker.mjs", "core.mjs", "teams.mjs", "brand.mjs"]
+}

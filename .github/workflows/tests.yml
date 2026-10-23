@@ -41,3 +41,22 @@ jobs:
       # preview.test.ts, proxy.test.ts, upstream.test.ts) need Claude Code and
       # run with `claude plugin test plugin`, not here; see CONTRIBUTING.md.
       - run: node test/${{ matrix.suite }}.mjs
+
+  server-types:
+    name: server types
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: 24
+          package-manager-cache: false
+      # tsc checks server/*.mjs (checkJs) twice: what runs on Cloudflare against
+      # the Worker's types alone (wrangler writes them from wrangler.toml; it needs
+      # no login), what runs on Node against Node's alone. The tools' versions are
+      # package.json's, pinned exactly, so a local run sees the same types.
+      - run: npm install --no-package-lock --ignore-scripts
+      - run: npm run typecheck:server
