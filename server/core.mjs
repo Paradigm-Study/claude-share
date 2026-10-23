@@ -25,6 +25,17 @@ export const KEEPALIVE_MS = 25_000 // a line on every open stream, so proxies ke
 // A client that is gone (asleep, unplugged) never comes back, so it leaves
 // within this plus the seat's grace, whatever the connection seemed to say.
 export const STREAM_MAX_MS = 5 * 60_000
+// What one seat (the host's too) holds open at once: streams (a reconnect's
+// old one, not noticed gone yet, among them) and long polls. One more takes
+// the oldest's place: the oldest stream ends, the oldest poll is answered.
+export const SEAT_STREAMS = 4
+export const SEAT_POLLS = 4
+// A stream (Node's) sends its events in pages of this many bytes at most, the
+// next as its reader takes the last, and holds at most STREAM_UNREAD it
+// hasn't taken: past that the reader isn't keeping up, and the stream ends
+// with what it holds. Its client reconnects from its cursor; nothing is lost.
+export const STREAM_PAGE = 512 * 1024
+export const STREAM_UNREAD = 1024 * 1024
 const POLL_WAIT_MS = 20_000
 const MAX_TEXT = 32_000 // chars; any string in an event, at any depth
 // One event's body, serialized. The plugin's largest is a row of 32,000
@@ -93,6 +104,8 @@ const MAX_BODY = 512_000
 // event): kept by the room, read with a member's token, gone with the room.
 const FILE_MAX = 10 * 1024 * 1024
 const ROOM_FILES_MAX = 100 * 1024 * 1024 // screenshots the host's Claude takes go up too
+// Uploads a room reads at once, each up to FILE_MAX in memory: past it, 429.
+export const FILE_UPLOADS = 4
 // …and how many: each one's name and type are kept with the room (the Worker
 // keeps them beside its bytes, under a key of their own). As many as 100 MB of
 // 10 KB files: far past what a day of screenshots and attachments makes, and a
@@ -156,8 +169,10 @@ export function revokeMatches(filter, s) {
 // someone's reaction to one of Claude's replies, and `seen` the replies that
 // came on someone's screen, each filed under the reply's key.
 const HOST_TYPES = new Set(['row', 'delta', 'turn', 'approval', 'title', 'policy', 'declined', 'chat', 'artifact', 'react', 'seen', 'ask'])
-// `answer`: the cloud host's approver answering an `ask`, from the approver's seats alone.
-const GUEST_TYPES = new Set(['prompt', 'stop', 'chat', 'react', 'seen', 'answer'])
+// `answer`: the cloud host's approver answering an `ask`; `set`: the approver
+// changing the cloud host's settings, which the host's own Room changes at
+// home. Both from the approver's seats alone.
+const GUEST_TYPES = new Set(['prompt', 'stop', 'chat', 'react', 'seen', 'answer', 'set'])
 const REACTIONS = new Set(['👍', '🎉', '👀'])
 const REPLY_KEY = /^[a-z0-9]{1,16}\.\d{1,5}$/
 
@@ -182,7 +197,13 @@ export function token(bytes = 16) {
     .replaceAll('=', '')
 }
 
-const clampName = name => String(name ?? '').trim().slice(0, 40) || 'teammate'
+// A person's name as the room keeps it: one line of 40 characters at most,
+// never only dots. Teammates' plugins name a folder after it, where `..`
+// would be its parent.
+const clampName = name => {
+  const text = String(name ?? '').replace(/[\x00-\x1f\x7f]+/g, ' ').trim().slice(0, 40).trim()
+  return text && !/^\.+$/.test(text) ? text : 'teammate'
+}
 
 // An event's body as the room keeps it: every string, at any depth, at most
 // `chars` long, and nothing nested past BODY_DEPTH (null there).
@@ -225,6 +246,9 @@ export class Room {
     this.team = data.team ?? null // { id, name, account }: shared with a team, whose access setting says who joins
     // Hosted in the cloud (docs/cloud-host.md): { state, approver: { seat, account, name }, since, until }.
     this.cloud = data.cloud ?? null
+    // Each word from its team's directory on whom it has now (`keepTeam`):
+    // a join that waited meanwhile asks the team again (in memory alone).
+    this.teamGen = 0
     this.seq = data.seq ?? 0
     this.events = data.events ?? []
     // Their bytes, kept as they come and go (a room loaded larger than its
@@ -245,6 +269,11 @@ export class Room {
     this.posts = new Windows() // posts this minute, counted exactly here
     this.waiters = new Set()
     this.files = new Map(Object.entries(data.files ?? {})) // id → { id, name, type, size, ts }
+    // Files going up now, by id → size: counted against the room's bound
+    // before they land (`fileRoutes`), so uploads at once can't pass it
+    // together. Memory only, as is how many are being read.
+    this.filesPending = new Map()
+    this.uploading = 0
     this.previews = new Map(Object.entries(data.previews ?? {})) // pid → { pid, port, title, ts, tcp? }
     // What preview links and cookies name the room by, never its id (which
     // joins it): a key made with the room and kept with it, or a Durable
@@ -253,6 +282,12 @@ export class Room {
     // A browser's session on the public link, sid → { pid, exp, seat }.
     this.previewSessions = new Map(Object.entries(data.previewSessions ?? {}))
     this.tcpStats = data.tcpStats ?? { used: 0, refunded: 0, opens: { start: 0, count: 0 } }
+    // What files and the public link served today (`serveReserve`): counted
+    // here, its reservation kept with the TCP budget (tcpStats.served), so a
+    // room loaded again starts its day from all it reserved.
+    this.serving = { day: '', bytes: 0 }
+    // Each seat's minute of it, in memory only: seat id → { start, bytes }.
+    this.serveMinutes = new Map()
     // Each seat's share of the room's minute of opens (kept in memory only: a
     // room that slept starts its seats afresh, its room-wide count does not).
     this.tcpSeatOpens = new Map()
@@ -274,7 +309,7 @@ export class Room {
     this.tickets = new Map(Object.entries(data.tickets ?? {}))
     // Each seat's minute of minting links, and the room's ('room'): in memory.
     this.mints = new Map()
-    this.proxied = new Map() // in flight: request id → settle(Response)
+    this.proxied = new Map() // in flight: request id → settle(Response), with the asking browser's .seat
     // Where file bytes live: memory here; a Durable Object keeps them in
     // storage, each with its metadata (`meta`, what `files` holds for it).
     const bytes = new Map()
@@ -465,11 +500,15 @@ export class Room {
     return [...pick(this.events), ...pick(this.live)].sort((a, b) => a.seq - b.seq)
   }
 
-  wait(after, ms) {
+  wait(after, ms, seat = '') {
     if (this.seq > after || this.endedAt) return Promise.resolve()
+    // A seat's polls past SEAT_POLLS: the oldest is answered now.
+    const mine = [...this.waiters].filter(w => w.seat === seat)
+    for (const old of mine.slice(0, Math.max(0, mine.length - SEAT_POLLS + 1))) old.done()
     return new Promise(resolve => {
       const waiter = {
         after,
+        seat,
         done: () => {
           clearTimeout(waiter.timer)
           this.waiters.delete(waiter)
@@ -513,6 +552,30 @@ export class Room {
     }
     if (!stays) this.append({ seat: seat.id, name: seat.name, role: 'guest' }, 'leave', { reason }, now)
     this.wake()
+  }
+
+  // Whether this guest seat is still the room's (here now; one away comes
+  // back by its next request). A stream whose seat is gone hears no more.
+  seated(id) {
+    for (const seat of this.seats.values()) if (seat.id === id) return true
+    return false
+  }
+
+  // A members-only team's people as the directory says they are now: a guest
+  // whose account isn't one of them (they left the team or were removed, or
+  // joined by link before it turned members-only) is let go, here or away,
+  // with what it holds for previews. Returns whether anyone was.
+  keepTeam(teamId, allowed, now) {
+    if (this.team?.id !== teamId || this.endedAt) return false
+    this.teamGen += 1
+    const keep = new Set(allowed)
+    let changed = false
+    for (const [bearer, seat] of [...this.seats, ...this.away]) {
+      if (seat.account && keep.has(seat.account)) continue
+      this.leave(bearer, 'removed', now)
+      changed = true
+    }
+    return changed
   }
 
   // Every seat of this account leaves, here and away, its tokens kept as
@@ -924,15 +987,24 @@ async function handleRoom(room, req, rest, now, origin, ctx) {
     if (room.endedAt) return { response: json({ error: 'This session is no longer shared.' }, 410) }
     const outdated = outdatedClient(req)
     if (outdated) return { response: outdated }
-    // Shared with a team: its access setting, as it is now, says who joins.
-    if (room.team) {
-      if (!ctx.directory) return { response: json({ error: `This session is for ${room.team.name}, and this server can't check who's in it.` }, 503) }
-      const check = await ctx.directory.joinCheck(room.team.id, accountOf(req))
-      if (!check.ok) return { response: json({ error: check.error, team: room.team.name, signIn: check.status === 401 || undefined }, check.status === 401 ? 403 : check.status) }
-    }
+    if (room.team && !ctx.directory) return { response: json({ error: `This session is for ${room.team.name}, and this server can't check who's in it.` }, 503) }
     if (room.seats.size >= ROOM_SEATS_MAX) return { response: json({ error: `This session is full: ${ROOM_SEATS_MAX} people have joined.` }, 403) }
     const body = await readJson(req)
-    const { token: seatToken, seat } = room.join(body.name, now, clientVersion(req), await whoIs(req, ctx))
+    const account = await whoIs(req, ctx)
+    // Shared with a team: its access setting, as it is now, says who joins,
+    // asked after the waits above (a body held open, the sign-in's look) and
+    // again if the team let someone go meanwhile, so a removal while this
+    // join waited never ends in a seat.
+    for (let tries = 0; room.team; tries++) {
+      const gen = room.teamGen
+      const check = await ctx.directory.joinCheck(room.team.id, accountOf(req))
+      if (!check.ok) return { response: json({ error: check.error, team: room.team.name, signIn: check.status === 401 || undefined }, check.status === 401 ? 403 : check.status) }
+      if (room.teamGen === gen) break
+      if (tries >= 2) return { response: json({ error: 'Who is in the team changed while you joined. Try again.' }, 409) }
+    }
+    if (room.endedAt) return { response: json({ error: 'This session is no longer shared.' }, 410) }
+    if (room.seats.size >= ROOM_SEATS_MAX) return { response: json({ error: `This session is full: ${ROOM_SEATS_MAX} people have joined.` }, 403) }
+    const { token: seatToken, seat } = room.join(body.name, now, clientVersion(req), account)
     // A long history in pages (see PAGE_BYTES_CAP): the first here, the rest
     // from events?after=historySeq.
     const max = maxOf(url)
@@ -964,7 +1036,7 @@ async function handleRoom(room, req, rest, now, origin, ctx) {
   if (rest === 'admin-end' && method === 'POST') {
     if (!ctx.admin) return { response: json({ error: 'Not found' }, 404) }
     room.end(now)
-    await unlist(room, ctx)
+    await ended(room, ctx)
     await endCloud(room, ctx)
     return { changed: true, response: json({ ok: true }) }
   }
@@ -976,7 +1048,8 @@ async function handleRoom(room, req, rest, now, origin, ctx) {
     const who = await whoIs(req, ctx)
     if (!who || (who !== room.host.account && who !== room.team?.account)) return { response: json({ error: 'Only the host can stop sharing.' }, 403) }
     room.end(now)
-    await unlist(room, ctx)
+    // Off its team's list, and its invites gone, as every end takes them (`ended`).
+    await ended(room, ctx)
     // A session in the cloud: its runner goes with the room.
     await endCloud(room, ctx)
     return { changed: true, response: json({ ok: true }) }
@@ -1024,7 +1097,9 @@ async function handleRoom(room, req, rest, now, origin, ctx) {
     const after = Number(url.searchParams.get('after') ?? 0) || 0
     const wait = Math.min(Number(url.searchParams.get('wait') ?? POLL_WAIT_MS) || 0, 25_000)
     room.touch(auth, now)
-    await room.wait(after, wait)
+    await room.wait(after, wait, auth.seat)
+    // Let go while it waited (removed from the room's team): nothing more.
+    if (auth.role !== 'host' && !room.seated(auth.seat)) return { response: json({ error: 'Not a member of this session.' }, 401) }
     const at = Date.now()
     room.touch(auth, at)
     const max = maxOf(url)
@@ -1051,6 +1126,9 @@ async function handleRoom(room, req, rest, now, origin, ctx) {
     const body = await readJson(req)
     const allowed = auth.role === 'host' ? HOST_TYPES : GUEST_TYPES
     const from = { seat: auth.seat, name: auth.name, role: auth.role }
+    // The approver's prompt says so: their own session in the cloud, which
+    // the cloud host's watch-only setting keeps to teammates.
+    const approver = isApprover(room, auth)
     room.touch(auth, now)
     const items = (Array.isArray(body.events) ? body.events.slice(0, 200) : []).filter(item => item && allowed.has(item.type))
     // A guest's event past EVENT_BYTES, clamped, is refused, and the post with
@@ -1068,6 +1146,17 @@ async function handleRoom(room, req, rest, now, origin, ctx) {
         const answer = cloudAnswer(room, auth, item.body)
         if (answer) room.append(from, 'answer', answer, now)
         if (answer) changed = true
+        continue
+      }
+      if (item.type === 'set') {
+        const set = cloudSet(room, auth, item.body)
+        if (set) room.append(from, 'set', set, now)
+        if (set) changed = true
+        continue
+      }
+      if (item.type === 'prompt' && approver) {
+        room.append({ ...from, approver: true }, 'prompt', item.body, now)
+        changed = true
         continue
       }
       if (item.type === 'react' || item.type === 'seen') {
@@ -1091,7 +1180,7 @@ async function handleRoom(room, req, rest, now, origin, ctx) {
   if (rest === 'end' && method === 'POST') {
     if (auth.role !== 'host' && !isApprover(room, auth)) return { response: json({ error: 'Only the host can stop sharing.' }, 403) }
     room.end(now)
-    await unlist(room, ctx)
+    await ended(room, ctx)
     await endCloud(room, ctx)
     return { changed: true, response: json({ ok: true }) }
   }
@@ -1178,6 +1267,21 @@ function cloudAnswer(room, auth, body) {
   const asked = room.events.some(e => e.type === 'ask' && e.body?.id === id)
   const answered = room.events.some(e => e.type === 'answer' && e.body?.id === id)
   return asked && !answered ? { id, answer } : null
+}
+
+// A change to the cloud host's settings as the room keeps it: the
+// approver's, of what the host's Room sets (who may prompt, what Claude asks
+// before, where what it shows goes), and Ask again for whom it always
+// allows. Nothing it doesn't name: "ask before nothing" isn't the cloud
+// host's, which holds its approver's Claude sign-in.
+function cloudSet(room, auth, body) {
+  if (!isApprover(room, auth)) return null
+  const set = {}
+  if (body?.prompts === 'everyone' || body?.prompts === 'watch') set.prompts = body.prompts
+  if (body?.approvals === 'all' || body?.approvals === 'edits') set.approvals = body.approvals
+  if (body?.files === 'on' || body?.files === 'off') set.files = body.files
+  if (body?.untrust === true) set.untrust = true
+  return Object.keys(set).length ? set : null
 }
 
 // What the runner is told to sign in with: one shape, nothing else.
@@ -1285,6 +1389,11 @@ async function endCloud(room, ctx) {
   await ctx.cloud?.stop(room.id).catch(() => {})
 }
 
+// The room ended or expired: off its team's list, and its invites gone.
+export async function ended(room, ctx) {
+  if (ctx.directory) await ctx.directory.roomEnded(room.id, room.team?.id ?? null).catch(() => {})
+}
+
 // One open stream: a JSON line now (everything after `after`), another each
 // time the room changes, and a keepalive line between. When it ends (the
 // client went, the room ended, or STREAM_MAX_MS passed) the seat counts as
@@ -1305,10 +1414,22 @@ function streamResponse(room, auth, after) {
     room.onDisconnect?.()
     return true
   }
+  // A page's worth of the events after the cursor at a time: one cut short
+  // waits for its reader (pull), and what changes meanwhile goes with the rest.
+  let behind = false
   const body = new ReadableStream({
     start(controller) {
       let cursor = after
+      // Its reader holds back what this stream sent (unread past
+      // STREAM_UNREAD): it ends, and what it holds goes with it.
+      const fail = () => {
+        if (!finish()) return
+        try {
+          controller.error(new Error('Stream not read'))
+        } catch {}
+      }
       const send = obj => {
+        if (controller.desiredSize !== null && controller.desiredSize < 0) return fail()
         try {
           controller.enqueue(enc.encode(`${JSON.stringify(obj)}\n`))
         } catch {}
@@ -1322,23 +1443,34 @@ function streamResponse(room, auth, after) {
       sub = {
         seat: auth.seat,
         send,
-        push: () => {
+        close,
+        push: (pulled = false) => {
+          if (done || (behind && !pulled)) return
+          if (auth.role !== 'host' && !room.seated(auth.seat)) return close()
           const page = room.page(cursor, Date.now())
-          cursor = page.seq
-          send(page)
-          if (page.ended) close()
+          const cut = pageOf(page.events, STREAM_PAGE)
+          behind = cut.more
+          cursor = cut.more ? cut.events.at(-1).seq : page.seq
+          send(cut.more ? { ...page, seq: cursor, events: cut.events, more: true } : page)
+          if (page.ended && !cut.more) close()
         },
         keepalive: setInterval(() => send({ t: Date.now() }), KEEPALIVE_MS),
         maxAge: setTimeout(close, STREAM_MAX_MS),
       }
+      // A seat's streams past SEAT_STREAMS: its oldest ends.
+      const mine = [...room.subscribers].filter(s => s.seat === auth.seat)
+      for (const old of mine.slice(0, Math.max(0, mine.length - SEAT_STREAMS + 1))) old.close()
       room.subscribers.add(sub)
       sub.push()
       if (auth.role === 'host') room.notify() // the host is back: everyone sees it
     },
+    pull() {
+      if (behind) sub.push(true)
+    },
     cancel() {
       finish()
     },
-  })
+  }, { highWaterMark: STREAM_UNREAD, size: chunk => chunk.byteLength })
   return new Response(body, {
     headers: { 'content-type': 'application/x-ndjson; charset=utf-8', 'cache-control': 'no-store', 'x-accel-buffering': 'no' },
   })
@@ -1368,21 +1500,39 @@ const fileType = raw => String(raw ?? '').replace(/[\u0000-\u001f]/g, '').slice(
 async function fileRoutes(room, req, rest, auth, now) {
   if (rest === 'files' && req.method === 'POST') {
     if (room.endedAt) return { response: json({ error: 'This session is no longer shared.' }, 410) }
-    let bytes
-    try { bytes = await readBody(req, FILE_MAX) } catch (error) {
-      return error.status === 413 ? { response: json({ error: `Files are limited to ${FILE_MAX / 1024 / 1024} MB.` }, 413) } : bodyFailure(error)
+    if (room.uploading >= FILE_UPLOADS) return { response: json({ error: 'Too many files are going up to this session at once. Try again in a moment.' }, 429) }
+    room.uploading += 1
+    try {
+      let bytes
+      try { bytes = await readBody(req, FILE_MAX) } catch (error) {
+        return error.status === 413 ? { response: json({ error: `Files are limited to ${FILE_MAX / 1024 / 1024} MB.` }, 413) } : bodyFailure(error)
+      }
+      const id = await sha256(bytes)
+      // What the room holds and what's going up now (the same bytes once):
+      // checked and reserved together, before anything waits.
+      const sizes = new Map([...room.filesPending, ...[...room.files.values()].map(f => [f.id, f.size])])
+      const used = [...sizes].reduce((n, [other, size]) => n + (other === id ? 0 : size), 0)
+      if (used + bytes.length > ROOM_FILES_MAX || (!sizes.has(id) && sizes.size >= ROOM_FILES_COUNT)) return { response: json({ error: 'This room is out of room for files.' }, 413) }
+      const meta = { id, name: fileName(req.headers.get('x-file-name')), type: fileType(req.headers.get('content-type')), size: bytes.length, ts: now }
+      const mine = !room.filesPending.has(id)
+      if (mine) room.filesPending.set(id, bytes.length)
+      try {
+        await room.store.put(id, bytes, meta)
+      } finally {
+        if (mine) room.filesPending.delete(id)
+      }
+      room.files.set(id, meta)
+      return { changed: true, response: json(meta) }
+    } finally {
+      room.uploading -= 1
     }
-    const id = await sha256(bytes)
-    const used = [...room.files.values()].reduce((n, f) => n + (f.id === id ? 0 : f.size), 0)
-    if (used + bytes.length > ROOM_FILES_MAX || (!room.files.has(id) && room.files.size >= ROOM_FILES_COUNT)) return { response: json({ error: 'This room is out of room for files.' }, 413) }
-    const meta = { id, name: fileName(req.headers.get('x-file-name')), type: fileType(req.headers.get('content-type')), size: bytes.length, ts: now }
-    await room.store.put(id, bytes, meta)
-    room.files.set(id, meta)
-    return { changed: true, response: json(meta) }
   }
   if (rest.startsWith('files/') && req.method === 'GET') {
     const meta = room.files.get(rest.slice(6))
-    const stored = meta ? await room.store.get(meta.id) : null
+    if (!meta) return { response: json({ error: 'No such file.' }, 404) }
+    // Counted before it's read: what the room may send is its budget's.
+    if (!serveReserve(room, auth.seat, meta.size, now)) return { response: json({ error: SERVED_ALL }, 429) }
+    const stored = await room.store.get(meta.id)
     if (!stored) return { response: json({ error: 'No such file.' }, 404) }
     return {
       response: new Response(stored.data, {
@@ -1458,8 +1608,71 @@ function mintTicket(room, { pid, path, seat, clear = false }, now, ticket = toke
 }
 // The room by its preview key, never its id; its preview rides along (an id,
 // not a credential), so a browser already in that preview goes back to it
-// once the link itself has expired.
-const enterUrl = (origin, room, ticket, pid) => `${origin}/__share/enter?room=${room.previewKey}&ticket=${ticket}&pid=${pid}`
+// once the link itself has expired. On a server whose previews each room has
+// a host name of its own (PREVIEW_URL `https://*.previews.example`), that
+// host name is the room's (`previewLabel`).
+const enterUrl = (origin, room, ticket, pid) => `${origin.replace('//*.', `//${previewLabel(room.previewKey)}.`)}/__share/enter?room=${room.previewKey}&ticket=${ticket}&pid=${pid}`
+
+// Per-room preview origins. With PREVIEW_URL a wildcard
+// (`https://*.previews.example`), each room's previews are served on a host
+// name of their own, `<label>.previews.example`: their own origin, so a page
+// of one room's previews can't read another's, nor send its requests with the
+// cookie another room's link set (one origin for every room could). The
+// label is the room's preview key as one DNS label: its bytes (a Durable
+// Object's id, 64 hex; Node's key, base64url) in lowercase base32, 52
+// characters at most, under the 63 a label may hold.
+const BASE32 = 'abcdefghijklmnopqrstuvwxyz234567'
+function base32(bytes) {
+  let out = '', bits = 0, value = 0
+  for (const byte of bytes) {
+    value = ((value << 8) | byte) & 0xffff
+    bits += 8
+    while (bits >= 5) {
+      out += BASE32[(value >>> (bits - 5)) & 31]
+      bits -= 5
+    }
+  }
+  return bits ? out + BASE32[(value << (5 - bits)) & 31] : out
+}
+function unbase32(text) {
+  const out = []
+  let bits = 0, value = 0
+  for (const c of text) {
+    const n = BASE32.indexOf(c)
+    if (n < 0) return null
+    value = ((value << 5) | n) & 0xffff
+    bits += 5
+    if (bits >= 8) {
+      out.push((value >>> (bits - 8)) & 255)
+      bits -= 8
+    }
+  }
+  const bytes = new Uint8Array(out)
+  return base32(bytes) === text ? bytes : null
+}
+const HEX_KEY = /^[0-9a-f]{64}$/
+export function previewLabel(key) {
+  const bytes = HEX_KEY.test(key) ? Uint8Array.from(key.match(/../g), h => parseInt(h, 16)) : Uint8Array.from(atob(key.replaceAll('-', '+').replaceAll('_', '/')), c => c.charCodeAt(0))
+  return base32(bytes)
+}
+// A label's preview key, as each adapter writes keys: a Durable Object's id
+// in hex (`hex`), Node's in base64url (`base64url`). Null for no label.
+export function previewKeyOf(label) {
+  const bytes = /^[a-z2-7]{1,63}$/.test(label ?? '') ? unbase32(label) : null
+  if (!bytes) return null
+  return { hex: [...bytes].map(b => b.toString(16).padStart(2, '0')).join(''), base64url: btoa(String.fromCharCode(...bytes)).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '') }
+}
+// Whether PREVIEW_URL gives each room's previews a host name of their own.
+export const roomOrigins = previewUrl => /^https?:\/\/\*\./.test(previewUrl ?? '')
+// The label a request's host name gives, on a server whose PREVIEW_URL is a
+// wildcard (`https://*.previews.example`): the host name's first part, when
+// the rest is the wildcard's. Null for any other host name.
+export function previewHostLabel(previewUrl, host) {
+  if (!roomOrigins(previewUrl)) return null
+  const base = new URL(previewUrl.replace('//*.', '//x.')).host.slice(2).toLowerCase()
+  const name = String(host ?? '').toLowerCase()
+  return name.endsWith(`.${base}`) && !name.slice(0, -base.length - 1).includes('.') ? name.slice(0, -base.length - 1) : null
+}
 
 async function previewRoutes(room, req, rest, auth, now, ctx) {
   const method = req.method
@@ -1548,6 +1761,11 @@ async function proxyAnswer(room, req, id, auth) {
   if (answer.body.byteLength > PROXY_RESPONSE_MAX) {
     failed(`Its answer was over ${PROXY_RESPONSE_MAX / 1024 / 1024} MB, more than a preview carries.`)
     return { response: json({ error: `Preview answers are limited to ${PROXY_RESPONSE_MAX} bytes.` }, 413) }
+  }
+  // Its browser's seat pays for it, as a file's download does.
+  if (!serveReserve(room, settle.seat ?? '', answer.body.byteLength, Date.now())) {
+    settle(previewPage(429, 'The preview has sent all it may for now', SERVED_ALL))
+    return { response: json({ error: SERVED_ALL }, 429) }
   }
   settle(proxiedAnswer(answer.status, answer.headers, answer.body))
   return { response: json({ ok: true }) }
@@ -1726,6 +1944,12 @@ function proxiedAnswer(status, pairs, body) {
     let value = rawValue.trim()
     if (!name || HOP.has(name)) continue
     if (name === 'location') value = value.replace(/^https?:\/\/(localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])(:\d+)?/i, '') || '/'
+    if (name === 'set-cookie') {
+      // The app's cookies stay on the preview's own host name: none for a
+      // whole domain (every room's previews under it), and never the room's.
+      if (value.trimStart().startsWith(`${COOKIE}=`)) continue
+      value = value.split(';').filter(part => !/^\s*domain\s*=/i.test(part)).join(';')
+    }
     try { headers.append(name, value) } catch {}
   }
   return new Response(NULL_BODY.has(code) ? null : body, { status: code, headers })
@@ -1794,13 +2018,13 @@ section.more { padding:0 0 72px; }
     <h2>What this server sees and keeps</h2>
     <ul>
       <li><b>What passes through:</b> while a session is shared, its prompts and the files people attach to them, Claude's replies and, while someone else is in the room, its thinking as it happens (passed along, never kept), the tools it runs with the first lines of their results and the pictures in them (screenshots, images it opens), the side chat, people's reactions to Claude's replies and which replies each person has had on screen, any files or local previews the host's Claude shows, and messages between a teammate's own other sessions and the host's session, which go to the other side alone (passed along, never kept). Sharing a session that already has history asks first whether to include it.</li>
-      <li><b>How long:</b> a room and everything in it is deleted 24 hours after the host stops sharing or was last seen. A room keeps its newest 5000 events, 16 MB of them at most. For TCP previews the room keeps only coarse connection and byte-budget counters, until the room is deleted. For a preview opened through its link, the room keeps the link (which preview, which seat made it, the page it opens) for 10 minutes, and the browser session it starts (which preview and seat) for 12 hours from the last link that browser opened; both end when that seat leaves or the host stops the preview. A seat keeps its newest 4 browser sessions per preview, and a room its newest 128 links and 256 browser sessions. A link or session that expired is removed at the room's next activity, or with the room; one that ended goes at once. Application bytes are relayed, never stored. There are no analytics, and no request logs kept.</li>
-      <li><b>Previews share a host name:</b> every shared session's previews are served on one preview host name, and their links name the session by a key of its own, which can't join it. A browser not already in a session's previews has that host name's storage and cache, and its domain's cookies, cleared before it enters; browsers clear them only over HTTPS (or on localhost). No preview can register a service worker there.</li>
-      <li><b>Accounts, only for teams:</b> sharing and joining need none. If you sign in (GitHub or Google) to use teams, the server keeps your name, username, verified email, which GitHub organizations you're in, the teams you're in and their settings, which open sessions are shared with each team, and invites to a session (who invited whom, until it's joined, dismissed, ends, or 12 hours pass). Signing in finishes only when you press Continue on this server's page. The page and Claude Code show the same code, and you continue only if they match. Until you press Continue, the server keeps who GitHub or Google said you are; after ten minutes that sign-in stops working, and it's deleted the next time Claude Code asks for it or anyone signs in. Claude Code's token is made when it picks up the sign-in, and the server keeps only its hash, never the token itself. Sign-ins stay until you delete your account (<code>/team delete-account</code>), which removes them at once. Signed in, a session you share or join also knows your account for as long as it lasts, so your sessions count as one person.</li>
+      <li><b>How long:</b> a room and everything in it is deleted 24 hours after the host stops sharing or was last seen. A room keeps its newest 5000 events, 16 MB of them at most. For TCP previews the room keeps only coarse connection and byte-budget counters, until the room is deleted. For a preview opened through its link, the room keeps the link (which preview, which seat made it, the page it opens) for 10 minutes, and the browser session it starts (which preview and seat) for 12 hours from the last link that browser opened; both end when that seat leaves or the host stops the preview. A seat keeps its newest 4 browser sessions per preview, and a room its newest 128 links and 256 browser sessions. A link or session that expired is removed at the room's next activity, or with the room; one that ended goes at once. Application bytes are relayed, never stored. To count the rooms each network makes in a day, the server on Cloudflare keeps a hash of each new room's network address, keyed by a random key made for that day, with that count, until the day (UTC) ends; then all of it goes, the key too. There are no analytics, and no request logs kept.</li>
+      <li><b>Previews share a host name:</b> every shared session's previews are served on one preview host name, and their links name the session by a key of its own, which can't join it. A browser not already in a session's previews has that host name's storage and cache, and its domain's cookies, cleared before it enters; browsers clear them only over HTTPS (or on localhost). No preview can register a service worker there. Clearing can't stop a page that's still open, though: a preview page of one session left open in a browser can reach the previews of another session that browser opens after it. Close the previews of a session you don't trust before opening another's, or open them in a browser profile of their own. A server of your own can give each session's previews a host name of its own, which closes this (<a href="https://github.com/Paradigm-Study/claude-share/blob/main/docs/guide.md#host-a-server">how</a>).</li>
+      <li><b>Accounts, only for teams:</b> sharing and joining need none. If you sign in (GitHub or Google) to use teams, the server keeps your name, username, the email your provider last verified (once it stops verifying one, it's shown but no longer signs anyone in or matches a team's domain), which GitHub organizations you're in, the teams you're in and their settings, which open sessions are shared with each team, and invites to a session (who invited whom, until it's joined, dismissed, ends, or 12 hours pass). Signing in finishes only when you press Continue on this server's page. The page and Claude Code show the same code, and you continue only if they match. Until you press Continue, the server keeps who GitHub or Google said you are; after ten minutes that sign-in stops working, and it's deleted then. Claude Code's token is made when it picks up the sign-in, and the server keeps only its hash, never the token itself. Sign-ins stay until you delete your account (<code>/team delete-account</code>), which removes them at once. Signed in, a session you share or join also knows your account for as long as it lasts, so your sessions count as one person.</li>
       <li><b>In the cloud, if a host chooses it:</b> Move to cloud sends the session's project files, its conversation and the host's Claude token to a container this server starts for that room, which runs Claude Code as the host. The server passes them on and keeps none of them. The container, with everything in it, is deleted when the host brings the session home, the room ends, or a week after the move; its changes are kept as a room file for Bring home, deleted with the room.</li>
       <li><b>Who can see it:</b> anyone with the room's link, or for a session shared with a team that keeps it to its people, only the people in that team. Links are long and random; forward one only to people you'd hand the session to. Content is encrypted in transit, not end to end: the server can read what passes through it.</li>
-      <li><b>What runs where:</b> a teammate's prompt runs on the host's machine. Reads inside the host's project run without asking; everything else asks the host first, by default.</li>
-      <li><b>Limits:</b> new rooms and joins are rate-limited per network; rooms hold up to 20 people, 100 MB of files (10,240 files at most), 128 open previews, and events of 128 KB each. Previews opened through their link limit request bodies to 1 MB and response bodies to 20 MB, and allow 512 requests waiting per room, 32 WebSockets per seat and 128 per room (one the host's Claude Code doesn't take up within 10 seconds closes, and those waiting hold 8 MB per room at most), and 30 new links a minute per seat (120 per room). Such a WebSocket closes once 1 MB sent through it waits unread; on Cloudflare, which can't see that, once one side sends more than 4 MB in a second. TCP previews instead allow 32 connections per seat across all previews, 64 per room, and 1200 new connections per minute (240 for any one seat). Only a port the host chose to forward can be reached this way, and only by someone in the room: their connections close when they leave or the host stops that preview. Unpaired connections close after 10 seconds. A room has a lifetime 1 GiB TCP byte budget, reserved in 1 MiB chunks per direction, unused parts given back when a connection closes. Data messages are at most 64 KiB, with at most 4 messages / 256 KiB outstanding per direction, and a connection closes if 1 MiB of control messages to one side goes unacknowledged (each acknowledgement covers everything sent before it), however long it lives. Rooms that are abused get ended.</li>
+      <li><b>What runs where:</b> a teammate's prompt runs on the host's machine. Reads inside the host's project run without asking (one through a link out of it asks); everything else asks the host first, by default. A local page the host's Claude opens or gives the address of is shared only once the host says so.</li>
+      <li><b>Limits:</b> new rooms and joins are rate-limited per network; rooms hold up to 20 people, 100 MB of files (10,240 files at most), 128 open previews, and events of 128 KB each. Previews opened through their link limit request bodies to 1 MB and response bodies to 20 MB, and allow 512 requests waiting per room, 32 WebSockets per seat and 128 per room (one the host's Claude Code doesn't take up within 10 seconds closes, and those waiting hold 8 MB per room at most), and 30 new links a minute per seat (120 per room). A room sends out at most 8 GB a day of its files and of what its previews' links answer, and to any one seat at most 256 MB a minute of it. Such a WebSocket closes once 1 MB sent through it waits unread; on Cloudflare, which can't see that, once one side sends more than 4 MB in a second. TCP previews instead allow 32 connections per seat across all previews, 64 per room, and 1200 new connections per minute (240 for any one seat). Only a port the host chose to forward can be reached this way, and only by someone in the room: their connections close when they leave or the host stops that preview. Unpaired connections close after 10 seconds. A room has a lifetime 1 GiB TCP byte budget, reserved in 1 MiB chunks per direction, unused parts given back when a connection closes. Data messages are at most 64 KiB, with at most 4 messages / 256 KiB outstanding per direction, and a connection closes if 1 MiB of control messages to one side goes unacknowledged (each acknowledgement covers everything sent before it), however long it lives. Rooms that are abused get ended.</li>
       <li><b>Your own server:</b> teams that want their sessions on their own infrastructure can run the same server on Cloudflare or Node in a few minutes (<a href="https://github.com/Paradigm-Study/claude-share#host-a-server">how</a>), and set it in the plugin.</li>
     </ul>
     <p>Questions or abuse reports: open an issue on <a href="https://github.com/Paradigm-Study/claude-share/issues">GitHub</a>.</p>
@@ -1942,7 +2166,7 @@ function keepNewestSessions(room, seat, pid) {
 // previews yet has what any other room left cleared first (above). What it
 // answers is made before anything changes, so nothing can spend a link and
 // then fail.
-function enterPreview(room, req, url, now, secure) {
+function enterPreview(room, req, url, now, secure, ownOrigin) {
   const pruned = room.sweepExpired(now)
   const ticket = room.tickets.get(url.searchParams.get('ticket') ?? '')
   const own = previewSession(room, req, now)
@@ -1953,7 +2177,8 @@ function enterPreview(room, req, url, now, secure) {
   }
   const path = ticket.path
   // Spent, but kept until it expires, so the browser that used it is known.
-  if (!ticket.clear && otherRoomsState(room, req)) {
+  // On the room's own host name no other room has left anything.
+  if (!ownOrigin && !ticket.clear && otherRoomsState(room, req)) {
     const next = token(18)
     const response = clearingPage(enterUrl('', room, next, ticket.pid))
     ticket.used = true
@@ -1982,20 +2207,22 @@ function enterPreview(room, req, url, now, secure) {
 
 // Everything on the preview host name. /__share/enter trades a ticket for a
 // cookie; anything else, with the cookie, goes to the host's localhost.
-export async function previewRequest(room, req, now, { secure = true } = {}) {
+// `own`: it came on this room's own host name (PREVIEW_URL a wildcard).
+export async function previewRequest(room, req, now, { secure = true, own = false } = {}) {
   const url = new URL(req.url)
   // No service worker registers here: one would outlive its room and answer
   // for every other room's previews in that browser, all on this host name.
   if ((req.headers.get('service-worker') ?? '').trim().toLowerCase() === 'script') {
     return { response: previewPage(403, 'Not here', 'Previews of a shared session do not run service workers.') }
   }
-  if (url.pathname === '/__share/enter') return enterPreview(room, req, url, now, secure)
+  if (url.pathname === '/__share/enter') return enterPreview(room, req, url, now, secure, own)
   const session = previewSession(room, req, now)
   const preview = session ? room.previews.get(session.pid) : null
   const ended = () => ({ response: previewPage(404, 'This preview has ended', `${room.host.name} is no longer sharing it.`) })
   const busy = () => ({ response: previewPage(503, 'The preview is busy', `${room.host.name}'s app has many requests waiting. Try again in a moment.`) })
   if (!preview || room.endedAt) return ended()
   if (room.proxied.size >= PUBLIC_LIMITS.proxied) return busy()
+  if (!serveLeft(room, session.seat ?? '', now)) return { response: previewPage(429, 'The preview has sent all it may for now', SERVED_ALL) }
   let body = new Uint8Array()
   if (req.method !== 'GET' && req.method !== 'HEAD') {
     try { body = await readBody(req, PROXY_BODY_MAX) } catch (error) {
@@ -2023,11 +2250,12 @@ export async function previewRequest(room, req, now, { secure = true } = {}) {
       room.proxied.delete(id)
       resolve(previewPage(504, 'The preview did not answer', `${room.host.name}'s app took too long to respond.`))
     }, PROXY_TIMEOUT_MS)
-    room.proxied.set(id, response => {
+    // Whose browser it is: its answer counts against that seat (`serveReserve`).
+    room.proxied.set(id, Object.assign(response => {
       clearTimeout(timer)
       room.proxied.delete(id)
       resolve(response)
-    })
+    }, { seat: session.seat ?? '' }))
   })
   const sent = room.toHost({
     proxy: { id, pid: preview.pid, port: preview.port, method: req.method, path: `${url.pathname}${url.search}`, headers, body: body.length ? toBase64(body) : '' },
@@ -2199,20 +2427,67 @@ export function tcpRefund(room, s) {
   return n
 }
 
-// What of a room's TCP counters is kept: the byte budget's two totals. Its
-// minute of opens is memory's, as every other minute's is (a restart can let
-// one minute count twice, no more), so no TCP connection waits on a write.
-export const tcpCounted = stats => `${stats.used}/${stats.refunded ?? 0}`
+// What of a room's TCP counters is kept: the byte budget's two totals, and
+// what its files and public link reserved today (`serveReserve`). Its minute
+// of opens is memory's, as every other minute's is (a restart can let one
+// minute count twice, no more), so no TCP connection waits on a write.
+export const tcpCounted = stats => `${stats.used}/${stats.refunded ?? 0}/${stats.served ? `${stats.served.day}:${stats.served.reserved}` : ''}`
 
 // Two copies of a room's TCP counters as one, whichever was saved later
 // (overlapping writes, a separate file or key beside the room's snapshot):
 // both totals only grow, and the later minute of opens wins (the same
-// minute: the larger count).
+// minute: the larger count), as does the later day served (the same day:
+// the larger reservation).
 export function mergeTCPStats(saved, current) {
   const older = saved?.opens, opens = current.opens
   const minute = older && older.start > opens.start ? older : older?.start === opens.start ? { start: opens.start, count: Math.max(older.count, opens.count) } : opens
-  return { used: Math.max(saved?.used ?? 0, current.used), refunded: Math.max(saved?.refunded ?? 0, current.refunded ?? 0), opens: minute }
+  const was = saved?.served, now = current.served
+  const served = !was || (now && now.day > was.day) ? now : !now || was.day > now.day ? was : { day: now.day, reserved: Math.max(was.reserved, now.reserved) }
+  return { used: Math.max(saved?.used ?? 0, current.used), refunded: Math.max(saved?.refunded ?? 0, current.refunded ?? 0), opens: minute, ...(served ? { served } : {}) }
 }
+
+// What a room's files and its previews' public link may send out: a room
+// serves at most `roomBytesPerDay` a day (UTC) of the files it keeps and of
+// the answers its host sends to guests' browsers, and one seat at most
+// `seatBytesPerMinute` a minute of it, so someone in a room can't have it
+// read and send the same bytes without end. The day's total is reserved
+// `reserveBytes` at a time, each reservation kept (tcpStats.served) as the
+// request that made it is answered: a file's before its bytes go, a preview
+// answer's just after it's handed to its browser, so a restart can't reset
+// the day, and misses one reservation at most. A seat's minute is memory's,
+// as every other minute is. TCP previews have a budget of their own
+// (TCP_LIMITS).
+export const SERVE_LIMITS = Object.freeze({ roomBytesPerDay: 8 * 1024 ** 3, seatBytesPerMinute: 256 * 1024 ** 2, reserveBytes: 64 * 1024 ** 2, periodMs: 60_000 })
+const utcDay = now => new Date(now).toISOString().slice(0, 10)
+
+// Whether `seat` may be sent `n` more bytes now; if so, they're counted.
+export function serveReserve(room, seat, n, now) {
+  const day = utcDay(now)
+  const reserved = room.tcpStats.served?.day === day ? room.tcpStats.served.reserved : 0
+  // A new day, or this process's first look at it: all that was reserved counts as served.
+  if (room.serving.day !== day) room.serving = { day, bytes: reserved }
+  if (room.serving.bytes + n > SERVE_LIMITS.roomBytesPerDay) return false
+  let minute = room.serveMinutes.get(seat)
+  if (!minute || now - minute.start >= SERVE_LIMITS.periodMs) {
+    // Seats come and go: only the ones served this past minute are kept.
+    for (const [other, old] of room.serveMinutes) if (now - old.start >= SERVE_LIMITS.periodMs) room.serveMinutes.delete(other)
+    room.serveMinutes.set(seat, (minute = { start: now, bytes: 0 }))
+  }
+  if (minute.bytes + n > SERVE_LIMITS.seatBytesPerMinute) return false
+  minute.bytes += n
+  room.serving.bytes += n
+  if (room.serving.bytes > reserved) room.tcpStats.served = { day, reserved: Math.min(SERVE_LIMITS.roomBytesPerDay, Math.ceil(room.serving.bytes / SERVE_LIMITS.reserveBytes) * SERVE_LIMITS.reserveBytes) }
+  return true
+}
+
+// Whether anything may still be sent to `seat` now (before asking the host).
+export function serveLeft(room, seat, now) {
+  const day = utcDay(now), minute = room.serveMinutes.get(seat)
+  const spent = room.serving.day === day ? room.serving.bytes : room.tcpStats.served?.day === day ? room.tcpStats.served.reserved : 0
+  return spent < SERVE_LIMITS.roomBytesPerDay && !(minute && now - minute.start < SERVE_LIMITS.periodMs && minute.bytes >= SERVE_LIMITS.seatBytesPerMinute)
+}
+
+const SERVED_ALL = 'This session has sent all it may for now. Try again in a minute, or tomorrow if it sent a lot today.'
 
 export function tcpFailure(message, code = 1008) {
   return Object.assign(new Error(message), { code })
@@ -2477,8 +2752,11 @@ export function landingPage(room, url, now, opts = {}) {
     people: room.people(now),
     team: room.team?.name ?? '',
   }
-  const json = JSON.stringify(data)
-  const membersOnly = room.team && opts.access === 'members'.replace(/</g, '\\u003c')
+  // Inside a script element `</script>` in a name would end it, and what
+  // follows would run: every `<` goes as its escape.
+  const json = JSON.stringify(data).replace(/</g, '\\u003c')
+  const membersOnly = room.team && opts.access === 'members'
+  const nonce = token(16)
   const host = escapeHtml(room.host.name)
   const html = `<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
@@ -2533,7 +2811,7 @@ ${PAGE_CSS}</style></head>
   </section>
 </main>
 <footer class="wrap"><q>Everyone in one session, Claude in the middle.</q></footer>
-<script>
+<script nonce="${nonce}">
 (function () {
   var data = ${json};
   var $ = function (id) { return document.getElementById(id); };
@@ -2604,5 +2882,12 @@ ${PAGE_CSS}</style></head>
 })();
 </script>
 </body></html>`
-  return new Response(html, { headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' } })
+  return new Response(html, { headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'content-security-policy': landingPolicy(nonce) } })
 }
+
+// The room page runs its one script, by this response's nonce, and loads its
+// fonts; anything a name or title might smuggle in runs nowhere.
+const landingPolicy = nonce => [
+  "default-src 'none'", `script-src 'nonce-${nonce}'`, "style-src 'unsafe-inline' https://fonts.googleapis.com", 'font-src https://fonts.gstatic.com',
+  "img-src 'self' data:", "connect-src 'self'", "base-uri 'none'", "form-action 'none'", "frame-ancestors 'none'",
+].join('; ')

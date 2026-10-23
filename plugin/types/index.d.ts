@@ -23,8 +23,13 @@ export type ShareRoom = {
 /** A room's host in the cloud: started, running, or stopped after its week. */
 export type ShareCloud = { state: 'starting' | 'running' | 'stopped'; approver: string; since: number; until?: number; mine: boolean }
 
-/** A question the cloud host put to its approver: a teammate's call, as the host's own dialog would ask it. */
-export type ShareCloudAsk = { id: string; who: string; what: string; extent?: string; preview?: string; always: string; options: string[]; ts: number }
+/**
+ * A question the cloud host put to its approver: a teammate's call, as the
+ * host's own dialog would ask it, or (`kind`) one about its localhost, as the
+ * host's row above the prompt would (`ShareHostAsk`): `port` and `related`
+ * are what a yes shares, and `options` its two answers.
+ */
+export type ShareCloudAsk = { id: string; who: string; seat?: string; kind?: ShareHostAsk['kind']; port?: number; label?: string; related?: { port: number; label: string }[]; what: string; extent?: string; preview?: string; always: string; options: string[]; ts: number }
 
 export type SharePerson = {
   id: string
@@ -39,8 +44,14 @@ export type SharePerson = {
   account?: string
 }
 
-/** Host: a teammate's prompt waiting to go to Claude: who, as Claude reads it (`framed`), as guests see it (`text`), its id, whether it has gone, and `aside` once it went and no turn started with it for a while: out of the line, but still theirs if its turn starts later. */
-export type ShareGuestPrompt = { who: string; framed: string; text: string; pid: string; sent?: true; aside?: true }
+/** Host: a teammate's prompt waiting to go to Claude: who, the seat it came from, as Claude reads it (`framed`), as guests see it (`text`), its id, whether it has gone, and `aside` once it went and no turn started with it for a while: out of the line, but still theirs if its turn starts later. */
+export type ShareGuestPrompt = { who: string; seat: string; framed: string; text: string; pid: string; sent?: true; aside?: true }
+
+/** Host: whose a turn, an agent or a call is: their name, and the seat their prompt came from (`''` when it can't be told: never always allowed). The host's own is `who: ''`. */
+export type ShareOwner = { who: string; seat: string }
+
+/** Host: a teammate the host always allows, by the seat they were asked for and its account (their other sessions), never by a name anyone can join as. */
+export type ShareTrust = { who: string; seat: string; account?: string }
 
 export type ShareWorking = {
   turnId: string
@@ -48,6 +59,8 @@ export type ShareWorking = {
   by: string
   /** True when a guest's prompt started it (its tools need the host's approval). */
   byGuest: boolean
+  /** The seat that guest's prompt came from (`''` when it can't be told). */
+  seat?: string
   startedAt: number
   /** The tail of the text Claude is streaming, for guests. */
   tail: string
@@ -219,13 +232,13 @@ export type ShareNeedAsked = { ports: number[]; times: number[] }
 /** Host: a question in the row above the prompt about sharing more of this machine's localhost. Only a proposal: the host's press shares. */
 export type ShareHostAsk = {
   id: string
-  /** `related`: what a shared port also uses; `mention`: forward a port Claude's mention shared as a page; `need`: a guest's preview asked for it. */
-  kind: 'related' | 'mention' | 'need'
+  /** `show`: share through its link a page Claude gave out or opened; `related`: what a shared port also uses; `mention`: forward a port Claude's mention shared as a page; `need`: a guest's preview asked for it. */
+  kind: 'show' | 'related' | 'mention' | 'need'
   port: number
   label?: string
   /** The guest whose preview asked (`need`). */
   who?: string
-  /** `related`: the ports of the one service beside the page that a yes forwards, three at most (a service a question: one process, so a backend on two ports is one question; one on more ports, a question each three, in turn); empty for `mention` and `need`, whose yes forwards `port`. */
+  /** `related`: the ports of the one service beside the page that a yes forwards, three at most (a service a question: one process, so a backend on two ports is one question; one on more ports, a question each three, in turn); empty for `show`, `mention` and `need`, whose yes shares or forwards `port`. */
   related: { port: number; label: string }[]
 }
 
@@ -314,9 +327,9 @@ declare module 'claude-code' {
       unread: number
       policy: SharePolicy
       /** Guests whose tool calls the host allowed for the rest of the session. */
-      trusted: string[]
+      trusted: ShareTrust[]
       /** Host: who each tool call of a guest's turn was for, by tool_use_id. */
-      owners: Record<string, string>
+      owners: Record<string, ShareOwner>
       /**
        * What the host's Claude showed, newest last (the Room panel's Files):
        * the newest 40 of what isn't an open preview, and every open preview
@@ -364,14 +377,16 @@ declare module 'claude-code' {
       cloud: ShareCloud | null
       /** The approver's: the cloud host's questions waiting for an answer, oldest first. */
       cloudAsks: ShareCloudAsk[]
+      /** The approver's: whom the cloud host always allows, as this session knows it (the move's, then each Always allow it gave), until its Ask again. */
+      cloudTrusted: string[]
       /** Where Move to cloud or Bring home is, for the Room to say. */
       cloudMove: { stage: 'idle' | 'token' | 'packing' | 'starting' | 'home' | 'failed'; note?: string } | null
       /** Host: a teammate's calls put to the host and not answered yet, by tool_use_id (the newest 64). A hook whose module ends under it has its `.catch` asked in the module after it, which denies these. */
       unanswered: string[]
       /** The hooks module that started last in this session, by its own id. A module a reload replaced finds another here, declines the calls still waiting in its row, whose buttons are now the new module's, and stops hearing the room. */
       module: string | null
-      /** Host: whose each agent is, by its loop's id (the newest 200): the teammate whose turn or agent started it, '' for the host's own. Its calls are put to the host as theirs, whatever turn runs by then; the host's own, or one not here, are the running turn's. */
-      agents: Record<string, string>
+      /** Host: whose each agent is, by its loop's id (the newest 200): the teammate whose turn or agent started it, `who: ''` for the host's own. Its calls are put to the host as theirs, whatever turn runs by then; the host's own, or one not here, are the running turn's. */
+      agents: Record<string, ShareOwner>
       /** Host: teammates' prompts waiting to go to Claude, one turn each, oldest first; the first is `sent` once submitted, until its turn starts, and one that hasn't started a while on is `aside` (the newest 8), known still when it does. */
       guestPrompts: ShareGuestPrompt[]
       /** The main loop's turn running now, by its id, whatever the mode: a teammate's prompt goes to Claude only once none runs. */

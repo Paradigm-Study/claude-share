@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 // A guest's isolated preview browser uses this loopback-only SOCKS5 proxy.
-// Loopback destinations (localhost, 127/8, ::1, names resolving there) reach
-// only the tunnel helper routed for that Host port; the Guest's own addresses,
+// Loopback destinations (localhost, *.localhost, 127/8, ::1) reach only the
+// tunnel helper routed for that Host port; any other name that points at this
+// computer is refused (DNS rebinding: a page's own name turned to loopback
+// would read the Host's previews as that page); the Guest's own addresses,
 // its local network (private ranges and every on-link subnet) and cloud
 // metadata are refused; everything else leaves directly or through the
 // person's own upstream proxy (one it can't use is left out, and said once).
@@ -391,7 +393,7 @@ async function start(cfg, { emit = notify, signal, timeouts: wait = {}, limits: 
     if (verdict.kind === 'loopback') return loopback(conn, request.port)
     if (verdict.kind === 'outbound') return outbound(conn, request.port, verdict)
     if (verdict.kind === 'lan') return refuseNetwork(conn)
-    refuse(conn, verdict.kind === 'own' ? NOT_ALLOWED : verdict.kind === 'invalid' ? UNREACHABLE : FAILED)
+    refuse(conn, verdict.kind === 'own' || verdict.kind === 'rebound' ? NOT_ALLOWED : verdict.kind === 'invalid' ? UNREACHABLE : FAILED)
   }
   // Says only that the local network was refused: never what or where.
   function refuseNetwork(conn) {
@@ -460,7 +462,10 @@ async function start(cfg, { emit = notify, signal, timeouts: wait = {}, limits: 
     if (!name || numeric(name)) return { kind: 'invalid' }
     if (name === 'localhost' || name.endsWith('.localhost')) return { kind: 'loopback' }
     const found = await resolve(name)
-    if (found?.some(local)) return { kind: 'loopback' }
+    // Only localhost and loopback literals reach the Host's previews. Another
+    // name pointing here may be a page's own, rebound to loopback after it
+    // loaded: its script would read the previews as that page's origin.
+    if (found?.some(local)) return { kind: 'rebound' }
     const here = network()
     if (!here) return { kind: 'error' }
     if (!found) return { kind: 'outbound', ip: null, host: name, addresses: null, tainted: false }

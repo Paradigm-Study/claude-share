@@ -292,6 +292,16 @@ test('a live check removes its throwaway sessions from CLAUDE_CONFIG_DIR', () =>
   assert.equal(result.homeSettings, null)
 })
 
+test('a plain http server elsewhere is refused before anything is installed; one on this computer is a server like any', () => {
+  const result = setup(['host', '--server', 'http://share.example.invalid'])
+  assert.equal(result.code, 1, result.out)
+  assert.match(result.out, /FAIL host needs --server <https:\/\/your-share-server> \(plain http:\/\/ only for a server on this computer\)/)
+  assert(!commands(result).some(c => c.startsWith('plugin ')))
+  assert.equal(result.settings, null)
+  const local = setup(['host', '--server', 'http://127.0.0.1:8787'], { healthFail: true })
+  assert.match(local.out, /not answering/, 'looked at as a server, not refused for its scheme')
+})
+
 test('unhealthy host server prevents installation and configuration', () => {
   const result = setup(['host', '--server', 'https://down.example.invalid'], { healthFail: true })
   assert.equal(result.code, 1, result.out)
