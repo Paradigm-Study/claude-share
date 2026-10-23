@@ -736,7 +736,7 @@ async function readBoundedJson(req, max = BOUNDED_BODY) {
   try { bytes = await readBody(req, max) } catch (error) { throw error.status ? error : bodyError('Expected valid UTF-8 JSON.') }
   let body
   try {
-    const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes)
+    const text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: false }).decode(bytes)
     body = text ? JSON.parse(text) : {}
   } catch { throw bodyError('Expected valid UTF-8 JSON.') }
   if (!body || typeof body !== 'object' || Array.isArray(body)) throw bodyError('Expected a JSON object.')
@@ -935,6 +935,7 @@ const teamOf = room => (room.team ? { id: room.team.id, name: room.team.name } :
 // stopped polling is dropped by the next request, so a quiet room costs nothing.
 // `ctx.previewOrigin` is where previews are served (a host name of their own,
 // so an app's root-relative paths work); absent, previews are off.
+/** @returns {Promise<{ response: Response, changed?: boolean }>} */
 export async function roomRequest(room, req, rest, now, origin, ctx = {}) {
   const expired = room.sweepExpired(now)
   const swept = room.sweep(now) || expired
@@ -1961,7 +1962,7 @@ function answerOf(bytes) {
   const end = bytes.subarray(0, PROXY_HEAD_MAX + 1).indexOf(0x0a)
   if (end < 0) return null
   let head
-  try { head = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes.subarray(0, end))) } catch { return null }
+  try { head = JSON.parse(new TextDecoder('utf-8', { fatal: true, ignoreBOM: false }).decode(bytes.subarray(0, end))) } catch { return null }
   if (!head || typeof head !== 'object' || Array.isArray(head) || !Number.isInteger(head.status) || !Array.isArray(head.headers)) return null
   if (!head.headers.every(h => Array.isArray(h) && h.length === 2 && typeof h[0] === 'string' && typeof h[1] === 'string')) return null
   return { status: head.status, headers: head.headers, body: bytes.subarray(end + 1) }
@@ -2336,7 +2337,7 @@ export function hostSocketAllowed(room, req) {
 // never a relay's error text.
 export async function relayRejectCode(req) {
   let body
-  try { body = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(await readBody(req, TCP_LIMITS.controlBytes))) } catch { return 0 }
+  try { body = JSON.parse(new TextDecoder('utf-8', { fatal: true, ignoreBOM: false }).decode(await readBody(req, TCP_LIMITS.controlBytes))) } catch { return 0 }
   if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).join(',') !== 'code') return 0
   return body.code === 'BUSY' ? 1013 : body.code === 'CONNECT' ? 1011 : 0
 }

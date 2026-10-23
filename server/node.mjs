@@ -650,7 +650,7 @@ function acceptSocket(nodeReq, socket, head, protocol, on) {
   })
   let buf = Buffer.alloc(0), parts = [], partOp = 0, partBytes = 0, partCount = 0
   let wire = { start: Date.now(), count: 0 }
-  const utf8 = new TextDecoder('utf-8', { fatal: true })
+  const utf8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: false })
   const maxFor = op => on.tcp ? (op === 1 ? TCP_LIMITS.controlBytes : TCP_LIMITS.dataBytes) : TCP_LIMITS.bufferBytes
   const read = () => {
     try {

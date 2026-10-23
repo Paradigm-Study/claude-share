@@ -157,7 +157,7 @@ export class Directory {
     this.roomInfo = opts.roomInfo ?? (async () => null)
     this.keepTeam = opts.keepTeam ?? (async () => {})
     this.onDue = opts.onDue ?? (() => {})
-    this.fetch = opts.fetch ?? ((...a) => fetch(...a))
+    this.fetch = opts.fetch ?? ((input, init) => fetch(input, init))
     this.changes = new Map() // account id → { start, count }: its minute (CHANGES)
   }
 
