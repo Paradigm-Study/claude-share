@@ -50,7 +50,11 @@ const ASK_HEADER = 'Shared' // marks the approval question this plugin asks
 // room sends a line whenever it changes: a quiet room costs no requests at
 // all. Where curl can't start, or the server has no stream, the plugin polls
 // with requests that return at once, less often the longer nothing happens.
-const STREAM_STALE_MS = 70_000 // no line for this long (keepalives come every 25 s): reconnect
+// No line for this long, and the connection died without a word (Wi-Fi
+// changed, a VPN reconnected): reconnect. Keepalives come every 10 s (every
+// 25 s from older servers, which this still allows for); looked at every 5 s.
+const STREAM_STALE_MS = 35_000
+const STREAM_WATCH_MS = 5_000
 const POLL_HOT_MS = 400 // something happened in the last few seconds
 const POLL_IDLE_MS = 1_500
 const HOT_FOR_MS = 15_000
@@ -1451,13 +1455,20 @@ async function runStream($: $, generation: number) {
     let lastLine = opened
     const watch = () => {
       if (feedStream !== child) return
-      void $.clock.now().then(now => {
-        if (feedStream !== child) return
-        if (now - lastLine > STREAM_STALE_MS) stopStream()
-        else $.clock.after(20_000, watch)
-      })
+      void $.clock
+        .now()
+        .then(async now => {
+          if (feedStream !== child) return
+          if (now - lastLine <= STREAM_STALE_MS) return void $.clock.after(STREAM_WATCH_MS, watch)
+          // Said at once: until now it looked live while nothing could arrive.
+          // Only while it's still the feed once the state is read: a room
+          // made meanwhile is its own stream's to describe.
+          await update($, connectionA, state => (feedStream === child ? 'reconnecting' : state)).catch(() => {})
+          if (feedStream === child) stopStream()
+        })
+        .catch(() => {}) // this module unloaded meanwhile
     }
-    $.clock.after(20_000, watch)
+    $.clock.after(STREAM_WATCH_MS, watch)
     try {
       for await (const chunk of child) {
         started = true

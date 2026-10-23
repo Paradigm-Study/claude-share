@@ -20,7 +20,7 @@ export const HISTORY_BYTES = 16 * 1024 * 1024
 const LIVE_LIMIT = 400 // ephemeral events (deltas) kept for pollers only
 const LIVE_BYTES = 2 * 1024 * 1024
 export const SEAT_TIMEOUT_MS = 45_000 // a seat neither connected nor heard from for this long left
-export const KEEPALIVE_MS = 25_000 // a line on every open stream, so proxies keep it open
+export const KEEPALIVE_MS = 10_000 // a line on every open stream: proxies keep it open, and a client soon tells a connection that died without a word from a quiet room
 // Every stream ends itself after this long and the client reconnects at once.
 // A client that is gone (asleep, unplugged) never comes back, so it leaves
 // within this plus the seat's grace, whatever the connection seemed to say.
