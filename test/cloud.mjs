@@ -31,18 +31,18 @@ const check = async (name, fn) => {
 }
 
 // A request as the adapters hand it to the core.
-const ask = (room, { method = 'GET', rest = '', token, body, now = Date.now(), cloud }) =>
+const ask = (room, { method = 'GET', rest = '', token, account, body, now = Date.now(), cloud, directory }) =>
   roomRequest(
     room,
     new Request(`${ORIGIN}/api/rooms/${room.id}/${rest}`, {
       method,
-      headers: { 'content-type': 'application/json', 'x-shared-session-version': '0.11.31', ...(token ? { authorization: `Bearer ${token}` } : {}) },
+      headers: { 'content-type': 'application/json', 'x-shared-session-version': '0.11.31', ...(token ? { authorization: `Bearer ${token}` } : {}), ...(account ? { 'x-shared-session-account': account } : {}) },
       body: body === undefined ? undefined : JSON.stringify(body),
     }),
     rest,
     now,
     ORIGIN,
-    { cloud },
+    { cloud, directory },
   ).then(async ({ response, changed }) => ({ status: response.status, body: await response.clone().json().catch(() => null), raw: response, changed }))
 
 // The container, as the room sees it: what it was started with, and its changes.
@@ -246,6 +246,20 @@ await check("the room's end stops its runner, by the host or the approver", asyn
   const cloud = standIn()
   const moved = await ask(room, { method: 'POST', rest: 'cloud', token: host, body: moveBody, cloud })
   assert.equal((await ask(room, { method: 'POST', rest: 'end', token: moved.body.token, cloud })).status, 200)
+  assert.ok(room.endedAt)
+  assert.deepEqual(cloud.calls.stopped, [room.id])
+  assert.equal(room.cloud, null)
+})
+
+await check("the host's sign-in ending the room (the Team panel's Stop) stops its runner too", async () => {
+  const now = Date.now()
+  const room = Room.create({ id: 'room0000000000000003', name: 'Scott', title: 'demo', now, version: '0.11.31', account: 'acct-scott' })
+  const cloud = standIn()
+  const directory = { whoIs: async tok => (tok === 'sign-in-scott' ? { id: 'acct-scott' } : tok === 'sign-in-eve' ? { id: 'acct-eve' } : null), roomEnded: async () => {} }
+  await ask(room, { method: 'POST', rest: 'cloud', token: room.host.token, body: moveBody, cloud })
+  assert.equal((await ask(room, { method: 'POST', rest: 'end', account: 'sign-in-eve', cloud, directory })).status, 403)
+  assert.deepEqual(cloud.calls.stopped, [])
+  assert.equal((await ask(room, { method: 'POST', rest: 'end', account: 'sign-in-scott', cloud, directory })).status, 200)
   assert.ok(room.endedAt)
   assert.deepEqual(cloud.calls.stopped, [room.id])
   assert.equal(room.cloud, null)

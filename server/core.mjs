@@ -261,6 +261,10 @@ export class Room {
     // token: one that comes back is seated again as it was, so a plugin that
     // was only away isn't told the session ended. Leaving isn't kept here.
     this.away = new Map(Object.entries(data.away ?? {}))
+    // Seats their person left from elsewhere (the Team panel's Leave), by
+    // token → when: a session still using one hears it left (410), instead of
+    // taking a new seat as it does when only let go. The newest hundred.
+    this.leftElsewhere = new Map(Object.entries(data.leftElsewhere ?? {}))
     this.live = []
     this.posts = new Windows() // posts this minute, counted exactly here
     this.waiters = new Set()
@@ -351,6 +355,7 @@ export class Room {
       events: this.events,
       seats: Object.fromEntries(this.seats),
       away: this.away.size ? Object.fromEntries(this.away) : undefined,
+      leftElsewhere: this.leftElsewhere.size ? Object.fromEntries(this.leftElsewhere) : undefined,
       files: Object.fromEntries(this.files),
       previews: Object.fromEntries(this.previews),
       previewKey: this.previewKey,
@@ -573,6 +578,18 @@ export class Room {
     return changed
   }
 
+  // Every seat of this account leaves, here and away, its tokens kept as
+  // left; returns how many.
+  leaveAccount(account, now) {
+    const bearers = [...this.seats, ...this.away].filter(([, seat]) => seat.account === account).map(([bearer]) => bearer)
+    for (const bearer of bearers) {
+      this.leave(bearer, 'left', now)
+      this.leftElsewhere.set(bearer, now)
+    }
+    for (const old of [...this.leftElsewhere.keys()].slice(0, Math.max(0, this.leftElsewhere.size - 100))) this.leftElsewhere.delete(old)
+    return bearers.length
+  }
+
   // Drops seats that stopped polling; returns whether anything changed.
   sweep(now) {
     let changed = false
@@ -730,8 +747,11 @@ const bodyFailure = error => ({ response: json({ error: error.message }, error.s
 
 // Recheck after every awaited body read. An expiry, Leave or host token change
 // during upload cannot commit a mutation or mint a capability into an old room.
+export const leftResponse = () => json({ error: 'You left this session from the Team panel.', left: true }, 410)
+
 function roomAccessError(room, req, ctx, host = false) {
   if (ctx.isCurrent && !ctx.isCurrent()) return json({ error: 'This shared session does not exist.' }, 404)
+  if (room.leftElsewhere.has(bearerOf(req))) return leftResponse()
   const auth = room.auth(bearerOf(req))
   if (!auth) return json({ error: 'Not a member of this session.' }, 401)
   if (host && auth.role !== 'host') return json({ error: 'Only the host can do that.' }, 403)
@@ -1020,6 +1040,31 @@ async function handleRoom(room, req, rest, now, origin, ctx) {
     await endCloud(room, ctx)
     return { changed: true, response: json({ ok: true }) }
   }
+
+  // The host's sign-in ends it too, with no room token: the Team panel's Stop,
+  // from any session or computer, even after the session that shared it
+  // closed without saving its token.
+  if (rest === 'end' && method === 'POST' && !bearerOf(req) && accountOf(req)) {
+    const who = await whoIs(req, ctx)
+    if (!who || (who !== room.host.account && who !== room.team?.account)) return { response: json({ error: 'Only the host can stop sharing.' }, 403) }
+    room.end(now)
+    // Off its team's list, and its invites gone, as every end takes them (`ended`).
+    await ended(room, ctx)
+    // A session in the cloud: its runner goes with the room.
+    await endCloud(room, ctx)
+    return { changed: true, response: json({ ok: true }) }
+  }
+
+  // A person leaves by their sign-in, with no seat token: the Team panel's
+  // Leave, for every session of theirs in it, here or on another computer.
+  if (rest === 'leave' && method === 'POST' && !bearerOf(req) && accountOf(req)) {
+    const who = await whoIs(req, ctx)
+    if (!who) return { response: json({ error: 'Sign in first: /team' }, 403) }
+    const left = room.leaveAccount(who, now)
+    return { changed: left > 0, response: json({ ok: true, left }) }
+  }
+  // A seat its person left from elsewhere: told so, never seated again.
+  if (room.leftElsewhere.has(bearerOf(req))) return { response: leftResponse() }
 
   // An away seat can still deliberately leave even when all seats are full.
   if (rest === 'leave' && method === 'POST' && room.away.has(bearerOf(req))) {

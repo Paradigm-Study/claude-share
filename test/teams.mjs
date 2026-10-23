@@ -24,14 +24,16 @@ import { PLUGIN_LATEST } from '../server/core.mjs'
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const PORT = Number(process.env.TEAMS_PORT ?? 8899)
 const S = (process.env.TEAMS_SERVER ?? `http://127.0.0.1:${PORT}`).replace(/\/+$/, '')
-const srv = process.env.TEAMS_SERVER ? { kill() {} } : spawn(process.execPath, [join(ROOT, 'server/node.mjs')], { env: { ...process.env, PORT: String(PORT), PREVIEW_PORT: String(PORT + 1), AUTH_TEST: '1', DATA_FILE: '' }, stdio: ['ignore', 'pipe', 'inherit'] })
+const srv = process.env.TEAMS_SERVER ? { kill() {} } : spawn(process.execPath, [join(ROOT, 'server/node.mjs')], { env: { ...process.env, PORT: String(PORT), PREVIEW_PORT: String(PORT + 1), AUTH_TEST: '1', DATA_FILE: '', TRUST_PROXY: '1' }, stdio: ['ignore', 'pipe', 'inherit'] })
 if (!process.env.TEAMS_SERVER) await new Promise(r => srv.stdout.once('data', r))
 
 const V = { 'x-shared-session-version': PLUGIN_LATEST, 'content-type': 'application/json' }
 // `tok`: a sign-in, as the team API takes it; `acct`: as a share or a join
-// sends it; `form`: fields a browser's form posts.
-const call = async (path, { method = 'GET', body, tok, acct, form } = {}) => {
+// sends it; `form`: fields a browser's form posts; `ip`: the network it
+// comes from, for the limits (the server trusts X-Forwarded-For here).
+const call = async (path, { method = 'GET', body, tok, acct, form, ip } = {}) => {
   const headers = { ...V }
+  if (ip) headers['x-forwarded-for'] = ip
   if (tok) headers.authorization = `Bearer ${tok}`
   if (acct) headers['x-shared-session-account'] = acct
   if (form) headers['content-type'] = 'application/x-www-form-urlencoded'
@@ -378,6 +380,29 @@ try {
   const aliceAgain = await signIn('alice@acme.com', 'Alice')
   ok(!(await call('/api/me', { tok: aliceAgain })).data.teams.some(t => t.id === team.id), 'someone who left is not pulled back in by the domain')
   const dave = await signIn('dave@solo.dev', 'Dave')
+  // The host's sign-in ends a room without its token (the Team panel's Stop),
+  // and nobody else's does.
+  const ownTeam = (await call('/api/teams', { method: 'POST', tok: dave, body: { name: 'Own' } })).data.team
+  const ownRoom = (await call('/api/rooms', { method: 'POST', acct: dave, body: { name: 'Dave', title: 'kept', team: ownTeam.id } })).data
+  const eve = await signIn('eve@else.dev', 'Eve')
+  ok((await call(`/api/rooms/${ownRoom.id}/end`, { method: 'POST', acct: eve })).status === 403, "someone else's sign-in doesn't end a room")
+  ok((await call(`/api/rooms/${ownRoom.id}/end`, { method: 'POST' })).status === 401, 'no sign-in and no token ends nothing')
+  ok((await call(`/api/rooms/${ownRoom.id}/end`, { method: 'POST', acct: dave })).status === 200, "the host's sign-in ends it")
+  ok((await call(`/api/rooms/${ownRoom.id}`)).data.ended && !(await call(`/api/teams/${ownTeam.id}/sessions`, { tok: dave })).data.sessions.some(s => s.id === ownRoom.id), "and it's off the team's list")
+  // A person leaves by their sign-in (the Team panel's Leave): every seat of
+  // theirs goes, and a session still using one hears it left, never reseated.
+  const linkRoom = (await call('/api/rooms', { method: 'POST', acct: dave, body: { name: 'Dave', title: 'link' } })).data
+  const eve1 = (await call(`/api/rooms/${linkRoom.id}/join`, { method: 'POST', acct: eve, body: { name: 'Eve' } })).data
+  await call(`/api/rooms/${linkRoom.id}/join`, { method: 'POST', acct: eve, body: { name: 'Eve' } })
+  const kimSeat = (await call(`/api/rooms/${linkRoom.id}/join`, { method: 'POST', body: { name: 'Kim' } })).data
+  ok((await call(`/api/rooms/${linkRoom.id}/leave`, { method: 'POST', acct: 'not-a-sign-in' })).status === 403, 'a leave by an unknown sign-in takes nobody')
+  const out = await call(`/api/rooms/${linkRoom.id}/leave`, { method: 'POST', acct: eve })
+  ok(out.status === 200 && out.data.left === 2, "a sign-in's leave takes every seat of theirs")
+  const refused = await call(`/api/rooms/${linkRoom.id}/events?after=0&wait=0`, { tok: eve1.token })
+  ok(refused.status === 410 && refused.data.left === true, 'and a seat that left hears so (410)')
+  ok((await call(`/api/rooms/${linkRoom.id}/join`, { method: 'POST', acct: eve, body: { name: 'Eve' } })).status === 200, 'joining again is still theirs to do')
+  ok((await call(`/api/rooms/${linkRoom.id}/events?after=0&wait=0`, { tok: kimSeat.token })).status === 200, "someone else's seat stays")
+  await call(`/api/rooms/${linkRoom.id}/end`, { method: 'POST', tok: linkRoom.token })
   const solo = (await call('/api/teams', { method: 'POST', tok: dave, body: { name: 'Solo' } })).data.team
   const soloRoom = (await call('/api/rooms', { method: 'POST', acct: dave, body: { name: 'Dave', title: 's', team: solo.id } })).data
   await call(`/api/teams/${solo.id}/members/me`, { method: 'DELETE', tok: dave })
@@ -420,7 +445,8 @@ try {
 
   // Reactions to Claude's replies and who saw them: kept when they're well
   // formed, from the host and guests alike; anything else is dropped.
-  const marks = (await call('/api/rooms', { method: 'POST', body: { name: 'Host', title: 'marks' } })).data
+  // From another network: this file makes more rooms than one may in a minute (LIMITS.create).
+  const marks = (await call('/api/rooms', { method: 'POST', ip: '203.0.113.7', body: { name: 'Host', title: 'marks' } })).data
   const guest = (await call(`/api/rooms/${marks.id}/join`, { method: 'POST', body: { name: 'Gia' } })).data
   const post = (tok, events) => call(`/api/rooms/${marks.id}/events`, { method: 'POST', tok, body: { events } })
   await post(guest.token, [
@@ -507,6 +533,13 @@ try {
   pat.release()
   const patAnswer = await pat.answer
   ok(patAnswer.response.status === 403 && ![...r3.seats.values()].some(seat => seat.name === 'Pat'), "a join whose joiner is removed while the team's yes is on its way gets no seat")
+  // The host's sign-in ending a room (the Team panel's Stop) takes what any
+  // end takes: its invites, and its place on its team's list.
+  const told = []
+  const endDirectory = { whoIs: async account => (account ? { id: account } : null), roomEnded: async (id, team) => void told.push(['roomEnded', id, team]), unregister: async (team, id) => void told.push(['unregister', team, id]) }
+  const r4 = Room.create({ id: 'r4', name: 'Host', title: 't', now: 0, account: 'h', team: { id: 'teamA', name: 'A', account: 'h' } })
+  const stopped = await roomRequest(r4, new Request('https://share.test/api/rooms/r4/end', { method: 'POST', headers: { 'x-shared-session-version': PLUGIN_LATEST, 'x-shared-session-account': 'h' } }), 'end', 2_000, 'https://share.test', { directory: endDirectory })
+  ok(stopped.response.status === 200 && Boolean(r4.endedAt) && JSON.stringify(told) === JSON.stringify([['roomEnded', 'r4', 'teamA']]), "the host's sign-in ending a room takes its invites and its place on its team's list, as every end does")
 } catch (error) {
   // Reported, so the checks below still run.
   console.error(error)

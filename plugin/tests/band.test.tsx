@@ -149,6 +149,8 @@ function world(
     launchFails?: boolean
     /** A saved place comes back to a room that's gone. */
     roomGone?: boolean
+    /** With roomGone: the room is still shared (this seat left it from elsewhere). */
+    leftHere?: boolean
     /** That one room is gone (its events answer 410); others are as ever. */
     goneRoom?: string
     /** That one room let this seat go: its events answer 401. */
@@ -893,6 +895,7 @@ function world(
     }
     if (opts.beforeEvents && path.endsWith('/events') && method === 'GET') await opts.beforeEvents()
     if (opts.beforeTell && method === 'POST' && /^\/api\/rooms\/[^/]+\/(end|leave)$/.test(path)) await opts.beforeTell()
+    if (opts.leftHere && method === 'GET' && /^\/api\/rooms\/[^/]+$/.test(path)) return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify({ ended: false }) } }
     if ((opts.roomGone || (opts.goneRoom && path.startsWith(`/api/rooms/${opts.goneRoom}/`))) && path.endsWith('/events') && method === 'GET') return { value: { status: 410, ok: false, headers: {}, text: '{"error":"This session is no longer shared."}' } }
     if (opts.seatGone && path === `/api/rooms/${opts.seatGone}/events` && method === 'GET') return { value: { status: 401, ok: false, headers: {}, text: '{"error":"Not a member of this session."}' } }
     const refused = method === 'POST' && path.endsWith('/join') ? opts.joinStatus?.[path.split('/')[3] ?? ''] : undefined
@@ -2991,8 +2994,43 @@ test('every request says the plugin version, and a newer one shows in the Room w
   expect(asked.logged.some(line => line.includes('9.9.9 is out'))).toBe(true)
   const pane = await $.ui.mount({ plugin: 'shared-session', surface: 'desktop', component: 'Pane', requestId: 'shared-room', props: PANE })
   await pane.press({ key: 'tab-settings' })
-  expect(await pane.find({ type: 'Text', text: /Version 9\.9\.9 is out/ })).toBeDefined()
-  expect(await pane.find({ key: 'copy-update' })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /Version 9\.9\.9 is out \(this session runs 0\.7\.1\)/ })).toBeDefined()
+  // Updates off: it installs for new sessions, and offers to load later ones in place.
+  expect((await pane.find({ key: 'update-now' }))?.props.label).toBe('Install update')
+  expect(await pane.find({ key: 'updates-on' })).toBeDefined()
+})
+
+test("the Room's Update runs the update command on this computer and says on its line what it did", async ($, on) => {
+  const installed = JSON.stringify({ version: 2, plugins: { 'shared-session@claude-share': [{ scope: 'user', installPath: '/home/scott/.claude/plugins/cache/claude-share/shared-session/9.9.9', version: '9.9.9' }] } })
+  const asked = world(on, { latest: '9.9.9', settings: '{}', files: { '/home/scott/.claude/plugins/installed_plugins.json': installed } })
+  await $.prompt.submit({ text: LINK, origin: { kind: 'composer' }, wait: false })
+  await asked.clock.advance(10)
+  const pane = await $.ui.mount({ plugin: 'shared-session', surface: 'desktop', component: 'Pane', requestId: 'shared-room', props: PANE })
+  await pane.press({ key: 'tab-settings' })
+  await pane.press({ key: 'update-now' })
+  await asked.clock.advance(100)
+  const run = asked.spawned.find(s => s.input?.includes('plugin update shared-session@claude-share'))
+  expect(run?.input).toContain('plugin marketplace update claude-share')
+  const said = "Shared Sessions 9.9.9 is installed here. Start a new session to use it (in Claude Desktop, quit and reopen the app); with Updates on in the Room, later releases load in place."
+  expect(await pane.find({ type: 'Text', text: said })).toBeDefined()
+  expect(asked.logged).toContain(said)
+  // Two minutes on, the line goes.
+  await asked.clock.advance(121_000)
+  expect(await pane.find({ type: 'Text', text: said })).toBeUndefined()
+})
+
+test("the Team panel's header says a newer release is out, with its Update", async ($, on) => {
+  const asked = world(on, { latest: '9.9.9', team: { signedIn: true, sessions: [teamSession(2, 'Kim')] } })
+  // The server names the newest release in its answers (a join's here).
+  await $.prompt.submit({ text: LINK, origin: { kind: 'composer' }, wait: false })
+  await asked.clock.advance(10)
+  await $.command.run({ command: 'team' } as never)
+  await asked.clock.advance(10)
+  const pane = await $.ui.mount(TEAM_PANE)
+  expect(await pane.find({ type: 'Text', text: '● 9.9.9 is out' })).toBeDefined()
+  expect((await pane.find({ key: 'update-now' }))?.props.label).toBe('Install update')
+  // The header keeps to the button: Turn on Updates is the Room's.
+  expect(await pane.find({ key: 'updates-on' })).toBeUndefined()
 })
 
 test("the Room's Updates setting turns on auto-update in the person's settings, keeping the rest", async ($, on) => {
@@ -4207,7 +4245,10 @@ async function alexAsking($: Parameters<TestBody>[0], on: On, opts: { beneath?: 
   const prompt = { seq: 2, type: 'prompt', ts: 900, from: { seat: 'seat2', name: 'Alex', role: 'guest' }, body: { text: 'Fetch the pages', pid: 'p1' } }
   const asked = world(on, { surfaces: opts.surfaces ?? ['desktop'], stream: [{ seq: 2, events: [prompt], people, ended: false, title: 'demo' }], beforeSet: opts.beforeSet, roomIds: opts.roomIds })
   on('turn.start', ($, e) => ({ turnId: e.turnId }))
-  on('tool.check', () => (opts.beneath === 'allow' ? { decision: 'allow', reason: 'Allowed in this mode' } : { decision: 'ask', reason: 'Asked in this mode' }))
+  // The engine's own permissions beneath the plugin. From 2.1.308 the
+  // dialog $.ui.ask opens is checked too, and it's the person's own: let
+  // through, as a real session shows it.
+  on('tool.check', ($, e) => (opts.beneath === 'allow' || e.tool === 'AskUserQuestion' ? { decision: 'allow', reason: 'Allowed in this mode' } : { decision: 'ask', reason: 'Asked in this mode' }))
   const ui = await $.ui.mount(band('desktop'))
   await ui.press({ key: 'share' })
   expect(await within(asked.clock, () => asked.submitted.some(p => p.text === 'Alex: Fetch the pages'), 5_000)).toBe(true)
@@ -4493,8 +4534,8 @@ function dialogs(on: On, refuse: (question: string) => boolean = () => false) {
   const drawn: Asked[] = []
   on('ui.render', { component: 'AskUserQuestion' }, ($, e) => {
     drawn.push(e.props.questions as Asked)
-    const { Text } = $.ui.resolve(e)
-    return <Text>dialog</Text>
+    // The engine's own dialog: from 2.1.308 it must be drawn by exactly one engine node.
+    return { type: 'engine', ref: 0 } as never
   })
   const up: { questions: Asked; answer: (label: string) => void }[] = []
   // Refused (a settings hook on AskUserQuestion) or up until answered.
@@ -5222,7 +5263,8 @@ for (const feed of ['stream', 'polls'] as const) {
     const newer = { on: false }
     const asked = world(on, { surfaces: ['desktop'], ...(feed === 'stream' ? { stream: pages } : { polled: pages }), beforeSet: key => (newer.on && key === 'module' ? { value: 'newer-module' as unknown } : undefined) })
     on('turn.start', ($, e) => ({ turnId: e.turnId }))
-    on('tool.check', () => ({ decision: 'ask', reason: 'Asked in this mode' }))
+    // The dialog $.ui.ask opens is checked too from 2.1.308: let through, as a real session shows it.
+    on('tool.check', ($, e) => (e.tool === 'AskUserQuestion' ? { decision: 'allow', reason: 'Allowed in this mode' } : { decision: 'ask', reason: 'Asked in this mode' }))
     const ui = await $.ui.mount(band('desktop'))
     await ui.press({ key: 'share' })
     expect(await within(asked.clock, () => asked.submitted.some(p => p.text === 'Alex: Fetch the pages'), 5_000)).toBe(true)
@@ -5804,6 +5846,63 @@ test("the Team panel opens a session you're already in, and Join all leaves out 
   await pane.press({ key: 'open-room0000000000000101' })
   await asked.clock.advance(10)
   expect(asked.spawned.some(s => s.input?.includes("claude://claude.ai/epitaxy/local_0000aaaa-0000-4000-8000-000000000001"))).toBe(true)
+})
+
+test('the Team panel leaves a session you are in elsewhere by your sign-in, after asking once', async ($, on) => {
+  const elsewhere = { ...teamSession(3, 'Lee'), accounts: ['acct-Lee', ME.id] }
+  const asked = world(on, { team: { signedIn: true, sessions: [elsewhere, teamSession(2, 'Kim')] } })
+  await $.command.run({ command: 'team' } as never)
+  await asked.clock.advance(10)
+  const pane = await $.ui.mount(TEAM_PANE)
+  // In it elsewhere: Leave beside Join; not in it: no Leave.
+  expect((await pane.find({ key: 'leave-room0000000000000103' }))?.props.label).toBe('Leave')
+  expect(await pane.find({ key: 'join-room0000000000000103' })).toBeDefined()
+  expect(await pane.find({ key: 'leave-room0000000000000102' })).toBeUndefined()
+  await pane.press({ key: 'leave-room0000000000000103' })
+  await asked.clock.advance(10)
+  expect((await pane.find({ key: 'leave-room0000000000000103' }))?.props.label).toBe('Leave everywhere?')
+  expect(asked).not.toContain('POST /api/rooms/room0000000000000103/leave')
+  await pane.press({ key: 'leave-room0000000000000103' })
+  await eventually(asked.clock, () => asked.some(a => a === 'POST /api/rooms/room0000000000000103/leave'))
+  const leave = asked.sent.find(r => r.path === '/api/rooms/room0000000000000103/leave')
+  // The sign-in, not a seat's token: the seats are other sessions'.
+  expect(leave?.headers['x-shared-session-account']).toBe(TEAM_TOKEN)
+  expect(leave?.headers.authorization).toBeUndefined()
+})
+
+test('a guest whose seat was left from the Team panel says so, and is out of the room', async ($, on) => {
+  const opts: NonNullable<Parameters<typeof world>[1]> = { leftHere: true }
+  const asked = world(on, opts)
+  await $.prompt.submit({ text: LINK, origin: { kind: 'composer' }, wait: false })
+  expect(await eventually(asked.clock, () => asked.state.room?.id)).toBe('room0000000000000001')
+  // The room is still shared, and refuses this seat: it was left from elsewhere.
+  opts.roomGone = true
+  expect(await eventually(asked.clock, () => asked.logged.find(line => line.includes('from the Team panel')))).toBe("You left Sam's session from the Team panel.")
+  expect(await eventually(asked.clock, () => (asked.state.room ?? null) === null)).toBe(true)
+  // A seat refused never takes a new one.
+  expect(asked.filter(a => a.endsWith('/join')).length).toBe(1)
+})
+
+test('the Team panel stops a session of yours by your sign-in, after asking once', async ($, on) => {
+  const away = { ...teamSession(1, 'Scott'), hostAccount: ME.id, hostOnline: false }
+  const asked = world(on, { team: { signedIn: true, sessions: [away, teamSession(2, 'Kim')] } })
+  await $.command.run({ command: 'team' } as never)
+  await asked.clock.advance(10)
+  const pane = await $.ui.mount(TEAM_PANE)
+  // Yours: Stop, never Join; someone else's: no Stop.
+  expect(await pane.find({ key: 'join-room0000000000000101' })).toBeUndefined()
+  expect((await pane.find({ key: 'stop-room0000000000000101' }))?.props.label).toBe('Stop')
+  expect(await pane.find({ key: 'stop-room0000000000000102' })).toBeUndefined()
+  await pane.press({ key: 'stop-room0000000000000101' })
+  await asked.clock.advance(10)
+  expect((await pane.find({ key: 'stop-room0000000000000101' }))?.props.label).toBe('Stop for everyone?')
+  expect(asked).not.toContain('POST /api/rooms/room0000000000000101/end')
+  await pane.press({ key: 'stop-room0000000000000101' })
+  await eventually(asked.clock, () => asked.some(a => a === 'POST /api/rooms/room0000000000000101/end'))
+  const end = asked.sent.find(r => r.path === '/api/rooms/room0000000000000101/end')
+  // The sign-in, not a room token: the session that shared it may be gone.
+  expect(end?.headers['x-shared-session-account']).toBe(TEAM_TOKEN)
+  expect(end?.headers.authorization).toBeUndefined()
 })
 
 test('a link to a room another session here is in opens that one; pasted again, it joins here too', async ($, on) => {
