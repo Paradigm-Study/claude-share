@@ -150,12 +150,17 @@ function needClaude() {
   return bin
 }
 
+// A share server address: https://, or plain http:// only on this computer.
+// Room tokens and sign-ins go with every request, so the plugin speaks to no
+// other plain http server.
 function validServer(url) {
   if (typeof url !== 'string') return null
   const value = url.trim().replace(/\/+$/, '')
   try {
     const parsed = new URL(value)
-    return /^https?:$/.test(parsed.protocol) && parsed.hostname && !parsed.username && !parsed.password && !parsed.search && !parsed.hash ? value : null
+    const local = /^(?:(?:[a-z0-9-]+\.)*localhost|127(?:\.\d{1,3}){3}|\[::1\])$/i.test(parsed.hostname)
+    const secure = parsed.protocol === 'https:' || (parsed.protocol === 'http:' && local)
+    return secure && parsed.hostname && !parsed.username && !parsed.password && !parsed.search && !parsed.hash ? value : null
   } catch {
     return null
   }
@@ -446,12 +451,12 @@ async function check(claude) {
   if (!config) return
   const saved = config.value
   const supplied = flag('server')
-  if (supplied !== undefined && !validServer(supplied)) return fail('check --server needs a valid http:// or https:// server address')
+  if (supplied !== undefined && !validServer(supplied)) return fail('check --server needs a valid https:// server address (plain http:// only for a server on this computer)')
   const environment = config.environment || process.env.SHARED_SESSION_SERVER
   const effective = saved || environment || defaultServer()
   const server = validServer(supplied ?? effective)
   if (!server) {
-    return fail('the share server is not a valid http:// or https:// address; run `node scripts/setup.mjs host --server <url>`')
+    return fail('the share server is not a valid https:// address (plain http:// only for a server on this computer); run `node scripts/setup.mjs host --server <url>`')
   }
   const savedSetting = saved || config.environment
   if (flag('live') && supplied && savedSetting && validServer(savedSetting) !== server) {
@@ -518,7 +523,7 @@ switch (command) {
   case 'host': {
     const server = validServer(flag('server'))
     if (!server) {
-      fail('host needs --server <https://your-share-server> (or run `deploy` to make one)')
+      fail('host needs --server <https://your-share-server> (plain http:// only for a server on this computer), or run `deploy` to make one')
       break
     }
     const claude = needClaude()

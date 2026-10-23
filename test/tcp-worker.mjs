@@ -280,9 +280,9 @@ try {
     await w.obj.fetch(req(w, 'socket?after=0', w.member, 'GET', undefined, true))
     const viewer = w.state.getWebSockets(w.seat).at(-1)
     for (const seat of w.obj.room.seats.values()) if (seat.id === w.seat) seat.account = 'acct-guest'
+    // The leave itself is the room's change that ends it.
     assert.equal(w.obj.room.leaveAccount('acct-guest', now), 1)
-    w.obj.room.wake()
-    assert.deepEqual(viewer.closes, [{ code: 1000, reason: 'left' }])
+    assert.deepEqual(viewer.closes, [{ code: 1008, reason: 'left' }])
     assert.equal(w.control.closes.length, 0, "the host's stream goes on")
     assert.equal((await w.obj.fetch(req(w, 'socket?after=0', w.member, 'GET', undefined, true))).status, 410)
     console.log('OK a stream whose seat left from elsewhere ends, and connecting again hears it left')

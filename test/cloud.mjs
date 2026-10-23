@@ -177,6 +177,33 @@ await check("the approver's other sessions (the same account) may answer too", a
   assert.ok(moved.body.token)
 })
 
+await check("only the approver changes the cloud host's settings, only as its Room would, and their prompts say they're theirs; home again, nobody does", async () => {
+  const now = Date.now()
+  const room = Room.create({ id: 'room0000000000000003', name: 'Scott', title: 'demo', now, version: '0.11.33', account: 'acct-scott' })
+  const cloud = standIn()
+  const moved = await ask(room, { method: 'POST', rest: 'cloud', token: room.host.token, body: moveBody, cloud })
+  const other = room.join('Scott', now, '0.11.33', 'acct-scott')
+  const guest = room.join('Alex', now, '0.11.33', 'acct-alex')
+  const post = (token, events) => ask(room, { method: 'POST', rest: 'events', token, body: { events }, cloud })
+  // A teammate: nothing.
+  await post(guest.token, [{ type: 'set', body: { approvals: 'all' } }])
+  assert.ok(!room.events.some(e => e.type === 'set'))
+  // The approver: what the Room sets, nothing else; "ask before nothing" isn't the cloud host's.
+  await post(moved.body.token, [{ type: 'set', body: { approvals: 'none', prompts: 'watch', files: 'off', untrust: true, extra: 1 } }])
+  await post(moved.body.token, [{ type: 'set', body: { approvals: 'none' } }])
+  await post(other.token, [{ type: 'set', body: { approvals: 'all' } }])
+  assert.deepEqual(room.events.filter(e => e.type === 'set').map(e => e.body), [{ prompts: 'watch', files: 'off', untrust: true }, { approvals: 'all' }])
+  // Their prompts say so (the cloud host's watch-only keeps to teammates); a teammate's don't.
+  await post(moved.body.token, [{ type: 'prompt', body: { text: 'Fix it', pid: 'p1' } }])
+  await post(guest.token, [{ type: 'prompt', body: { text: 'Break it', pid: 'p2' } }])
+  assert.deepEqual(room.events.filter(e => e.type === 'prompt').map(e => [e.body.pid, e.from.approver === true]), [['p1', true], ['p2', false]])
+  // Home again: no approver, no settings from a guest seat, no mark.
+  assert.equal((await ask(room, { method: 'POST', rest: 'cloud/home', token: moved.body.token, cloud })).status, 200)
+  await post(other.token, [{ type: 'set', body: { prompts: 'everyone' } }, { type: 'prompt', body: { text: 'Again', pid: 'p3' } }])
+  assert.equal(room.events.filter(e => e.type === 'set').length, 2)
+  assert.equal(room.events.find(e => e.type === 'prompt' && e.body.pid === 'p3')?.from.approver, undefined)
+})
+
 await check('Bring home: the approver alone, the runner stopped, its changes a room file, a new host token', async () => {
   const { room, host, guest } = freshRoom()
   const cloud = standIn({ diff: 'diff --git a/README.md b/README.md\n+from the cloud\n' })
@@ -228,7 +255,7 @@ await check("the host's sign-in ending the room (the Team panel's Stop) stops it
   const now = Date.now()
   const room = Room.create({ id: 'room0000000000000003', name: 'Scott', title: 'demo', now, version: '0.11.31', account: 'acct-scott' })
   const cloud = standIn()
-  const directory = { whoIs: async tok => (tok === 'sign-in-scott' ? { id: 'acct-scott' } : tok === 'sign-in-eve' ? { id: 'acct-eve' } : null), unregister: async () => {} }
+  const directory = { whoIs: async tok => (tok === 'sign-in-scott' ? { id: 'acct-scott' } : tok === 'sign-in-eve' ? { id: 'acct-eve' } : null), roomEnded: async () => {} }
   await ask(room, { method: 'POST', rest: 'cloud', token: room.host.token, body: moveBody, cloud })
   assert.equal((await ask(room, { method: 'POST', rest: 'end', account: 'sign-in-eve', cloud, directory })).status, 403)
   assert.deepEqual(cloud.calls.stopped, [])

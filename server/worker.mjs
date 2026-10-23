@@ -23,10 +23,15 @@ import {
   SEAT_TIMEOUT_MS,
   KEEPALIVE_MS,
   STREAM_MAX_MS,
+  SEAT_STREAMS,
   createRoom,
+  ended,
   roomRequest,
   previewRequest,
   previewRoomOf,
+  previewKeyOf,
+  previewHostLabel,
+  roomOrigins,
   notFound,
   json,
   publicOrigin,
@@ -109,18 +114,27 @@ function previewOriginOf(req, env) {
 // key leads here and nowhere else. A preview Worker before keys can't route
 // them, so on an update this Worker is deployed first (wrangler.preview.toml,
 // scripts/setup.mjs).
+//
+// With PREVIEW_URL a wildcard (`https://*.previews.example`), each room's
+// previews have a host name of their own, and its first part is the key
+// (core's previewLabel): nothing else names a room here then. The room hears
+// which (`x-preview-own`, set only here).
 async function previewFetch(req, env) {
-  const key = previewRoomOf(req) ?? ''
+  const url = new URL(req.url)
+  const own = roomOrigins(env.PREVIEW_URL)
+  const key = own ? (previewKeyOf(previewHostLabel(env.PREVIEW_URL, url.host))?.hex ?? '') : (previewRoomOf(req) ?? '')
   let stub = null
   try { stub = OBJECT_ID.test(key) ? env.ROOMS.get(env.ROOMS.idFromString(key)) : null } catch {}
   if (!stub) return previewMissing()
-  const url = new URL(req.url)
+  const headers = new Headers(req.headers)
+  headers.delete('x-preview-own')
+  if (own) headers.set('x-preview-own', '1')
   // The body as it comes: the room bounds it (PROXY_BODY_MAX) as it arrives.
   const body = req.method === 'GET' || req.method === 'HEAD' ? null : req.body
   return stub.fetch(
     new Request(`https://room.internal/${key}/__preview${url.pathname}${url.search}`, {
       method: req.method,
-      headers: req.headers,
+      headers,
       body,
       redirect: 'manual',
       ...(body ? { duplex: 'half' } : {}),
@@ -185,8 +199,9 @@ export default {
     }
     if (!ROOM_ID.test(id)) return notFound()
     // Previews have a host name of their own: this origin serves none, page
-    // or socket (only previewFetch makes these paths, by the room's key).
-    if (rest.startsWith('__preview')) return notFound()
+    // or socket (only previewFetch makes these paths, by the room's key);
+    // nor does it take what the directory tells a room (__team).
+    if (rest.startsWith('__')) return notFound()
     const limit = limitOf(req, id, rest, req.headers.get('cf-connecting-ip') ?? 'unknown')
     const limiter = limit && { create: env.CREATE_LIMIT, join: env.JOIN_LIMIT, events: env.EVENTS_LIMIT }[limit.kind]
     if (limiter && !(await limiter.limit({ key: limit.key })).success) return limitedResponse(limit.kind)
@@ -409,6 +424,12 @@ export class RoomObject {
 
     const room = this.room
     if (preview ? id !== room.previewKey : id !== room.id) return preview ? previewMissing() : notFound()
+    // The directory: a members-only team's people now (DirectoryObject's keepTeam).
+    if (rest === '__team' && req.method === 'POST') {
+      const body = await req.json().catch(() => ({}))
+      if (room.keepTeam(String(body.team ?? ''), Array.isArray(body.allowed) ? body.allowed.map(String) : [], now)) await this.persist()
+      return json({ ok: true })
+    }
     // What expired is swept by the alarm, and by roomRequest for ordinary
     // requests; upgrades check what they need where they admit.
     if (req.method === 'POST') {
@@ -426,7 +447,7 @@ export class RoomObject {
     if (preview) {
       const path = url.pathname.slice(`/${id}/__preview`.length) || '/'
       const inner = new Request(new URL(`${path}${url.search}`, 'https://preview.local'), req)
-      const { response, changed } = await previewRequest(this.room, inner, now)
+      const { response, changed } = await previewRequest(this.room, inner, now, { own: req.headers.get('x-preview-own') === '1' })
       if (changed) await this.persist()
       return response
     }
@@ -456,11 +477,19 @@ export class RoomObject {
     // …and which plugin it runs now: a stream says it as any request does.
     if (noteVersion(this.room, req, auth) || this.room.seats.size !== seated) await this.persist()
     if (this.room.endedAt) return json({ error: 'This session is no longer shared.' }, 410)
+    // A seat's streams past SEAT_STREAMS: its oldest ends (a reconnect's old
+    // one, likely, not noticed gone yet).
+    const mine = this.state.getWebSockets(auth.seat).filter(ws => !this.closed.has(ws) && ws.deserializeAttachment()?.seat === auth.seat)
+      .sort((a, b) => (a.deserializeAttachment().at ?? 0) - (b.deserializeAttachment().at ?? 0))
+    for (const old of mine.slice(0, Math.max(0, mine.length - SEAT_STREAMS + 1))) {
+      this.closed.add(old)
+      try { old.close(1008, 'Too many streams') } catch {}
+    }
     const [client, server] = Object.values(new WebSocketPair())
     // Tagged as a stream, so a change goes to streams alone (broadcast), and
     // by seat, for who is connected.
     this.state.acceptWebSocket(server, ['stream', auth.seat])
-    server.serializeAttachment({ seat: auth.seat, role: auth.role, after: Number(url.searchParams.get('after') ?? 0) || 0 })
+    server.serializeAttachment({ seat: auth.seat, role: auth.role, after: Number(url.searchParams.get('after') ?? 0) || 0, at: now })
     this.room.touch(auth, now)
     this.send(server, now)
     if (auth.role === 'host') this.broadcast() // the host is back: everyone sees it
@@ -735,13 +764,9 @@ export class RoomObject {
   send(ws, now = Date.now()) {
     const att = ws.deserializeAttachment()
     if (!att?.seat || !this.room) return
-    // Its seat left from elsewhere (the Team panel's Leave): the stream ends,
-    // and its next connect hears so (410). It never gets the room's news again.
-    if (!this.room.holdsSeat(att.seat)) {
-      this.closed.add(ws)
-      try {
-        ws.close(1000, 'left')
-      } catch {}
+    // Its seat let go for good (removed from the room's team): it hears no more.
+    if (att.role !== 'host' && !this.room.seated(att.seat)) {
+      try { ws.close(1008, 'left') } catch {}
       return
     }
     const page = this.room.page(att.after, now)
@@ -931,6 +956,7 @@ export class RoomObject {
     if (now - this.lastActive(now) > ROOM_TTL_MS) {
       this.room.revokeTCP()
       this.room.revokePublic()
+      await ended(this.room, { directory: directoryClient(this.env) })
       for (const ws of this.state.getWebSockets()) ws.close(1000, 'expired')
       await this.state.storage.deleteAll()
       this.room = null
@@ -945,9 +971,6 @@ export class RoomObject {
   }
 }
 
-// Counts new rooms exactly: per address this minute and today, and for the
-// whole server today (kept in storage, so a restart doesn't reset the day).
-// Only a Share reaches it, so it costs one request per room made.
 // What a room asks of its cloud host (docs/cloud-host.md): HostContainer, one
 // a room, by the room's id.
 function hostsClient(env) {
@@ -1061,29 +1084,79 @@ function safeEqual(a, b) {
   return diff === 0
 }
 
+// Counts new rooms exactly: per address this minute and today, and for the
+// whole server today. Today's counts are kept in storage, so a restart
+// doesn't reset the day: the server's under day:<date>, and each address's
+// under a:<date>:<its keyed hash>, the key a random one made for that day
+// (k:<date>), so what's kept can't be read back as addresses. An alarm at
+// the day's end deletes them all, key included. Only a Share reaches it, so
+// it costs one request per room made. Its minute is memory's, as every
+// other minute is.
 export class GateObject {
   constructor(state) {
     this.state = state
     this.minute = new Windows()
-    this.addresses = new Map() // ip → rooms today
-    this.day = { key: '', count: 0 }
+    this.addresses = new Map() // a:<date>:<hash> → rooms today, as read or written here
+    this.day = { key: '', count: 0, secret: '' }
+    // One Share at a time: each reads and writes its address's count across awaits no gate holds.
+    this.queue = Promise.resolve()
   }
 
-  async fetch(req) {
+  fetch(req) {
+    const turn = this.queue.then(() => this.admit(req))
+    this.queue = turn.catch(() => {})
+    return turn
+  }
+
+  async admit(req) {
     const { ip, max } = await req.json()
     const now = Date.now()
     const key = new Date(now).toISOString().slice(0, 10)
+    const storage = this.state.storage
     if (this.day.key !== key) {
-      this.day = { key, count: (await this.state.storage.get(`day:${key}`)) ?? 0 }
+      let secret = await storage.get(`k:${key}`)
+      if (!secret) {
+        secret = token(32)
+        await storage.put(`k:${key}`, secret)
+        // The day's end, and a minute for the clocks.
+        await storage.setAlarm(Date.parse(`${key}T00:00:00Z`) + 86_400_000 + 60_000)
+      }
+      this.day = { key, count: (await storage.get(`day:${key}`)) ?? 0, secret }
       this.addresses.clear()
+      await this.forget(key)
     }
     if (this.day.count >= max) return json({ ok: false, reason: 'day' })
-    if ((this.addresses.get(ip) ?? 0) >= ROOMS_PER_ADDRESS_DAY || !this.minute.hit('create', ip, now)) return json({ ok: false, reason: 'address' })
-    this.addresses.set(ip, (this.addresses.get(ip) ?? 0) + 1)
+    const who = `a:${key}:${await keyedHash(this.day.secret, ip)}`
+    const made = this.addresses.get(who) ?? (await storage.get(who)) ?? 0
+    if (made >= ROOMS_PER_ADDRESS_DAY || !this.minute.hit('create', ip, now)) return json({ ok: false, reason: 'address' })
+    this.addresses.set(who, made + 1)
     this.day.count += 1
-    await this.state.storage.put(`day:${key}`, this.day.count)
+    await storage.put({ [`day:${key}`]: this.day.count, [who]: made + 1 })
     return json({ ok: true })
   }
+
+  async alarm() {
+    const today = new Date(Date.now()).toISOString().slice(0, 10)
+    await this.forget(today)
+    if (this.day.key !== today) this.day = { key: '', count: 0, secret: '' }
+  }
+
+  // Every day's counts and key but today's.
+  async forget(today) {
+    const storage = this.state.storage
+    for (const prefix of ['a:', 'k:', 'day:']) {
+      const old = [...(await storage.list({ prefix })).keys()].filter(k => !k.startsWith(`${prefix}${today}`))
+      for (let i = 0; i < old.length; i += 128) await storage.delete(old.slice(i, i + 128))
+    }
+  }
+}
+
+// A keyed hash of an address (HMAC-SHA-256, its first 16 bytes in hex).
+async function keyedHash(secret, text) {
+  const enc = new TextEncoder()
+  const key = await crypto.subtle.importKey('raw', enc.encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign'])
+  const mac = new Uint8Array(await crypto.subtle.sign('HMAC', key, enc.encode(text)))
+  return [...mac.slice(0, 16)].map(b => b.toString(16).padStart(2, '0')).join('')
 }
 
 // The one directory of accounts and teams.
@@ -1091,7 +1164,7 @@ const directoryStub = env => env.DIRECTORY.get(env.DIRECTORY.idFromName('directo
 
 // What a room asks the directory, over its stub (paths the Worker never
 // forwards from outside).
-const DIRECTORY_CALLS = ['shareCheck', 'joinCheck', 'register', 'unregister', 'teamAccess', 'sessionInvite', 'whoIs']
+const DIRECTORY_CALLS = ['shareCheck', 'joinCheck', 'register', 'unregister', 'roomEnded', 'teamAccess', 'sessionInvite', 'whoIs']
 function directoryClient(env) {
   if (!env?.DIRECTORY) return null
   const call = name => async (...args) => {
@@ -1105,6 +1178,7 @@ function directoryClient(env) {
 
 export class DirectoryObject {
   constructor(state, env) {
+    this.state = state
     const storage = state.storage
     const kv = {
       get: key => storage.get(key),
@@ -1118,7 +1192,25 @@ export class DirectoryObject {
       const res = await env.ROOMS.get(env.ROOMS.idFromName(id)).fetch(`https://room.internal/${id}/`)
       return res.ok ? res.json() : null
     }
-    this.directory = new Directory(kv, { providers: providersFrom(env), roomInfo })
+    // A members-only team's people now, for its room to let the others go
+    // (a path the Worker never forwards from outside).
+    const keepTeam = async (id, team, allowed) => {
+      if (!ROOM_ID.test(id)) return
+      await env.ROOMS.get(env.ROOMS.idFromName(id)).fetch(`https://room.internal/${id}/__team`, { method: 'POST', body: JSON.stringify({ team, allowed }) })
+    }
+    // What's timed goes when it's due: the alarm is set for the soonest.
+    const onDue = at => void this.wakeAt(at).catch(() => {})
+    this.directory = new Directory(kv, { providers: providersFrom(env), roomInfo, keepTeam, onDue })
+  }
+
+  async wakeAt(at) {
+    const set = await this.state.storage.getAlarm()
+    if (!set || at + 1000 < set) await this.state.storage.setAlarm(at + 1000)
+  }
+
+  async alarm() {
+    const next = await this.directory.sweep(Date.now())
+    if (next) await this.wakeAt(next)
   }
 
   async fetch(req) {

@@ -18,7 +18,7 @@ import { readFileSync, writeFileSync, renameSync } from 'node:fs'
 import { Readable } from 'node:stream'
 
 import { Directory, mapStore, providersFrom, BODY_CHARS } from './teams.mjs'
-import { Room, ROOM_ID, SEAT_TIMEOUT_MS, createRoom, roomRequest, previewRequest, previewRoomOf, notFound, json, publicOrigin, token, missingPage, previewMissing, previewTooLarge, homePage, outdatedClient, versionInfo, limitOf, limitedResponse, closedResponse, Windows, SOCKET_ID, previewSocketTarget, publicPairValid, hostHalfClose, tcpHalfClose, announceSocket, hostSocketAllowed, relayRejectCode, rejectReason, streamedRoomBody, bodyLimit, bodyTooLarge, PROXY_BODY_MAX, sendableClose, TCP_LIMITS, PUBLIC_LIMITS, revokeMatches, tcpSocketTarget, announceTCP, tcpState, tcpCounted, tcpValid, tcpReserve, tcpRefund, tcpFailure, tcpFrame, tcpStep, chargeControl, mergeTCPStats } from './core.mjs'
+import { Room, ROOM_ID, SEAT_TIMEOUT_MS, createRoom, ended, roomRequest, previewRequest, previewRoomOf, previewKeyOf, previewHostLabel, roomOrigins, notFound, json, publicOrigin, token, missingPage, previewMissing, previewTooLarge, homePage, outdatedClient, versionInfo, limitOf, limitedResponse, closedResponse, Windows, SOCKET_ID, previewSocketTarget, publicPairValid, hostHalfClose, tcpHalfClose, announceSocket, hostSocketAllowed, relayRejectCode, rejectReason, streamedRoomBody, bodyLimit, bodyTooLarge, PROXY_BODY_MAX, sendableClose, TCP_LIMITS, PUBLIC_LIMITS, revokeMatches, tcpSocketTarget, announceTCP, tcpState, tcpCounted, tcpValid, tcpReserve, tcpRefund, tcpFailure, tcpFrame, tcpStep, chargeControl, mergeTCPStats } from './core.mjs'
 
 const PORT = Number(process.env.PORT ?? 8787)
 const PUBLIC_URL = process.env.PUBLIC_URL
@@ -108,7 +108,8 @@ function save(immediate = false) {
   } else if (!saveTimer) saveTimer = setTimeout(later(DATA_FILE, write), 500)
 }
 
-// Every room's TCP byte budget, in its own small file: a reservation is
+// Every room's byte budgets, in their own small file: TCP's, and what its
+// files and public link served today (core's serveReserve). A reservation is
 // written before the bytes it allows, a refund (budget given back) soon
 // after, since a lost one only undercounts what's left. The minute of opens
 // is memory's (tcpCounted), so no TCP connection waits on a write.
@@ -118,7 +119,7 @@ function saveStats(immediate = false) {
   const write = () => {
     statsTimer = null
     const tmp = `${STATS_FILE}.tmp`
-    const counted = [...rooms.values()].filter(r => r.tcpStats.used)
+    const counted = [...rooms.values()].filter(r => r.tcpStats.used || r.tcpStats.served)
     writeFileSync(tmp, JSON.stringify({ rooms: Object.fromEntries(counted.map(r => [r.id, r.tcpStats])) }))
     renameSync(tmp, STATS_FILE)
   }
@@ -138,6 +139,7 @@ setInterval(() => {
     if (now - lastActive > ROOM_TTL_MS) {
       room.revokeTCP()
       room.revokePublic()
+      void ended(room, { directory })
       rooms.delete(room.id)
       previewRooms.delete(room.previewKey)
       changed = true
@@ -160,7 +162,28 @@ const roomInfoOf = async id => {
   if (!room) return null
   return { title: room.title, people: room.people(Date.now()), ended: Boolean(room.endedAt) }
 }
-const directory = new Directory(mapStore(directoryData, () => save()), { providers: providersFrom(process.env), roomInfo: roomInfoOf })
+// A members-only team's people now: its room lets the others go.
+const keepTeam = async (id, teamId, allowed) => {
+  if (rooms.get(id)?.keepTeam(teamId, allowed, Date.now())) save(true)
+}
+// What the directory has timed is deleted when it's due, whether anyone asks
+// or not: one timer, for the soonest.
+let dueTimer = null
+let dueAt = Infinity
+const onDue = at => {
+  if (at >= dueAt) return
+  clearTimeout(dueTimer)
+  dueAt = at
+  dueTimer = setTimeout(async () => {
+    dueTimer = null
+    dueAt = Infinity
+    const next = await directory.sweep(Date.now()).catch(() => null)
+    if (next) onDue(next)
+  }, Math.max(0, at - Date.now()) + 1000)
+  dueTimer.unref()
+}
+const directory = new Directory(mapStore(directoryData, () => save()), { providers: providersFrom(process.env), roomInfo: roomInfoOf, keepTeam, onDue })
+directory.sweep(Date.now()).then(next => next && onDue(next), () => {})
 
 async function route(req) {
   const url = new URL(req.url)
@@ -228,8 +251,12 @@ async function route(req) {
   return response
 }
 
-// The room a preview request names by its preview key, never by its id.
+// The room a preview request names by its preview key, never by its id: with
+// PREVIEW_URL a wildcard (`http://*.previews.example`), by its host name's
+// first part alone (core's previewLabel), else by its link or cookie.
+const ownOrigins = roomOrigins(PREVIEW_URL)
 const previewRoomFor = req => {
+  if (ownOrigins) return previewRooms.get(previewKeyOf(previewHostLabel(PREVIEW_URL, req.headers.get('host')))?.base64url ?? '')
   const key = previewRoomOf(req)
   return key && ROOM_ID.test(key) ? previewRooms.get(key) : undefined
 }
@@ -237,7 +264,7 @@ const previewRoomFor = req => {
 async function previewRoute(req) {
   const room = previewRoomFor(req)
   if (!room) return previewMissing()
-  const { response, changed } = await previewRequest(room, req, Date.now(), { secure: new URL(previewOrigin(req)).protocol === 'https:' })
+  const { response, changed } = await previewRequest(room, req, Date.now(), { secure: previewOrigin(req).startsWith('https:'), own: ownOrigins })
   if (changed) save()
   return response
 }
@@ -319,21 +346,34 @@ const serve = handle => async (nodeReq, nodeRes) => {
     if (cookies.length) out['set-cookie'] = cookies
     nodeRes.writeHead(res.status, out)
     if (!res.body) return nodeRes.end()
-    // Pass the body through as it comes: a stream stays open until either side
-    // closes it.
+    // Pass the body through as it comes, as fast as its client takes it: a
+    // stream stays open until either side closes it, and one that fails (a
+    // room stream its client stopped reading) closes the connection.
     const reader = res.body.getReader()
     nodeRes.on('close', () => reader.cancel().catch(() => {}))
+    reader.closed.catch(() => nodeRes.destroy())
     for (;;) {
-      const { done, value } = await reader.read()
+      const { done, value } = await reader.read().catch(() => ({ done: true, failed: true }))
       if (done) break
-      nodeRes.write(value)
+      if (!nodeRes.write(value)) await drained(nodeRes)
     }
-    nodeRes.end()
+    if (!nodeRes.destroyed) nodeRes.end()
   } catch (error) {
     nodeRes.writeHead(500, { 'content-type': 'application/json' })
     nodeRes.end(JSON.stringify({ error: String(error?.message ?? error) }))
   }
 }
+
+// A response's buffer taken by its client, or the connection gone.
+const drained = res => new Promise(resolve => {
+  const done = () => {
+    res.off('drain', done)
+    res.off('close', done)
+    resolve()
+  }
+  res.on('drain', done)
+  res.on('close', done)
+})
 
 const server = createServer(serve(route))
 server.requestTimeout = 60_000
