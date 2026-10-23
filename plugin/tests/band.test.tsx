@@ -2985,6 +2985,34 @@ test("a room this session can't reach says it is reconnecting", async ($, on) =>
   }
 })
 
+// A connection that died without a word (Wi-Fi changed, a VPN reconnected)
+// still looks open: only the room's lines stopping says so.
+test('a stream quiet for 35 s is given up, says Reconnecting at once, and opens again', async ($, on) => {
+  let held: Promise<void> | null = null
+  let release = () => {}
+  const asked = await guestJoined($, on, { streamHeld: () => held ?? Promise.resolve() })
+  const streams = () => asked.spawned.filter(s => s.argv[0] === 'curl' && s.input?.includes('/stream?after=')).length
+  // Live until it's ever written otherwise.
+  const connection = () => asked.state.connection ?? 'live'
+  expect(await within(asked.clock, () => connection() === 'live' && streams() === 1, 1_000)).toBe(true)
+  held = new Promise<void>(done => (release = done))
+  // Keepalives every 10 s: three missed is still a quiet room.
+  await asked.clock.advance(30_000)
+  expect([streams(), connection()]).toEqual([1, 'live'])
+  // Past 35 s, looked at every 5 s: given up, said at once, opened again.
+  await asked.clock.advance(12_000)
+  expect([streams(), connection()]).toEqual([2, 'reconnecting'])
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount(band(surface))
+    expect(await ui.find({ type: 'Text', text: /Reconnecting/ })).toBeDefined()
+    await ui.unmount()
+  }
+  // The room answers on the new one: live again.
+  release()
+  expect(await within(asked.clock, () => connection() === 'live', 1_000)).toBe(true)
+  await $.command.run({ command: 'stop-sharing', args: '' } as never)
+})
+
 test('every request says the plugin version, and a newer one shows in the Room with its command', async ($, on) => {
   const asked = world(on, { latest: '9.9.9', settings: '{}' })
   await $.prompt.submit({ text: LINK, origin: { kind: 'composer' }, wait: false })
