@@ -216,7 +216,7 @@ export default {
           method: 'PUT',
           headers: { authorization: req.headers.get('authorization') ?? '', 'content-length': req.headers.get('content-length') },
           body: req.body,
-          // @ts-expect-error Node's fetch needs it for a streamed body; Workers' types lack it
+          // @ts-expect-error Workers' types lack it, and Workers ignore it: harmless here
           duplex: 'half',
         }),
       )

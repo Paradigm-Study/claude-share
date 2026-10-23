@@ -1,9 +1,8 @@
 {
   "compilerOptions": {
-    "target": "es2023", "lib": ["es2023"], "types": ["node"],
+    "target": "es2023", "lib": ["es2023"],
     "module": "esnext", "moduleResolution": "bundler", "resolveJsonModule": true,
     "allowJs": true, "checkJs": true, "strict": false,
     "noEmit": true, "skipLibCheck": true
-  },
-  "include": ["worker-configuration.d.ts", "*.mjs"]
+  }
 }

@@ -69,7 +69,7 @@ export function dockerCloud({ image, serverUrl }) {
         body: JSON.stringify({ ...config, server: serverUrl ?? config.server }),
       })
       if (!started.ok) {
-        const why = (await started.json().catch(() => null))?.error ?? `status ${started.status}`
+        const why = (/** @type {{ error?: string } | null} */ (await started.json().catch(() => null)))?.error ?? `status ${started.status}`
         await cloud.stop(id)
         throw new Error(`the runner refused its configuration (${why})`)
       }
