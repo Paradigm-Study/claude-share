@@ -60,6 +60,20 @@ function track(server) {
   server.on('connection', socket => { sockets.add(socket); socket.on('error', () => {}); socket.on('close', () => sockets.delete(socket)) })
   return server
 }
+// Whether a port a helper held can be bound again, within `ms`: one still held then fails.
+async function rebindable(host, port, ms = 3000) {
+  const deadline = Date.now() + ms
+  for (;;) {
+    const server = track(net.createServer())
+    try {
+      await listen(server, host, port)
+      return await close(server)
+    } catch (error) {
+      if (error.code !== 'EADDRINUSE' || Date.now() > deadline) throw error
+      await new Promise(resolve => setTimeout(resolve, 50))
+    }
+  }
+}
 async function freePort() {
   for (let attempt = 0; attempt < 8; attempt++) {
     const v4 = track(net.createServer()), v6 = track(net.createServer())
@@ -893,7 +907,9 @@ async function workerChecks() {
   assert.equal(closed(commands[0].id).length, 2)
   assert.ok(commands.slice(1).every(c => closed(c.id).length === 1), 'shutdown closes each admitted peer exactly once')
   await until(() => localSockets.size === 0 && peers.size === 0, 'worker shutdown owns all TCP/WS sockets')
-  const rebound = track(net.createServer()); await listen(rebound, '127.0.0.1', host.port); await close(rebound)
+  // Its control port is free again. The kernel can hold it a moment after the
+  // process is gone (a kept-alive client here not yet told), so bind until it frees.
+  await rebindable('127.0.0.1', host.port)
   assert.deepEqual(host.rows.filter(r => r.state === 'ready'), [{ state: 'ready', port: host.port }])
   assert.ok(!host.stdout.includes(host.controlToken) && !host.stdout.includes(CAP))
   assert.ok(!host.rows.some(r => r.id === 'REFUSED00000') && !notices.some(r => r.path.includes('REFUSED00000')), 'the open refused 503 never ran')
@@ -1943,7 +1959,10 @@ async function webrtcChecks() {
   const windows = [chrome.path && windowScripts && ['Chrome', chrome.path, launchChrome(chrome.path)], firefox.path && ['Firefox', firefox.path, launchFirefox(firefox.path)]].filter(Boolean)
   for (const [name, binary, start] of windows) {
     const version = await promisify(execFile)(binary, ['--version'], { timeout: 15_000 }).then(({ stdout }) => stdout.trim(), () => 'unknown version')
-    const counts = { stun: 0, peer: 0, peerTcp: 0, turn: 0, turnViaProxy: 0 }, datagrams = []
+    // turnViaProxy: TURN connections the proxy began; turnProxied: those of them that
+    // connected, counted as the TURN server counts (on connect), so the difference
+    // from `turn` is what reached TURN directly, whatever the browser abandoned.
+    const counts = { stun: 0, peer: 0, peerTcp: 0, turn: 0, turnViaProxy: 0, turnProxied: 0 }, datagrams = []
     const udp = async key => {
       const socket = dgram.createSocket('udp4')
       datagrams.push(socket)
@@ -1999,7 +2018,7 @@ async function webrtcChecks() {
         const to = port === APP && ['localhost', '127.0.0.1'].includes(host) ? { host: '127.0.0.1', port } : port === TURN && host === lan ? { host: lan, port } : null
         if (!to) return client.end(Buffer.from([5, 2, 0, 1, 0, 0, 0, 0, 0, 0]))
         if (to.port === TURN) counts.turnViaProxy++
-        const upstream = net.connect(to, () => { client.write(Buffer.from([5, 0, 0, 1, 0, 0, 0, 0, 0, 0])); client.pipe(upstream).pipe(client) })
+        const upstream = net.connect(to, () => { if (to.port === TURN) counts.turnProxied++; client.write(Buffer.from([5, 0, 0, 1, 0, 0, 0, 0, 0, 0])); client.pipe(upstream).pipe(client) })
         sockets.add(upstream)
         upstream.on('error', () => client.destroy())
         upstream.on('close', () => { sockets.delete(upstream); client.destroy() })
@@ -2017,7 +2036,7 @@ async function webrtcChecks() {
       await until(() => report || early, `the ${name} WebRTC page reports`, 60_000)
       assert.ok(report, `${name} stopped early ${JSON.stringify(early)}: ${browserLog}`)
       await pause(1000) // A late retransmit still counts.
-      assert.deepEqual({ stun: counts.stun, peer: counts.peer, peerTcp: counts.peerTcp, turn: counts.turn - counts.turnViaProxy }, { stun: 0, peer: 0, peerTcp: 0, turn: 0 }, `${name} (${version}): WebRTC reaches this machine's address directly`)
+      assert.deepEqual({ stun: counts.stun, peer: counts.peer, peerTcp: counts.peerTcp, turn: counts.turn - counts.turnProxied }, { stun: 0, peer: 0, peerTcp: 0, turn: 0 }, `${name} (${version}): WebRTC reaches this machine's address directly`)
       assert.ok(counts.turnViaProxy >= 1, `${name} (${version}): TURN over TCP must come through the proxy (${JSON.stringify(report.errors)})`)
     } finally {
       await endBrowser(browser, exited, profile)

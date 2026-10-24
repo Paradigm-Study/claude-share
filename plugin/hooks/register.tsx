@@ -3579,6 +3579,8 @@ async function resumeJoined($: $) {
       listed = page.previews
       room = { ...room, seq: page.seq }
     } catch (error) {
+      // Its person left it from elsewhere meanwhile (the Team panel's Leave): said as such.
+      if (error instanceof ApiError && error.status === 410 && error.data.left === true) return void (await over(`You left ${saved.room.host}'s session from the Team panel while this one was closed.`))
       if (error instanceof ApiError && (error.status === 404 || error.status === 410)) return void (await over())
       if (error instanceof ApiError && error.status === 401) {
         // Given up meanwhile (a room made or joined here, the session's end):

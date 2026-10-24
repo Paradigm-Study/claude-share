@@ -68,6 +68,8 @@ function world(
     eventsRefused?: { count: number }
     /** Holds each join after the first, its answer made as it arrived (what's shared then), until it resolves. */
     joinHold?: () => Promise<void>
+    /** This seat's person left the room from elsewhere (the Team panel's Leave): reading its events is answered 410, left. */
+    leftElsewhere?: boolean
     /** Events the room takes as too large: a post holding one is refused (413) and nothing of it is taken, as for a guest's event past 128 KB. */
     tooLarge?: (event: { type: string; body: Record<string, unknown> }) => boolean
     /** The room's cloud host: a server without containers (`refuse`), Bring home with changes, what the clipboard holds, a bundle the runner didn't take. */
@@ -966,6 +968,8 @@ function world(
         await opts.joinHold()
         return { value: { status: 200, ok: true, headers: {}, text } }
       }
+    } else if (opts.leftElsewhere && path.endsWith('/events') && method === 'GET') {
+      return { value: { status: 410, ok: false, headers: {}, text: JSON.stringify({ error: 'You left this session from the Team panel.', left: true }) } }
     } else if (path.endsWith('/events') && method === 'GET') {
       const after = Number(/[?&]after=(\d+)/.exec(e.url)?.[1] ?? 0)
       body = withList((opts.polled as { seq: number }[] | undefined)?.find(page => page.seq > after) ?? { seq: 1, events: [], people, ended: false, title: 'demo' })
@@ -2242,6 +2246,24 @@ for (const ending of ['leave', 'timeout'] as const) {
     if (ending === 'timeout') expect(asked.toasted.some(t => t.includes('took too long'))).toBe(true)
   })
 }
+
+// A session that was closed when its person left the room from elsewhere
+// (the Team panel's Leave) says so when it opens again, not that the room ended.
+test('a session reopened after its person left from the Team panel says they left', async ($, on) => {
+  const saved = {
+    at: 900,
+    room: { server: 'https://share.test', id: 'room0000000000000001', url: LINK, title: 'demo', host: 'Sam', token: 'g', seat: 'seat1', seq: 2, since: 1 },
+    autoOpen: true, policy: { prompts: 'everyone', approvals: 'edits', files: 'on' }, shown: [], activity: [], chat: [], sidebar: null,
+  }
+  const asked = world(on, { leftElsewhere: true, files: { [checkpointPath('joined:session-test-0001')]: JSON.stringify({ version: 1, value: saved }) } })
+  on('session.start', ($, e) => ({ cwd: e.cwd }))
+  await $.session.start(START)
+  expect(await eventually(asked.clock, () => asked.logged.some(l => l.includes('from the Team panel')))).toBe(true)
+  expect(asked.logged).toContain("You left Sam's session from the Team panel while this one was closed.")
+  expect(asked.logged.some(l => l.includes('ended while this one was closed'))).toBe(false)
+  expect(asked.state.mode ?? 'idle').toBe('idle')
+  expect(asked.some(a => a.endsWith('/join'))).toBe(false) // never seated again
+})
 
 test('saved localhost listeners resume and restore after helper loss without opening a browser', async ($, on) => {
   const saved = {

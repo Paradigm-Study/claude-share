@@ -396,8 +396,14 @@ try {
   await call(`/api/rooms/${linkRoom.id}/join`, { method: 'POST', acct: eve, body: { name: 'Eve' } })
   const kimSeat = (await call(`/api/rooms/${linkRoom.id}/join`, { method: 'POST', body: { name: 'Kim' } })).data
   ok((await call(`/api/rooms/${linkRoom.id}/leave`, { method: 'POST', acct: 'not-a-sign-in' })).status === 403, 'a leave by an unknown sign-in takes nobody')
+  // One of their sessions is listening: it hears at once, its stream ending.
+  const listening = await fetch(`${S}/api/rooms/${linkRoom.id}/stream?after=0`, { headers: { ...V, authorization: `Bearer ${eve1.token}` } })
+  const stream = listening.body.getReader()
+  await stream.read() // the room as it is
   const out = await call(`/api/rooms/${linkRoom.id}/leave`, { method: 'POST', acct: eve })
   ok(out.status === 200 && out.data.left === 2, "a sign-in's leave takes every seat of theirs")
+  const drained = (async () => { for (;;) if ((await stream.read()).done) return true })()
+  ok(await Promise.race([drained, new Promise(done => setTimeout(() => done(false), 3_000))]), "a session still listening with a seat that left has its stream end at once")
   const refused = await call(`/api/rooms/${linkRoom.id}/events?after=0&wait=0`, { tok: eve1.token })
   ok(refused.status === 410 && refused.data.left === true, 'and a seat that left hears so (410)')
   ok((await call(`/api/rooms/${linkRoom.id}/join`, { method: 'POST', acct: eve, body: { name: 'Eve' } })).status === 200, 'joining again is still theirs to do')
