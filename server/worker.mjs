@@ -16,7 +16,10 @@
 // Accounts and teams (server/teams.mjs) live in one more Durable Object, the
 // directory: sign-in, teams and their lists of sessions. Rooms ask it who may
 // share with a team and join one; it asks rooms how they are when listing.
+// They call each other's methods (Durable Object RPC), never a path: what
+// only the objects say to each other has no URL the Worker could forward.
 
+import { DurableObject } from 'cloudflare:workers'
 import {
   Room,
   ROOM_ID,
@@ -199,8 +202,7 @@ export default {
     }
     if (!ROOM_ID.test(id)) return notFound()
     // Previews have a host name of their own: this origin serves none, page
-    // or socket (only previewFetch makes these paths, by the room's key);
-    // nor does it take what the directory tells a room (__team).
+    // or socket (only previewFetch makes these paths, by the room's key).
     if (rest.startsWith('__')) return notFound()
     const limit = limitOf(req, id, rest, req.headers.get('cf-connecting-ip') ?? 'unknown')
     const limiter = limit && { create: env.CREATE_LIMIT, join: env.JOIN_LIMIT, events: env.EVENTS_LIMIT }[limit.kind]
@@ -283,8 +285,9 @@ async function bridge(stub, id, url, headers) {
   })
 }
 
-export class RoomObject {
+export class RoomObject extends DurableObject {
   constructor(state, env) {
+    super(state, env)
     this.state = state
     this.env = env
     this.room = null
@@ -395,6 +398,11 @@ export class RoomObject {
     return files
   }
 
+  // The directory: a members-only team's people now (DirectoryObject's keepTeam).
+  async keepTeam(team, allowed) {
+    if (this.room?.keepTeam(String(team ?? ''), Array.isArray(allowed) ? allowed.map(String) : [], Date.now())) await this.persist()
+  }
+
   async fetch(req) {
     const url = new URL(req.url)
     const origin = req.headers.get('x-share-origin') ?? url.origin
@@ -425,12 +433,6 @@ export class RoomObject {
 
     const room = this.room
     if (preview ? id !== room.previewKey : id !== room.id) return preview ? previewMissing() : notFound()
-    // The directory: a members-only team's people now (DirectoryObject's keepTeam).
-    if (rest === '__team' && req.method === 'POST') {
-      const body = await req.json().catch(() => ({}))
-      if (room.keepTeam(String(body.team ?? ''), Array.isArray(body.allowed) ? body.allowed.map(String) : [], now)) await this.persist()
-      return json({ ok: true })
-    }
     // What expired is swept by the alarm, and by roomRequest for ordinary
     // requests; upgrades check what they need where they admit.
     if (req.method === 'POST') {
@@ -1164,22 +1166,13 @@ async function keyedHash(secret, text) {
 // The one directory of accounts and teams.
 const directoryStub = env => env.DIRECTORY.get(env.DIRECTORY.idFromName('directory'))
 
-// What a room asks the directory, over its stub (paths the Worker never
-// forwards from outside).
-const DIRECTORY_CALLS = ['shareCheck', 'joinCheck', 'register', 'unregister', 'roomEnded', 'teamAccess', 'sessionInvite', 'whoIs']
-function directoryClient(env) {
-  if (!env?.DIRECTORY) return null
-  const call = name => async (...args) => {
-    const res = await directoryStub(env).fetch(`https://directory.internal/rpc/${name}`, { method: 'POST', body: JSON.stringify(args) })
-    const data = await res.json()
-    if (!res.ok) throw new Error(data.error ?? `directory: HTTP ${res.status}`)
-    return data.result
-  }
-  return Object.fromEntries(DIRECTORY_CALLS.map(name => [name, call(name)]))
-}
+// What a room asks the directory: its stub, whose methods are the
+// DirectoryObject's below.
+const directoryClient = env => env?.DIRECTORY ? directoryStub(env) : null
 
-export class DirectoryObject {
+export class DirectoryObject extends DurableObject {
   constructor(state, env) {
+    super(state, env)
     this.state = state
     const storage = state.storage
     const kv = {
@@ -1198,7 +1191,7 @@ export class DirectoryObject {
     // (a path the Worker never forwards from outside).
     const keepTeam = async (id, team, allowed) => {
       if (!ROOM_ID.test(id)) return
-      await env.ROOMS.get(env.ROOMS.idFromName(id)).fetch(`https://room.internal/${id}/__team`, { method: 'POST', body: JSON.stringify({ team, allowed }) })
+      await env.ROOMS.get(env.ROOMS.idFromName(id)).keepTeam(team, allowed)
     }
     // What's timed goes when it's due: the alarm is set for the soonest.
     const onDue = at => void this.wakeAt(at).catch(() => {})
@@ -1215,17 +1208,17 @@ export class DirectoryObject {
     if (next) await this.wakeAt(next)
   }
 
+  // What a room asks (Directory's own methods, the same names).
+  shareCheck(teamId, tokenText) { return this.directory.shareCheck(teamId, tokenText) }
+  joinCheck(teamId, tokenText) { return this.directory.joinCheck(teamId, tokenText) }
+  whoIs(tokenText) { return this.directory.whoIs(tokenText) }
+  teamAccess(teamId) { return this.directory.teamAccess(teamId) }
+  sessionInvite(tokenText, room, to) { return this.directory.sessionInvite(tokenText, room, to) }
+  roomEnded(roomId, teamId) { return this.directory.roomEnded(roomId, teamId) }
+  register(teamId, room) { return this.directory.register(teamId, room) }
+  unregister(teamId, roomId) { return this.directory.unregister(teamId, roomId) }
+
   async fetch(req) {
-    const url = new URL(req.url)
-    if (url.pathname.startsWith('/rpc/')) {
-      const name = url.pathname.slice('/rpc/'.length)
-      if (!DIRECTORY_CALLS.includes(name)) return json({ error: 'Not found' }, 404)
-      try {
-        return json({ result: (await this.directory[name](...(await req.json()))) ?? null })
-      } catch (error) {
-        return json({ error: String(error?.message ?? error) }, 500)
-      }
-    }
-    return this.directory.handle(req, req.headers.get('x-share-origin') ?? url.origin)
+    return this.directory.handle(req, req.headers.get('x-share-origin') ?? new URL(req.url).origin)
   }
 }

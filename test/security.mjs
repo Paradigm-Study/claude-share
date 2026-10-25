@@ -345,10 +345,11 @@ const ok = label => console.log(`ok ${label}`)
     await objects.get(id).state.barrier
     return objects.get(id)
   }
-  env.ROOMS = { idFromName: name => name, get: id => ({ fetch: async (input, init) => (await roomObject(id)).obj.fetch(new Request(input, init)) }) }
+  env.ROOMS = { idFromName: name => name, get: id => ({ fetch: async (input, init) => (await roomObject(id)).obj.fetch(new Request(input, init)), keepTeam: async (...args) => (await roomObject(id)).obj.keepTeam(...args) }) }
   const directoryStorage = new Storage()
   const directory = new DirectoryObject({ storage: directoryStorage }, env)
-  env.DIRECTORY = { idFromName: name => name, get: () => ({ fetch: (input, init) => directory.fetch(new Request(input, init)) }) }
+  // A stub: the object's methods, as RPC calls them.
+  env.DIRECTORY = { idFromName: name => name, get: () => directory }
   const V = { 'x-shared-session-version': PLUGIN_LATEST, 'content-type': 'application/json' }
   const at = async (path, { method = 'GET', body, tok, acct } = {}) => {
     const headers = { ...V, ...(tok ? { authorization: `Bearer ${tok}` } : {}), ...(acct ? { 'x-shared-session-account': acct } : {}) }
@@ -378,8 +379,10 @@ const ok = label => console.log(`ok ${label}`)
   }
   const [fredWs, gusWs] = [await socketOf(fredSeat), await socketOf(gusSeat)]
   const out = async seat => (await at(`/api/rooms/${room.id}/events?after=0&wait=0`, { tok: seat.token })).status
-  // Nobody outside says it: the Worker forwards no __ path to a room.
+  // Nobody outside says it: the Worker forwards no __ path to a room, and the
+  // room has no path for it at all (the directory calls its keepTeam).
   assert.equal((await at(`/api/rooms/${room.id}/__team`, { method: 'POST', tok: room.token, body: { team: crew.id, allowed: [] } })).status, 404)
+  assert.equal((await obj.fetch(new Request(`https://room.internal/${room.id}/__team`, { method: 'POST', headers: { ...V, authorization: `Bearer ${room.token}` }, body: JSON.stringify({ team: crew.id, allowed: [] }) }))).status, 404)
   assert.equal(await out(gusSeat), 200)
   assert.equal((await at(`/api/teams/${crew.id}/members/${fredId}`, { method: 'DELETE', tok: wes })).status, 200)
   assert.deepEqual(fredWs.closes, [{ code: 1008, reason: 'left' }], "the removed member's stream closes")
