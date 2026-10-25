@@ -142,7 +142,10 @@ const peerRelaysA = atom({ plugin: 'shared-session', key: 'peerRelays' } as cons
 const peerSendsA = atom({ plugin: 'shared-session', key: 'peerSends' } as const, [] as SharePeerSend[])
 const mailboxHelperA = atom({ plugin: 'shared-session', key: 'mailboxHelper' } as const, null as ShareMailboxHelper | null)
 const autoOpenA = atom({ plugin: 'shared-session', key: 'autoOpen' } as const, true)
-const askingA = atom({ plugin: 'shared-session', key: 'asking' } as const, null as { prompts: number } | null)
+// Share asked about: what teammates may do first (`teammates` unset), then,
+// with earlier prompts, whether they go too.
+type ShareAsking = { prompts: number; teammates?: SharePolicy['prompts'] }
+const askingA = atom({ plugin: 'shared-session', key: 'asking' } as const, null as ShareAsking | null)
 const connectionA = atom({ plugin: 'shared-session', key: 'connection' } as const, 'live' as 'live' | 'reconnecting')
 const confirmingA = atom({ plugin: 'shared-session', key: 'confirming' } as const, null as 'stop' | null)
 const closingA = atom({ plugin: 'shared-session', key: 'closing' } as const, null as { how: Exit; room: string } | null)
@@ -2958,9 +2961,11 @@ async function inShareTurn<T>($: $, work: () => Promise<T>): Promise<T> {
   }
 }
 
-// Share pressed. Sharing sends everything earlier to everyone with the link,
-// so a session with earlier prompts asks first, in the row above the prompt
-// (and the Room), whether to include them; a fresh one shares at once. It
+// Share pressed. The row above the prompt (and the Room) asks first what
+// teammates may do, prompt Claude or only watch, so a watch-only room is one
+// from its start. Sharing sends everything earlier to everyone with the
+// link, so a session with earlier prompts then asks whether to include them;
+// a fresh one shares once the first is answered. It
 // goes in its turn, and waits for a room being taken back before it reads
 // anything. Asking first gives nothing up: only the share that makes a room
 // (`share`, through `roomClosed`) gives a late one up, so a Cancel leaves it
@@ -2972,8 +2977,14 @@ function requestShare($: $, surface?: RenderSurface): Promise<void> {
     // back or given up. Not read then: a read now would be what `share`
     // sees, should the room come back meanwhile.
     const idle = takingBack !== null || (await read($, modeA)) === 'idle'
-    const prompts = idle ? await earlierPrompts($) : 0
-    if (prompts === 0) {
+    if (!idle) {
+      await share($, surface)
+      return
+    }
+    const prompts = await earlierPrompts($)
+    // Its room back meanwhile, this session shares already: a look after
+    // the wait, so a write.
+    if ((await update($, modeA, v => v)) !== 'idle') {
       await share($, surface)
       return
     }
@@ -3085,9 +3096,13 @@ async function readBackward($: $, path: string, upTo: number, out: HistoryMessag
 // `history: false` shares only what happens from now on: nothing earlier goes
 // out, not even the first prompt as the room's title. Signed in, it goes to
 // the team the Team panel shows (listed for its people, its access setting
-// saying who joins); `team: false` shares by link alone. Called in a share
-// turn (`inShareTurn`), so a session sharing already is what it reads.
-async function share($: $, surface?: RenderSurface, opts: { history?: boolean; team?: boolean } = {}): Promise<ShareRoom> {
+// saying who joins); `team: false` shares by link alone. `watch: true`
+// makes the room watch-only before its link goes anywhere, so nobody's
+// prompt reaches Claude in between; a session sharing already turns
+// watch-only. Called in a share turn (`inShareTurn`), so a session sharing
+// already is what it reads.
+type ShareOpts = { history?: boolean; team?: boolean; watch?: boolean }
+async function share($: $, surface?: RenderSurface, opts: ShareOpts = {}): Promise<ShareRoom> {
   // A room being left finishes first: its state clears before this one's.
   // A late take-back it gives up is over once this room is made, and kept if
   // it isn't (`roomMade`, `notMade`).
@@ -3096,12 +3111,13 @@ async function share($: $, surface?: RenderSurface, opts: { history?: boolean; t
 }
 
 // The room made, and this session sharing it (or the one it shares already).
-async function makeRoom($: $, surface: RenderSurface | undefined, opts: { history?: boolean; team?: boolean }): Promise<ShareRoom> {
+async function makeRoom($: $, surface: RenderSurface | undefined, opts: ShareOpts): Promise<ShareRoom> {
   const mode = await read($, modeA)
   if (mode === 'guest') throw new Error('Leave the session you joined before sharing this one.')
   await update($, askingA, () => null)
   const existing = await read($, roomA)
   if (mode === 'host' && existing) {
+    if (opts.watch && (await read($, policyA)).prompts !== 'watch') await setPolicy($, { prompts: 'watch' })
     await copyLink($, existing.url, surface)
     return existing
   }
@@ -3146,6 +3162,9 @@ async function makeRoom($: $, surface: RenderSurface | undefined, opts: { histor
   await update($, invitedA, () => ({}))
   void readUpdates($).then(() => noteLatest($, created.latest))
   await update($, peopleA, () => [{ id: 'host', name, role: 'host', online: true }])
+  // Watch-only first, ahead of the history: a guest joining takes it up
+  // before anything else, and only the host has the link yet.
+  if (opts.watch) await setPolicy($, { prompts: 'watch' })
 
   // What happened before Share, so people who join see the whole session,
   // and the dev servers Claude opened then, still running, open for them too.
@@ -3158,9 +3177,10 @@ async function makeRoom($: $, surface: RenderSurface | undefined, opts: { histor
   void shareLocal($, localOpens(messages)).catch(() => {})
   startFeed($)
   const copied = await $.ui.copy({ text: room.url, surface }).catch(() => ({ isCopied: false }))
-  $.ui.toast(copied.isCopied ? `Sharing${room.team ? ` with ${room.team.name}` : ''} · link copied` : 'Sharing · the link is in the transcript')
+  const watchOnly = opts.watch ? ', watch-only' : ''
+  $.ui.toast(copied.isCopied ? `Sharing${room.team ? ` with ${room.team.name}` : ''}${watchOnly} · link copied` : `Sharing${watchOnly} · the link is in the transcript`)
   const access = room.team ? ((await read($, teamsA)).teams.find(x => x.id === room.team?.id) ?? null) : null
-  $.ui.log(`Sharing${opts.history === false ? ' from now on' : ''}${room.team ? ` with ${room.team.name}` : ''}. ${whoJoins(room, access)}: ${room.url}`)
+  $.ui.log(`Sharing${opts.history === false ? ' from now on' : ''}${room.team ? ` with ${room.team.name}` : ''}${watchOnly}. ${whoJoins(room, access)}: ${room.url}`)
   if (room.team) void refreshTeams($).catch(() => {})
   void holdRoom($).catch(() => {})
   await markSidebar($, current => `👥 Live · ${current || room.title}`)
@@ -9442,24 +9462,38 @@ function describe(a: ShareActivity): string {
   }
 }
 
-// Share pressed in a session with history: everything earlier would go to
-// everyone with the link, so the row (or the Room) asks first.
-function shareChoice($: $, el: UI, prompts: number, where: 'band' | 'room', surface: RenderSurface, team: string | null) {
+// Share pressed: the row (or the Room) asks what teammates may do, then, in
+// a session with history, whether everything earlier goes to everyone with
+// the link.
+function shareChoice($: $, el: UI, asking: ShareAsking, where: 'band' | 'room', surface: RenderSurface, team: string | null) {
   const { Box, Text, Button } = el
-  const go = (history: boolean, surface?: RenderSurface) =>
-    void inShareTurn($, () => share($, surface, { history })).catch(error => {
+  const { prompts, teammates } = asking
+  const go = (opts: ShareOpts, surface?: RenderSurface) =>
+    void inShareTurn($, () => share($, surface, opts)).catch(error => {
       $.ui.toast("Couldn't share")
       $.ui.log(`Couldn't share: ${String(error?.message ?? error)}`)
     })
+  const pick = (chosen: SharePolicy['prompts'], surface?: RenderSurface) =>
+    prompts ? void update($, askingA, a => (a ? { ...a, teammates: chosen } : a)) : go({ watch: chosen === 'watch' }, surface)
   const who = team ? `Everyone in ${team}` : 'Everyone with the link'
-  const what = `${who} will see its ${prompts} earlier prompt${prompts === 1 ? '' : 's'} and Claude's replies.`
-  const buttons = (
-    <Box flexDirection="row" gap={1} flexShrink={0}>
-      <Button key="share-all" label="Share everything" variant="primary" onPress={press => go(true, press.surface)} />
-      <Button key="share-new" label="Only from now on" onPress={press => go(false, press.surface)} />
-      <Button key="share-cancel" label="Cancel" plain dimColor onPress={() => void update($, askingA, () => null)} />
-    </Box>
-  )
+  const cancel = <Button key="share-cancel" label="Cancel" plain dimColor onPress={() => void update($, askingA, () => null)} />
+  const [what, buttons] = !teammates
+    ? [
+        `${who} will see it live. Teammates can:`,
+        <Box flexDirection="row" gap={1} flexShrink={0}>
+          <Button key="share-prompt" label="Prompt Claude" variant="primary" onPress={press => pick('everyone', press.surface)} />
+          <Button key="share-watch" label="Only watch and chat" onPress={press => pick('watch', press.surface)} />
+          {cancel}
+        </Box>,
+      ]
+    : [
+        `${who} will see its ${prompts} earlier prompt${prompts === 1 ? '' : 's'} and Claude's replies.${teammates === 'watch' ? ' They can watch and chat, not prompt Claude.' : ''}`,
+        <Box flexDirection="row" gap={1} flexShrink={0}>
+          <Button key="share-all" label="Share everything" variant="primary" onPress={press => go({ history: true, watch: teammates === 'watch' }, press.surface)} />
+          <Button key="share-new" label="Only from now on" onPress={press => go({ history: false, watch: teammates === 'watch' }, press.surface)} />
+          {cancel}
+        </Box>,
+      ]
   if (where === 'room') {
     return (
       <Box flexDirection="column" gap={1}>
@@ -10472,14 +10506,15 @@ async function shareAnswer($: $): Promise<string> {
 async function shareCommand($: $, e: { args: string }): Promise<{ text: string }> {
   const words = e.args.trim().toLowerCase().split(/\s+/).filter(Boolean)
   const choice = words.find(w => w === 'all' || w === 'new') ?? ''
-  // `link`: by link alone, not to the team.
+  // `link`: by link alone, not to the team. `watch`: watch-only from the start.
   const byLink = words.includes('link')
+  const watch = words.includes('watch')
   // In its turn: a Share under way finishes first, and this is then a
   // session sharing already.
-  return inShareTurn($, () => shareAsked($, choice, byLink))
+  return inShareTurn($, () => shareAsked($, choice, byLink, watch))
 }
 
-async function shareAsked($: $, choice: string, byLink: boolean): Promise<{ text: string }> {
+async function shareAsked($: $, choice: string, byLink: boolean, watch: boolean): Promise<{ text: string }> {
   try {
     // A room being left finishes first: then the mode says whether to ask.
     // A room being taken back is waited for, not given up: asking gives
@@ -10491,20 +10526,21 @@ async function shareAsked($: $, choice: string, byLink: boolean): Promise<{ text
       if (prompts > 0) {
         const team = byLink ? null : await shareTeamName($)
         // The row above the prompt offers the same two, a press away (by keys in a terminal).
-        await update($, askingA, () => ({ prompts }))
+        await update($, askingA, () => ({ prompts, teammates: watch ? 'watch' : 'everyone' }))
+        const rest = `${byLink ? ' link' : ''}${watch ? ' watch' : ''}`
         return {
           text: [
             `This session has ${prompts} earlier prompt${prompts === 1 ? '' : 's'}. ${team ? `Everyone in ${team}` : 'Everyone with the link'} would see them, and Claude's replies.`,
             '',
-            `- \`/share-session all${byLink ? ' link' : ''}\` shares the session as it is`,
-            `- \`/share-session new${byLink ? ' link' : ''}\` shares only what happens from now on`,
+            `- \`/share-session all${rest}\` shares the session as it is`,
+            `- \`/share-session new${rest}\` shares only what happens from now on`,
           ].join('\n'),
         }
       }
     }
-    const room = await share($, undefined, { history: choice !== 'new', team: !byLink })
+    const room = await share($, undefined, { history: choice !== 'new', team: !byLink, watch })
     const team = room.team ? (await read($, teamsA)).teams.find(t => t.id === room.team?.id) ?? null : null
-    return { text: `Sharing this session${choice === 'new' ? ' from now on' : ''}${room.team ? ` with ${room.team.name}` : ''}. ${whoJoins(room, team)}: ${room.url}` }
+    return { text: `Sharing this session${choice === 'new' ? ' from now on' : ''}${room.team ? ` with ${room.team.name}` : ''}${watch ? ', watch-only: teammates watch and chat, and only you prompt Claude' : ''}. ${whoJoins(room, team)}: ${room.url}` }
   } catch (error) {
     return { text: `Couldn't share: ${String((error as Error)?.message ?? error)}` }
   }
@@ -10534,7 +10570,7 @@ export const register: Register = (on, options) => {
       }
     }
     // Not /share: Claude has its own. Every name here is the plugin's alone.
-    await $.command.register({ name: 'share-session', description: 'Share this session (with your team when signed in): /share-session [all | new] [link]' })
+    await $.command.register({ name: 'share-session', description: 'Share this session (with your team when signed in): /share-session [all | new] [link] [watch]' })
     await $.command.register({ name: 'team', description: "Your team's shared sessions, one click to join: /team [signin | create <name> | invite | signout]" })
     await $.command.register({ name: 'invite', description: 'Invite a teammate into this shared session, in their Claude Code: /invite <name>' })
     await $.command.register({ name: 'stop-sharing', description: 'Stop sharing this session, or leave the one you joined' })
@@ -12241,7 +12277,7 @@ export const register: Register = (on, options) => {
     const room = v.room
 
     if (v.mode === 'idle' || !room) {
-      if (v.asking) return shareChoice($, el, v.asking.prompts, 'room', e.surface, await shareTeamName($))
+      if (v.asking) return shareChoice($, el, v.asking, 'room', e.surface, await shareTeamName($))
       return (
         <Box flexDirection="column" gap={1}>
           <Text bold>This session isn't shared</Text>
@@ -13125,7 +13161,7 @@ export const register: Register = (on, options) => {
 
     if (v.mode === 'idle') {
       const teamName = await shareTeamName($)
-      if (v.asking) return shareChoice($, el, v.asking.prompts, 'band', e.surface, teamName)
+      if (v.asking) return shareChoice($, el, v.asking, 'band', e.surface, teamName)
       // A teammate's invite: who (in their color), then what, cut to fit
       // beside Join.
       const invites = await read($, invitesA)
