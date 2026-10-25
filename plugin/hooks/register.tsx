@@ -9135,16 +9135,19 @@ async function postChat($: $, text: string) {
 
 async function openRoom($: $, page?: RoomTab) {
   roomOpen = true
+  // A dialog in a terminal: it takes the keys (Tab and the arrows walk it,
+  // Esc closes it) and opens as tall as the Room is, not a third of the
+  // screen. Desktop's side panel just comes forward. Opened before any
+  // await: a press asks for it only while the press runs, and an open the
+  // engine counts unasked waits undrawn below 144 columns.
+  const opened = $.ui.open({ id: ROOM, title: 'Shared session', focus: true, closeOnEscape: true, rows: 60 })
   // On the page asked for; else, with messages waiting, on the chat.
   if (page) await update($, roomTabA, () => page)
   else if ((await read($, unreadA)) > 0) await update($, roomTabA, () => 'chat')
   if ((await read($, roomTabA)) === 'chat') await update($, unreadA, () => 0)
   // Who can be invited now: someone may have joined the team since.
   if ((await read($, teamsA)).account) void refreshTeams($).catch(() => {})
-  // A dialog in a terminal: it takes the keys (Tab and the arrows walk it,
-  // Esc closes it) and opens as tall as the Room is, not a third of the
-  // screen. Desktop's side panel just comes forward.
-  await $.ui.open({ id: ROOM, title: 'Shared session', focus: true, closeOnEscape: true, rows: 60 })
+  await opened
 }
 
 // What one riding poll adds to the reply being shown.
@@ -10001,9 +10004,11 @@ let teamTimer: Timer | null = null
 // The Team panel: fresh when it opens, and every 20 s while it's open.
 async function openTeam($: $, page?: 'live' | 'people' | 'settings') {
   teamOpen = true
+  // Opened before any await, as the Room is (openRoom). A session with no
+  // panels (a headless run) still answers in words.
+  const opened = $.ui.open({ id: TEAM, title: 'Team', focus: true, closeOnEscape: true, rows: 60 }).catch(() => {})
   if (page) await update($, teamTabA, () => page)
-  // A session with no panels (a headless run) still answers in words.
-  await $.ui.open({ id: TEAM, title: 'Team', focus: true, closeOnEscape: true, rows: 60 }).catch(() => {})
+  await opened
   void refreshTeams($).catch(() => {})
   if (!teamTimer) {
     teamTimer = $.clock.every(20_000, () => {
