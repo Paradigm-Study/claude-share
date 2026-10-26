@@ -33,6 +33,48 @@
 // who leaves it or is removed leaves its sessions too.
 
 import { json, token, brandPage, commandBox, COPY_SCRIPT, INSTALL_COMMAND } from './core.ts'
+import type { JsonObject } from './core.ts'
+
+// The records above, as the directory writes them.
+export type Account = {
+  id: string
+  provider: string
+  subject: string
+  name: string
+  login?: string
+  email: string
+  emailVerified: boolean
+  githubOrgs: string[]
+  idents?: string[]
+  createdAt: number
+  seenAt: number
+}
+// Who a provider said someone is.
+export type Identity = { provider: string; subject: string; name?: string; login?: string; email?: string; emailVerified: boolean; githubOrgs?: string | string[] }
+type Role = 'owner' | 'member'
+export type Team = { id: string; name: string; createdAt: number; access: 'members' | 'link'; domains?: string[]; githubOrgs?: string[]; invite: string }
+type Membership = { role: Role; at: number }
+type Listing = { id: string; url: string; title: string; host: string; hostAccount?: string; createdAt: number }
+type SessionInvite = { room: { id: string; url: string; title: string; host: string }; from: { id: string; name: string }; at: number; exp: number }
+// How a room is, as it answers for a team's list (RoomObject's `info`).
+export type RoomInfo = { title?: string; ended?: boolean; people?: { name: string; role: string; online: boolean; account?: string }[] }
+// The one key-value store: a Durable Object's storage, or a Map (mapStore).
+// Its values are what the keys above say they are.
+export type Kv = {
+  get(key: string): Promise<any>
+  put(key: string, value: unknown): Promise<unknown>
+  delete(key: string): Promise<unknown>
+  list(prefix: string): Promise<[string, any][]>
+}
+// A provider this server signs in with: its OAuth app's id and secret (none for the test one).
+type ProviderKeys = { id?: string; secret?: string }
+export type DirectoryOptions = {
+  providers?: Record<string, ProviderKeys>
+  roomInfo?: (id: string) => Promise<RoomInfo | null>
+  keepTeam?: (room: string, team: string, allowed: string[]) => Promise<unknown>
+  onDue?: (at: number) => void
+  fetch?: typeof fetch
+}
 
 const LOGIN_MS = 10 * 60 * 1000
 const INVITE_MS = 12 * 60 * 60 * 1000 // a session invite lasts half a day at most
@@ -51,7 +93,7 @@ const PUBLIC_DOMAINS = new Set(
   'gmail.com googlemail.com outlook.com hotmail.com live.com msn.com yahoo.com ymail.com icloud.com me.com mac.com aol.com proton.me protonmail.com pm.me gmx.com gmx.net mail.com yandex.com yandex.ru zoho.com qq.com 163.com 126.com naver.com hey.com fastmail.com tutanota.com duck.com users.noreply.github.com'.split(' '),
 )
 
-export const PROVIDERS = {
+export const PROVIDERS: Record<string, { label: string; authorize: string; scope: string }> = {
   github: {
     label: 'GitHub',
     authorize: 'https://github.com/login/oauth/authorize',
@@ -66,30 +108,31 @@ export const PROVIDERS = {
 
 // Which providers this server can sign people in with: those with a client id
 // and secret configured (and the test one, for the end-to-end test only).
-export function providersFrom(env) {
-  const out = {}
+export function providersFrom(env: { GITHUB_CLIENT_ID?: string; GITHUB_CLIENT_SECRET?: string; GOOGLE_CLIENT_ID?: string; GOOGLE_CLIENT_SECRET?: string; AUTH_TEST?: string }) {
+  const out: Record<string, ProviderKeys> = {}
   if (env.GITHUB_CLIENT_ID && env.GITHUB_CLIENT_SECRET) out.github = { id: env.GITHUB_CLIENT_ID, secret: env.GITHUB_CLIENT_SECRET }
   if (env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET) out.google = { id: env.GOOGLE_CLIENT_ID, secret: env.GOOGLE_CLIENT_SECRET }
   if (env.AUTH_TEST === '1') out.test = {}
   return out
 }
 
-async function sha256(text) {
+async function sha256(text: string) {
   const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text)))
   return [...digest].map(b => b.toString(16).padStart(2, '0')).join('')
 }
 
-const clean = (v, max = NAME_MAX) => String(v ?? '').replace(/[\u0000-\u001f]/g, '').trim().slice(0, max)
-const domainOf = email => (String(email ?? '').toLowerCase().split('@')[1] ?? '').trim()
-const listOf = (value, test) =>
-  [...new Set((Array.isArray(value) ? value : String(value ?? '').split(/[\s,]+/)).map(v => String(v).trim().toLowerCase().replace(/^@/, '')).filter(v => v && test.test(v)))].slice(0, 20)
+const clean = (v: unknown, max = NAME_MAX) => String(v ?? '').replace(/[\u0000-\u001f]/g, '').trim().slice(0, max)
+const domainOf = (email: unknown) => (String(email ?? '').toLowerCase().split('@')[1] ?? '').trim()
+const listOf = (value: unknown, test: RegExp): string[] =>
+  [...new Set((Array.isArray(value) ? value : String(value ?? '').split(/[\s,]+/)).map((v: unknown) => String(v).trim().toLowerCase().replace(/^@/, '')).filter(v => v && test.test(v)))].slice(0, 20)
 
-const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c])
+const ESCAPES: Record<string, string> = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }
+const esc = (s: unknown) => String(s).replace(/[&<>"]/g, c => ESCAPES[c] ?? c)
 
 // The sign-in and invite pages, in the site's look (brandPage): an eyebrow,
 // the heading, then its words as paragraphs (escaped here) and whatever
 // follows them (already markup).
-function page(eyebrow, heading, lines, more = {}) {
+function page(eyebrow: string, heading: string, lines: string | string[], more: { after?: string; script?: string; status?: number } = {}) {
   const body = (Array.isArray(lines) ? lines : [lines]).map(line => `<p class="sub-copy">${line}</p>`).join('')
   return brandPage({ title: heading, eyebrow, heading, body, ...more })
 }
@@ -133,13 +176,13 @@ const CONTINUE_SCRIPT = `(function () {
   shown();
 })();`
 // …allowed by its hash, the one script the page may run.
-let continueHash = null
+let continueHash: Promise<string> | null = null
 const continueSource = () => (continueHash ??= crypto.subtle.digest('SHA-256', new TextEncoder().encode(CONTINUE_SCRIPT)).then(d => `'sha256-${btoa(String.fromCharCode(...new Uint8Array(d)))}'`))
 
 // The page whose Continue finishes a sign-in: never in a frame (nothing drawn
 // over it can take the click), running no script but its own, never cached,
 // and its address (the login) never sent on.
-async function guarded(res) {
+async function guarded(res: Response) {
   const headers = new Headers(res.headers)
   headers.set('x-frame-options', 'DENY')
   headers.set('content-security-policy', `frame-ancestors 'none'; script-src ${await continueSource()}`)
@@ -149,9 +192,15 @@ async function guarded(res) {
 }
 
 export class Directory {
-  // kv: { get(key), put(key, value), delete(key), list(prefix) → [key, value][] }
-  // opts: { providers, roomInfo(id) → info | null, fetch }
-  constructor(kv, opts = {}) {
+  kv: Kv
+  providers: Record<string, ProviderKeys>
+  roomInfo: (id: string) => Promise<RoomInfo | null>
+  keepTeam: (room: string, team: string, allowed: string[]) => Promise<unknown>
+  onDue: (at: number) => void
+  fetch: typeof fetch
+  changes: Map<string, { start: number; count: number }>
+
+  constructor(kv: Kv, opts: DirectoryOptions = {}) {
     this.kv = kv
     this.providers = opts.providers ?? {}
     this.roomInfo = opts.roomInfo ?? (async () => null)
@@ -162,7 +211,7 @@ export class Directory {
   }
 
   // One change on the account's minute: false once it has made CHANGES.limit.
-  change(accountId, now) {
+  change(accountId: string, now: number) {
     const w = this.changes.get(accountId)
     if (w && now - w.start < CHANGES.periodMs) return ++w.count <= CHANGES.limit
     if (this.changes.size >= 10_000) for (const [id, v] of this.changes) if (now - v.start >= CHANGES.periodMs) this.changes.delete(id)
@@ -172,7 +221,7 @@ export class Directory {
 
   // -- accounts --------------------------------------------------------------
 
-  async accountOf(tokenText) {
+  async accountOf(tokenText: unknown): Promise<Account | null> {
     const t = String(tokenText ?? '').replace(/^Bearer\s+/i, '').trim()
     if (!/^ssa_[A-Za-z0-9_-]{20,80}$/.test(t)) return null
     const rec = await this.kv.get(`tok:${await sha256(t)}`)
@@ -182,13 +231,13 @@ export class Directory {
   // The account a confirmed identity is, made or brought up to date, and the
   // teams it now joins by itself. Its token is made only when Claude Code
   // collects the sign-in (mint, from poll).
-  async signIn(identity, now) {
+  async signIn(identity: Identity, now: number) {
     const ident = `ident:${identity.provider}:${identity.subject}`
     const email = identity.emailVerified && identity.email ? String(identity.email).toLowerCase() : ''
     let id = (await this.kv.get(ident)) ?? (email ? await this.byEmail(email, identity.provider) : null)
     const before = id ? await this.kv.get(`acct:${id}`) : null
     id = before?.id ?? token(12)
-    const account = {
+    const account: Account = {
       ...before,
       id,
       provider: identity.provider,
@@ -221,29 +270,29 @@ export class Directory {
   // address, and no identity of its own at this provider (a second one there,
   // with the same address, is that address deleted and made again for someone
   // else). Anything else in the index takes nobody.
-  async byEmail(email, provider) {
+  async byEmail(email: string, provider: string): Promise<string | null> {
     const id = await this.kv.get(`email:${email}`)
-    const account = id ? await this.kv.get(`acct:${id}`) : null
+    const account: Account | null = id ? await this.kv.get(`acct:${id}`) : null
     if (!account || !account.emailVerified || account.email !== email) return null
     const idents = new Set([...(account.idents ?? []), `ident:${account.provider}:${account.subject}`])
     return [...idents].some(i => i.startsWith(`ident:${provider}:`)) ? null : account.id
   }
 
   // The address's index entry, only while it is this account's.
-  async unindex(email, id) {
+  async unindex(email: string, id: string) {
     if ((await this.kv.get(`email:${email}`)) === id) await this.kv.delete(`email:${email}`)
   }
 
   // A signed-in Claude Code's token, handed straight over: only its hash is kept.
-  async mint(accountId, now) {
+  async mint(accountId: string, now: number) {
     const secret = `ssa_${token(24)}`
     await this.kv.put(`tok:${await sha256(secret)}`, { account: accountId, at: now })
     return secret
   }
 
   // Teams that take this account by its email's domain or its GitHub orgs.
-  async autoJoin(account, now) {
-    const teams = new Set()
+  async autoJoin(account: Account, now: number) {
+    const teams = new Set<string>()
     const domain = account.emailVerified ? domainOf(account.email) : ''
     if (domain) for (const [key] of await this.kv.list(`dom:${domain}:`)) teams.add(key.split(':')[2])
     for (const org of account.githubOrgs ?? []) for (const [key] of await this.kv.list(`org:${org}:`)) teams.add(key.split(':')[2])
@@ -254,21 +303,21 @@ export class Directory {
     }
   }
 
-  async addMember(teamId, accountId, role, now) {
+  async addMember(teamId: string, accountId: string, role: Role, now: number) {
     await this.kv.put(`mem:${teamId}:${accountId}`, { role, at: now })
     await this.kv.put(`myteam:${accountId}:${teamId}`, 1)
     await this.kv.delete(`left:${teamId}:${accountId}`)
   }
 
-  async removeMember(teamId, accountId, opts = {}) {
+  async removeMember(teamId: string, accountId: string, opts: { remember?: boolean } = {}) {
     await this.kv.delete(`mem:${teamId}:${accountId}`)
     await this.kv.delete(`myteam:${accountId}:${teamId}`)
     if (opts.remember !== false) await this.kv.put(`left:${teamId}:${accountId}`, 1)
-    const team = await this.kv.get(`team:${teamId}`)
-    const rooms = (await this.kv.list(`live:${teamId}:`)).map(([, entry]) => entry.id)
+    const team: Team | undefined = await this.kv.get(`team:${teamId}`)
+    const rooms: string[] = (await this.kv.list(`live:${teamId}:`)).map(([, entry]) => entry.id)
     // A team keeps an owner while it has anyone: the longest-standing member.
     // With nobody left, it goes, with its invite and what joined it by itself.
-    const members = await this.kv.list(`mem:${teamId}:`)
+    const members: [string, Membership][] = await this.kv.list(`mem:${teamId}:`)
     await this.enforce(teamId, rooms, team?.access, members)
     if (!members.length) {
       if (team) {
@@ -290,14 +339,14 @@ export class Directory {
   // A members-only team's sessions keep only its members as they are now
   // (someone left or was removed, or it just turned members-only): each room
   // lets go of the guests whose account isn't one, with what they hold open.
-  async enforce(teamId, rooms, access, members) {
+  async enforce(teamId: string, rooms: string[], access: string | undefined, members?: [string, Membership][]) {
     if (access !== 'members' || !rooms.length) return
     const allowed = (members ?? (await this.kv.list(`mem:${teamId}:`))).map(([key]) => key.split(':')[2])
     for (const id of rooms) await this.keepTeam(id, teamId, allowed).catch(() => {})
   }
 
-  async teamsOf(account) {
-    const out = []
+  async teamsOf(account: Account) {
+    const out: ReturnType<Directory['teamView']>[] = []
     for (const [key] of await this.kv.list(`myteam:${account.id}:`)) {
       const teamId = key.split(':')[2]
       const team = await this.kv.get(`team:${teamId}`)
@@ -307,7 +356,7 @@ export class Directory {
     return out.sort((a, b) => a.name.localeCompare(b.name))
   }
 
-  teamView(team, role) {
+  teamView(team: Team, role: Role) {
     return {
       id: team.id,
       name: team.name,
@@ -321,18 +370,18 @@ export class Directory {
   // -- what rooms ask ---------------------------------------------------------
 
   // May this account share with this team? Returns its name for the room.
-  async shareCheck(teamId, tokenText) {
+  async shareCheck(teamId: string, tokenText: string) {
     const account = await this.accountOf(tokenText)
     if (!account) return { ok: false, status: 401, error: 'Sign in to share with a team: /team in Claude Code.' }
-    const team = TEAM_ID.test(String(teamId)) ? await this.kv.get(`team:${teamId}`) : null
+    const team: Team | null = TEAM_ID.test(String(teamId)) ? await this.kv.get(`team:${teamId}`) : null
     if (!team || !(await this.kv.get(`mem:${team.id}:${account.id}`))) return { ok: false, status: 403, error: "You're not in that team." }
     return { ok: true, team: { id: team.id, name: team.name }, account: { id: account.id, name: account.name } }
   }
 
   // May this person join a session shared with this team? The team's access
   // setting decides, as it is now.
-  async joinCheck(teamId, tokenText) {
-    const team = await this.kv.get(`team:${teamId}`)
+  async joinCheck(teamId: string, tokenText: string) {
+    const team: Team | undefined = await this.kv.get(`team:${teamId}`)
     // The team is gone (its last person left): nobody can be checked against it.
     if (!team) return { ok: false, status: 403, error: 'This session was shared with a team that no longer exists. Ask the host to share it again.' }
     if (team.access === 'link') return { ok: true }
@@ -343,19 +392,19 @@ export class Directory {
   }
 
   // Who a sign-in is, for a room to know a person across their sessions.
-  async whoIs(tokenText) {
+  async whoIs(tokenText: string) {
     const account = await this.accountOf(tokenText)
     return account ? { id: account.id, name: account.name } : null
   }
 
   // A team's access setting, for a session's page to say who can join.
-  async teamAccess(teamId) {
+  async teamAccess(teamId: string): Promise<string | null> {
     return (await this.kv.get(`team:${teamId}`))?.access ?? null
   }
 
   // People who share a team with this account: whom it may invite.
-  async teammates(account) {
-    const seen = new Map()
+  async teammates(account: Account) {
+    const seen = new Map<string, { id: string; name: string; login?: string }>()
     for (const [key] of await this.kv.list(`myteam:${account.id}:`)) {
       for (const m of await this.members(key.split(':')[2])) if (m.id !== account.id && !seen.has(m.id)) seen.set(m.id, { id: m.id, name: m.name, login: m.login })
     }
@@ -365,13 +414,13 @@ export class Directory {
   // A host invites teammates to the session it shares: each sees it in their
   // own Claude Code until they join, dismiss it, it ends, or a day passes.
   // Only people who share a team with the host can be invited.
-  async sessionInvite(tokenText, room, to, now = Date.now()) {
+  async sessionInvite(tokenText: string, room: SessionInvite['room'], to: unknown, now = Date.now()) {
     const account = await this.accountOf(tokenText)
     if (!account) return { ok: false, status: 401, error: 'Sign in to invite people: /team in Claude Code.' }
     if (!this.change(account.id, now)) return { ok: false, status: 429, error: CHANGES.message }
     const mates = new Map((await this.teammates(account)).map(m => [m.id, m]))
-    const invited = []
-    const refused = []
+    const invited: string[] = []
+    const refused: string[] = []
     for (const id of (Array.isArray(to) ? to : []).slice(0, 50).map(String)) {
       const mate = mates.get(id)
       if (!mate) {
@@ -388,21 +437,21 @@ export class Directory {
 
   // An invite gone (answered, ended, expired, its account deleted), with
   // its session's index of it.
-  async dropInvite(accountId, roomId) {
+  async dropInvite(accountId: string, roomId: string) {
     await this.kv.delete(`sinv:${accountId}:${roomId}`)
     await this.kv.delete(`rinv:${roomId}:${accountId}`)
   }
 
   // A session ended or expired: its invites go, and its place on its team's list.
-  async roomEnded(roomId, teamId) {
+  async roomEnded(roomId: string, teamId: string | null) {
     if (teamId) await this.kv.delete(`live:${teamId}:${roomId}`)
     for (const [key] of await this.kv.list(`rinv:${roomId}:`)) await this.dropInvite(key.slice(`rinv:${roomId}:`.length), roomId)
   }
 
   // What's due goes: invites past their 12 hours, sign-ins past their ten
   // minutes. Returns when the next is due, or null.
-  async sweep(now) {
-    let next = null
+  async sweep(now: number) {
+    let next: number | null = null
     for (const prefix of ['sinv:', 'login:', 'state:']) {
       for (const [key, rec] of await this.kv.list(prefix)) {
         if (!(rec?.exp > now)) {
@@ -416,9 +465,9 @@ export class Directory {
   }
 
   // An account's invites still good: an ended or expired session's go.
-  async invitesOf(account, now) {
-    const out = []
-    for (const [key, invite] of await this.kv.list(`sinv:${account.id}:`)) {
+  async invitesOf(account: Account, now: number) {
+    const out: { room: SessionInvite['room']; from: { name: string }; at: number }[] = []
+    for (const [key, invite] of (await this.kv.list(`sinv:${account.id}:`)) as [string, SessionInvite][]) {
       const info = invite.exp > now ? await this.roomInfo(invite.room.id).catch(() => null) : null
       // Already there (another session of theirs joined): nothing to answer.
       const there = Array.isArray(info?.people) && info.people.some(p => p.account === account.id && p.online)
@@ -431,17 +480,17 @@ export class Directory {
     return out.sort((a, b) => b.at - a.at)
   }
 
-  async register(teamId, room) {
+  async register(teamId: string, room: Listing) {
     await this.kv.put(`live:${teamId}:${room.id}`, room)
   }
 
-  async unregister(teamId, roomId) {
+  async unregister(teamId: string, roomId: string) {
     await this.kv.delete(`live:${teamId}:${roomId}`)
   }
 
-  async sessions(teamId) {
-    const out = []
-    for (const [key, entry] of await this.kv.list(`live:${teamId}:`)) {
+  async sessions(teamId: string) {
+    const out: (Omit<Listing, 'title'> & { title: string; hostOnline: boolean; people: string[]; accounts: string[] })[] = []
+    for (const [key, entry] of (await this.kv.list(`live:${teamId}:`)) as [string, Listing][]) {
       const info = await this.roomInfo(entry.id).catch(() => null)
       if (!info || info.ended) {
         await this.kv.delete(key) // ended or expired: off the list
@@ -457,7 +506,7 @@ export class Directory {
         hostOnline: people.some(p => p.role === 'host' && p.online),
         people: people.filter(p => p.online).map(p => p.name),
         // Who's in it by account: a person's own sessions are "in it" anywhere.
-        accounts: people.filter(p => p.online && p.account).map(p => p.account),
+        accounts: people.filter(p => p.online && p.account).map(p => p.account ?? ''),
         createdAt: entry.createdAt,
       })
     }
@@ -467,17 +516,17 @@ export class Directory {
   // -- HTTP ---------------------------------------------------------------------
 
   // Every path this owns: /auth/…, /api/auth/…, /api/me, /api/teams…, /api/invites/…, /i/<code>.
-  static owns(pathname) {
+  static owns(pathname: string) {
     return /^\/(auth\/|api\/auth\/|api\/me(\/invites(\/[^/]+)?)?$|api\/teams(\/|$)|api\/invites\/|i\/)/.test(pathname)
   }
 
   // What one address may do only so often (the join limit): start a sign-in,
   // make a team, take an invite. Polling and listing are not counted.
-  static limited(pathname, method) {
+  static limited(pathname: string, method: string) {
     return /^\/auth\/[^/]+\/start$/.test(pathname) || (method === 'POST' && /^\/api\/(teams|invites\/[^/]+)$/.test(pathname))
   }
 
-  async handle(req, origin, now = Date.now()) {
+  async handle(req: Request, origin: string, now = Date.now()): Promise<Response> {
     const url = new URL(req.url)
     const parts = url.pathname.split('/').filter(Boolean)
     const method = req.method
@@ -487,7 +536,7 @@ export class Directory {
       }
       if (parts[0] === 'auth' && parts.length === 3 && parts[2] === 'start') return this.start(parts[1], url, origin, now)
       if (parts[0] === 'auth' && parts.length === 3 && parts[2] === 'callback') return this.callback(parts[1], url, origin, now)
-      if (url.pathname === '/auth/confirm') return method === 'POST' ? this.confirm(await readBody(req, 'form'), now) : page('Sign-in', "This sign-in link isn't complete", startAgain)
+      if (url.pathname === '/auth/confirm') return method === 'POST' ? this.confirm(await readForm(req), now) : page('Sign-in', "This sign-in link isn't complete", startAgain)
       if (url.pathname === '/api/auth/poll' && method === 'POST') return this.poll(await readBody(req), now)
       if (parts[0] === 'i' && parts.length === 2) return this.invitePage(parts[1], origin)
 
@@ -511,8 +560,8 @@ export class Directory {
       if (url.pathname === '/api/teams' && method === 'POST') return this.createTeam(account, await readBody(req), now)
       if (parts[0] === 'api' && parts[1] === 'invites' && parts.length === 3 && method === 'POST') return this.acceptInvite(account, parts[2], now)
       if (parts[0] === 'api' && parts[1] === 'teams' && parts.length >= 3) {
-        const team = TEAM_ID.test(parts[2]) ? await this.kv.get(`team:${parts[2]}`) : null
-        const mem = team ? await this.kv.get(`mem:${team.id}:${account.id}`) : null
+        const team: Team | null = TEAM_ID.test(parts[2]) ? await this.kv.get(`team:${parts[2]}`) : null
+        const mem: Membership | null = team ? await this.kv.get(`mem:${team.id}:${account.id}`) : null
         if (!team || !mem) return json({ error: "No such team, or you're not in it." }, 404)
         const owner = mem.role === 'owner'
         const sub = parts.slice(3).join('/')
@@ -543,27 +592,27 @@ export class Directory {
       }
       return json({ error: 'Not found' }, 404)
     } catch (error) {
-      return json({ error: String(error?.message ?? error).slice(0, 200) }, 400)
+      return json({ error: String((error as Error | null)?.message ?? error).slice(0, 200) }, 400)
     }
   }
 
-  accountView(account) {
+  accountView(account: Account) {
     return { id: account.id, name: account.name, login: account.login, email: account.email, provider: account.provider }
   }
 
-  async members(teamId) {
-    const out = []
-    for (const [key, m] of await this.kv.list(`mem:${teamId}:`)) {
-      const a = await this.kv.get(`acct:${key.split(':')[2]}`)
+  async members(teamId: string) {
+    const out: { id: string; name: string; login?: string; role: Role }[] = []
+    for (const [key, m] of (await this.kv.list(`mem:${teamId}:`)) as [string, Membership][]) {
+      const a: Account | undefined = await this.kv.get(`acct:${key.split(':')[2]}`)
       if (a) out.push({ id: a.id, name: a.name, login: a.login, role: m.role })
     }
     return out.sort((a, b) => Number(b.role === 'owner') - Number(a.role === 'owner') || a.name.localeCompare(b.name))
   }
 
-  async createTeam(account, body, now) {
+  async createTeam(account: Account, body: JsonObject, now: number) {
     const name = clean(body.name)
     if (!name) return json({ error: 'A team needs a name.' }, 400)
-    const team = { id: token(9), name, createdAt: now, access: 'members', domains: [], githubOrgs: [], invite: token(12) }
+    const team: Team = { id: token(9), name, createdAt: now, access: 'members', domains: [], githubOrgs: [], invite: token(12) }
     await this.kv.put(`team:${team.id}`, team)
     await this.kv.put(`inv:${team.invite}`, team.id)
     await this.addMember(team.id, account.id, 'owner', now)
@@ -574,7 +623,7 @@ export class Directory {
   // the domain of their own verified email (not a public provider's), and
   // GitHub organizations they're in. Otherwise anyone could pull strangers in,
   // and with them what those strangers share.
-  unclaimable(account, body) {
+  unclaimable(account: Account, body: JsonObject) {
     const own = account.emailVerified ? domainOf(account.email) : ''
     if (body.domains !== undefined) {
       const bad = listOf(body.domains, DOMAIN).filter(d => d !== own || PUBLIC_DOMAINS.has(d))
@@ -595,13 +644,13 @@ export class Directory {
   // An owner's changes. Only what changed is written, and only accounts a
   // newly added domain or organization takes are looked at: saving the same
   // lists again (or none) scans nothing.
-  async updateTeam(team, body, now = Date.now()) {
-    const next = { ...team }
+  async updateTeam(team: Team, body: JsonObject, now = Date.now()) {
+    const next: Team = { ...team }
     if (body.name !== undefined && clean(body.name)) next.name = clean(body.name)
     if (body.access === 'members' || body.access === 'link') next.access = body.access
     if (body.domains !== undefined) next.domains = listOf(body.domains, DOMAIN)
     if (body.githubOrgs !== undefined) next.githubOrgs = listOf(body.githubOrgs, ORG)
-    const minus = (a, b) => (a ?? []).filter(x => !(b ?? []).includes(x))
+    const minus = (a: string[] | undefined, b: string[] | undefined) => (a ?? []).filter(x => !(b ?? []).includes(x))
     for (const d of minus(team.domains, next.domains)) await this.kv.delete(`dom:${d}:${team.id}`)
     for (const o of minus(team.githubOrgs, next.githubOrgs)) await this.kv.delete(`org:${o}:${team.id}`)
     const domains = minus(next.domains, team.domains)
@@ -614,14 +663,14 @@ export class Directory {
     // People already signed in whom the new rules take in. Only an account
     // says which organizations it's in, so a new one reads every account
     // once; a new domain alone reads the verified-email index.
-    const takes = a => (a.emailVerified && domains.includes(domainOf(a.email))) || (a.githubOrgs ?? []).some(o => orgs.includes(o))
-    const found = new Map()
+    const takes = (a: Account) => (a.emailVerified && domains.includes(domainOf(a.email))) || (a.githubOrgs ?? []).some(o => orgs.includes(o))
+    const found = new Map<string, Account>()
     if (orgs.length) {
-      for (const [, a] of await this.kv.list('acct:')) if (takes(a)) found.set(a.id, a)
+      for (const [, a] of (await this.kv.list('acct:')) as [string, Account][]) if (takes(a)) found.set(a.id, a)
     } else if (domains.length) {
-      for (const [key, id] of await this.kv.list('email:')) {
+      for (const [key, id] of (await this.kv.list('email:')) as [string, string][]) {
         if (found.has(id) || !domains.includes(domainOf(key.slice('email:'.length)))) continue
-        const a = await this.kv.get(`acct:${id}`)
+        const a: Account | undefined = await this.kv.get(`acct:${id}`)
         if (a && takes(a)) found.set(id, a)
       }
     }
@@ -630,20 +679,20 @@ export class Directory {
   }
 
   // The team an invite code is for, while it works.
-  async inviteTeam(code) {
+  async inviteTeam(code: unknown): Promise<Team | null> {
     const teamId = /^[A-Za-z0-9_-]{8,40}$/.test(String(code ?? '')) ? await this.kv.get(`inv:${code}`) : null
     return teamId ? ((await this.kv.get(`team:${teamId}`)) ?? null) : null
   }
 
-  async acceptInvite(account, code, now) {
+  async acceptInvite(account: Account, code: unknown, now: number) {
     const team = await this.inviteTeam(code)
     if (!team) return json({ error: "That invite link doesn't work any more. Ask for a new one." }, 404)
-    const mem = await this.kv.get(`mem:${team.id}:${account.id}`)
+    const mem: Membership | undefined = await this.kv.get(`mem:${team.id}:${account.id}`)
     if (!mem) await this.addMember(team.id, account.id, 'member', now)
     return json({ team: this.teamView(team, mem?.role ?? 'member'), joined: !mem })
   }
 
-  async deleteAccount(account) {
+  async deleteAccount(account: Account) {
     const teams = (await this.kv.list(`myteam:${account.id}:`)).map(([key]) => key.split(':')[2])
     // The sessions it shares, off its teams' lists (they go on, by link).
     for (const team of teams) for (const [key, entry] of await this.kv.list(`live:${team}:`)) if (entry?.hostAccount === account.id) await this.kv.delete(key)
@@ -668,7 +717,7 @@ export class Directory {
   // Whoever makes a start link chooses its `login`, though, so the provider's
   // answer only asks (ask): the browser says yes before anything is signed
   // in. An invite code, when given, is taken once they're signed in.
-  async start(provider, url, origin, now) {
+  async start(provider: string, url: URL, origin: string, now: number) {
     if (!this.providers[provider]) return page('Sign-in', "This sign-in isn't set up", 'This share server has no sign-in with that provider. Sharing by link works without one.')
     const login = url.searchParams.get('login') ?? ''
     if (!LOGIN_ID.test(login)) return page('Sign-in', "This sign-in link isn't complete", startAgain)
@@ -683,13 +732,13 @@ export class Directory {
       // The end-to-end test's own provider: who to be comes in the link. It
       // asks in the browser as the others do.
       const email = clean(url.searchParams.get('email'), 120).toLowerCase()
-      const identity = { provider: 'test', subject: email || login, name: url.searchParams.get('name') || email, email, emailVerified: Boolean(email), githubOrgs: url.searchParams.get('orgs') ?? '' }
+      const identity: Identity = { provider: 'test', subject: email || login, name: url.searchParams.get('name') || email, email, emailVerified: Boolean(email), githubOrgs: url.searchParams.get('orgs') ?? '' }
       return this.ask(identity, login, invite, now)
     }
     const state = token(18)
     await this.kv.put(`state:${state}`, { provider, login, invite, exp: now + LOGIN_MS })
     const p = PROVIDERS[provider]
-    const q = new URLSearchParams({ client_id: this.providers[provider].id, redirect_uri: `${origin}/auth/${provider}/callback`, scope: p.scope, state })
+    const q = new URLSearchParams({ client_id: this.providers[provider].id ?? '', redirect_uri: `${origin}/auth/${provider}/callback`, scope: p.scope, state })
     if (provider === 'google') {
       q.set('response_type', 'code')
       q.set('prompt', 'select_account')
@@ -697,7 +746,7 @@ export class Directory {
     return new Response(null, { status: 302, headers: { location: `${p.authorize}?${q}`, 'cache-control': 'no-store' } })
   }
 
-  async callback(provider, url, origin, now) {
+  async callback(provider: string, url: URL, origin: string, now: number) {
     const state = await this.kv.get(`state:${url.searchParams.get('state') ?? ''}`)
     if (!state || state.provider !== provider || state.exp < now) return page('Sign-in', 'This sign-in expired', ['A sign-in waits ten minutes.', startAgain])
     await this.kv.delete(`state:${url.searchParams.get('state')}`)
@@ -707,7 +756,7 @@ export class Directory {
       const identity = await this.identity(provider, code, `${origin}/auth/${provider}/callback`)
       return await this.ask(identity, state.login, state.invite, now)
     } catch (error) {
-      return page('Sign-in', "Sign-in didn't work", [esc(String(error?.message ?? error).slice(0, 200)), startAgain])
+      return page('Sign-in', "Sign-in didn't work", [esc(String((error as Error | null)?.message ?? error).slice(0, 200)), startAgain])
     }
   }
 
@@ -716,7 +765,7 @@ export class Directory {
   // `login`), so someone who opened another person's start link can tell
   // it isn't theirs, and only its Continue, a POST carrying this page's
   // nonce, goes on (CONTINUE_SCRIPT: not a click timed for it).
-  async ask(identity, login, invite, now) {
+  async ask(identity: Identity, login: string, invite: string, now: number) {
     const known = await this.kv.get(`login:${login}`)
     if (known?.status === 'done') return alreadyIn()
     const nonce = token(18)
@@ -738,7 +787,7 @@ export class Directory {
   // The confirmation page's Continue. Only the page's own nonce finishes
   // it: a form another site posts can't, nor a page a newer start has
   // replaced.
-  async confirm(form, now) {
+  async confirm(form: URLSearchParams, now: number) {
     const login = String(form.get('login') ?? '')
     const rec = LOGIN_ID.test(login) ? await this.kv.get(`login:${login}`) : null
     if (!rec || rec.exp < now) {
@@ -754,12 +803,12 @@ export class Directory {
 
   // Signs the confirmed identity in and takes its invite. No token yet:
   // storage never holds one, so it's made as Claude Code collects it (poll).
-  async finish(identity, login, invite, now) {
+  async finish(identity: Identity, login: string, invite: string, now: number) {
     const account = await this.signIn(identity, now)
-    let joined = null
+    let joined: { id: string; name: string } | null = null
     if (invite) {
       const res = await this.acceptInvite(account, invite, now)
-      if (res.ok) joined = (/** @type {{ team?: { id: string, name: string } }} */ (await res.json())).team ?? null
+      if (res.ok) joined = ((await res.json()) as { team?: { id: string; name: string } }).team ?? null
     }
     await this.kv.put(`login:${login}`, { status: 'done', account: account.id, joined: joined?.id ?? null, exp: now + LOGIN_MS })
     return page('Signed in', `You're signed in, ${account.name}`, [
@@ -772,7 +821,7 @@ export class Directory {
   // the browser's Continue finished it: the token is made now, so Claude
   // Code keeps it and the server only its hash. An expired sign-in is
   // deleted as it's asked for, not only by the next start's sweep.
-  async poll(body, now) {
+  async poll(body: JsonObject, now: number) {
     const verifier = String(body.verifier ?? '')
     if (!/^[A-Za-z0-9_-]{32,128}$/.test(verifier)) return json({ error: 'bad verifier' }, 400)
     const login = await sha256(verifier)
@@ -788,31 +837,31 @@ export class Directory {
     return json({ status: 'done', token: await this.mint(account.id, now), joined: rec.joined ?? null, account: this.accountView(account), teams: await this.teamsOf(account) })
   }
 
-  async identity(provider, code, redirect) {
+  async identity(provider: string, code: string, redirect: string): Promise<Identity> {
     const cfg = this.providers[provider]
     if (provider === 'github') {
       const tok = await this.fetch('https://github.com/login/oauth/access_token', {
         method: 'POST',
         headers: { accept: 'application/json', 'content-type': 'application/json' },
         body: JSON.stringify({ client_id: cfg.id, client_secret: cfg.secret, code, redirect_uri: redirect }),
-      }).then(r => r.json())
+      }).then(r => r.json() as Promise<JsonObject>)
       if (!tok.access_token) throw new Error(`GitHub sign-in failed: ${tok.error_description ?? tok.error ?? 'no token'}`)
-      const gh = path => this.fetch(`https://api.github.com${path}`, { headers: { authorization: `Bearer ${tok.access_token}`, accept: 'application/vnd.github+json', 'user-agent': 'claude-share' } }).then(r => (r.ok ? r.json() : null))
+      const gh = (path: string): Promise<any> => this.fetch(`https://api.github.com${path}`, { headers: { authorization: `Bearer ${tok.access_token}`, accept: 'application/vnd.github+json', 'user-agent': 'claude-share' } }).then(r => (r.ok ? r.json() : null))
       const [user, emails, orgs] = await Promise.all([gh('/user'), gh('/user/emails'), gh('/user/orgs?per_page=100')])
       if (!user?.id) throw new Error('GitHub sign-in failed: no user')
       // Its addresses unread say nothing either way: try again, rather than take that as none.
       if (!Array.isArray(emails)) throw new Error("GitHub sign-in failed: couldn't read your email addresses. Try again.")
-      const primary = emails.find(e => e.primary && e.verified) ?? emails.find(e => e.verified) ?? null
-      return { provider, subject: String(user.id), login: user.login, name: user.name || user.login, email: primary?.email ?? '', emailVerified: Boolean(primary), githubOrgs: Array.isArray(orgs) ? orgs.map(o => o.login) : [] }
+      const primary = emails.find((e: JsonObject) => e.primary && e.verified) ?? emails.find((e: JsonObject) => e.verified) ?? null
+      return { provider, subject: String(user.id), login: user.login, name: user.name || user.login, email: primary?.email ?? '', emailVerified: Boolean(primary), githubOrgs: Array.isArray(orgs) ? orgs.map((o: JsonObject) => o.login) : [] }
     }
     if (provider === 'google') {
       const tok = await this.fetch('https://oauth2.googleapis.com/token', {
         method: 'POST',
         headers: { 'content-type': 'application/x-www-form-urlencoded' },
-        body: new URLSearchParams({ code, client_id: cfg.id, client_secret: cfg.secret, redirect_uri: redirect, grant_type: 'authorization_code' }),
-      }).then(r => r.json())
+        body: new URLSearchParams({ code, client_id: cfg.id ?? '', client_secret: cfg.secret ?? '', redirect_uri: redirect, grant_type: 'authorization_code' }),
+      }).then(r => r.json() as Promise<JsonObject>)
       if (!tok.access_token) throw new Error(`Google sign-in failed: ${tok.error_description ?? tok.error ?? 'no token'}`)
-      const user = await this.fetch('https://openidconnect.googleapis.com/v1/userinfo', { headers: { authorization: `Bearer ${tok.access_token}` } }).then(r => r.json())
+      const user = await this.fetch('https://openidconnect.googleapis.com/v1/userinfo', { headers: { authorization: `Bearer ${tok.access_token}` } }).then(r => r.json() as Promise<JsonObject>)
       if (!user?.sub) throw new Error('Google sign-in failed: no user')
       return { provider, subject: user.sub, name: user.name || user.email, email: user.email ?? '', emailVerified: user.email_verified === true }
     }
@@ -821,7 +870,7 @@ export class Directory {
 
   // An invite link opened in a browser: what it is, and how to take it in
   // Claude Code (Desktop opens a new session with the link as its prompt).
-  async invitePage(code, origin) {
+  async invitePage(code: string, origin: string) {
     const team = await this.inviteTeam(code)
     if (!team) return page('Team invite', "This invite doesn't work any more", 'Someone in the team made a new link, or the team is gone. Ask them for the current one.', { status: 404 })
     const link = `${origin}/i/${code}`
@@ -847,14 +896,19 @@ export class Directory {
 // The directory's bodies, in characters (the Worker bounds their bytes at
 // three a character before reading them): JSON, or a browser's form ('form').
 export const BODY_CHARS = 16_000
-async function readBody(req, as = 'json') {
+async function bodyText(req: Request) {
   const text = await req.text()
   if (text.length > BODY_CHARS) throw new Error('body too large')
-  return as === 'form' ? new URLSearchParams(text) : text ? JSON.parse(text) : {}
+  return text
 }
+async function readBody(req: Request): Promise<JsonObject> {
+  const text = await bodyText(req)
+  return text ? JSON.parse(text) : {}
+}
+const readForm = async (req: Request) => new URLSearchParams(await bodyText(req))
 
 // A store over a plain Map, for the Node server (persisted by its caller).
-export function mapStore(map, onChange = () => {}) {
+export function mapStore(map: Map<string, unknown>, onChange = () => {}): Kv {
   return {
     get: async key => map.get(key),
     put: async (key, value) => {

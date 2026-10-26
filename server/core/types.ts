@@ -77,7 +77,7 @@ type Refusal = { ok: false; status: number; error: string; team?: string }
 type Person = { id: string; name: string }
 // What the room lists on its team's list.
 export type TeamListing = { id: string; url: string; title: string; host: string; hostAccount?: string; createdAt: number }
-// What a room asks the directory and tells it (teams.mjs, `Directory`).
+// What a room asks the directory and tells it (teams.ts, `Directory`).
 export type DirectoryClient = {
   shareCheck(teamId: string, account: string): Promise<{ ok: true; team: { id: string; name: string }; account: Person } | Refusal>
   joinCheck(teamId: string, account: string): Promise<{ ok: true; account?: Person } | Refusal>

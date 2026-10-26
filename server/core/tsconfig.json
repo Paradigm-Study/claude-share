@@ -1,7 +1,0 @@
-// The room's logic, checked strictly against the Worker's types alone
-// (npm run typecheck:server).
-{
-  "extends": "../tsconfig.base.json",
-  "compilerOptions": { "types": [], "strict": true, "checkJs": false },
-  "include": ["../worker-configuration.d.ts", "*.ts"]
-}

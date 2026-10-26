@@ -5,7 +5,7 @@
 // (Hono): who is asking, the person's sign-in through the server's own
 // accounts (GitHub, Google), and their Allow.
 //
-// The sign-in is the one Claude Code's /team uses (server/teams.mjs): the page
+// The sign-in is the one Claude Code's /team uses (server/teams.ts): the page
 // makes a secret, opens /auth/<provider>/start with its hash, and the server
 // collects the account token by polling the directory with the secret, never
 // letting it reach the page. The grant keeps that token (encrypted by the
@@ -20,7 +20,7 @@ import { Hono } from 'hono'
 import { OAuthProvider } from '@cloudflare/workers-oauth-provider'
 import type { ConsentDescription } from '@cloudflare/workers-oauth-provider'
 import { brandPage, escapeHtml } from '../core/pages.ts'
-import { providersFrom } from '../teams.mjs'
+import { providersFrom } from '../teams.ts'
 import { directory, whoIs } from './index.ts'
 import type { TracesEnv } from './index.ts'
 import { handleMcp } from './mcp.ts'

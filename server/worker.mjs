@@ -13,7 +13,7 @@
 // wrangler.preview.toml), its own workers.dev host name, bound to the rooms
 // here: every path there is the host's app.
 //
-// Accounts and teams (server/teams.mjs) live in one more Durable Object, the
+// Accounts and teams (server/teams.ts) live in one more Durable Object, the
 // directory: sign-in, teams and their lists of sessions. Rooms ask it who may
 // share with a team and join one; it asks rooms how they are when listing.
 // They call each other's methods (Durable Object RPC), never a path: what
@@ -86,7 +86,7 @@ import {
   mergeTCPStats,
   leftResponse,
 } from './core.ts'
-import { Directory, providersFrom, BODY_CHARS } from './teams.mjs'
+import { Directory, providersFrom, BODY_CHARS } from './teams.ts'
 // Session traces (server/traces, TypeScript): loaded only where a database
 // is bound, so the Worker's tests on Node 20, which can't load TypeScript,
 // never reach it.
