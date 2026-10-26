@@ -20,7 +20,7 @@ const dns = require('dns')
 const os = require('os')
 const tls = require('tls')
 const http = require('http')
-const { run, controlServer, vacant, portOK, notify, failure, safeCode } = require('./tcp-relay.cjs')
+const { run, controlServer, vacant, portOK, notify, failure, safeCode } = require('./tcp-relay.mts')
 
 const LIMITS = Object.freeze({ clients: 512, held: 64, routes: 128, startable: 128, bypass: 64, entry: 253, body: 8192, headers: 8192, line: 8192, controlSockets: 8, upstreamHead: 8192, upstreamTries: 4, stdout: 1 << 20, dohBody: 65_536, dohNames: 256 })
 // doh: one name's whole look, every server; dohEach: one server's A and AAAA;

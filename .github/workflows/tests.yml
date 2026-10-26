@@ -88,6 +88,9 @@ jobs:
       - run: npm run typecheck:server
       # scripts/: TypeScript Node runs as it is, so only erasable syntax (scripts/tsconfig.json).
       - run: npm run typecheck:scripts
+      # The plugin's relay helpers (plugin/relay/*.mts), which Node runs as
+      # they are: strictly, against Node's types, erasable syntax alone.
+      - run: npm run typecheck:relay
       # oxlint on server/, with the type-aware rules (oxlint-tsgolint): a
       # promise nobody awaits or catches fails it (.oxlintrc.json).
       - run: npm run lint

@@ -32,7 +32,7 @@ const fs = require('fs')
 const path = require('path')
 const { spawn } = require('child_process')
 const { randomUUID } = require('crypto')
-const { controlServer, notify, failure, readConfig, roomSettings, roomPost } = require('./tcp-relay.cjs')
+const { controlServer, notify, failure, readConfig, roomSettings, roomPost } = require('./tcp-relay.mts')
 const { receiptLine, writeLine, STATUS, DROPS, UUID } = require('./receipt.cjs')
 
 const LIMITS = Object.freeze({

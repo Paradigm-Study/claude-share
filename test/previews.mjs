@@ -7,7 +7,7 @@ import { once } from 'node:events'
 import { request as httpRequest, createServer as createHTTPServer } from 'node:http'
 import { createHash, randomBytes } from 'node:crypto'
 import relay from '../plugin/relay/ws-relay.cjs'
-import ws from '../plugin/relay/ws.cjs'
+import * as ws from '../plugin/relay/ws.mts'
 import { startWorkerd } from './support/workerd.mjs'
 import './support/cloudflare.mjs'
 const { Room, PLUGIN_LATEST, roomRequest, token, versionInfo, tcpSocketTarget, NEED_LIMIT, LIMITS, limitOf, streamedRoomBody, previewRequest, previewSocketTarget, publicPairValid, PUBLIC_LIMITS, TCP_LIMITS, SEAT_TIMEOUT_MS, EVENT_BYTES, HISTORY_BYTES, ROOM_FILES_COUNT, ROOM_PREVIEWS_MAX, ROOM_SEATS_MAX, SERVE_LIMITS, previewLabel, previewKeyOf, previewHostLabel, roomOrigins, hostHalfClose, tcpHalfClose, rejectReason, homePage } = await import('../server/core/index.ts')
