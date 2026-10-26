@@ -1,6 +1,6 @@
-// Room logic for the Cloudflare Durable Object (worker.mjs). Everything
+// Room logic for the Cloudflare Durable Object (worker.ts). Everything
 // speaks the Fetch API: a Request in, a Response out, and the sockets,
-// timers and storage stay in worker.mjs.
+// timers and storage stay in worker.ts.
 //
 // A room is one shared Claude Code session. The host's session posts what its
 // transcript keeps (rows), live text (deltas) and turn state; guests post
@@ -59,6 +59,7 @@ export {
   limitOf,
   notFound,
   badRequest,
+  statusOf,
 } from './http.ts'
 export { ROOM_ID, Room } from './room.ts'
 export { createRoom, roomRequest, ended, PEER_HANDLE, PEER_STATUS, PEER_DROPS } from './routes.ts'
@@ -113,3 +114,7 @@ export {
   missingPage,
   landingPage,
 } from './pages.ts'
+export type { LimitKind } from './limits.ts'
+export type { Person } from './room.ts'
+export type { SocketTarget } from './previews.ts'
+export type { TCPFailure, TCPFrame, TCPHalf, TCPRelayed, TCPTarget } from './tcp.ts'

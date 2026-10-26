@@ -399,7 +399,7 @@ async function deploy(claude) {
   // Previews of a host's localhost: the same script as a second Worker, on its
   // own host name. An update deploys it first: the new rooms name themselves in
   // preview links by a key only the new preview Worker routes, and it still
-  // routes the links and cookies older rooms made (server/worker.mjs). So a
+  // routes the links and cookies older rooms made (server/worker.ts). So a
   // failed preview deploy then stops before the rooms change. The first time
   // it goes second: its binding needs the main Worker's rooms to exist.
   // Whether it deployed is wrangler's exit status: one on a custom domain

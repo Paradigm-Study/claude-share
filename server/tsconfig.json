@@ -3,5 +3,5 @@
 {
   "extends": "./tsconfig.base.json",
   "compilerOptions": { "types": [], "strict": true, "checkJs": false },
-  "include": ["worker-configuration.d.ts", "core.ts", "core/*.ts", "teams.ts"]
+  "include": ["worker-configuration.d.ts", "worker.ts", "core.ts", "core/*.ts", "teams.ts"]
 }

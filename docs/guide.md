@@ -244,7 +244,7 @@ Each person then adds the server once: `claude mcp add --transport http shared-s
 | --- | --- |
 | `plugin/` | The plugin: `hooks/register.tsx` (hooks), `hooks/rows.ts` (transcript rows), `hooks/look.ts` (drawings), `hooks/window.ts` (preview windows: launching and finding them), `hooks/preview.ts`, `hooks/proxy.ts` and `hooks/upstream.ts` (a preview's address, the public link's answers, the person's own proxy), `tests/` |
 | `server/core.ts`, `server/core/` | Room logic and the link page |
-| `server/worker.mjs`, `wrangler.toml` | Cloudflare Worker + Durable Object |
+| `server/worker.ts`, `wrangler.toml` | Cloudflare Worker + Durable Object |
 | `plugin/relay/` | Helpers run under Node: TCP forwarding (`local-preview.cjs`, `tcp-worker.cjs`, `tcp-relay.cjs`), the public preview's WebSockets (`ws-relay.cjs`, over the WebSocket client in `ws.cjs`), the preview window's proxy (`browser-proxy.cjs`), same-project discovery (`discover.cjs`), messages between sessions (`mailbox.cjs`, `receipt.cjs`) |
 | `test/e2e.mjs` | End to end: a real host and guests through a server |
 

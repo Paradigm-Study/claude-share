@@ -33,7 +33,7 @@
 // who leaves it or is removed leaves its sessions too.
 
 import { json, token, brandPage, commandBox, COPY_SCRIPT, INSTALL_COMMAND } from './core.ts'
-import type { JsonObject } from './core.ts'
+import type { DirectoryClient, JsonObject } from './core.ts'
 
 // The records above, as the directory writes them.
 export type Account = {
@@ -370,7 +370,7 @@ export class Directory {
   // -- what rooms ask ---------------------------------------------------------
 
   // May this account share with this team? Returns its name for the room.
-  async shareCheck(teamId: string, tokenText: string) {
+  async shareCheck(teamId: string, tokenText: string): ReturnType<DirectoryClient['shareCheck']> {
     const account = await this.accountOf(tokenText)
     if (!account) return { ok: false, status: 401, error: 'Sign in to share with a team: /team in Claude Code.' }
     const team: Team | null = TEAM_ID.test(String(teamId)) ? await this.kv.get(`team:${teamId}`) : null
@@ -380,7 +380,7 @@ export class Directory {
 
   // May this person join a session shared with this team? The team's access
   // setting decides, as it is now.
-  async joinCheck(teamId: string, tokenText: string) {
+  async joinCheck(teamId: string, tokenText: string): ReturnType<DirectoryClient['joinCheck']> {
     const team: Team | undefined = await this.kv.get(`team:${teamId}`)
     // The team is gone (its last person left): nobody can be checked against it.
     if (!team) return { ok: false, status: 403, error: 'This session was shared with a team that no longer exists. Ask the host to share it again.' }
@@ -414,7 +414,7 @@ export class Directory {
   // A host invites teammates to the session it shares: each sees it in their
   // own Claude Code until they join, dismiss it, it ends, or a day passes.
   // Only people who share a team with the host can be invited.
-  async sessionInvite(tokenText: string, room: SessionInvite['room'], to: unknown, now = Date.now()) {
+  async sessionInvite(tokenText: string, room: SessionInvite['room'], to: unknown, now = Date.now()): ReturnType<DirectoryClient['sessionInvite']> {
     const account = await this.accountOf(tokenText)
     if (!account) return { ok: false, status: 401, error: 'Sign in to invite people: /team in Claude Code.' }
     if (!this.change(account.id, now)) return { ok: false, status: 429, error: CHANGES.message }

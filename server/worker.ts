@@ -20,6 +20,8 @@
 // only the objects say to each other has no URL the Worker could forward.
 
 import { DurableObject } from 'cloudflare:workers'
+import { Hono } from 'hono'
+import type { Context } from 'hono'
 import {
   Room,
   ROOM_ID,
@@ -85,23 +87,50 @@ import {
   chargeControl,
   mergeTCPStats,
   leftResponse,
+  statusOf,
 } from './core.ts'
 import { Directory, providersFrom, BODY_CHARS } from './teams.ts'
+import type { CloudHosts, FileMeta, LimitKind, RevokeFilter, RoomContext, RoomData, RoomEvent, SocketTarget, TCPFrame, TCPHalf, TCPStats } from './core.ts'
+import type { Kv, RoomInfo } from './teams.ts'
+import type { TracesEnv } from './traces/index.ts'
+import type { Turn } from './traces/turns.ts'
+
+// What the Workers are given: wrangler.toml's bindings and variables,
+// wrangler.preview.toml's ROLE, and the secrets a person sets. The optional
+// ones are what a server may go without (a preview Worker, no teams, no
+// containers, no traces).
+export type ServerEnv = Omit<TracesEnv, 'DIRECTORY'> & {
+  ROLE?: string
+  PUBLIC_URL?: string
+  PREVIEW_URL?: string
+  NEW_ROOMS?: string
+  MAX_ROOMS_PER_DAY?: string
+  ADMIN_TOKEN?: string
+  PLUGIN_SOURCE?: string
+  CREATE_LIMIT: RateLimit
+  JOIN_LIMIT: RateLimit
+  EVENTS_LIMIT: RateLimit
+  ROOMS: DurableObjectNamespace<RoomObject>
+  // Reached by fetch alone (not RPC objects), so their stubs aren't typed by class.
+  GATE?: DurableObjectNamespace
+  DIRECTORY?: DurableObjectNamespace<DirectoryObject>
+  HOSTS?: DurableObjectNamespace
+}
 // Session traces (server/traces, TypeScript): loaded only where a database
 // is bound, so the Worker's tests on Node 20, which can't load TypeScript,
 // never reach it.
-const tracesOn = env => Boolean(env?.TRACES_DB && env?.OAUTH_KV)
+const tracesOn = (env: ServerEnv | undefined) => Boolean(env?.TRACES_DB && env?.OAUTH_KV)
 const traces = () => import('./traces/index.ts')
 
 const ROOM_TTL_MS = 24 * 60 * 60 * 1000
-const pad = seq => String(seq).padStart(12, '0')
+const pad = (seq: number) => String(seq).padStart(12, '0')
 const CHUNK = 512 * 1024 // file bytes per storage value
 // A room's one value (meta, 2 MB at most): the room without its events and its
 // files' records, which have keys of their own (e:<seq>, and bm:<id> beside
 // each file's bytes).
-export function metaOf(room) {
+export function metaOf(room: Room) {
   const { events, files, ...meta } = room.toJSON()
-  return { events, meta }
+  return { events: events ?? [], meta }
 }
 // The directory reads a body whole, so the Worker reads it first, bounded:
 // its characters at three bytes each.
@@ -111,7 +140,7 @@ const OBJECT_ID = /^[0-9a-f]{64}$/
 
 // Where previews are served: PREVIEW_URL, else this Worker's workers.dev name
 // with "-preview" (claude-share.x.workers.dev → claude-share-preview.x.workers.dev).
-function previewOriginOf(req, env) {
+function previewOriginOf(req: Request, env: ServerEnv) {
   if (env.PREVIEW_URL) return env.PREVIEW_URL.replace(/\/+$/, '')
   const m = /^([^.]+)\.(.+\.workers\.dev)$/.exec(new URL(req.url).hostname)
   return m ? `https://${m[1]}-preview.${m[2]}` : ''
@@ -127,11 +156,11 @@ function previewOriginOf(req, env) {
 // previews have a host name of their own, and its first part is the key
 // (core's previewLabel): nothing else names a room here then. The room hears
 // which (`x-preview-own`, set only here).
-async function previewFetch(req, env) {
+async function previewFetch(req: Request, env: ServerEnv): Promise<Response> {
   const url = new URL(req.url)
   const own = roomOrigins(env.PREVIEW_URL)
   const key = own ? (previewKeyOf(previewHostLabel(env.PREVIEW_URL, url.host))?.hex ?? '') : (previewRoomOf(req) ?? '')
-  let stub = null
+  let stub: DurableObjectStub<RoomObject> | null = null
   try { stub = OBJECT_ID.test(key) ? env.ROOMS.get(env.ROOMS.idFromString(key)) : null } catch {}
   if (!stub) return previewMissing()
   const headers = new Headers(req.headers)
@@ -150,120 +179,150 @@ async function previewFetch(req, env) {
   )
 }
 
+// The main Worker's routes, in the order they're looked at: what the server
+// says of itself, its home page, traces (when on), the directory's paths
+// (when it has one), then a room's. A preview Worker serves its rooms'
+// previews alone (previewFetch). Handlers never touch `c.res`, so Hono hands
+// back the Response a room gave, a WebSocket's upgrade included.
+type App = { Bindings: ServerEnv }
+const app = new Hono<App>()
+// A path's parts as they came (Hono's params are decoded; a room's id never is).
+const segments = (c: Context<App>) => new URL(c.req.url).pathname.split('/').filter(Boolean)
+const addressOf = (req: Request) => req.headers.get('cf-connecting-ip') ?? 'unknown'
+
+app.all('/api/health', () => json({ ok: true }))
+app.all('/api/version', c => versionInfo({ traces: tracesOn(c.env) }))
+const home = (c: Context<App>) => (c.req.raw.method === 'GET' ? homePage(publicOrigin(c.req.raw, c.env.PUBLIC_URL), { traces: tracesOn(c.env) }) : notFound())
+app.all('/', home)
+app.all('/privacy', home)
+
+// Session traces over MCP, and its OAuth (server/traces/oauth.ts).
+app.use(async (c, next) => {
+  const env = c.env
+  if (!tracesOn(env) || !hasDirectory(env)) return next()
+  const { isTracesPath, tracesFetch } = await traces()
+  if (!isTracesPath(new URL(c.req.url).pathname)) return next()
+  const req = c.req.raw
+  if (!(await env.EVENTS_LIMIT.limit({ key: `traces:${addressOf(req)}` })).success) return limitedResponse('events')
+  // TracesEnv types its directory's stub loosely (its own calls say what they get).
+  return tracesFetch(req, env as unknown as TracesEnv, c.executionCtx as ExecutionContext, publicOrigin(req, env.PUBLIC_URL))
+})
+
+// Accounts and teams: the directory's own paths, passed on to it.
+app.use(async (c, next) => {
+  const env = c.env, req = c.req.raw
+  const url = new URL(req.url)
+  if (!hasDirectory(env) || !Directory.owns(url.pathname)) return next()
+  if (Directory.limited(url.pathname, req.method) && !(await env.JOIN_LIMIT.limit({ key: `auth:${addressOf(req)}` })).success) return limitedResponse('join')
+  const headers = new Headers(req.headers)
+  headers.set('x-share-origin', publicOrigin(req, env.PUBLIC_URL))
+  // Read here, bounded (a declared length past it refused before any):
+  // the directory takes what it's given whole.
+  let body: Uint8Array | undefined
+  if (bodied(req)) {
+    try { body = await readBody(req, DIRECTORY_BODY_MAX) } catch (error) { return statusOf(error) === 413 ? bodyTooLarge(DIRECTORY_BODY_MAX) : badRequest('The request body did not arrive.') }
+  }
+  return directoryStub(env).fetch(
+    new Request(`https://directory.internal${url.pathname}${url.search}`, {
+      method: req.method,
+      headers,
+      body,
+      redirect: 'manual',
+    }),
+  )
+})
+
+// A Share: a new room.
+app.post('/api/rooms', async c => {
+  const env = c.env, req = c.req.raw
+  const outdated = outdatedClient(req)
+  if (outdated) return outdated
+  if (env.NEW_ROOMS === 'off') return closedResponse()
+  // The rate-limit binding below is loose (cached counts let a burst
+  // through); the gate counts new rooms exactly, per address and per day.
+  const gate: { ok: boolean; reason?: string } = env.GATE
+    ? await env.GATE.get(env.GATE.idFromName('gate')).fetch('https://gate.internal/', { method: 'POST', body: JSON.stringify({ ip: addressOf(req), max: Number(env.MAX_ROOMS_PER_DAY) || ROOMS_PER_DAY }) }).then(r => r.json<{ ok: boolean; reason?: string }>()).catch(() => ({ ok: true }))
+    : { ok: true }
+  if (!gate.ok) return gate.reason === 'day' ? busyResponse() : limitedResponse('create')
+  return toRoom(c, token(16), 'create')
+})
+// The operator ends a room (abuse); the room checks its admin token.
+app.post('/api/admin/rooms/:id/end', c => toRoom(c, segments(c)[3], 'admin-end'))
+// A share link opened in a browser.
+app.all('/s/:id', c => toRoom(c, segments(c)[1], 'page'))
+// Everything else of a room's, its path after the id as the room's `rest`.
+const roomRest = (c: Context<App>) => toRoom(c, segments(c)[2], segments(c).slice(3).join('/'))
+app.all('/api/rooms/:id', roomRest)
+app.all('/api/rooms/:id/*', roomRest)
+
+app.notFound(() => notFound())
+// What throws goes to the runtime as it did before Hono: a 500 of its own.
+app.onError(error => { throw error })
+
 export default {
-  async fetch(req, env, ctx) {
-    if (env.ROLE === 'preview') return previewFetch(req, env)
-    const url = new URL(req.url)
-    const origin = publicOrigin(req, env.PUBLIC_URL)
-    const parts = url.pathname.split('/').filter(Boolean)
+  async fetch(req: Request, env: ServerEnv, ctx: ExecutionContext): Promise<Response> {
+    return env.ROLE === 'preview' ? previewFetch(req, env) : app.fetch(req, env, ctx)
+  },
+}
 
-    if (url.pathname === '/api/health') return json({ ok: true })
-    if (url.pathname === '/api/version') return versionInfo({ traces: tracesOn(env) })
-    if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/privacy')) return homePage(origin, { traces: tracesOn(env) })
-    // Session traces over MCP, and its OAuth (server/traces/oauth.ts).
-    if (tracesOn(env) && env.DIRECTORY) {
-      const { isTracesPath, tracesFetch } = await traces()
-      if (isTracesPath(url.pathname)) {
-        if (!(await env.EVENTS_LIMIT.limit({ key: `traces:${req.headers.get('cf-connecting-ip') ?? 'unknown'}` })).success) return limitedResponse('events')
-        return tracesFetch(req, env, ctx, origin)
-      }
-    }
-    const bodied = req.method !== 'GET' && req.method !== 'HEAD'
-    if (env.DIRECTORY && Directory.owns(url.pathname)) {
-      if (Directory.limited(url.pathname, req.method) && !(await env.JOIN_LIMIT.limit({ key: `auth:${req.headers.get('cf-connecting-ip') ?? 'unknown'}` })).success) return limitedResponse('join')
-      const headers = new Headers(req.headers)
-      headers.set('x-share-origin', origin)
-      // Read here, bounded (a declared length past it refused before any):
-      // the directory takes what it's given whole.
-      let body
-      if (bodied) {
-        try { body = await readBody(req, DIRECTORY_BODY_MAX) } catch (error) { return error.status === 413 ? bodyTooLarge(DIRECTORY_BODY_MAX) : badRequest('The request body did not arrive.') }
-      }
-      return directoryStub(env).fetch(
-        new Request(`https://directory.internal${url.pathname}${url.search}`, {
-          method: req.method,
-          headers,
-          body,
-          redirect: 'manual',
-        }),
-      )
-    }
+const bodied = (req: Request) => req.method !== 'GET' && req.method !== 'HEAD'
+const hasDirectory = (env: ServerEnv): env is ServerEnv & { DIRECTORY: DurableObjectNamespace<DirectoryObject> } => Boolean(env.DIRECTORY)
 
-    let id
-    let rest
-    if (req.method === 'POST' && url.pathname === '/api/rooms') {
-      const outdated = outdatedClient(req)
-      if (outdated) return outdated
-      if (env.NEW_ROOMS === 'off') return closedResponse()
-      // The rate-limit binding below is loose (cached counts let a burst
-      // through); the gate counts new rooms exactly, per address and per day.
-      const gate = env.GATE ? await env.GATE.get(env.GATE.idFromName('gate')).fetch('https://gate.internal/', { method: 'POST', body: JSON.stringify({ ip: req.headers.get('cf-connecting-ip') ?? 'unknown', max: Number(env.MAX_ROOMS_PER_DAY) || ROOMS_PER_DAY }) }).then(r => r.json()).catch(() => ({ ok: true })) : { ok: true }
-      if (!gate.ok) return gate.reason === 'day' ? busyResponse() : limitedResponse('create')
-      id = token(16)
-      rest = 'create'
-    } else if (req.method === 'POST' && parts[0] === 'api' && parts[1] === 'admin' && parts[2] === 'rooms' && parts.length === 5 && parts[4] === 'end') {
-      id = parts[3]
-      rest = 'admin-end'
-    } else if (parts[0] === 's' && parts.length === 2) {
-      id = parts[1]
-      rest = 'page'
-    } else if (parts[0] === 'api' && parts[1] === 'rooms' && parts.length >= 3) {
-      id = parts[2]
-      rest = parts.slice(3).join('/')
-    } else {
-      return notFound()
-    }
-    if (!ROOM_ID.test(id)) return notFound()
-    // Previews have a host name of their own: this origin serves none, page
-    // or socket (only previewFetch makes these paths, by the room's key).
-    if (rest.startsWith('__')) return notFound()
-    const limit = limitOf(req, id, rest, req.headers.get('cf-connecting-ip') ?? 'unknown')
-    const limiter = limit && { create: env.CREATE_LIMIT, join: env.JOIN_LIMIT, events: env.EVENTS_LIMIT }[limit.kind]
-    if (limiter && !(await limiter.limit({ key: limit.key })).success) return limitedResponse(limit.kind)
+// One request for a room, to its Durable Object: limited first, its body
+// passed on as a stream.
+async function toRoom(c: Context<App>, id: string, rest: string): Promise<Response> {
+  const env = c.env, req = c.req.raw
+  const url = new URL(req.url)
+  if (!ROOM_ID.test(id)) return notFound()
+  // Previews have a host name of their own: this origin serves none, page
+  // or socket (only previewFetch makes these paths, by the room's key).
+  if (rest.startsWith('__')) return notFound()
+  const limit = limitOf(req, id, rest, addressOf(req))
+  const limiter = limit && { create: env.CREATE_LIMIT, join: env.JOIN_LIMIT, events: env.EVENTS_LIMIT }[limit.kind]
+  if (limit && limiter && !(await limiter.limit({ key: limit.key })).success) return limitedResponse(limit.kind)
 
-    // The packed session for the room's cloud host goes straight to it, as it
-    // comes: its ticket (the room minted it with the move) is checked there.
-    if (rest === 'cloud/bundle' && req.method === 'PUT') {
-      if (!env.HOSTS) return notFound()
-      if (!(Number(req.headers.get('content-length')) <= CLOUD_BUNDLE_MAX)) return bodyTooLarge(CLOUD_BUNDLE_MAX)
-      return env.HOSTS.get(env.HOSTS.idFromName(id)).fetch(
-        new Request('https://host.internal/bundle', {
-          method: 'PUT',
-          headers: { authorization: req.headers.get('authorization') ?? '', 'content-length': req.headers.get('content-length') },
-          body: req.body,
-          // @ts-expect-error Workers' types lack it, and Workers ignore it: harmless here
-          duplex: 'half',
-        }),
-      )
-    }
-
-    const stub = env.ROOMS.get(env.ROOMS.idFromName(id))
-    const headers = new Headers(req.headers)
-    headers.set('x-share-origin', origin)
-    headers.set('x-preview-origin', previewOriginOf(req, env))
-    if (rest === 'stream' && req.method === 'GET') return bridge(stub, id, url, headers)
-    // Every body goes on as a stream, never buffered here: the room reads it
-    // through readBody, bounded. A declared length past what the route takes
-    // (bodyLimit) is refused first; the streamed
-    // routes authenticate before reading and bound themselves.
-    const max = bodyLimit(url.pathname)
-    if (bodied && !streamedRoomBody(req.method, rest) && Number(req.headers.get('content-length')) > max) return bodyTooLarge(max)
-    return stub.fetch(
-      new Request(`https://room.internal/${id}/${rest}${url.search}`, {
-        method: req.method,
-        headers,
-        body: bodied ? req.body : undefined,
-        ...(bodied ? { duplex: 'half' } : {}),
+  // The packed session for the room's cloud host goes straight to it, as it
+  // comes: its ticket (the room minted it with the move) is checked there.
+  if (rest === 'cloud/bundle' && req.method === 'PUT') {
+    if (!env.HOSTS) return notFound()
+    if (!(Number(req.headers.get('content-length')) <= CLOUD_BUNDLE_MAX)) return bodyTooLarge(CLOUD_BUNDLE_MAX)
+    return env.HOSTS.get(env.HOSTS.idFromName(id)).fetch(
+      new Request('https://host.internal/bundle', {
+        method: 'PUT',
+        headers: { authorization: req.headers.get('authorization') ?? '', 'content-length': req.headers.get('content-length') ?? '' },
+        body: req.body,
+        // @ts-expect-error Workers' types lack it, and Workers ignore it: harmless here
+        duplex: 'half',
       }),
     )
-  },
+  }
+
+  const stub = env.ROOMS.get(env.ROOMS.idFromName(id))
+  const headers = new Headers(req.headers)
+  headers.set('x-share-origin', publicOrigin(req, env.PUBLIC_URL))
+  headers.set('x-preview-origin', previewOriginOf(req, env))
+  if (rest === 'stream' && req.method === 'GET') return bridge(stub, id, url, headers)
+  // Every body goes on as a stream, never buffered here: the room reads it
+  // through readBody, bounded. A declared length past what the route takes
+  // (bodyLimit) is refused first; the streamed
+  // routes authenticate before reading and bound themselves.
+  const max = bodyLimit(url.pathname)
+  if (bodied(req) && !streamedRoomBody(req.method, rest) && Number(req.headers.get('content-length')) > max) return bodyTooLarge(max)
+  return stub.fetch(
+    new Request(`https://room.internal/${id}/${rest}${url.search}`, {
+      method: req.method,
+      headers,
+      body: bodied(req) ? req.body : undefined,
+      ...(bodied(req) ? { duplex: 'half' } : {}),
+    }),
+  )
 }
 
 // A client's stream: open a WebSocket to the room and pass each message on as
 // one line, with a keepalive line between. Either side closing closes both,
 // and so does STREAM_MAX_MS passing: the client reconnects at once, and one
 // that is gone leaves the room whatever its connection seemed to say.
-async function bridge(stub, id, url, headers) {
+async function bridge(stub: DurableObjectStub<RoomObject>, id: string, url: URL, headers: Headers) {
   headers.set('upgrade', 'websocket')
   const upstream = await stub.fetch(`https://room.internal/${id}/socket${url.search}`, { headers })
   const ws = upstream.webSocket
@@ -273,8 +332,8 @@ async function bridge(stub, id, url, headers) {
   const writer = writable.getWriter()
   const enc = new TextEncoder()
   let open = true
-  let keepalive = null
-  let maxAge = null
+  let keepalive: ReturnType<typeof setInterval> | undefined
+  let maxAge: ReturnType<typeof setTimeout> | undefined
   const close = () => {
     if (!open) return
     open = false
@@ -285,7 +344,7 @@ async function bridge(stub, id, url, headers) {
     } catch {}
     writer.close().catch(() => {})
   }
-  const write = text => {
+  const write = (text: string) => {
     if (open) writer.write(enc.encode(`${text}\n`)).catch(close)
   }
   ws.addEventListener('message', e => write(typeof e.data === 'string' ? e.data : ''))
@@ -298,8 +357,44 @@ async function bridge(stub, id, url, headers) {
   })
 }
 
-export class RoomObject extends DurableObject {
-  constructor(state, env) {
+// What a socket carries through the room's sleep (its attachment): a stream's
+// seat and cursor; a public pair's half (pb: the browser's, ph: the host's
+// relay) and what let it in; a TCP half (tcpState).
+type StreamAttachment = { seat: string; role: 'host' | 'guest'; after: number; at: number }
+type PublicAttachment = {
+  pb?: string
+  ph?: string
+  pid: string
+  session: string
+  ownerSeat: string
+  exp: number
+  deadline?: number
+  paired?: boolean
+  closed?: boolean
+  rate?: { start: number; count: number; bytes?: number }
+}
+type TCPAttachment = { tcp: TCPHalf & { closed?: boolean } }
+type Attachment = Partial<StreamAttachment> & Partial<PublicAttachment> & Partial<TCPAttachment>
+const attachmentOf = (ws: WebSocket): Attachment | null => ws.deserializeAttachment()
+// A TCP half's attachment, for sockets tagged 'tcp' (they always carry one).
+const tcpOf = (ws: WebSocket): TCPAttachment['tcp'] => ws.deserializeAttachment().tcp
+// A file's record beside its bytes: how many chunks hold them.
+type StoredFile = FileMeta & { chunks: number }
+
+export class RoomObject extends DurableObject<ServerEnv> {
+  state: DurableObjectState
+  room: Room | null
+  savedSeq: number
+  persisting: Promise<void>
+  closed: WeakSet<WebSocket>
+  pending: Map<string, { messages: (string | ArrayBuffer)[]; bytes: number }>
+  pendingBytes: number
+  tcpSaved: string
+  alarmAt: number | null
+  keeping: Promise<void>
+  keepPending: boolean
+
+  constructor(state: DurableObjectState, env: ServerEnv) {
     super(state, env)
     this.state = state
     this.env = env
@@ -324,16 +419,16 @@ export class RoomObject extends DurableObject {
     this.keepPending = false
     state.blockConcurrencyWhile(async () => {
       this.alarmAt = (await state.storage.getAlarm()) ?? null
-      const meta = await state.storage.get('meta')
+      const meta = await state.storage.get<Omit<RoomData, 'events' | 'files'>>('meta')
       if (!meta) { this.cleanupPublic(Date.now()); return }
-      const stored = await state.storage.list({ prefix: 'e:' })
-      const tcpStats = (await state.storage.get('tcp:stats')) ?? meta.tcpStats
+      const stored = await state.storage.list<RoomEvent>({ prefix: 'e:' })
+      const tcpStats = (await state.storage.get<TCPStats>('tcp:stats')) ?? meta.tcpStats
       this.tcpSaved = tcpCounted(tcpStats ?? { used: 0 })
       const files = await this.loadFiles()
       this.attach(Room.resume({ ...meta, tcpStats, files, events: [...stored.values()] }, Date.now()))
       const now = Date.now()
       this.cleanupPublic(now)
-      const expired = this.room.sweepExpired(now)
+      const expired = this.live().sweepExpired(now)
       this.closeStaleTCP(now)
       if (expired) await this.persist()
       await this.schedule()
@@ -342,35 +437,41 @@ export class RoomObject extends DurableObject {
 
   // Who is connected is whoever has a socket open, and every change goes to
   // them.
-  attach(room) {
+  // The room, where only a request to a room that exists can be.
+  live(): Room {
+    if (!this.room) throw new Error('This shared session does not exist.')
+    return this.room
+  }
+
+  attach(room: Room) {
     this.room = room
     this.savedSeq = room.seq
     // Previews name the room by this object's own id (previewFetch).
     room.previewKey = this.state.id?.toString() ?? room.previewKey
-    room.connected = seat => this.state.getWebSockets(seat).some(ws => !this.closed.has(ws))
+    room.connected = (seat: string) => this.state.getWebSockets(seat).some(ws => !this.closed.has(ws))
     room.onChange = () => this.broadcast()
     // A revocation closes the channels it covers (revokeMatches): a TCP pair
     // by its preview or seat, a public one by its browser session, seat or
     // preview.
-    room.onTCPRevoke = filter => {
+    room.onTCPRevoke = (filter: RevokeFilter) => {
       for (const ws of this.tcpSockets()) {
-        const s = ws.deserializeAttachment().tcp
+        const s = tcpOf(ws)
         if (revokeMatches(filter, s)) this.closeTCP(s.id, 1008, 'TCP access revoked')
       }
     }
-    room.onPreviewRevoke = filter => {
+    room.onPreviewRevoke = (filter: RevokeFilter) => {
       for (const ws of this.publicSockets()) {
-        const att = ws.deserializeAttachment()
+        const att = attachmentOf(ws) ?? {}
         if (revokeMatches(filter, att)) this.unpair(ws, att, 1008, 'Preview ended')
       }
     }
     // A message for one seat's streams only (the host's asks, a message
     // between sessions; room.toHost and room.toSeat): found by the seat's tag,
     // which only streams carry.
-    room.toSeat = (seat, message) => {
+    room.toSeat = (seat: string, message: unknown) => {
       let sent = false
       for (const ws of this.state.getWebSockets(seat)) {
-        const att = ws.deserializeAttachment()
+        const att = attachmentOf(ws)
         if (this.closed.has(ws) || att?.seat !== seat || att.tcp || att.pb || att.ph) continue
         try {
           ws.send(JSON.stringify(message))
@@ -383,15 +484,15 @@ export class RoomObject extends DurableObject {
     // beside them (bm:<id>); deleteAll() at expiry takes them too.
     const storage = this.state.storage
     room.store = {
-      put: async (id, data, file) => {
-        const entries = { [`bm:${id}`]: { ...file, size: data.length, chunks: Math.ceil(data.length / CHUNK) || 1 } }
+      put: async (id: string, data: Uint8Array, file: FileMeta) => {
+        const entries: Record<string, unknown> = { [`bm:${id}`]: { ...file, size: data.length, chunks: Math.ceil(data.length / CHUNK) || 1 } }
         for (let i = 0, n = 0; i < Math.max(1, data.length); i += CHUNK, n++) entries[`b:${id}:${n}`] = data.slice(i, i + CHUNK)
         await storage.put(entries)
       },
-      get: async id => {
-        const meta = await storage.get(`bm:${id}`)
+      get: async (id: string) => {
+        const meta = await storage.get<StoredFile>(`bm:${id}`)
         if (!meta) return null
-        const parts = await storage.get(Array.from({ length: meta.chunks }, (_, n) => `b:${id}:${n}`))
+        const parts = await storage.get<ArrayBuffer | Uint8Array>(Array.from({ length: meta.chunks }, (_, n) => `b:${id}:${n}`))
         const data = new Uint8Array(meta.size)
         let at = 0
         for (let n = 0; n < meta.chunks; n++) {
@@ -409,26 +510,26 @@ export class RoomObject extends DurableObject {
   // where every record is kept: so how many a room keeps isn't bounded by
   // what one value holds.
   async loadFiles() {
-    const kept = await this.state.storage.list({ prefix: 'bm:' })
-    const files = {}
+    const kept = await this.state.storage.list<StoredFile>({ prefix: 'bm:' })
+    const files: Record<string, FileMeta> = {}
     for (const { chunks, ...file } of kept.values()) if (file.id) files[file.id] = file
     return files
   }
 
   // The directory: a members-only team's people now (DirectoryObject's keepTeam).
-  async keepTeam(team, allowed) {
+  async keepTeam(team: unknown, allowed: unknown) {
     if (this.room?.keepTeam(String(team ?? ''), Array.isArray(allowed) ? allowed.map(String) : [], Date.now())) await this.persist()
   }
 
   // The directory: how this room is, for a team's list (what GET /api/rooms/:id
   // answers), or nothing once it's gone.
-  async info() {
+  async info(): Promise<RoomInfo | null> {
     if (!this.room) return null
     const res = await this.fetch(new Request(`https://room.internal/${this.room.id}/`))
-    return res.ok ? res.json() : null
+    return res.ok ? res.json<RoomInfo>() : null
   }
 
-  async fetch(req) {
+  async fetch(req: Request): Promise<Response> {
     const url = new URL(req.url)
     const origin = req.headers.get('x-share-origin') ?? url.origin
     const [id, ...restParts] = url.pathname.split('/').filter(Boolean)
@@ -481,7 +582,7 @@ export class RoomObject extends DurableObject {
     }
 
     const admin = Boolean(this.env?.ADMIN_TOKEN) && req.headers.get('authorization') === `Bearer ${this.env.ADMIN_TOKEN}`
-    const ctx = { previewOrigin: req.headers.get('x-preview-origin') ?? '', admin, directory: directoryClient(this.env), isCurrent: () => this.room === room, cloud: hostsClient(this.env), pluginSource: this.env.PLUGIN_SOURCE }
+    const ctx: RoomContext = { previewOrigin: req.headers.get('x-preview-origin') ?? '', admin, directory: directoryClient(this.env), isCurrent: () => this.room === room, cloud: hostsClient(this.env), pluginSource: this.env.PLUGIN_SOURCE }
     const counters = tcpCounted(room.tcpStats)
     const { response, changed } = await roomRequest(room, req, rest, now, origin, ctx)
     if (changed) await this.persist()
@@ -494,19 +595,20 @@ export class RoomObject extends DurableObject {
     return response
   }
 
-  async accept(req, url, now) {
+  async accept(req: Request, url: URL, now: number) {
     if (req.headers.get('upgrade')?.toLowerCase() !== 'websocket') return json({ error: 'Expected a WebSocket.' }, 426)
-    const seated = this.room.seats.size
+    const room = this.live()
+    const seated = room.seats.size
     const bearer = (req.headers.get('authorization') ?? '').replace(/^Bearer\s+/i, '').trim()
     // Left from elsewhere (the Team panel's Leave): told so, never seated again.
-    if (this.room.leftElsewhere.has(bearer)) return leftResponse()
-    const auth = this.room.auth(bearer, now)
+    if (room.leftElsewhere.has(bearer)) return leftResponse()
+    const auth = room.auth(bearer, now)
     if (!auth) return json({ error: 'Not a member of this session.' }, 401)
     // A seat let go for being quiet came back: kept (storage writes finish
     // before the answer goes out).
     // …and which plugin it runs now: a stream says it as any request does.
-    if (noteVersion(this.room, req, auth) || this.room.seats.size !== seated) await this.persist()
-    if (this.room.endedAt) return json({ error: 'This session is no longer shared.' }, 410)
+    if (noteVersion(room, req, auth) || room.seats.size !== seated) await this.persist()
+    if (room.endedAt) return json({ error: 'This session is no longer shared.' }, 410)
     // A seat's streams past SEAT_STREAMS: its oldest ends (a reconnect's old
     // one, likely, not noticed gone yet).
     const mine = this.state.getWebSockets(auth.seat).filter(ws => !this.closed.has(ws) && ws.deserializeAttachment()?.seat === auth.seat)
@@ -520,7 +622,7 @@ export class RoomObject extends DurableObject {
     // by seat, for who is connected.
     this.state.acceptWebSocket(server, ['stream', auth.seat])
     server.serializeAttachment({ seat: auth.seat, role: auth.role, after: Number(url.searchParams.get('after') ?? 0) || 0, at: now })
-    this.room.touch(auth, now)
+    room.touch(auth, now)
     this.send(server, now)
     if (auth.role === 'host') this.broadcast() // the host is back: everyone sees it
     await this.schedule()
@@ -532,15 +634,16 @@ export class RoomObject extends DurableObject {
   // pairing outlives the object sleeping between messages. Both halves carry
   // what let the browser in (its session, seat, preview, expiry), and the
   // browser's its pairing deadline.
-  async previewSocket(req, url, id, now) {
+  async previewSocket(req: Request, url: URL, id: string, now: number) {
+    const room = this.live()
     // Halves past their deadline hold no place: checked right before admission.
     this.cleanupPublic(now)
     const path = url.pathname.slice(`/${id}/__preview`.length) || '/'
-    const active = this.publicSockets().map(ws => ws.deserializeAttachment()).filter(att => att.pb)
-    const target = previewSocketTarget(this.room, new Request(new URL(`${path}${url.search}`, 'https://preview.local'), { headers: req.headers }), now, active)
+    const active = this.publicSockets().map(attachmentOf).filter(att => att?.pb).map(att => ({ ownerSeat: att?.ownerSeat }))
+    const target = previewSocketTarget(room, new Request(new URL(`${path}${url.search}`, 'https://preview.local'), { headers: req.headers }), now, active)
     if (!target.ok) return new Response(target.error ?? 'This preview has ended', { status: target.status })
     const wsId = token(12)
-    if (!announceSocket(this.room, wsId, target)) return new Response(`${this.room.host.name}'s Claude Code isn't connected right now.`, { status: 503 })
+    if (!announceSocket(room, wsId, target)) return new Response(`${room.host.name}'s Claude Code isn't connected right now.`, { status: 503 })
     const [client, server] = Object.values(new WebSocketPair())
     this.state.acceptWebSocket(server, ['public', `pb:${wsId}`])
     server.serializeAttachment({ pb: wsId, pid: target.pid, session: target.session, ownerSeat: target.ownerSeat, exp: target.exp, deadline: now + PUBLIC_LIMITS.pairMs })
@@ -548,8 +651,8 @@ export class RoomObject extends DurableObject {
     return new Response(null, { status: 101, webSocket: client, headers: target.protocols[0] ? { 'sec-websocket-protocol': target.protocols[0] } : undefined })
   }
 
-  publicValid(att) {
-    return publicPairValid(this.room, att, Date.now())
+  publicValid(att: Attachment | null) {
+    return publicPairValid(this.room, att && att.pid !== undefined && att.session !== undefined && att.exp !== undefined ? { pid: att.pid, session: att.session, exp: att.exp, closed: att.closed } : null, Date.now())
   }
 
   publicSockets() {
@@ -560,11 +663,11 @@ export class RoomObject extends DurableObject {
   // attachment that doesn't name them all proves nothing, so it closes too),
   // and so does a browser's half the host didn't take up by its deadline.
   // From the constructor, the alarm and right before admission.
-  cleanupPublic(now) {
+  cleanupPublic(now: number) {
     for (const ws of this.publicSockets()) {
-      const att = ws.deserializeAttachment()
+      const att = attachmentOf(ws) ?? {}
       if (!this.publicValid(att)) this.unpair(ws, att, 1008, 'Preview ended')
-      else if (att.pb && !att.paired && !(att.deadline > now)) this.unpair(ws, att, 1011, 'Preview relay timeout')
+      else if (att.pb && !att.paired && !((att.deadline ?? 0) > now)) this.unpair(ws, att, 1011, 'Preview relay timeout')
     }
   }
 
@@ -572,7 +675,7 @@ export class RoomObject extends DurableObject {
     return this.state.getWebSockets('tcp').filter(ws => !this.closed.has(ws) && !ws.deserializeAttachment()?.tcp?.closed)
   }
 
-  tcpPeer(s) {
+  tcpPeer(s: TCPHalf) {
     return this.state.getWebSockets(`${s.side === 'guest' ? 'th' : 'tg'}:${s.id}`).find(ws => !this.closed.has(ws) && !ws.deserializeAttachment()?.tcp?.closed)
   }
 
@@ -580,14 +683,15 @@ export class RoomObject extends DurableObject {
   // the transcript snapshot. Monotonic merge also protects overlapping writes.
   async persistTCPStats() {
     await this.state.storage.transaction(async storage => {
-      const stats = mergeTCPStats(await storage.get('tcp:stats'), this.room.tcpStats)
+      const room = this.live()
+      const stats = mergeTCPStats(await storage.get<TCPStats>('tcp:stats'), room.tcpStats)
       await storage.put('tcp:stats', stats)
-      this.room.tcpStats = stats
+      room.tcpStats = stats
       this.tcpSaved = tcpCounted(stats)
     })
   }
 
-  async tunnelSocket(req, pid, now) {
+  async tunnelSocket(req: Request, pid: string, now: number) {
     if (req.method !== 'GET') return json({ error: 'Expected a WebSocket GET.' }, 405)
     // Admission is synchronous up to the socket's acceptance, so no barrier:
     // one (blockConcurrencyWhile) held every channel's messages in the room
@@ -596,14 +700,15 @@ export class RoomObject extends DurableObject {
     // A half past its pairing deadline holds no place: checked right before
     // admission, the one check outside the alarm.
     this.closeStaleTCP(now)
-    const active = this.tcpSockets().map(ws => ws.deserializeAttachment().tcp).filter(s => s.side === 'guest')
-    const target = tcpSocketTarget(this.room, req, pid, now, active)
+    const room = this.live()
+    const active = this.tcpSockets().map(tcpOf).filter(s => s.side === 'guest')
+    const target = tcpSocketTarget(room, req, pid, now, active)
     if (!target.ok) return json({ error: target.error }, target.status)
     const id = token(12)
     const [client, server] = Object.values(new WebSocketPair())
     this.state.acceptWebSocket(server, ['tcp', `tg:${id}`])
     server.serializeAttachment({ tcp: tcpState(id, target, 'guest', now) })
-    if (!announceTCP(this.room, id, target)) {
+    if (!announceTCP(room, id, target)) {
       this.closeTCP(id, 1011, 'TCP host disconnected')
       return json({ error: 'The TCP host disconnected.' }, 503)
     }
@@ -611,20 +716,21 @@ export class RoomObject extends DurableObject {
     return new Response(null, { status: 101, webSocket: client })
   }
 
-  sendTCP(ws, data) {
+  sendTCP(ws: WebSocket, data: string | ArrayBuffer | ArrayBufferView) {
     const n = typeof data === 'string' ? new TextEncoder().encode(data).byteLength : data.byteLength
-    if (typeof ws.bufferedAmount === 'number' && ws.bufferedAmount + n > TCP_LIMITS.bufferBytes) throw tcpFailure('TCP socket output limit exceeded.', 1009)
+    const buffered = (ws as WebSocket & { bufferedAmount?: number }).bufferedAmount
+    if (typeof buffered === 'number' && buffered + n > TCP_LIMITS.bufferBytes) throw tcpFailure('TCP socket output limit exceeded.', 1009)
     ws.send(data)
   }
 
-  closeTCP(id, code = 1011, reason = '') {
+  closeTCP(id: string, code: unknown = 1011, reason: unknown = '') {
     let refunded = false
     for (const ws of this.state.getWebSockets('tcp')) {
       const att = ws.deserializeAttachment()
       if (att?.tcp?.id !== id || att.tcp.closed) continue
       this.closed.add(ws)
       // What it reserved and didn't carry goes back to the room's budget, once.
-      if (tcpRefund(this.room, att.tcp)) refunded = true
+      if (this.room && tcpRefund(this.room, att.tcp)) refunded = true
       // A close event can itself hibernate before its peer's close is handled.
       ws.serializeAttachment({ tcp: { ...att.tcp, closed: true } })
       try { ws.close(sendableClose(code), String(reason).replace(/[^\x20-\x7e]/g, '?').slice(0, 100)) } catch {}
@@ -636,11 +742,11 @@ export class RoomObject extends DurableObject {
   // waits for its host half: a TCP guest half (its worker busy, the port
   // refusing) or a public browser (more relays than it runs, the port
   // refusing). Never one already paired.
-  async rejectRelay(req, id) {
-    const room = this.room
-    const live = ws => !this.closed.has(ws) && !ws.deserializeAttachment()?.closed && !ws.deserializeAttachment()?.tcp?.closed
+  async rejectRelay(req: Request, id: string) {
+    const room = this.live()
+    const live = (ws: WebSocket) => !this.closed.has(ws) && !ws.deserializeAttachment()?.closed && !ws.deserializeAttachment()?.tcp?.closed
     const guest = SOCKET_ID.test(id) ? this.tcpSockets().find(ws => {
-      const s = ws.deserializeAttachment().tcp
+      const s = tcpOf(ws)
       return s.id === id && s.room === room.id && s.side === 'guest'
     }) : null
     const browser = SOCKET_ID.test(id) && !guest ? this.publicSockets().find(ws => ws.deserializeAttachment().pb === id) : null
@@ -649,7 +755,7 @@ export class RoomObject extends DurableObject {
       if (!hostSocketAllowed(room, req)) return json({ error: 'Only the host rejects a relay.' }, 401)
       if (guest) {
         if (!this.tcpSockets().includes(guest)) return notFound()
-        const s = guest.deserializeAttachment().tcp
+        const s = tcpOf(guest)
         if (s.id !== id || s.room !== room.id || s.side !== 'guest') return notFound()
         if (s.ready || this.tcpPeer(s)) return json({ error: 'That socket already has a host relay.' }, 409)
         return null
@@ -666,7 +772,7 @@ export class RoomObject extends DurableObject {
       if (after) return after
       if (!code) return json({ error: 'Expected exactly a BUSY or CONNECT code.' }, 400)
       if (guest) this.closeTCP(id, code, rejectReason('TCP', code))
-      else this.unpair(browser, browser.deserializeAttachment(), code, rejectReason('Preview', code))
+      else if (browser) this.unpair(browser, attachmentOf(browser) ?? {}, code, rejectReason('Preview', code))
       await this.schedule()
       return json({ ok: true })
     })
@@ -674,10 +780,11 @@ export class RoomObject extends DurableObject {
 
   // TCP halves no longer valid (their seat or preview gone, the room ended),
   // and guest halves past their pairing deadline.
-  closeStaleTCP(now) {
+  closeStaleTCP(now: number) {
+    const room = this.live()
     for (const ws of this.tcpSockets()) {
-      const s = ws.deserializeAttachment().tcp
-      if (!tcpValid(this.room, s)) this.closeTCP(s.id, 1008, 'TCP access revoked')
+      const s = tcpOf(ws)
+      if (!tcpValid(room, s)) this.closeTCP(s.id, 1008, 'TCP access revoked')
       else if (!s.ready && s.deadline <= now) this.closeTCP(s.id, 1008, 'TCP relay timeout')
     }
   }
@@ -685,10 +792,12 @@ export class RoomObject extends DurableObject {
   // One message through tcpStep, both halves' attachments saved before any of
   // it is sent on: 'reserve' when the sender's budget must grow first, 'done'
   // when it finished the channel, else 'sent'.
-  forwardTCP(ws, peer, frame, now) {
-    const from = ws.deserializeAttachment().tcp, to = peer?.deserializeAttachment()?.tcp
+  forwardTCP(ws: WebSocket, peer: WebSocket | undefined, frame: TCPFrame, now: number) {
+    const from = tcpOf(ws), to: TCPAttachment['tcp'] | undefined = peer?.deserializeAttachment()?.tcp
     if (this.closed.has(ws) || (peer && this.closed.has(peer)) || from.closed || to?.closed) throw tcpFailure('TCP channel closed.')
-    const step = tcpStep(this.room, from, to, frame, now)
+    const step = tcpStep(this.live(), from, to, frame, now)
+    // A half without its peer was refused above (tcpCheck: not paired).
+    if (!peer || !to) throw tcpFailure('TCP channel is not paired.')
     if (step.reserve) return 'reserve'
     ws.serializeAttachment({ tcp: from })
     peer.serializeAttachment({ tcp: to })
@@ -698,8 +807,8 @@ export class RoomObject extends DurableObject {
     return 'done'
   }
 
-  async tcpMessage(ws, message) {
-    const s = ws.deserializeAttachment()?.tcp
+  async tcpMessage(ws: WebSocket, message: string | ArrayBuffer) {
+    const s: TCPAttachment['tcp'] | undefined = attachmentOf(ws)?.tcp
     if (!s || s.closed || this.closed.has(ws)) return
     try {
       const frame = tcpFrame(message), peer = this.tcpPeer(s)
@@ -712,10 +821,10 @@ export class RoomObject extends DurableObject {
         // Throwing out of blockConcurrencyWhile resets the entire object.
         // Protocol/budget failures close just this pair, not everyone's room.
         try {
-          const from = ws.deserializeAttachment().tcp
-          if (from.closed || !tcpValid(this.room, from)) throw tcpFailure('TCP access revoked.')
-          tcpCheck(from, peer.deserializeAttachment().tcp, frame, Date.now())
-          if (!tcpReserve(this.room, from)) throw tcpFailure('TCP room byte budget exhausted.')
+          const from = tcpOf(ws), room = this.live()
+          if (from.closed || !tcpValid(room, from)) throw tcpFailure('TCP access revoked.')
+          tcpCheck(from, peer?.deserializeAttachment()?.tcp, frame, Date.now())
+          if (!tcpReserve(room, from)) throw tcpFailure('TCP room byte budget exhausted.')
           await this.persistTCPStats()
           ws.serializeAttachment({ tcp: from })
           // A reservation is larger than any frame: the step now relays.
@@ -725,20 +834,21 @@ export class RoomObject extends DurableObject {
       })
       if (failure) throw failure
     } catch (error) {
-      this.closeTCP(s.id, error.code ?? 1011, error.message)
+      this.closeTCP(s.id, (error as { code?: number }).code ?? 1011, (error as Error).message)
       await this.schedule()
     }
   }
 
   // The same host-only endpoint pairs TCP and public-link previews. Tags
   // distinguish their purposes, and a second host half is always refused.
-  async relaySocket(req, wsId, now = Date.now()) {
-    if (req.method !== 'GET' || !SOCKET_ID.test(wsId) || !hostSocketAllowed(this.room, req)) return json({ error: 'Only the host relays a preview.' }, 401)
+  async relaySocket(req: Request, wsId: string, now = Date.now()) {
+    const room = this.live()
+    if (req.method !== 'GET' || !SOCKET_ID.test(wsId) || !hostSocketAllowed(room, req)) return json({ error: 'Only the host relays a preview.' }, 401)
     const guest = this.state.getWebSockets(`tg:${wsId}`).find(ws => !this.closed.has(ws) && !ws.deserializeAttachment()?.tcp?.closed)
     if (guest) {
-      const s = guest.deserializeAttachment().tcp
+      const s = tcpOf(guest)
       if (this.tcpPeer(s)) return json({ error: 'That socket already has a host relay.' }, 409)
-      if (!tcpValid(this.room, s) || s.ready || s.deadline <= now) {
+      if (!tcpValid(room, s) || s.ready || s.deadline <= now) {
         this.closeTCP(wsId, 1008, 'TCP access revoked or relay timed out')
         return json({ error: 'That TCP channel has ended.' }, 410)
       }
@@ -752,20 +862,20 @@ export class RoomObject extends DurableObject {
         server.serializeAttachment({ tcp: host })
         this.sendTCP(guest, guestReady)
         this.sendTCP(server, hostReady)
-      } catch (error) { this.closeTCP(wsId, error.code ?? 1011, error.message) }
+      } catch (error) { this.closeTCP(wsId, (error as { code?: number }).code ?? 1011, (error as Error).message) }
       await this.schedule()
       return new Response(null, { status: 101, webSocket: client })
     }
     const browser = this.state.getWebSockets(`pb:${wsId}`).find(ws => !this.closed.has(ws) && !ws.deserializeAttachment()?.closed)
     if (!browser) return json({ error: 'That socket has closed.' }, 410)
-    const att = browser.deserializeAttachment()
+    const att = attachmentOf(browser) ?? {}
     if (!this.publicValid(att)) {
       this.unpair(browser, att, 1008, 'Preview ended')
       return json({ error: 'That preview has ended.' }, 410)
     }
     if (this.state.getWebSockets(`ph:${wsId}`).some(ws => !this.closed.has(ws) && !ws.deserializeAttachment()?.closed)) return json({ error: 'That socket already has a host relay.' }, 409)
     // Taken up too late: the alarm closes it at its deadline, this before.
-    if (!(att.deadline > now)) {
+    if (!((att.deadline ?? 0) > now)) {
       this.unpair(browser, att, 1011, 'Preview relay timeout')
       return json({ error: 'That socket has closed.' }, 410)
     }
@@ -783,7 +893,7 @@ export class RoomObject extends DurableObject {
   }
 
   // A browser socket's waiting messages, out of the room's total.
-  takePending(id) {
+  takePending(id: string) {
     const queue = this.pending.get(id)
     if (queue) this.pendingBytes -= queue.bytes
     this.pending.delete(id)
@@ -791,15 +901,15 @@ export class RoomObject extends DurableObject {
   }
 
   // One socket's line: everything after its cursor, and the room now.
-  send(ws, now = Date.now()) {
-    const att = ws.deserializeAttachment()
+  send(ws: WebSocket, now = Date.now()) {
+    const att = attachmentOf(ws)
     if (!att?.seat || !this.room) return
     // Its seat let go for good (removed from the room's team): it hears no more.
     if (att.role !== 'host' && !this.room.seated(att.seat)) {
       try { ws.close(1008, 'left') } catch {}
       return
     }
-    const page = this.room.page(att.after, now)
+    const page = this.room.page(att.after ?? 0, now)
     try {
       ws.send(JSON.stringify(page))
       ws.serializeAttachment({ ...att, after: page.seq })
@@ -815,8 +925,8 @@ export class RoomObject extends DurableObject {
   }
 
   // Streams send nothing; data channels never receive room JSON.
-  async webSocketMessage(ws, message) {
-    const att = ws.deserializeAttachment()
+  async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer) {
+    const att = attachmentOf(ws)
     if (att?.tcp) return this.tcpMessage(ws, message)
     if (!(att?.pb ?? att?.ph) || this.closed.has(ws) || att.closed) return
     this.publicMessage(ws, att, message)
@@ -829,8 +939,8 @@ export class RoomObject extends DurableObject {
   // workerd doesn't report bufferedAmount, so there each socket sends at
   // most PUBLIC_LIMITS.bytesPerWindow a second (counted beside its rate): a
   // fast sender can't fill the isolate's memory behind a slow reader.
-  publicMessage(ws, att, message) {
-    const id = att.pb ?? att.ph
+  publicMessage(ws: WebSocket, att: Attachment, message: string | ArrayBuffer) {
+    const id = att.pb ?? att.ph ?? ''
     if (!this.publicValid(att)) return this.unpair(ws, att, 1008, 'Preview ended')
     const n = typeof message === 'string' ? new TextEncoder().encode(message).byteLength : message.byteLength
     if (n > PUBLIC_LIMITS.bufferBytes) return this.unpair(ws, att, 1009, 'Preview message limit')
@@ -851,13 +961,14 @@ export class RoomObject extends DurableObject {
       return
     }
     for (const peer of peers) {
-      if (typeof peer.bufferedAmount === 'number' && peer.bufferedAmount + n > PUBLIC_LIMITS.bufferBytes) return this.unpair(ws, att, 1009, 'WebSocket output limit')
+      const buffered = (peer as WebSocket & { bufferedAmount?: number }).bufferedAmount
+      if (typeof buffered === 'number' && buffered + n > PUBLIC_LIMITS.bufferBytes) return this.unpair(ws, att, 1009, 'WebSocket output limit')
       try { peer.send(message) } catch { this.unpair(ws, att, 1011, '') }
     }
   }
 
-  async webSocketClose(ws, code, reason) {
-    const att = ws.deserializeAttachment()
+  async webSocketClose(ws: WebSocket, code: number, reason: string) {
+    const att = attachmentOf(ws)
     if (att?.tcp) {
       this.closeTCP(att.tcp.id, tcpHalfClose(code), 'TCP socket closed')
       await this.schedule()
@@ -868,8 +979,8 @@ export class RoomObject extends DurableObject {
     await this.disconnected(ws)
   }
 
-  async webSocketError(ws) {
-    const att = ws.deserializeAttachment()
+  async webSocketError(ws: WebSocket) {
+    const att = attachmentOf(ws)
     if (att?.tcp) {
       this.closeTCP(att.tcp.id, 1011, 'TCP socket failed')
       await this.schedule()
@@ -880,12 +991,12 @@ export class RoomObject extends DurableObject {
   }
 
   // Either half of a preview socket closing closes the other.
-  unpair(ws, att, code, reason) {
-    const id = att.pb ?? att.ph
+  unpair(ws: WebSocket, att: Attachment, code: unknown, reason: unknown) {
+    const id = att.pb ?? att.ph ?? ''
     const close = sendableClose(code)
     for (const peer of [ws, ...this.state.getWebSockets(att.pb ? `ph:${id}` : `pb:${id}`)]) {
       this.closed.add(peer)
-      const binding = peer.deserializeAttachment()
+      const binding = attachmentOf(peer)
       if (binding?.closed) continue
       // Closing sockets can still be listed after hibernation. Keep the fence
       // in their attachments as well as the object-local WeakSet.
@@ -899,19 +1010,19 @@ export class RoomObject extends DurableObject {
 
   // A seat counts as last seen when its socket closed; look again once its
   // grace period is over.
-  async disconnected(ws) {
+  async disconnected(ws: WebSocket) {
     this.closed.add(ws)
     try {
       ws.close(1000, 'bye')
     } catch {}
-    const att = ws.deserializeAttachment()
+    const att = attachmentOf(ws)
     if (!att || !this.room) return
-    this.room.touch(att, Date.now())
+    if (att.seat && att.role) this.room.touch({ role: att.role, seat: att.seat, name: '' }, Date.now())
     await this.persist()
     await this.schedule()
   }
 
-  persist() {
+  persist(): Promise<void> {
     // Body reads may overlap, but an older metadata save must never finish
     // after a newer one (a preview's Stop, a Leave). Capture each
     // snapshot only when the previous save has finished.
@@ -927,13 +1038,13 @@ export class RoomObject extends DurableObject {
     if (tcpCounted(room.tcpStats) !== this.tcpSaved) await this.persistTCPStats()
     // Files are kept beside their bytes (store.put), never in meta.
     const { events, meta } = metaOf(room)
-    const entries = { meta }
+    const entries: Record<string, unknown> = { meta }
     for (const event of events) if (event.seq > this.savedSeq) entries[`e:${pad(event.seq)}`] = event
     const keys = Object.keys(entries)
     for (let i = 0; i < keys.length; i += 100) {
       await this.state.storage.put(Object.fromEntries(keys.slice(i, i + 100).map(k => [k, entries[k]])))
     }
-    this.savedSeq = meta.seq
+    this.savedSeq = meta.seq ?? 0
     const oldest = events[0]?.seq
     if (oldest) {
       const stale = await this.state.storage.list({ prefix: 'e:', end: `e:${pad(oldest)}`, limit: 500 })
@@ -953,14 +1064,14 @@ export class RoomObject extends DurableObject {
     return this.keeping.catch(() => {})
   }
 
-  async keepNew(final) {
+  async keepNew(final: boolean) {
     const room = this.room
     if (!room || !tracesOn(this.env)) return
     const { tracesScope, takeTurns, authorOf, keepTurns } = await traces()
     const scope = tracesScope(room)
     if (!scope) return
     const storage = this.state.storage
-    const [seen, open, waiting] = await Promise.all([storage.get('traces:seq'), storage.get('traces:open'), storage.get('traces:out')])
+    const [seen, open, waiting] = await Promise.all([storage.get<number>('traces:seq'), storage.get<Turn>('traces:open'), storage.get<Turn[]>('traces:out')])
     const { closed, open: still } = takeTurns(room.events.filter(e => e.seq > (seen ?? 0)), open ?? null, name => authorOf(room, name))
     if (final && still) closed.push(still)
     // A database down for long holds the newest 500 turns.
@@ -972,12 +1083,12 @@ export class RoomObject extends DurableObject {
     }
     if (!out.length) return
     try {
-      await keepTurns(this.env, { id: room.id, scope, team: room.team?.id ?? null, owner: { name: room.host.name, account: room.host.account ?? null }, title: room.title ?? null }, out)
+      await keepTurns(this.env as unknown as TracesEnv, { id: room.id, scope, team: room.team?.id ?? null, owner: { name: room.host.name, account: room.host.account ?? null }, title: room.title ?? null }, out)
       await storage.put('traces:out', [])
       this.keepPending = false
     } catch (error) {
       this.keepPending = true
-      console.warn(`traces: ${out.length} turns wait: ${error?.message ?? error}`)
+      console.warn(`traces: ${out.length} turns wait: ${(error as Error | null)?.message ?? error}`)
       if (!final) await this.schedule()
     }
   }
@@ -999,11 +1110,11 @@ export class RoomObject extends DurableObject {
       }
     }
     for (const ws of this.tcpSockets()) {
-      const s = ws.deserializeAttachment().tcp
+      const s = tcpOf(ws)
       if (!s.ready) due.push(s.deadline)
     }
     for (const ws of this.publicSockets()) {
-      const att = ws.deserializeAttachment()
+      const att = attachmentOf(ws) ?? {}
       if (att.exp) due.push(att.exp)
       if (att.pb && !att.paired && att.deadline) due.push(att.deadline)
     }
@@ -1015,8 +1126,8 @@ export class RoomObject extends DurableObject {
   }
 
   // A host with a stream open is active now, however long ago it last spoke.
-  lastActive(now) {
-    const room = this.room
+  lastActive(now: number) {
+    const room = this.live()
     if (!room.endedAt && room.connected('host')) return now
     return Math.max(room.host.lastSeen, room.endedAt ?? 0)
   }
@@ -1049,13 +1160,14 @@ export class RoomObject extends DurableObject {
 
 // What a room asks of its cloud host (docs/cloud-host.md): HostContainer, one
 // a room, by the room's id.
-function hostsClient(env) {
-  if (!env.HOSTS) return null
-  const stub = id => env.HOSTS.get(env.HOSTS.idFromName(id))
+function hostsClient(env: ServerEnv): CloudHosts | null {
+  const hosts = env.HOSTS
+  if (!hosts) return null
+  const stub = (id: string) => hosts.get(hosts.idFromName(id))
   return {
     async start(id, payload) {
       const res = await stub(id).fetch('https://host.internal/start', { method: 'POST', body: JSON.stringify(payload) })
-      if (!res.ok) throw new Error((await res.json().catch(() => null))?.error ?? `status ${res.status}`)
+      if (!res.ok) throw new Error((await res.json<{ error?: string }>().catch(() => null))?.error ?? `status ${res.status}`)
     },
     async stop(id) {
       const res = await stub(id).fetch('https://host.internal/stop', { method: 'POST' })
@@ -1074,28 +1186,37 @@ const HOST_PORT = 8080
 const HOST_START_MS = 120_000
 const HOST_ALARM_MS = 60_000
 
+// What the object keeps while its runner runs: the container's control key,
+// the bundle's ticket (until used), and its room.
+type Runner = { key: string; ticket: string | null; room: string; at: number }
+
 export class HostContainer {
-  constructor(state, env) {
+  state: DurableObjectState
+  env: ServerEnv
+
+  constructor(state: DurableObjectState, env: ServerEnv) {
     this.state = state
     this.env = env
   }
 
   runner() {
-    return this.state.container.getTcpPort(HOST_PORT)
+    const container = this.state.container
+    if (!container) throw new Error('This server has no containers.')
+    return container.getTcpPort(HOST_PORT)
   }
 
-  async control(path, key, init = {}) {
+  async control(path: string, key: string, init: RequestInit & { duplex?: 'half' } = {}) {
     return this.runner().fetch(`http://runner${path}`, { ...init, headers: { ...(init.headers ?? {}), authorization: `Bearer ${key}` } })
   }
 
-  async fetch(req) {
+  async fetch(req: Request): Promise<Response> {
     const url = new URL(req.url)
     const container = this.state.container
     if (!container) return json({ error: 'This server has no containers.' }, 501)
-    const saved = (await this.state.storage.get('runner')) ?? null
+    const saved = (await this.state.storage.get<Runner>('runner')) ?? null
 
     if (url.pathname === '/start' && req.method === 'POST') {
-      const { ticket, config } = await req.json()
+      const { ticket, config } = await req.json<{ ticket: string; config: { room: string } }>()
       if (container.running) await container.destroy().catch(() => {})
       const key = token(32)
       container.start({ enableInternet: true, env: { SS_CONTROL_KEY: key } })
@@ -1113,7 +1234,7 @@ export class HostContainer {
       const started = await this.control('/start', key, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(config) })
       if (!started.ok) {
         await container.destroy().catch(() => {})
-        return json({ error: (await started.json().catch(() => null))?.error ?? 'the runner refused its configuration' }, 502)
+        return json({ error: (await started.json<{ error?: string }>().catch(() => null))?.error ?? 'the runner refused its configuration' }, 502)
       }
       await this.state.storage.put('runner', { key, ticket, room: config.room, at: Date.now() })
       await this.state.storage.setAlarm(Date.now() + HOST_ALARM_MS)
@@ -1146,14 +1267,14 @@ export class HostContainer {
   // Kept going while the runner runs; a container that stopped by itself is
   // forgotten (the room sees its host away, and Bring home still works).
   async alarm() {
-    const saved = await this.state.storage.get('runner')
+    const saved = await this.state.storage.get<Runner>('runner')
     if (!saved) return
     if (!this.state.container?.running) return void (await this.state.storage.deleteAll())
     await this.state.storage.setAlarm(Date.now() + HOST_ALARM_MS)
   }
 }
 
-function safeEqual(a, b) {
+function safeEqual(a: string, b: string) {
   if (a.length !== b.length) return false
   let diff = 0
   for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i)
@@ -1169,42 +1290,47 @@ function safeEqual(a, b) {
 // it costs one request per room made. Its minute is memory's, as every
 // other minute is.
 export class GateObject {
-  constructor(state) {
+  state: DurableObjectState
+  minute: Windows
+  addresses: Map<string, number>
+  day: { key: string; count: number; secret: string }
+  queue: Promise<unknown>
+
+  constructor(state: DurableObjectState) {
     this.state = state
     this.minute = new Windows()
     this.addresses = new Map() // a:<date>:<hash> → rooms today, as read or written here
     this.day = { key: '', count: 0, secret: '' }
     // One Share at a time: each reads and writes its address's count across awaits no gate holds.
-    /** @type {Promise<unknown>} */
     this.queue = Promise.resolve()
   }
 
-  fetch(req) {
+  fetch(req: Request): Promise<Response> {
     const turn = this.queue.then(() => this.admit(req))
     this.queue = turn.catch(() => {})
     return turn
   }
 
-  async admit(req) {
-    const { ip, max } = await req.json()
+  async admit(req: Request) {
+    const { ip, max } = await req.json<{ ip: string; max: number }>()
     const now = Date.now()
     const key = new Date(now).toISOString().slice(0, 10)
     const storage = this.state.storage
     if (this.day.key !== key) {
-      let secret = await storage.get(`k:${key}`)
+      let secret = await storage.get<string>(`k:${key}`)
       if (!secret) {
         secret = token(32)
         await storage.put(`k:${key}`, secret)
         // The day's end, and a minute for the clocks.
         await storage.setAlarm(Date.parse(`${key}T00:00:00Z`) + 86_400_000 + 60_000)
       }
-      this.day = { key, count: (await storage.get(`day:${key}`)) ?? 0, secret }
+      this.day = { key, count: (await storage.get<number>(`day:${key}`)) ?? 0, secret }
       this.addresses.clear()
       await this.forget(key)
     }
     if (this.day.count >= max) return json({ ok: false, reason: 'day' })
     const who = `a:${key}:${await keyedHash(this.day.secret, ip)}`
-    const made = this.addresses.get(who) ?? (await storage.get(who)) ?? 0
+    const made = this.addresses.get(who) ?? (await storage.get<number>(who)) ?? 0
     if (made >= ROOMS_PER_ADDRESS_DAY || !this.minute.hit('create', ip, now)) return json({ ok: false, reason: 'address' })
     this.addresses.set(who, made + 1)
     this.day.count += 1
@@ -1219,7 +1345,7 @@ export class GateObject {
   }
 
   // Every day's counts and key but today's.
-  async forget(today) {
+  async forget(today: string) {
     const storage = this.state.storage
     for (const prefix of ['a:', 'k:', 'day:']) {
       const old = [...(await storage.list({ prefix })).keys()].filter(k => !k.startsWith(`${prefix}${today}`))
@@ -1229,7 +1355,7 @@ export class GateObject {
 }
 
 // A keyed hash of an address (HMAC-SHA-256, its first 16 bytes in hex).
-async function keyedHash(secret, text) {
+async function keyedHash(secret: string, text: string) {
   const enc = new TextEncoder()
   const key = await crypto.subtle.importKey('raw', enc.encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign'])
   const mac = new Uint8Array(await crypto.subtle.sign('HMAC', key, enc.encode(text)))
@@ -1237,36 +1363,39 @@ async function keyedHash(secret, text) {
 }
 
 // The one directory of accounts and teams.
-const directoryStub = env => env.DIRECTORY.get(env.DIRECTORY.idFromName('directory'))
+const directoryStub = (env: ServerEnv & { DIRECTORY: DurableObjectNamespace<DirectoryObject> }) => env.DIRECTORY.get(env.DIRECTORY.idFromName('directory'))
 
 // What a room asks the directory: its stub, whose methods are the
 // DirectoryObject's below.
-const directoryClient = env => env?.DIRECTORY ? directoryStub(env) : null
+const directoryClient = (env: ServerEnv | undefined) => (env && hasDirectory(env) ? directoryStub(env) : null)
 
-export class DirectoryObject extends DurableObject {
-  constructor(state, env) {
+export class DirectoryObject extends DurableObject<ServerEnv> {
+  state: DurableObjectState
+  directory: Directory
+
+  constructor(state: DurableObjectState, env: ServerEnv) {
     super(state, env)
     this.state = state
     const storage = state.storage
-    const kv = {
+    const kv: Kv = {
       get: key => storage.get(key),
       put: (key, value) => storage.put(key, value),
       delete: key => storage.delete(key),
       list: async prefix => [...(await storage.list({ prefix })).entries()],
     }
     // How a room is, for a team's list: its own info, or nothing once it's gone.
-    const roomInfo = async id => ROOM_ID.test(id) ? env.ROOMS.get(env.ROOMS.idFromName(id)).info() : null
+    const roomInfo = async (id: string): Promise<RoomInfo | null> => ROOM_ID.test(id) ? env.ROOMS.get(env.ROOMS.idFromName(id)).info() : null
     // A members-only team's people now, for its room to let the others go.
-    const keepTeam = async (id, team, allowed) => {
+    const keepTeam = async (id: string, team: string, allowed: string[]) => {
       if (!ROOM_ID.test(id)) return
       await env.ROOMS.get(env.ROOMS.idFromName(id)).keepTeam(team, allowed)
     }
     // What's timed goes when it's due: the alarm is set for the soonest.
-    const onDue = at => void this.wakeAt(at).catch(() => {})
+    const onDue = (at: number) => void this.wakeAt(at).catch(() => {})
     this.directory = new Directory(kv, { providers: providersFrom(env), roomInfo, keepTeam, onDue })
   }
 
-  async wakeAt(at) {
+  async wakeAt(at: number) {
     const set = await this.state.storage.getAlarm()
     if (!set || at + 1000 < set) await this.state.storage.setAlarm(at + 1000)
   }
@@ -1277,16 +1406,16 @@ export class DirectoryObject extends DurableObject {
   }
 
   // What a room asks (Directory's own methods, the same names).
-  shareCheck(teamId, tokenText) { return this.directory.shareCheck(teamId, tokenText) }
-  joinCheck(teamId, tokenText) { return this.directory.joinCheck(teamId, tokenText) }
-  whoIs(tokenText) { return this.directory.whoIs(tokenText) }
-  teamAccess(teamId) { return this.directory.teamAccess(teamId) }
-  sessionInvite(tokenText, room, to) { return this.directory.sessionInvite(tokenText, room, to) }
-  roomEnded(roomId, teamId) { return this.directory.roomEnded(roomId, teamId) }
-  register(teamId, room) { return this.directory.register(teamId, room) }
-  unregister(teamId, roomId) { return this.directory.unregister(teamId, roomId) }
+  shareCheck(teamId: string, tokenText: string) { return this.directory.shareCheck(teamId, tokenText) }
+  joinCheck(teamId: string, tokenText: string) { return this.directory.joinCheck(teamId, tokenText) }
+  whoIs(tokenText: string) { return this.directory.whoIs(tokenText) }
+  teamAccess(teamId: string) { return this.directory.teamAccess(teamId) }
+  sessionInvite(tokenText: string, room: Parameters<Directory['sessionInvite']>[1], to: unknown) { return this.directory.sessionInvite(tokenText, room, to) }
+  roomEnded(roomId: string, teamId: string | null) { return this.directory.roomEnded(roomId, teamId) }
+  register(teamId: string, room: Parameters<Directory['register']>[1]) { return this.directory.register(teamId, room) }
+  unregister(teamId: string, roomId: string) { return this.directory.unregister(teamId, roomId) }
 
-  async fetch(req) {
+  async fetch(req: Request) {
     return this.directory.handle(req, req.headers.get('x-share-origin') ?? new URL(req.url).origin)
   }
 }

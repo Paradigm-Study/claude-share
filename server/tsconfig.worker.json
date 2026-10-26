@@ -1,6 +1,0 @@
-// What runs on Cloudflare, checked against the Worker's types alone.
-{
-  "extends": "./tsconfig.base.json",
-  "compilerOptions": { "types": [], "strictNullChecks": true },
-  "include": ["worker-configuration.d.ts", "worker.mjs", "core.ts", "core/*.ts", "teams.ts", "brand.mjs", "traces/*.ts"]
-}
