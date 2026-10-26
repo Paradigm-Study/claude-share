@@ -59,7 +59,7 @@ CLAUDE_BIN=$(which claude) node test/e2e.mjs            # a real host and guests
 EXTERNAL_SERVER=1 SHARE_SERVER=https://… node test/e2e.mjs   # …or through a deployed one (`npx wrangler dev` runs the Worker locally: SHARE_SERVER=http://127.0.0.1:8787)
 ```
 
-All but the e2e run without a model. Under Vitest, `vitest.config.ts` aliases `cloudflare:workers`, workerd's own module, to `test/support/cloudflare-workers.mjs`, and a suite imports the server as it likes. The `node test/x.mjs` suites that load anything of `server/` import `test/support/cloudflare.mjs` first and the server with `import()` after it, for the same stand-in. Node strips the server's TypeScript types itself.
+All but the e2e run without a model. A Vitest suite that starts the Workers (`startWorkerd`) goes in `vitest.config.ts`'s `WORKERD` list, whose tests have minutes; the others have 30 s. Under Vitest, `vitest.config.ts` aliases `cloudflare:workers`, workerd's own module, to `test/support/cloudflare-workers.mjs`, and a suite imports the server as it likes. The `node test/x.mjs` suites that load anything of `server/` import `test/support/cloudflare.mjs` first and the server with `import()` after it, for the same stand-in. Node strips the server's TypeScript types itself.
 
 - `plugin/.claude/types/claude-code.d.ts` is the engine's API, at least 2.1.299's (copy it in from a Claude Code session with `/plugin-types plugin/.claude/types`; it is git-ignored). It is the authority on every hook, `$` call and element.
 - The validator enforces three engine rules: `$` may only be passed to functions declared at the top of `register.tsx`; `atom(...)` references use literal plugin and key strings; a link element accepts only `https:` (or `http://localhost`) addresses.
