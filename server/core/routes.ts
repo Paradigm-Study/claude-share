@@ -14,7 +14,8 @@ import {
   sha256,
   roomAccessError,
   readBoundedJson,
-} from './http.mjs'
+  statusOf,
+} from './http.ts'
 import {
   Room,
   maxOf,
@@ -26,9 +27,9 @@ import {
   clampBody,
   tidyMark,
   LIVE_TYPES,
-} from './room.mjs'
-import { stopCloud, cloudSummary, endCloud, cloudRoutes, isApprover, cloudAnswer, cloudSet } from './cloud.mjs'
-import { landingPage } from './pages.mjs'
+} from './room.ts'
+import { stopCloud, cloudSummary, endCloud, cloudRoutes, isApprover, cloudAnswer, cloudSet } from './cloud.ts'
+import { landingPage } from './pages.ts'
 import {
   ROOM_SEATS_MAX,
   PAGE_BYTES_CAP,
@@ -39,25 +40,26 @@ import {
   ROOM_FILES_MAX,
   ROOM_FILES_COUNT,
   PEER_LIMIT,
-} from './limits.mjs'
-import { previewRoutes, needRoute } from './previews.mjs'
-import { serveReserve, SERVED_ALL } from './tcp.mjs'
+} from './limits.ts'
+import { previewRoutes, needRoute } from './previews.ts'
+import { serveReserve, SERVED_ALL } from './tcp.ts'
+import type { Auth, FileMeta, JsonObject, RoomContext, RoomTeam, RouteResult } from './types.ts'
 
 // POST /api/rooms: the host's Share. Returns the room and the host's token.
 // Shared with a team (`team`, the host signed in), the room goes on the
 // team's list, and the team's access setting says who may join; refused, no
 // room is made (`room` is absent).
-export async function createRoom(req, id, now, origin, ctx = {}) {
+export async function createRoom(req: Request, id: string, now: number, origin: string, ctx: RoomContext = {}): Promise<RouteResult & { room?: Room }> {
   // The body arrives as a stream: one past its bound, or not JSON, is said
   // as such, never thrown out of the room as a 500.
   let body
-  try { body = await readJson(req) } catch (error) { return bodyFailure(error.status ? error : { message: 'Expected a JSON body.' }) }
+  try { body = await readJson(req) } catch (error) { return bodyFailure(statusOf(error) ? error : { message: 'Expected a JSON body.' }) }
   const team = body.team ? await teamFor(req, body.team, ctx) : null
-  if (team?.error) return { response: team.error }
+  if (team && 'error' in team) return { response: team.error }
   // Signed in, the host is known by account: their other sessions are them.
   const account = team?.account ?? (await whoIs(req, ctx))
   const room = Room.create({ id, name: body.name, title: body.title, now, fromNow: body.fromNow, version: clientVersion(req), team, account })
-  if (team) await listWithTeam(room, origin, ctx)
+  if (team) await listWithTeam(room, team, origin, ctx)
   return {
     room,
     response: json({
@@ -73,33 +75,34 @@ export async function createRoom(req, id, now, origin, ctx = {}) {
 }
 
 // The account a request comes from (the plugin's sign-in), never in a URL.
-const accountOf = req => req.headers.get('x-shared-session-account') ?? ''
+const accountOf = (req: Request) => req.headers.get('x-shared-session-account') ?? ''
 
 // Its account id, when it's signed in to this server; else null.
-async function whoIs(req, ctx) {
-  if (!accountOf(req) || !ctx.directory) return null
-  return (await ctx.directory.whoIs(accountOf(req)).catch(() => null))?.id ?? null
+async function whoIs(req: Request, ctx: RoomContext) {
+  const directory = ctx.directory
+  if (!accountOf(req) || !directory) return null
+  return (await directory.whoIs(accountOf(req)).catch(() => null))?.id ?? null
 }
 
-async function teamFor(req, teamId, ctx) {
+async function teamFor(req: Request, teamId: unknown, ctx: RoomContext): Promise<RoomTeam | { error: Response }> {
   if (!ctx.directory) return { error: json({ error: "This share server doesn't have teams." }, 400) }
   const check = await ctx.directory.shareCheck(String(teamId), accountOf(req))
   if (!check.ok) return { error: json({ error: check.error }, check.status) }
   return { ...check.team, account: check.account.id }
 }
 
-function listWithTeam(room, origin, ctx) {
-  return ctx.directory.register(room.team.id, {
+function listWithTeam(room: Room, team: RoomTeam, origin: string, ctx: RoomContext) {
+  return ctx.directory?.register(team.id, {
     id: room.id,
     url: shareUrl(origin, room.id),
     title: room.title,
     host: room.host.name,
-    hostAccount: room.team.account,
+    hostAccount: team.account,
     createdAt: room.createdAt,
   })
 }
 
-const teamOf = room => (room.team ? { id: room.team.id, name: room.team.name } : undefined)
+const teamOf = (room: Room) => (room.team ? { id: room.team.id, name: room.team.name } : undefined)
 
 // Everything under /api/rooms/:id/... and /s/:id. `changed` tells the caller
 // whether to persist the room.
@@ -107,16 +110,15 @@ const teamOf = room => (room.team ? { id: room.team.id, name: room.team.name } :
 // stopped polling is dropped by the next request, so a quiet room costs nothing.
 // `ctx.previewOrigin` is where previews are served (a host name of their own,
 // so an app's root-relative paths work); absent, previews are off.
-/** @returns {Promise<{ response: Response, changed?: boolean }>} */
-export async function roomRequest(room, req, rest, now, origin, ctx = {}) {
+export async function roomRequest(room: Room, req: Request, rest: string, now: number, origin: string, ctx: RoomContext = {}): Promise<RouteResult> {
   const expired = room.sweepExpired(now)
   const swept = room.sweep(now) || expired
   const versions = versionsOf(room)
   const seated = room.seats.size
   const cloudWas = room.cloud?.state
-  const result = await handleRoom(room, req, rest, now, origin, ctx).catch(error => {
+  const result = await handleRoom(room, req, rest, now, origin, ctx).catch((error: unknown) => {
     // A JSON body past its bound is said as such, not as a crash.
-    if (error?.status === 413) return { response: json({ error: error.message }, 413) }
+    if (statusOf(error) === 413) return { response: json({ error: (error as Error).message }, 413) }
     throw error
   })
   // The cloud host's time is up: stopped, its changes kept for Bring home.
@@ -129,9 +131,9 @@ export async function roomRequest(room, req, rest, now, origin, ctx = {}) {
   return swept || versionsOf(room) !== versions ? { ...result, changed: true } : result
 }
 
-const versionsOf = room => [room.host.version, ...[...room.seats.values()].map(s => s.version)].join(' ')
+const versionsOf = (room: Room) => [room.host.version, ...[...room.seats.values()].map(s => s.version)].join(' ')
 
-async function handleRoom(room, req, rest, now, origin, ctx) {
+async function handleRoom(room: Room, req: Request, rest: string, now: number, origin: string, ctx: RoomContext): Promise<RouteResult> {
   const method = req.method
   const url = new URL(req.url)
 
@@ -160,7 +162,8 @@ async function handleRoom(room, req, rest, now, origin, ctx) {
     if (room.endedAt) return { response: json({ error: 'This session is no longer shared.' }, 410) }
     const outdated = outdatedClient(req)
     if (outdated) return { response: outdated }
-    if (room.team && !ctx.directory) return { response: json({ error: `This session is for ${room.team.name}, and this server can't check who's in it.` }, 503) }
+    const directory = ctx.directory
+    if (room.team && !directory) return { response: json({ error: `This session is for ${room.team.name}, and this server can't check who's in it.` }, 503) }
     if (room.seats.size >= ROOM_SEATS_MAX) return { response: json({ error: `This session is full: ${ROOM_SEATS_MAX} people have joined.` }, 403) }
     const body = await readJson(req)
     const account = await whoIs(req, ctx)
@@ -168,10 +171,11 @@ async function handleRoom(room, req, rest, now, origin, ctx) {
     // asked after the waits above (a body held open, the sign-in's look) and
     // again if the team let someone go meanwhile, so a removal while this
     // join waited never ends in a seat.
-    for (let tries = 0; room.team; tries++) {
+    for (let tries = 0; room.team && directory; tries++) {
+      const team = room.team
       const gen = room.teamGen
-      const check = await ctx.directory.joinCheck(room.team.id, accountOf(req))
-      if (!check.ok) return { response: json({ error: check.error, team: room.team.name, signIn: check.status === 401 || undefined }, check.status === 401 ? 403 : check.status) }
+      const check = await directory.joinCheck(team.id, accountOf(req))
+      if (!check.ok) return { response: json({ error: check.error, team: team.name, signIn: check.status === 401 || undefined }, check.status === 401 ? 403 : check.status) }
       if (room.teamGen === gen) break
       if (tries >= 2) return { response: json({ error: 'Who is in the team changed while you joined. Try again.' }, 409) }
     }
@@ -274,7 +278,7 @@ async function handleRoom(room, req, rest, now, origin, ctx) {
     return {
       response: json({
         // Cut short, the cursor stops at the last event sent.
-        seq: page.more ? page.events.at(-1).seq : room.seq,
+        seq: page.more ? page.events.at(-1)?.seq : room.seq,
         more: page.more || undefined,
         events: page.events,
         people: room.people(at),
@@ -297,7 +301,7 @@ async function handleRoom(room, req, rest, now, origin, ctx) {
     // the cloud host's watch-only setting keeps to teammates.
     const approver = isApprover(room, auth)
     room.touch(auth, now)
-    const items = (Array.isArray(body.events) ? body.events.slice(0, 200) : []).filter(item => item && allowed.has(item.type))
+    const items: { type: string; body?: JsonObject }[] = (Array.isArray(body.events) ? body.events.slice(0, 200) : []).filter((item: JsonObject | null) => item && allowed.has(item.type))
     // A guest's event past EVENT_BYTES, clamped, is refused, and the post with
     // it (nothing a guest's plugin sends is that big); a host's is cut.
     if (auth.role !== 'host' && items.some(item => bodyBytes(clampBody(item.body)) > EVENT_BYTES)) {
@@ -357,10 +361,11 @@ async function handleRoom(room, req, rest, now, origin, ctx) {
   if (rest === 'invite' && method === 'POST') {
     if (auth.role !== 'host') return { response: json({ error: 'Only the host invites people.' }, 403) }
     if (room.endedAt) return { response: json({ error: 'This session is no longer shared.' }, 410) }
-    if (!ctx.directory) return { response: json({ error: "This share server doesn't have accounts." }, 400) }
+    const directory = ctx.directory
+    if (!directory) return { response: json({ error: "This share server doesn't have accounts." }, 400) }
     if (!room.posts.hit('events', 'all', now)) return { response: limitedResponse('events') }
     const body = await readJson(req)
-    const result = await ctx.directory.sessionInvite(accountOf(req), { id: room.id, url: shareUrl(origin, room.id), title: room.title, host: room.host.name }, body.to)
+    const result = await directory.sessionInvite(accountOf(req), { id: room.id, url: shareUrl(origin, room.id), title: room.title, host: room.host.name }, body.to)
     if (!result.ok) return { response: json({ error: result.error }, result.status) }
     return { response: json({ invited: result.invited, refused: result.refused }) }
   }
@@ -372,10 +377,10 @@ async function handleRoom(room, req, rest, now, origin, ctx) {
     if (room.endedAt) return { response: json({ error: 'This session is no longer shared.' }, 410) }
     const body = await readJson(req)
     const team = body.team ? await teamFor(req, body.team, ctx) : null
-    if (team?.error) return { response: team.error }
+    if (team && 'error' in team) return { response: team.error }
     await unlist(room, ctx)
     room.team = team
-    if (team) await listWithTeam(room, origin, ctx)
+    if (team) await listWithTeam(room, team, origin, ctx)
     room.wake()
     return { changed: true, response: json({ team: teamOf(room) ?? null }) }
   }
@@ -383,27 +388,27 @@ async function handleRoom(room, req, rest, now, origin, ctx) {
   return { response: json({ error: 'Not found' }, 404) }
 }
 
-async function unlist(room, ctx) {
+async function unlist(room: Room, ctx: RoomContext) {
   if (room.team && ctx.directory) await ctx.directory.unregister(room.team.id, room.id).catch(() => {})
 }
 
 // The room ended or expired: off its team's list, and its invites gone.
-export async function ended(room, ctx) {
+export async function ended(room: Room, ctx: RoomContext) {
   if (ctx.directory) await ctx.directory.roomEnded(room.id, room.team?.id ?? null).catch(() => {})
 }
 
-const fileName = raw => {
+const fileName = (raw: unknown) => {
   let name = String(raw ?? '')
   try {
     name = decodeURIComponent(name)
   } catch {}
-  return name.split(/[\\/]/).pop().replace(/[\u0000-\u001f]/g, '').slice(0, 120) || 'file'
+  return (name.split(/[\\/]/).pop() ?? '').replace(/[\u0000-\u001f]/g, '').slice(0, 120) || 'file'
 }
 // A file's type, as its name: no control characters (no type has one, and a
 // record written as JSON takes six bytes for each), at most 100 characters.
-const fileType = raw => String(raw ?? '').replace(/[\u0000-\u001f]/g, '').slice(0, 100) || 'application/octet-stream'
+const fileType = (raw: unknown) => String(raw ?? '').replace(/[\u0000-\u001f]/g, '').slice(0, 100) || 'application/octet-stream'
 
-async function fileRoutes(room, req, rest, auth, now) {
+async function fileRoutes(room: Room, req: Request, rest: string, auth: Auth, now: number): Promise<RouteResult | null> {
   if (rest === 'files' && req.method === 'POST') {
     if (room.endedAt) return { response: json({ error: 'This session is no longer shared.' }, 410) }
     if (room.uploading >= FILE_UPLOADS) return { response: json({ error: 'Too many files are going up to this session at once. Try again in a moment.' }, 429) }
@@ -411,15 +416,15 @@ async function fileRoutes(room, req, rest, auth, now) {
     try {
       let bytes
       try { bytes = await readBody(req, FILE_MAX) } catch (error) {
-        return error.status === 413 ? { response: json({ error: `Files are limited to ${FILE_MAX / 1024 / 1024} MB.` }, 413) } : bodyFailure(error)
+        return statusOf(error) === 413 ? { response: json({ error: `Files are limited to ${FILE_MAX / 1024 / 1024} MB.` }, 413) } : bodyFailure(error)
       }
       const id = await sha256(bytes)
       // What the room holds and what's going up now (the same bytes once):
       // checked and reserved together, before anything waits.
-      const sizes = new Map([...room.filesPending, ...[...room.files.values()].map(f => [f.id, f.size])])
+      const sizes = new Map<string, number>([...room.filesPending, ...[...room.files.values()].map((f): [string, number] => [f.id, f.size])])
       const used = [...sizes].reduce((n, [other, size]) => n + (other === id ? 0 : size), 0)
       if (used + bytes.length > ROOM_FILES_MAX || (!sizes.has(id) && sizes.size >= ROOM_FILES_COUNT)) return { response: json({ error: 'This room is out of room for files.' }, 413) }
-      const meta = { id, name: fileName(req.headers.get('x-file-name')), type: fileType(req.headers.get('content-type')), size: bytes.length, ts: now }
+      const meta: FileMeta = { id, name: fileName(req.headers.get('x-file-name')), type: fileType(req.headers.get('content-type')), size: bytes.length, ts: now }
       const mine = !room.filesPending.has(id)
       if (mine) room.filesPending.set(id, bytes.length)
       try {
@@ -457,14 +462,15 @@ const PEER_MODE = /^[a-z-]{1,32}$/
 const PEER_TOKEN = /^[0-9a-f]{24}$/
 const PEER_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const PEER_PID = /^[A-Za-z0-9_-]{1,64}$/
-const PEER_KEYS = {
+type PeerKind = 'guest' | 'guestStatus' | 'host' | 'hostStatus'
+const PEER_KEYS: Record<PeerKind, Set<string>> = {
   guest: new Set(['handle', 'name', 'mode', 'chain', 'id', 'pid', 'body']),
   guestStatus: new Set(['handle', 'status', 'ref', 'reason']),
   host: new Set(['to', 'handle', 'body', 'ref']),
   hostStatus: new Set(['to', 'handle', 'status', 'id', 'reason']),
 }
 
-function peerAllowed(room, key, now) {
+function peerAllowed(room: Room, key: string, now: number) {
   let w = room.peers.get(key)
   if (!w || now - w.start >= PEER_LIMIT.periodMs) {
     // Seats come and go: only the ones that sent this past minute are kept.
@@ -478,7 +484,7 @@ function peerAllowed(room, key, now) {
 
 // A message or a receipt as either side sends it, checked: null when well
 // formed, else what's wrong.
-function peerProblem(body, kind) {
+function peerProblem(body: JsonObject, kind: PeerKind) {
   const keys = Object.keys(body)
   const allowed = PEER_KEYS[kind]
   if (keys.some(k => !allowed.has(k))) return `Expected only { ${[...allowed].join(', ')} }.`
@@ -495,7 +501,7 @@ function peerProblem(body, kind) {
   if (kind === 'guest') {
     if (typeof name !== 'string' || !name || name.length > PEER_LIMIT.nameChars || /[\x00-\x1f\x7f]/.test(name)) return `A name of 1 to ${PEER_LIMIT.nameChars} characters, without control characters.`
     if (mode !== undefined && (typeof mode !== 'string' || !PEER_MODE.test(mode))) return 'A permission mode class as Claude Code spells it.'
-    if (chain !== undefined && (!Array.isArray(chain) || chain.length > PEER_LIMIT.chain || chain.some(t => typeof t !== 'string' || !PEER_TOKEN.test(t)))) return `A hop chain of at most ${PEER_LIMIT.chain} tokens of 24 hex characters.`
+    if (chain !== undefined && (!Array.isArray(chain) || chain.length > PEER_LIMIT.chain || chain.some((t: unknown) => typeof t !== 'string' || !PEER_TOKEN.test(t)))) return `A hop chain of at most ${PEER_LIMIT.chain} tokens of 24 hex characters.`
     if (typeof id !== 'string' || !PEER_ID.test(id)) return "The message's id, a UUID."
     if (typeof pid !== 'string' || !PEER_PID.test(pid)) return 'An id of 1 to 64 letters, digits, - or _.'
   }
@@ -504,7 +510,7 @@ function peerProblem(body, kind) {
   return null
 }
 
-async function peerRoute(room, req, auth, now, ctx) {
+async function peerRoute(room: Room, req: Request, auth: Auth, now: number, ctx: RoomContext): Promise<RouteResult> {
   const host = auth.role === 'host'
   const before = roomAccessError(room, req, ctx, host)
   if (before) return { response: before }
@@ -515,7 +521,7 @@ async function peerRoute(room, req, auth, now, ctx) {
   const after = roomAccessError(room, req, ctx, host)
   if (after) return { response: after }
   if (!body || typeof body !== 'object' || Array.isArray(body)) return { response: json({ error: 'Expected a JSON object.' }, 400) }
-  const kind = `${host ? 'host' : 'guest'}${'status' in body ? 'Status' : ''}`
+  const kind = `${host ? 'host' : 'guest'}${'status' in body ? 'Status' : ''}` as PeerKind
   const problem = peerProblem(body, kind)
   if (problem) return { response: json({ error: problem }, 400) }
   const { handle, name, mode, chain, id, pid, body: text, status, ref, reason } = body

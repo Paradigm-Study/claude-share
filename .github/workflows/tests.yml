@@ -63,9 +63,10 @@ jobs:
         with:
           node-version: 24
           package-manager-cache: false
-      # tsc checks server/*.mjs (checkJs) twice: what runs on Cloudflare against
-      # the Worker's types alone (wrangler writes them from wrangler.toml; it needs
-      # no login), what runs on Node against Node's alone. The tools' versions are
-      # package.json's, pinned exactly, so a local run sees the same types.
+      # tsc checks the server against the Worker's types alone (wrangler writes
+      # them from wrangler.toml; it needs no login): server/*.mjs (checkJs) with
+      # what they import, then server/core and server/traces, the TypeScript,
+      # strictly. The tools' versions are package.json's, pinned exactly, so a
+      # local run sees the same types.
       - run: npm install --no-package-lock --ignore-scripts
       - run: npm run typecheck:server

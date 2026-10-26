@@ -85,7 +85,7 @@ import {
   chargeControl,
   mergeTCPStats,
   leftResponse,
-} from './core.mjs'
+} from './core.ts'
 import { Directory, providersFrom, BODY_CHARS } from './teams.mjs'
 // Session traces (server/traces, TypeScript): loaded only where a database
 // is bound, so the Worker's tests on Node 20, which can't load TypeScript,

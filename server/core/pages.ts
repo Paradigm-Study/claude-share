@@ -1,11 +1,12 @@
-import { token } from './http.mjs'
+import { token } from './http.ts'
 import { CLOVER_WEBP, LOGO_PATHS } from '../brand.mjs'
+import type { Room } from './room.ts'
 
 // The server's own front page: what this is, the one-line install, and what
 // the server sees and keeps (the disclosure a public server owes its users).
 // `traces`: whether this server keeps shared sessions' turns (server/traces),
 // which it then says.
-export function homePage(origin, { traces = false } = {}) {
+export function homePage(origin: string, { traces = false }: { traces?: boolean } = {}) {
   const html = `<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -69,7 +70,7 @@ ${traces ? `      <li><b>Traces, kept on this server:</b> this server keeps the 
 // A page in the site's own look: the nav, an eyebrow, a serif heading, its
 // words, then whatever follows (buttons, a command to copy). The account,
 // invite and not-found pages are all this; callers escape what they pass.
-export function brandPage({ title, eyebrow = '', heading, body = '', after = '', mark = '', status = 200, script = '' }) {
+export function brandPage({ title, eyebrow = '', heading, body = '', after = '', mark = '', status = 200, script = '' }: { title: string; eyebrow?: string; heading: string; body?: string; after?: string; mark?: string; status?: number; script?: string }) {
   const html = `<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -106,7 +107,7 @@ ${script ? `<script>${script}</script>` : ''}
 // Claude Code show it under "First time?").
 export const INSTALL_COMMAND = 'claude plugin marketplace add Paradigm-Study/claude-share && claude plugin install shared-session@claude-share'
 export const COPY_ICON = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2.5"/><path d="M5 15V6a2 2 0 0 1 2-2h9"/></svg>'
-export const commandBox = (id, text, label) => `<div class="composer"><span class="slash" aria-hidden="true">$</span><code id="${id}">${escapeHtml(text)}</code><button type="button" data-copy="${id}" aria-label="${escapeHtml(label)}">${COPY_ICON}</button></div>`
+export const commandBox = (id: string, text: string, label: string) => `<div class="composer"><span class="slash" aria-hidden="true">$</span><code id="${id}">${escapeHtml(text)}</code><button type="button" data-copy="${id}" aria-label="${escapeHtml(label)}">${COPY_ICON}</button></div>`
 // Every [data-copy] button copies its code's text and says so for a moment:
 // in the code's place when it shows, else on the button itself.
 export const COPY_SCRIPT = `document.querySelectorAll('[data-copy]').forEach(function (b) { b.addEventListener('click', function () {
@@ -131,8 +132,8 @@ export function missingPage() {
 // The page a share link opens in a browser: hands the link to Claude Desktop
 // as a new Claude Code session's prompt, where the plugin joins on Enter.
 
-export const escapeHtml = s =>
-  String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c])
+const ENTITIES: Record<string, string> = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }
+export const escapeHtml = (s: unknown) => String(s).replace(/[&<>"']/g, c => ENTITIES[c] ?? c)
 
 const PAGE_CSS = `/* Paradigm's landing design (paradigm-study-web, "A School of One"): paper and
    ink, a faint dot grid, the notebook window with three muted dots, mono
@@ -247,7 +248,7 @@ footer q { font-family:var(--display); font-size:17px; color:var(--muted); quote
 @media (prefers-reduced-motion: reduce) { * { animation:none !important; transition:none !important; } }
 `
 
-export function landingPage(room, url, now, opts = {}) {
+export function landingPage(room: Room, url: string, now: number, opts: { access?: string | null } = {}) {
   const deepLink = `claude://code/new?q=${encodeURIComponent(url)}`
   const data = {
     id: room.id,
@@ -262,7 +263,7 @@ export function landingPage(room, url, now, opts = {}) {
   // Inside a script element `</script>` in a name would end it, and what
   // follows would run: every `<` goes as its escape.
   const json = JSON.stringify(data).replace(/</g, '\\u003c')
-  const membersOnly = room.team && opts.access === 'members'
+  const membersOnly = room.team && opts.access === 'members' ? room.team : null
   const nonce = token(16)
   const host = escapeHtml(room.host.name)
   const html = `<!doctype html>
@@ -290,7 +291,7 @@ ${PAGE_CSS}</style></head>
       <span class="eyebrow" id="eyebrow">${host} is sharing</span>
       <h1 id="title"></h1>
       <p class="sub-copy" id="subcopy">A live Claude Code session. Join from your own Claude Code: your prompts run in <span class="hn"></span>'s session, and everyone sees the replies as they stream.</p>
-      ${membersOnly ? `<p class="note join"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg><span>Only people in ${escapeHtml(room.team.name)} can join. In Claude Code, press <b>Team</b> above the prompt and sign in first.</span></p>` : ''}
+      ${membersOnly ? `<p class="note join"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg><span>Only people in ${escapeHtml(membersOnly.name)} can join. In Claude Code, press <b>Team</b> above the prompt and sign in first.</span></p>` : ''}
       <div class="people"><div class="dots" id="dots"></div><div class="count" id="count"></div></div>
       <div class="cta" id="cta">
         <a class="btn-primary" id="open" href="#"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 17 17 7M9 7h8v8"/></svg>Open in Claude Code</a>
@@ -394,7 +395,7 @@ ${PAGE_CSS}</style></head>
 
 // The room page runs its one script, by this response's nonce, and loads its
 // fonts; anything a name or title might smuggle in runs nowhere.
-const landingPolicy = nonce => [
+const landingPolicy = (nonce: string) => [
   "default-src 'none'", `script-src 'nonce-${nonce}'`, "style-src 'unsafe-inline' https://fonts.googleapis.com", 'font-src https://fonts.gstatic.com',
   "img-src 'self' data:", "connect-src 'self'", "base-uri 'none'", "form-action 'none'", "frame-ancestors 'none'",
 ].join('; ')
