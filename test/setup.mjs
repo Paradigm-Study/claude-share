@@ -17,7 +17,7 @@ const fakeCli = String.raw`
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 const s = JSON.parse(readFileSync(process.env.SETUP_SCENARIO, 'utf8'))
 const args = process.argv.slice(2)
-appendFileSync(process.env.SETUP_LOG, JSON.stringify({ kind: 'cli', args, serverEnv: process.env.SHARED_SESSION_SERVER }) + '\n')
+appendFileSync(process.env.SETUP_LOG, JSON.stringify({ kind: 'cli', args, serverEnv: process.env.SHARED_SESSION_SERVER, place: process.env.CLAUDE_CODE_HOST_SESSION_ID }) + '\n')
 const finish = (code, value) => { console.log(typeof value === 'string' ? value : JSON.stringify(value)); process.exit(code) }
 const command = args.join(' ')
 // pathVersion: the terminal's claude is that old, the one CLAUDE_BIN names (desk/claude) new enough.
@@ -42,8 +42,11 @@ if (command === 'plugin list --json') {
   if (s.listFail) finish(1, 'listing unavailable')
   if (s.listMalformed) finish(0, 'not JSON')
   const plugins = s.missing ? [] : [{ id: 'shared-session@claude-share', version: '0.11.19', enabled: !s.disabled }]
-  // inline: the automatic-update folder; 'folder': a checkout of the plugin elsewhere.
-  if (s.inline) plugins.push({ id: 'shared-session@inline', enabled: true, installPath: process.env.HOME + (s.inline === 'folder' ? '/src/claude-share/plugin' : '/.claude/shared-session/plugin') })
+  // inline: the automatic-update folder ('linked': reached through a link to
+  // HOME); 'folder': a checkout of the plugin elsewhere; 'unsaid': a CLI that
+  // gives no installPath.
+  const where = { folder: '/src/claude-share/plugin', linked: '/../linked-home/.claude/shared-session/plugin/' }[s.inline] ?? '/.claude/shared-session/plugin'
+  if (s.inline) plugins.push({ id: 'shared-session@inline', enabled: true, ...(s.inline === 'unsaid' ? {} : { installPath: process.env.HOME + where }) })
   finish(0, plugins)
 }
 if (command.startsWith('plugin update ')) finish(s.updateFail ? 1 : 0, s.updateFail ? 'download failed' : 'already current')
@@ -94,6 +97,8 @@ globalThis.fetch = async (url, init = {}) => {
   if (parsed.pathname.endsWith('/stream')) return new Response(JSON.stringify({ events: [], people: [{ name: 'setup-guest' }] }) + '\n')
   if (parsed.pathname.endsWith('/events')) return json({ events: [{ type: 'join', from: { role: 'guest', name: 'test guest' } }] })
   if (parsed.pathname === '/api/rooms/live-room-abcdefghijkl') return json({ ended: existsSync(process.env.SETUP_STOPPED) })
+  // strayEnded: the stray room ended already.
+  if (s.strayEnded && parsed.pathname === '/api/rooms/stray-room-abcdefghijkl/end') return json({ error: 'This shared session has ended.' }, 410)
   if (parsed.pathname.endsWith('/end') || parsed.pathname.startsWith('/s/')) return json({ ok: true })
   throw new Error('Unexpected intercepted request: ' + url)
 }
@@ -130,6 +135,8 @@ function setup(args, scenario = {}) {
     })
     if (scenario.configDir) env.CLAUDE_CONFIG_DIR = configDir
     if (scenario.envServer) env.SHARED_SESSION_SERVER = scenario.envServer
+    // place: run from a Claude Desktop session, as an agent there runs it.
+    if (scenario.place) env.CLAUDE_CODE_HOST_SESSION_ID = scenario.place
     const result = spawnSync(process.execPath, ['--import', join(dir, 'fetch.mjs'), join(dir, 'scripts/setup.mjs'), ...args], { env, cwd: dir, encoding: 'utf8', timeout: 15_000 })
     assert.ifError(result.error)
     const calls = existsSync(env.SETUP_LOG) ? readFileSync(env.SETUP_LOG, 'utf8').trim().split('\n').map(line => JSON.parse(line)) : []
@@ -220,6 +227,34 @@ test("a live check ends a room its session left open elsewhere, and removes its 
   assert.match(result.out, /NOTE ended the room the check's session left open on https:\/\/stray\.example\.invalid/)
   assert(requests(result).some(r => r.url === 'https://stray.example.invalid/api/rooms/stray-room-abcdefghijkl/end' && r.method === 'POST'), JSON.stringify(requests(result)))
   assert.deepEqual(result.rooms, [], 'no checkpoint is left behind')
+})
+
+test('the automatic-update folder is told by its path, as the plugin tells it, and a CLI that gives no path falls back as before', () => {
+  const settings = { pluginConfigs: { [pluginId]: { options: { server: 'https://saved.example.invalid' } } } }
+  for (const inline of ['linked', 'unsaid']) {
+    const result = setup(['check'], { inline, settings })
+    assert.equal(result.code, 0, result.out)
+    assert.equal(requests(result)[0].url, 'https://saved.example.invalid/api/health', inline)
+    assert.doesNotMatch(result.out, /NOTE sessions load the plugin from/, inline)
+  }
+})
+
+test("a live check's sessions are never the Claude Desktop session it runs in", () => {
+  const result = setup(['check', '--live'], { place: 'local_0123abcd-0000-4000-8000-000000000000' })
+  assert.equal(result.code, 0, result.out)
+  const sessions = result.calls.filter(c => c.kind === 'cli' && c.args[0] === '-p')
+  assert.equal(sessions.length, 3, JSON.stringify(sessions))
+  assert(sessions.every(c => c.place === undefined), JSON.stringify(sessions))
+})
+
+test("a live check's leftover room that ended already is no failure; one on plain http is never sent its token", () => {
+  const ended = setup(['check', '--live'], { strayServer: 'https://stray.example.invalid', strayEnded: true })
+  assert.doesNotMatch(ended.out, /left a room open/, ended.out)
+  assert.deepEqual(ended.rooms, [])
+  const plain = setup(['check', '--live'], { strayServer: 'http://stray.example.invalid' })
+  assert.match(plain.out, /FAIL the check's session left a room open on http:\/\/stray\.example\.invalid, not https/)
+  assert(!requests(plain).some(r => r.url.startsWith('http://stray.example.invalid')), JSON.stringify(requests(plain)))
+  assert.deepEqual(plain.rooms, [])
 })
 
 test('explicit non-live server checks may differ from the saved setting', () => {
