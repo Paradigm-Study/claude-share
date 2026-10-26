@@ -40,8 +40,7 @@ jobs:
       # The plugin's own tests (plugin/tests: band.test.tsx, window.test.ts,
       # preview.test.ts, proxy.test.ts, upstream.test.ts) need Claude Code and
       # run with `claude plugin test plugin`, not here; see CONTRIBUTING.md.
-      # cloudflare.mjs answers server/worker.mjs's `cloudflare:workers` import under Node.
-      - run: node --import ./test/support/cloudflare.mjs test/${{ matrix.suite }}.mjs
+      - run: node test/${{ matrix.suite }}.mjs
 
   server-types:
     name: server types

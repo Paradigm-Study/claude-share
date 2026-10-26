@@ -42,18 +42,18 @@ node test/setup.mjs                                     # setup.mjs against a fa
 node test/local-preview.mjs                             # TCP helpers through a real Node room; real Chrome and Firefox preview windows and their WebRTC when installed
 node test/browser-proxy.mjs                             # the preview window's SOCKS5 helper, its DNS-over-HTTPS against a local TLS fixture (openssl for the test CA)
 node test/discover.mjs                                  # same-project service discovery, and who holds a port
-node --import ./test/support/cloudflare.mjs test/tcp-worker.mjs  # the Worker's TCP lifecycle and hibernation, its public link, files and preview keys
-node --import ./test/support/cloudflare.mjs test/peer.mjs  # messages and receipts between a guest's own sessions and the host's
+node test/tcp-worker.mjs                                # the Worker's TCP lifecycle and hibernation, its public link, files and preview keys
+node test/peer.mjs                                      # messages and receipts between a guest's own sessions and the host's
 node test/mailbox.mjs                                   # the host's mailbox helper and relay/receipt.cjs through real Unix sockets (macOS or Linux)
-node --import ./test/support/cloudflare.mjs test/previews.mjs  # preview shares, forwarding, Stop, needs, the public link, bounded bodies and events, a worst-case meta, the home page's claims
-node --import ./test/support/cloudflare.mjs test/teams.mjs  # accounts and teams, the sign-in's confirmation, Continue in a real headless Chrome when there is one
+node test/previews.mjs                                  # preview shares, forwarding, Stop, needs, the public link, bounded bodies and events, a worst-case meta, the home page's claims
+node test/teams.mjs                                     # accounts and teams, the sign-in's confirmation, Continue in a real headless Chrome when there is one
 node test/cloud.mjs                                     # the cloud host's handoff through the core; with CLOUD_IMAGE and model access, a real runner in Docker
-node --import ./test/support/cloudflare.mjs test/security.mjs  # where a room's files land on a teammate's computer (relay/save.sh) and where a guest's read really goes (relay/real.sh), through real links; names, the room page, what a seat holds open, uploads, and on the Worker team removals, what a room serves and the daily room count
+node test/security.mjs                                  # where a room's files land on a teammate's computer (relay/save.sh) and where a guest's read really goes (relay/real.sh), through real links; names, the room page, what a seat holds open, uploads, and on the Worker team removals, what a room serves and the daily room count
 CLAUDE_BIN=$(which claude) node test/e2e.mjs            # a real host and guests through a local server (needs model access)
 EXTERNAL_SERVER=1 SHARE_SERVER=https://… node test/e2e.mjs   # …or through a deployed one (`npx wrangler dev` runs the Worker locally: SHARE_SERVER=http://127.0.0.1:8787)
 ```
 
-All but the e2e run without a model. The suites that load `server/worker.mjs` start Node with `--import ./test/support/cloudflare.mjs`, which stands in for `cloudflare:workers`, workerd's own module.
+All but the e2e run without a model. The suites that load `server/worker.mjs` import `test/support/cloudflare.mjs` first, which stands in for `cloudflare:workers`, workerd's own module.
 
 - `plugin/.claude/types/claude-code.d.ts` is the engine's API, at least 2.1.299's (copy it in from a Claude Code session with `/plugin-types plugin/.claude/types`; it is git-ignored). It is the authority on every hook, `$` call and element.
 - The validator enforces three engine rules: `$` may only be passed to functions declared at the top of `register.tsx`; `atom(...)` references use literal plugin and key strings; a link element accepts only `https:` (or `http://localhost`) addresses.

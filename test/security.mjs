@@ -15,6 +15,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Room, FILE_UPLOADS, LIMITS, PLUGIN_LATEST, ROOMS_PER_ADDRESS_DAY, SEAT_POLLS, SEAT_STREAMS, SERVE_LIMITS, STREAM_PAGE, STREAM_UNREAD, landingPage, roomRequest, token } from '../server/core.mjs'
+import './support/cloudflare.mjs'
 
 const SAVE = fileURLToPath(new URL('../plugin/relay/save.sh', import.meta.url))
 const REAL = fileURLToPath(new URL('../plugin/relay/real.sh', import.meta.url))
@@ -345,7 +346,12 @@ const ok = label => console.log(`ok ${label}`)
     await objects.get(id).state.barrier
     return objects.get(id)
   }
-  env.ROOMS = { idFromName: name => name, get: id => ({ fetch: async (input, init) => (await roomObject(id)).obj.fetch(new Request(input, init)), keepTeam: async (...args) => (await roomObject(id)).obj.keepTeam(...args) }) }
+  // A stub: the object's methods, as RPC calls them; `fetch` alone is a room of
+  // the version before RPC, which has neither keepTeam nor info.
+  const fetchOf = id => async (input, init) => (await roomObject(id)).obj.fetch(new Request(input, init))
+  const rpcStub = id => ({ fetch: fetchOf(id), keepTeam: async (...args) => (await roomObject(id)).obj.keepTeam(...args), info: async () => (await roomObject(id)).obj.info() })
+  const oldStub = id => ({ fetch: fetchOf(id), keepTeam: async () => { throw new Error('no RPC') }, info: async () => { throw new Error('no RPC') } })
+  env.ROOMS = { idFromName: name => name, get: rpcStub }
   const directoryStorage = new Storage()
   const directory = new DirectoryObject({ storage: directoryStorage }, env)
   // A stub: the object's methods, as RPC calls them.
@@ -379,10 +385,8 @@ const ok = label => console.log(`ok ${label}`)
   }
   const [fredWs, gusWs] = [await socketOf(fredSeat), await socketOf(gusSeat)]
   const out = async seat => (await at(`/api/rooms/${room.id}/events?after=0&wait=0`, { tok: seat.token })).status
-  // Nobody outside says it: the Worker forwards no __ path to a room, and the
-  // room has no path for it at all (the directory calls its keepTeam).
+  // Nobody outside says it: the Worker forwards no __ path to a room.
   assert.equal((await at(`/api/rooms/${room.id}/__team`, { method: 'POST', tok: room.token, body: { team: crew.id, allowed: [] } })).status, 404)
-  assert.equal((await obj.fetch(new Request(`https://room.internal/${room.id}/__team`, { method: 'POST', headers: { ...V, authorization: `Bearer ${room.token}` }, body: JSON.stringify({ team: crew.id, allowed: [] }) }))).status, 404)
   assert.equal(await out(gusSeat), 200)
   assert.equal((await at(`/api/teams/${crew.id}/members/${fredId}`, { method: 'DELETE', tok: wes })).status, 200)
   assert.deepEqual(fredWs.closes, [{ code: 1008, reason: 'left' }], "the removed member's stream closes")
@@ -411,6 +415,22 @@ const ok = label => console.log(`ok ${label}`)
   assert.equal((await at(`/api/rooms/${room.id}/end`, { method: 'POST', tok: room.token })).status, 200)
   assert.deepEqual(held(), [], "the room's end takes its invites and its place on the team's list")
   await directory.alarm()
+  // While a deploy runs both versions: a room of the version before RPC hears
+  // a removal through __team, and asks the directory through /rpc/.
+  {
+    const again = (await at('/api/rooms', { method: 'POST', acct: wes, body: { name: 'Wes', title: 'crew again', team: crew.id } })).data
+    const seat = (await at(`/api/rooms/${again.id}/join`, { method: 'POST', acct: gus, body: { name: 'Gus' } })).data
+    assert.equal((await at(`/api/teams/${crew.id}/sessions`, { tok: wes })).data.sessions?.[0]?.id, again.id, "the team's list reads the room through its info")
+    env.ROOMS.get = oldStub
+    assert.equal((await at(`/api/teams/${crew.id}/sessions`, { tok: wes })).data.sessions?.[0]?.id, again.id, "…and through a path from an older room")
+    assert.equal((await at(`/api/teams/${crew.id}/members/${gusId}`, { method: 'DELETE', tok: wes })).status, 200)
+    assert.equal((await at(`/api/rooms/${again.id}/events?after=0&wait=0`, { tok: seat.token })).status, 401, 'an older room lets go of someone removed')
+    env.ROOMS.get = rpcStub
+    const asked = await directory.fetch(new Request('https://directory.internal/rpc/teamAccess', { method: 'POST', body: JSON.stringify([crew.id]) }))
+    assert.equal(asked.status, 200)
+    assert.ok('result' in await asked.json(), 'an older room asks the directory through /rpc/')
+    assert.equal((await directory.fetch(new Request('https://directory.internal/rpc/handle', { method: 'POST', body: '[]' }))).status, 404, 'only the calls a room makes')
+  }
   ok("on the Worker, a members-only team's room lets go of someone removed from it as the directory says, closing their stream, saved so; no request from outside can say it; a seat's streams past four end its oldest; and a room's end takes its invites and listing from the directory, whose alarm is set for what's due")
 
   // What a room serves of its files is counted against its day, the

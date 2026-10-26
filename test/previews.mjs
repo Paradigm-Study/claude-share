@@ -14,7 +14,10 @@ import ws from '../plugin/relay/ws.cjs'
 import { spawn } from 'node:child_process'
 import { once } from 'node:events'
 import { Room, PLUGIN_LATEST, roomRequest, token, versionInfo, tcpSocketTarget, NEED_LIMIT, LIMITS, limitOf, streamedRoomBody, previewRequest, previewSocketTarget, publicPairValid, PUBLIC_LIMITS, TCP_LIMITS, SEAT_TIMEOUT_MS, EVENT_BYTES, HISTORY_BYTES, ROOM_FILES_COUNT, ROOM_PREVIEWS_MAX, ROOM_SEATS_MAX, SERVE_LIMITS, previewLabel, previewKeyOf, previewHostLabel, roomOrigins, hostHalfClose, tcpHalfClose, rejectReason, homePage } from '../server/core.mjs'
-import { metaOf } from '../server/worker.mjs'
+import './support/cloudflare.mjs'
+
+// After the stand-in for `cloudflare:workers` is registered.
+const { metaOf } = await import('../server/worker.mjs')
 
 function world() {
   const room = Room.create({ id: token(16), name: 'Host', now: Date.now(), version: PLUGIN_LATEST })

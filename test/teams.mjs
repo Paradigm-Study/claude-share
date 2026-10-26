@@ -20,6 +20,7 @@ import { homedir, tmpdir } from 'node:os'
 import { basename, join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { PLUGIN_LATEST } from '../server/core.mjs'
+import './support/cloudflare.mjs'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const PORT = Number(process.env.TEAMS_PORT ?? 8899)
