@@ -44,6 +44,26 @@ function within(promise, label, ms = 5000) {
   let timer
   return Promise.race([promise, new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`Timed out: ${label}`)), ms) })]).finally(() => clearTimeout(timer))
 }
+// Waits for `work` while `count` keeps moving. It fails when `broken()`
+// says the channel closed, when the count stands still for `stallMs`, or
+// past `capMs`: what a long step guards is a channel that closes or stops,
+// and a slow machine (a CI runner at a third of its usual speed) is neither.
+async function moving(work, label, count, broken, { stallMs = 15_000, capMs = 300_000 } = {}) {
+  let done = false, failure = null
+  const watched = Promise.resolve(work).then(() => { done = true }, error => { failure = error; done = true })
+  const began = Date.now()
+  let last = count(), lastAt = began
+  while (!done) {
+    await pause(50)
+    if (done) break
+    if (broken()) throw new Error(`Closed: ${label}`)
+    if (count() !== last) { last = count(); lastAt = Date.now() }
+    if (Date.now() - lastAt > stallMs) throw new Error(`Stalled for ${stallMs / 1000} s: ${label}`)
+    if (Date.now() - began > capMs) throw new Error(`Timed out: ${label}`)
+  }
+  await watched
+  if (failure) throw failure
+}
 const listen = (server, host = '127.0.0.1', port = 0) => new Promise((resolve, reject) => {
   server.once('error', reject)
   server.listen({ host, port, ipv6Only: host === '::1' }, () => { server.removeListener('error', reject); resolve(server.address().port) })
@@ -1275,14 +1295,14 @@ async function realChain() {
     const ping = await wire(raw.port, '127.0.0.1', false)
     let echoed = 0, arrived
     ping.client.on('data', bytes => { echoed += bytes.length; arrived?.() })
-    await within((async () => {
+    await moving((async () => {
       for (let i = 0; i < FRAMES; i++) {
         const back = new Promise(resolve => (arrived = resolve))
         ping.client.write(Buffer.from([i & 255]))
         await back
         await pace(i)
       }
-    })(), 'request/response past 20,000 frames', 120_000).catch(error => { throw new Error(`${error.message}: ${echoed} echoed in ${Date.now() - began} ms, closed ${ping.closed}`) })
+    })(), 'request/response past 20,000 frames', () => echoed, () => ping.closed).catch(error => { throw new Error(`${error.message}: ${echoed} echoed in ${Date.now() - began} ms, closed ${ping.closed}`) })
     assert.equal(echoed, FRAMES)
     ping.client.end()
     await until(() => ping.closed, 'request/response channel finished', 10_000)
@@ -1299,7 +1319,8 @@ async function realChain() {
     oneWay.client.on('data', async bytes => {
       for (let i = 0; i < bytes.length; i++) { await pace(dripped++); more() }
     })
-    await until(() => oneWay.closed, 'one way past 20,000 frames', 120_000).catch(error => { throw new Error(`${error.message}: ${dripped} arrived`) })
+    // The channel closing is this step's end: whether it closed early, the count says.
+    await moving(until(() => oneWay.closed, 'one way past 20,000 frames', 300_000), 'one way past 20,000 frames', () => dripped, () => false).catch(error => { throw new Error(`${error.message}: ${dripped} arrived`) })
     assert.equal(dripped, FRAMES)
     assert.ok(!dripRun.rows.some(row => row.state === 'channel-error') && !hostWorker.rows.some(row => row.state === 'error'), JSON.stringify([...dripRun.rows, ...hostWorker.rows].filter(row => row.state?.includes('error'))))
     await stop(dripRun)
