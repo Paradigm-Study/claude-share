@@ -42,6 +42,8 @@ function world(
     history?: unknown[]
     down?: boolean
     latest?: string
+    /** The share server keeps shared sessions' turns (server/traces), as /api/version says. */
+    traces?: boolean
     settings?: string
     hostAway?: boolean
     env?: Record<string, string>
@@ -921,7 +923,7 @@ function world(
     const signedIn = headers.authorization === `Bearer ${TEAM_TOKEN}`
     const team = { id: 'team0001', name: 'Acme', role: 'owner', access: opts.team?.access ?? 'members', domains: [], githubOrgs: [], invite: 'invite0001' }
     if (path === '/api/version') {
-      body = { version: opts.latest ?? '0.7.1' }
+      body = { version: opts.latest ?? '0.7.1', ...(opts.traces ? { traces: true } : {}) }
     } else if (path === '/api/auth/providers') {
       body = { providers: opts.team?.providers ?? [{ id: 'github', label: 'GitHub' }, { id: 'google', label: 'Google' }] }
     } else if (path === '/api/auth/poll') {
@@ -1051,6 +1053,27 @@ test('with earlier prompts, Only watch and chat then asks about them, and the ro
   expect(asked.posted.some(e => e.type === 'row')).toBe(true)
   await $.command.run({ command: 'stop-sharing', args: '' } as never)
 })
+
+// A server that keeps shared sessions' turns says so in /api/version, and
+// Share says it to a host it keeps them for: one signed in. Signed out, or
+// on a server that keeps nothing, Share says nothing of it.
+for (const [traces, signedIn] of [[true, true], [true, false], [false, true]] as const) {
+  test(`Share says the server keeps the session's turns only where it does, for a host signed in (traces ${traces ? 'on' : 'off'}, ${signedIn ? 'signed in' : 'signed out'})`, async ($, on) => {
+    const asked = world(on, { traces, team: { signedIn } })
+    on('session.start', ($, e) => ({ cwd: e.cwd }))
+    await $.session.start(START)
+    await asked.clock.advance(2_000)
+    const pane = await $.ui.mount(roomPane())
+    await pane.press({ key: 'room-share' })
+    await asked.clock.advance(200)
+    expect(await pane.find({ type: 'Text', text: /will see it live/ })).toBeDefined()
+    expect(Boolean(await pane.find({ type: 'Text', text: /This server keeps its turns: .+ can search them later\./ }))).toBe(traces && signedIn)
+    await pane.press({ key: 'share-cancel' })
+    const said = (await $.command.run({ command: 'share-session', args: '' } as never)) as { text: string }
+    expect(said.text.includes('This server keeps its turns')).toBe(traces && signedIn)
+    await $.command.run({ command: 'stop-sharing', args: '' } as never)
+  })
+}
 
 test('/share-session watch shares watch-only at once', async ($, on) => {
   const asked = world(on)

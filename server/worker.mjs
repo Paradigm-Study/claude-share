@@ -87,6 +87,11 @@ import {
   leftResponse,
 } from './core.mjs'
 import { Directory, providersFrom, BODY_CHARS } from './teams.mjs'
+// Session traces (server/traces, TypeScript): loaded only where a database
+// is bound, so the Worker's tests on Node 20, which can't load TypeScript,
+// never reach it.
+const tracesOn = env => Boolean(env?.TRACES_DB && env?.OAUTH_KV)
+const traces = () => import('./traces/index.ts')
 
 const ROOM_TTL_MS = 24 * 60 * 60 * 1000
 const pad = seq => String(seq).padStart(12, '0')
@@ -153,8 +158,16 @@ export default {
     const parts = url.pathname.split('/').filter(Boolean)
 
     if (url.pathname === '/api/health') return json({ ok: true })
-    if (url.pathname === '/api/version') return versionInfo()
-    if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/privacy')) return homePage(origin)
+    if (url.pathname === '/api/version') return versionInfo({ traces: tracesOn(env) })
+    if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/privacy')) return homePage(origin, { traces: tracesOn(env) })
+    // Session traces over MCP, and its OAuth (server/traces/oauth.ts).
+    if (tracesOn(env) && env.DIRECTORY) {
+      const { isTracesPath, tracesFetch } = await traces()
+      if (isTracesPath(url.pathname)) {
+        if (!(await env.EVENTS_LIMIT.limit({ key: `traces:${req.headers.get('cf-connecting-ip') ?? 'unknown'}` })).success) return limitedResponse('events')
+        return tracesFetch(req, env, ctx, origin)
+      }
+    }
     const bodied = req.method !== 'GET' && req.method !== 'HEAD'
     if (env.DIRECTORY && Directory.owns(url.pathname)) {
       if (Directory.limited(url.pathname, req.method) && !(await env.JOIN_LIMIT.limit({ key: `auth:${req.headers.get('cf-connecting-ip') ?? 'unknown'}` })).success) return limitedResponse('join')
@@ -305,6 +318,10 @@ export class RoomObject extends DurableObject {
     this.tcpSaved = tcpCounted({ used: 0 })
     // When the alarm set is due (schedule), null when none is or it's unknown.
     this.alarmAt = null
+    // The traces' writes, one at a time (keepSoon), and whether turns wait in
+    // its outbox for the database to take them.
+    this.keeping = Promise.resolve()
+    this.keepPending = false
     state.blockConcurrencyWhile(async () => {
       this.alarmAt = (await state.storage.getAlarm()) ?? null
       const meta = await state.storage.get('meta')
@@ -468,6 +485,8 @@ export class RoomObject extends DurableObject {
     const counters = tcpCounted(room.tcpStats)
     const { response, changed } = await roomRequest(room, req, rest, now, origin, ctx)
     if (changed) await this.persist()
+    // Turns that ended go to traces after the answer, not before it.
+    if (changed) void this.keepSoon()
     // The byte budget changed without the room (a revocation's refund): its key alone.
     else if (this.room === room && tcpCounted(room.tcpStats) !== counters) await this.persistTCPStats()
     // A link or a browser session made is something to sweep when it expires.
@@ -922,6 +941,47 @@ export class RoomObject extends DurableObject {
     }
   }
 
+  // Session traces (server/traces): the turns that ended since the last
+  // look, from the room's events, written to its outbox and then to the
+  // database. What's read and the turn still open are kept in storage
+  // (traces:*), so a room that sleeps or restarts carries on; the outbox is
+  // emptied only once the database took it, and the alarm tries again a
+  // minute later.
+  keepSoon() {
+    if (!tracesOn(this.env) || !this.room) return Promise.resolve()
+    this.keeping = this.keeping.catch(() => {}).then(() => this.keepNew(false))
+    return this.keeping.catch(() => {})
+  }
+
+  async keepNew(final) {
+    const room = this.room
+    if (!room || !tracesOn(this.env)) return
+    const { tracesScope, takeTurns, authorOf, keepTurns } = await traces()
+    const scope = tracesScope(room)
+    if (!scope) return
+    const storage = this.state.storage
+    const [seen, open, waiting] = await Promise.all([storage.get('traces:seq'), storage.get('traces:open'), storage.get('traces:out')])
+    const { closed, open: still } = takeTurns(room.events.filter(e => e.seq > (seen ?? 0)), open ?? null, name => authorOf(room, name))
+    if (final && still) closed.push(still)
+    // A database down for long holds the newest 500 turns.
+    const out = [...(waiting ?? []), ...closed].slice(-500)
+    if (room.seq !== seen || closed.length) {
+      await storage.put({ 'traces:seq': room.seq, 'traces:out': out })
+      if (still && !final) await storage.put('traces:open', still)
+      else await storage.delete('traces:open')
+    }
+    if (!out.length) return
+    try {
+      await keepTurns(this.env, { id: room.id, scope, team: room.team?.id ?? null, owner: { name: room.host.name, account: room.host.account ?? null }, title: room.title ?? null }, out)
+      await storage.put('traces:out', [])
+      this.keepPending = false
+    } catch (error) {
+      this.keepPending = true
+      console.warn(`traces: ${out.length} turns wait: ${error?.message ?? error}`)
+      if (!final) await this.schedule()
+    }
+  }
+
   // The next thing due: a disconnected seat's grace running out, a browser
   // session expiring, a socket's pairing deadline, or the room's expiry. Set
   // only when that's sooner than the alarm already set (or none is): one set
@@ -932,6 +992,7 @@ export class RoomObject extends DurableObject {
     if (!room) return
     const now = Date.now()
     const due = [this.lastActive(now) + ROOM_TTL_MS + 1000]
+    if (this.keepPending) due.push(now + 60_000)
     for (const seat of [{ id: 'host', lastSeen: room.host.lastSeen }, ...room.seats.values()]) {
       if (!room.endedAt && !room.connected(seat.id) && now - seat.lastSeen < SEAT_TIMEOUT_MS) {
         due.push(seat.lastSeen + SEAT_TIMEOUT_MS + 1000)
@@ -964,7 +1025,11 @@ export class RoomObject extends DurableObject {
     this.alarmAt = null
     if (!this.room) return
     const now = Date.now()
+    // Turns traces couldn't take yet, tried again.
+    await this.keepSoon()
     if (now - this.lastActive(now) > ROOM_TTL_MS) {
+      // The last turn, still open, goes before the room does.
+      await (this.keeping = this.keeping.catch(() => {}).then(() => this.keepNew(true))).catch(() => {})
       this.room.revokeTCP()
       this.room.revokePublic()
       await ended(this.room, { directory: directoryClient(this.env) })

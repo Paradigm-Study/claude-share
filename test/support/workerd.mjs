@@ -56,7 +56,7 @@ async function ready(origin, child, logs, ms) {
   throw new Error(`wrangler dev did not answer within ${ms} ms: ${logs()}`)
 }
 
-// Starts both Workers, on free ports unless `port` and `previewPort` say. `vars` are added to both (AUTH_TEST, PUBLIC_URL…), or
+// Starts both Workers, on free ports unless `port` and `previewPort` say. `extra` is TOML added to the main Worker's config (a binding). `vars` are added to both (AUTH_TEST, PUBLIC_URL…), or
 // made from the ports when a function (a PREVIEW_URL that names the port).
 // `restart()` stops and starts them again on the same ports and storage, as a
 // deploy or an eviction would; `stop()` ends them and deletes their storage.
@@ -65,11 +65,11 @@ function checkTools() {
   if (WRANGLER_NODE === process.execPath && Number(process.versions.node.split('.')[0]) < 22) throw new Error(`wrangler needs Node 22 or newer (this is ${process.version}): set WRANGLER_NODE to one`)
 }
 
-export async function startWorkerd({ vars = {}, quiet = true, containers = false, port: fixedPort, previewPort: fixedPreview } = {}) {
+export async function startWorkerd({ vars = {}, quiet = true, containers = false, port: fixedPort, previewPort: fixedPreview, extra = '' } = {}) {
   checkTools()
   const dir = await mkdtemp(join(tmpdir(), 'share-workerd-'))
   const mainConfig = join(dir, 'main.toml'), previewConfig = join(dir, 'preview.toml')
-  await writeFile(mainConfig, `${forTest(await readFile(join(ROOT, 'wrangler.toml'), 'utf8'), containers)}`)
+  await writeFile(mainConfig, `${forTest(await readFile(join(ROOT, 'wrangler.toml'), 'utf8'), containers)}\n${extra}\n`)
   await writeFile(previewConfig, forTest(await readFile(join(ROOT, 'wrangler.preview.toml'), 'utf8')))
   const port = fixedPort ?? await freePort()
   let previewPort = fixedPreview ?? await freePort()
