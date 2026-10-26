@@ -15,7 +15,6 @@ node test/local-preview.mjs
 node test/browser-proxy.mjs
 node test/discover.mjs
 node test/previews.mjs
-node test/peer.mjs
 node test/mailbox.mjs
 ```
 
