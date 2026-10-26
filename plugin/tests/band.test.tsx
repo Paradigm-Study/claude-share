@@ -3251,7 +3251,7 @@ test("the Room's Updates setting turns on auto-update in the person's settings, 
   expect(after.theme).toBe('dark')
 })
 
-test('automatic updates chosen outside the Room (setup.mjs) load in place, keeping other plugin folders', async ($, on) => {
+test('automatic updates chosen outside the Room (setup.ts) load in place, keeping other plugin folders', async ($, on) => {
   const asked = world(on, {
     settings: JSON.stringify({ env: { CLAUDE_CODE_PLUGIN_DIRS: '/home/scott/mods/other' }, extraKnownMarketplaces: { 'claude-share': { source: { source: 'github', repo: 'Paradigm-Study/claude-share' }, autoUpdate: true } } }),
   })

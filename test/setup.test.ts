@@ -120,7 +120,7 @@ function setup(args: string[], scenario: Scenario = {}) {
   try {
     for (const path of ['bin', 'desk', 'scripts', 'plugin/hooks', 'plugin/.claude-plugin', '.claude']) mkdirSync(join(dir, path), { recursive: true })
     const buildServer = scenario.buildServer || defaultUrl
-    writeFileSync(join(dir, 'scripts/setup.mjs'), readFileSync(join(root, 'scripts/setup.mjs')))
+    writeFileSync(join(dir, 'scripts/setup.ts'), readFileSync(join(root, 'scripts/setup.ts')))
     writeFileSync(join(dir, 'plugin/.claude-plugin/plugin.json'), readFileSync(join(root, 'plugin/.claude-plugin/plugin.json')))
     writeFileSync(join(dir, 'plugin/hooks/server.ts'), defaultSource.replace(defaultUrl, buildServer))
     writeFileSync(join(dir, 'scenario.json'), JSON.stringify({ ...scenario, buildServer }))
@@ -149,7 +149,7 @@ function setup(args: string[], scenario: Scenario = {}) {
     // place: run from a Claude Desktop session, as an agent there runs it.
     if (scenario.place) env.CLAUDE_CODE_HOST_SESSION_ID = scenario.place
     // A cast: the Worker's types (server/worker-configuration.d.ts) say process.env holds its vars.
-    const result = spawnSync(process.execPath, ['--import', join(dir, 'fetch.mjs'), join(dir, 'scripts/setup.mjs'), ...args], { env: env as NodeJS.ProcessEnv, cwd: dir, encoding: 'utf8', timeout: 15_000 })
+    const result = spawnSync(process.execPath, ['--import', join(dir, 'fetch.mjs'), join(dir, 'scripts/setup.ts'), ...args], { env: env as NodeJS.ProcessEnv, cwd: dir, encoding: 'utf8', timeout: 15_000 })
     assert.ifError(result.error)
     const calls = existsSync(env.SETUP_LOG) ? readFileSync(env.SETUP_LOG, 'utf8').trim().split('\n').map((line): Call => JSON.parse(line)) : []
     const read = (path: string) => {
@@ -428,7 +428,7 @@ test('an update deploys the preview Worker before the main one', () => {
 })
 
 // The cloud host's image is kept in this project's Cloudflare account
-// (scripts/push-image.mjs): deploying there needs no Docker; another account
+// (scripts/push-image.ts): deploying there needs no Docker; another account
 // builds it from cloud/Dockerfile, which does.
 const IMAGE_ACCOUNT = /registry\.cloudflare\.com\/([0-9a-f]{32})\//.exec(readFileSync(join(root, 'wrangler.toml'), 'utf8'))![1]
 

@@ -33,7 +33,7 @@ Leave the optional share-server setting empty to use the public server. Start a 
 ```bash
 git clone https://github.com/Paradigm-Study/claude-share.git
 cd claude-share
-node scripts/setup.mjs join
+node scripts/setup.ts join
 ```
 
 Despite the command name, `join` installs the plugin for both sharing and joining. It also enables automatic marketplace updates and the function-hooks switch needed on 2.1.285. Read its `NOTE` lines; if it prints `NEEDS HUMAN`, complete that step and rerun the command. [More setup and update options](docs/guide.md#install).
@@ -68,17 +68,17 @@ Every session's previews share one preview host name, and their links name the s
 Sharing by link works with the public server. Teams that want their own infrastructure can run the same server on their own Cloudflare account:
 
 ```bash
-node scripts/setup.mjs deploy
+node scripts/setup.ts deploy
 ```
 
-Run that from a clone with Node 22.18+; Cloudflare account setup and browser authorization need a person. For an existing server, use `node scripts/setup.mjs host --server https://your-server`. [Cloudflare and team sign-in setup](docs/guide.md#host-a-server).
+Run that from a clone with Node 22.18+; Cloudflare account setup and browser authorization need a person. For an existing server, use `node scripts/setup.ts host --server https://your-server`. [Cloudflare and team sign-in setup](docs/guide.md#host-a-server).
 
 ## Troubleshooting
 
 - **No Share button or unknown command:** start a new session, or quit and reopen Desktop. The session may have started before installation.
 - **`hooks: Invalid input`:** check `claude --version`. Use the setup script above if Desktop has a newer copy than your terminal.
 - **A pasted link gets an ordinary Claude reply:** the plugin is not loaded in that session. Restart after installing and paste the link into a fresh session.
-- **Check the installation:** from a clone, run `node scripts/setup.mjs check`. Add `--live` to test sharing, resuming, stopping and joining with temporary sessions through the selected server.
+- **Check the installation:** from a clone, run `node scripts/setup.ts check`. Add `--live` to test sharing, resuming, stopping and joining with temporary sessions through the selected server.
 
 [More troubleshooting](docs/guide.md#troubleshooting) · [Report a reproducible bug](https://github.com/Paradigm-Study/claude-share/issues/new/choose)
 

@@ -588,7 +588,7 @@ async function readUpdates($: $) {
   await update($, updatesA, () => on)
   const pinned = named && !runsLive($) && (await pinnedByDesktop($))
   await update($, liveUpdatesA, () => (runsLive($) ? 'running' : pinned ? 'pinned' : named ? 'next' : null))
-  // Automatic updates chosen outside the Room (setup.mjs turns on only the
+  // Automatic updates chosen outside the Room (setup.ts turns on only the
   // marketplace's autoUpdate), or the folder named for them gone: in place now.
   const missing = named && dir ? !(await $.fs.exists(`${dir}/.claude-plugin/plugin.json`).catch(() => true)) : false
   if (on && (!named || missing) && !runsLive($) && (await enableLive($))) {
@@ -633,7 +633,7 @@ async function writeUpdates($: $, on: boolean) {
 async function serverOf($: $): Promise<string> {
   const fromEnv = (await $.env.get('SHARED_SESSION_SERVER')) ?? ''
   // The live copy is a plugin folder, configured under another id: the
-  // server saved for the installed copy (setup.mjs, /plugin configure) counts.
+  // server saved for the installed copy (setup.ts, /plugin configure) counts.
   let saved = configuredServer
   if (!saved && runsLive($)) {
     const options = ((await readSettings($))?.settings.pluginConfigs as Record<string, { options?: { server?: unknown } }> | undefined)?.[INSTALLED_ID]?.options
@@ -10220,7 +10220,7 @@ async function joinHere($: $, url: string) {
 async function takeInvite($: $, server: string, code: string): Promise<string> {
   const ours = await serverOf($).catch(() => '')
   if (server !== ours) {
-    return `This invite is for the share server at ${server}, and this Claude Code shares through ${ours || 'another one'}. To use that team, set the plugin's server to ${server} (\`node scripts/setup.mjs host --server ${server}\` in the claude-share repo), then paste the link again.`
+    return `This invite is for the share server at ${server}, and this Claude Code shares through ${ours || 'another one'}. To use that team, set the plugin's server to ${server} (\`node scripts/setup.ts host --server ${server}\` in the claude-share repo), then paste the link again.`
   }
   const saved = await signInFor($, server)
   if (saved) {

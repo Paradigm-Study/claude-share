@@ -86,6 +86,8 @@ jobs:
       # the same types.
       - run: npm install --no-package-lock --ignore-scripts
       - run: npm run typecheck:server
+      # scripts/: TypeScript Node runs as it is, so only erasable syntax (scripts/tsconfig.json).
+      - run: npm run typecheck:scripts
       # oxlint on server/, with the type-aware rules (oxlint-tsgolint): a
       # promise nobody awaits or catches fails it (.oxlintrc.json).
       - run: npm run lint

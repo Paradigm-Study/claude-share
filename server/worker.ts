@@ -148,7 +148,7 @@ function previewOriginOf(req: Request, env: ServerEnv) {
 // never by the room's id, which joins it: idFromName can't be undone, so the
 // key leads here and nowhere else. A preview Worker before keys can't route
 // them, so on an update this Worker is deployed first (wrangler.preview.toml,
-// scripts/setup.mjs).
+// scripts/setup.ts).
 //
 // With PREVIEW_URL a wildcard (`https://*.previews.example`), each room's
 // previews have a host name of their own, and its first part is the key

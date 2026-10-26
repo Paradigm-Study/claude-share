@@ -3,7 +3,7 @@
 // Safe to run again. Needs Node 22.18 or newer (it loads TypeScript). The
 // connection string is the person's to give:
 //
-//   TRACES_DATABASE_URL='postgresql://…' node scripts/traces-migrate.mjs
+//   TRACES_DATABASE_URL='postgresql://…' node scripts/traces-migrate.ts
 
 import pg from 'pg'
 import { migrate } from '../server/traces/store.ts'

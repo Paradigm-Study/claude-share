@@ -60,7 +60,7 @@ The room's end, its expiry, and the approver leaving for good stop the runner.
 - **Tests**: `wrangler dev` builds the image from `cloud/Dockerfile` with
   Docker (`CLOUD_DOCKER=1 node test/cloud.mjs`).
 - **The image** is built once and kept in this project's Cloudflare registry,
-  so deploying needs no Docker (`scripts/push-image.mjs` makes a new one after
+  so deploying needs no Docker (`scripts/push-image.ts` makes a new one after
   `cloud/` changes). It doesn't change with releases: the runner takes the
   plugin from GitHub's `main` at the room server's version, falling back to
   the one built in.

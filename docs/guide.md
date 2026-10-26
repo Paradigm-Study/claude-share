@@ -38,7 +38,7 @@ claude plugin marketplace update claude-share && claude plugin update shared-ses
 **Or let the setup script do it.** It works for a person or an agent; see [AGENTS.md](../AGENTS.md). From a clone of this repo:
 
 ```bash
-node scripts/setup.mjs join
+node scripts/setup.ts join
 ```
 
 It also handles three more cases:
@@ -108,10 +108,10 @@ Teams can run their own room server instead of the public one. Rooms are short-l
 **Cloudflare (recommended):** a Worker with one Durable Object per room. A quiet room costs nothing: open streams end at the Worker, and the room sleeps between changes. It fits the free plan for a small team. From a clone of this repo:
 
 ```bash
-node scripts/setup.mjs deploy
+node scripts/setup.ts deploy
 ```
 
-That signs you in (`npx wrangler login` in a browser), deploys and waits for the server. It then points this machine at it and prints the one-line install for teammates. By hand, it's `npx wrangler login`, `npx wrangler deploy`, then `npx wrangler deploy -c wrangler.preview.toml`. To update a server already deployed, go the other way round: `npx wrangler deploy -c wrangler.preview.toml` first, then `npx wrangler deploy` (new rooms' preview links need the new preview Worker, which still opens the old ones). `setup.mjs deploy` does it in that order and stops if the preview Worker doesn't deploy, before the main one changes. The second Worker serves previews of a host's localhost on a host name of its own. On workers.dev every room's previews share it, and a browser not already in a room's previews has that host name's storage, cache and cookies cleared as it enters; browsers clear those cookies for the whole domain, which on workers.dev is your account's subdomain, so another Worker of yours there that keeps cookies loses them in that browser too. Sharing one host name has a cost clearing can't cover: a page from one session's previews still open in a browser can make requests to another session's previews that browser opens later, and read them. Give each room's previews a host name of its own (next) to close that.
+That signs you in (`npx wrangler login` in a browser), deploys and waits for the server. It then points this machine at it and prints the one-line install for teammates. By hand, it's `npx wrangler login`, `npx wrangler deploy`, then `npx wrangler deploy -c wrangler.preview.toml`. To update a server already deployed, go the other way round: `npx wrangler deploy -c wrangler.preview.toml` first, then `npx wrangler deploy` (new rooms' preview links need the new preview Worker, which still opens the old ones). `setup.ts deploy` does it in that order and stops if the preview Worker doesn't deploy, before the main one changes. The second Worker serves previews of a host's localhost on a host name of its own. On workers.dev every room's previews share it, and a browser not already in a room's previews has that host name's storage, cache and cookies cleared as it enters; browsers clear those cookies for the whole domain, which on workers.dev is your account's subdomain, so another Worker of yours there that keeps cookies loses them in that browser too. Sharing one host name has a cost clearing can't cover: a page from one session's previews still open in a browser can make requests to another session's previews that browser opens later, and read them. Give each room's previews a host name of its own (next) to close that.
 
 **A host name per room** (recommended where people you don't all trust share sessions on one server): a domain of its own on your Cloudflare account, never a subdomain of a site people sign in to, such as `example-previews.dev`. These steps are a person's, in the Cloudflare dashboard:
 
@@ -133,7 +133,7 @@ On Cloudflare, `npx wrangler secret put GITHUB_CLIENT_ID` (and `GITHUB_CLIENT_SE
 <a id="traces-on-your-own-server"></a>**Traces on your own server** keep the turns of sessions shared by people signed in, and let them search those turns from Claude Code over MCP. They need teams' sign-in (above), a Postgres database and Workers AI. Without the `TRACES_DB` and `OAUTH_KV` bindings, a server keeps nothing beyond a room's day, and its traces code never loads.
 
 1. Make a Postgres database. Neon works, and its Lakebase Search adds BM25 and a Chinese tokenizer; without it, Chinese is matched by pairs of characters. The database needs the `vector` extension (pgvector).
-2. Make its tables: `TRACES_DATABASE_URL=postgresql://… node scripts/traces-migrate.mjs`. It is safe to run again.
+2. Make its tables: `TRACES_DATABASE_URL=postgresql://… node scripts/traces-migrate.ts`. It is safe to run again.
 3. Make a Hyperdrive config for it, `npx wrangler hyperdrive create traces --connection-string=postgresql://… --caching-disabled`, with the database's direct host, not a pooler's. Caching off lets a search see a turn as soon as it's kept.
 4. Make a KV namespace for the OAuth grants: `npx wrangler kv namespace create OAUTH_KV`.
 5. Add both, and Workers AI, to `wrangler.toml`:
@@ -159,7 +159,7 @@ Each person then adds the server once: `claude mcp add --transport http shared-s
 
 - run `/plugin configure shared-session` and enter the address;
 - set `SHARED_SESSION_SERVER` in the `env` block of `~/.claude/settings.json` (`$CLAUDE_CONFIG_DIR/settings.json` when that's set), or in your organization's managed settings so a whole team gets it;
-- in your own fork, bake the address in with `node scripts/set-server.mjs https://your-server`.
+- in your own fork, bake the address in with `node scripts/set-server.ts https://your-server`.
 
 ## Troubleshooting
 
@@ -167,9 +167,9 @@ Each person then adds the server once: `claude mcp add --transport http shared-s
 | --- | --- |
 | No Share button, or `Unknown command: /share-session` | The session started before the plugin was installed. Start a new session, or quit and reopen Claude Desktop. |
 | An old error after updating the plugin | Same cause: a session keeps the plugin copy it started with, and `/reload-plugins` re-reads that copy. Restart Desktop or use a new session. |
-| `Couldn't share: Sharing needs a share server…` | Current releases use the public server by default. Update the plugin, or check whether your fork removed that default. For your own server, run `node scripts/setup.mjs host --server <url>`. |
-| `ECONNREFUSED` when sharing | The server address points at a machine that isn't running a server. Run `node scripts/setup.mjs check` to see which address is set. |
-| `hooks: Invalid input` from `claude plugin …` | That `claude` is older than 2.1.286. Run `claude update`. `setup.mjs` uses Claude Desktop's bundled one instead on a Mac, or whatever you set in `CLAUDE_BIN`; it then notes that your terminal `claude` still needs `claude update`. |
+| `Couldn't share: Sharing needs a share server…` | Current releases use the public server by default. Update the plugin, or check whether your fork removed that default. For your own server, run `node scripts/setup.ts host --server <url>`. |
+| `ECONNREFUSED` when sharing | The server address points at a machine that isn't running a server. Run `node scripts/setup.ts check` to see which address is set. |
+| `hooks: Invalid input` from `claude plugin …` | That `claude` is older than 2.1.286. Run `claude update`. `setup.ts` uses Claude Desktop's bundled one instead on a Mac, or whatever you set in `CLAUDE_BIN`; it then notes that your terminal `claude` still needs `claude update`. |
 | `You need a workers.dev subdomain` on deploy | One-time Cloudflare setup: open Workers & Pages in the dashboard once, then deploy again. |
 | TLS handshake errors right after the first deploy | The new certificate takes a minute or so. |
 | A pasted link goes to Claude as a normal prompt | The plugin isn't loaded in that session (see the first row), or the link was edited. |

@@ -5,7 +5,7 @@
 # name themselves in preview links by a key only this version routes, and
 # this version still routes what older rooms made. The first time, deploy it
 # after: its ROOMS binding needs the main Worker's rooms to exist.
-# scripts/setup.mjs deploy does both in that order.
+# scripts/setup.ts deploy does both in that order.
 name = "claude-share-preview"
 main = "server/worker.ts"
 compatibility_date = "2026-04-01"
