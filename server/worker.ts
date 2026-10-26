@@ -88,9 +88,9 @@ import {
   mergeTCPStats,
   leftResponse,
   statusOf,
-} from './core.ts'
+} from './core/index.ts'
 import { Directory, providersFrom, BODY_CHARS } from './teams.ts'
-import type { CloudHosts, FileMeta, LimitKind, RevokeFilter, RoomContext, RoomData, RoomEvent, SocketTarget, TCPFrame, TCPHalf, TCPStats } from './core.ts'
+import type { CloudHosts, FileMeta, RevokeFilter, RoomContext, RoomData, RoomEvent, TCPFrame, TCPHalf, TCPStats } from './core/index.ts'
 import type { Kv, RoomInfo } from './teams.ts'
 import type { TracesEnv } from './traces/index.ts'
 import type { Turn } from './traces/turns.ts'
@@ -192,7 +192,7 @@ const addressOf = (req: Request) => req.headers.get('cf-connecting-ip') ?? 'unkn
 
 app.all('/api/health', () => json({ ok: true }))
 app.all('/api/version', c => versionInfo({ traces: tracesOn(c.env) }))
-const home = (c: Context<App>) => (c.req.raw.method === 'GET' ? homePage(publicOrigin(c.req.raw, c.env.PUBLIC_URL), { traces: tracesOn(c.env) }) : notFound())
+const home = (c: Context<App>) => (c.req.raw.method === 'GET' ? homePage({ traces: tracesOn(c.env) }) : notFound())
 app.all('/', home)
 app.all('/privacy', home)
 
@@ -529,7 +529,7 @@ export class RoomObject extends DurableObject<ServerEnv> {
     return res.ok ? res.json<RoomInfo>() : null
   }
 
-  async fetch(req: Request): Promise<Response> {
+  override async fetch(req: Request): Promise<Response> {
     const url = new URL(req.url)
     const origin = req.headers.get('x-share-origin') ?? url.origin
     const [id, ...restParts] = url.pathname.split('/').filter(Boolean)
@@ -925,7 +925,7 @@ export class RoomObject extends DurableObject<ServerEnv> {
   }
 
   // Streams send nothing; data channels never receive room JSON.
-  async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer) {
+  override async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer) {
     const att = attachmentOf(ws)
     if (att?.tcp) return this.tcpMessage(ws, message)
     if (!(att?.pb ?? att?.ph) || this.closed.has(ws) || att.closed) return
@@ -967,7 +967,7 @@ export class RoomObject extends DurableObject<ServerEnv> {
     }
   }
 
-  async webSocketClose(ws: WebSocket, code: number, reason: string) {
+  override async webSocketClose(ws: WebSocket, code: number, reason: string) {
     const att = attachmentOf(ws)
     if (att?.tcp) {
       this.closeTCP(att.tcp.id, tcpHalfClose(code), 'TCP socket closed')
@@ -979,7 +979,7 @@ export class RoomObject extends DurableObject<ServerEnv> {
     await this.disconnected(ws)
   }
 
-  async webSocketError(ws: WebSocket) {
+  override async webSocketError(ws: WebSocket) {
     const att = attachmentOf(ws)
     if (att?.tcp) {
       this.closeTCP(att.tcp.id, 1011, 'TCP socket failed')
@@ -1132,7 +1132,7 @@ export class RoomObject extends DurableObject<ServerEnv> {
     return Math.max(room.host.lastSeen, room.endedAt ?? 0)
   }
 
-  async alarm() {
+  override async alarm() {
     this.alarmAt = null
     if (!this.room) return
     const now = Date.now()
@@ -1400,7 +1400,7 @@ export class DirectoryObject extends DurableObject<ServerEnv> {
     if (!set || at + 1000 < set) await this.state.storage.setAlarm(at + 1000)
   }
 
-  async alarm() {
+  override async alarm() {
     const next = await this.directory.sweep(Date.now())
     if (next) await this.wakeAt(next)
   }
@@ -1415,7 +1415,7 @@ export class DirectoryObject extends DurableObject<ServerEnv> {
   register(teamId: string, room: Parameters<Directory['register']>[1]) { return this.directory.register(teamId, room) }
   unregister(teamId: string, roomId: string) { return this.directory.unregister(teamId, roomId) }
 
-  async fetch(req: Request) {
+  override async fetch(req: Request) {
     return this.directory.handle(req, req.headers.get('x-share-origin') ?? new URL(req.url).origin)
   }
 }

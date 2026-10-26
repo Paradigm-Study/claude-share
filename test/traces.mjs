@@ -26,7 +26,7 @@ if (major < 22 || (major === 22 && minor < 18)) {
 const { takeTurns, tracesScope, authorOf } = await import('../server/traces/turns.ts')
 const { grams, queryWords } = await import('../server/traces/grams.ts')
 const { timeOf } = await import('../server/traces/time.ts')
-const { PLUGIN_LATEST } = await import('../server/core.ts')
+const { PLUGIN_LATEST } = await import('../server/core/index.ts')
 
 let failed = 0
 const ok = (cond, label) => {
