@@ -254,6 +254,12 @@ try {
     const bm25 = cjk ? (await search(direct, scopes, { query, mode: 'keyword', keywords: 'bm25' })).length : '-'
     console.log(`NOTE ${query.padEnd(10)} pairs: ${bigram} hit(s)   Lakebase BM25: ${bm25}`)
   }
+  // Every word of a query must be in the turn, by either keyword path: 「怎么」
+  // alone is in 「缓存击穿怎么处理」, 「上线」 is in no turn.
+  for (const keywords of cjk ? ['bigram', 'bm25'] : ['bigram']) {
+    const found = await search(direct, scopes, { query: '怎么上线', mode: 'keyword', keywords })
+    ok(found.length === 0, `keyword search (${keywords}) finds no turn that has only one of the query's words: 怎么上线 → ${found[0]?.prompt.slice(0, 12) ?? 'nothing'}`)
+  }
 
   if (ai) {
     for (const [query, expect] of [
@@ -267,6 +273,8 @@ try {
     }
     const hybrid = await hits(a.access, '部署')
     ok(hybrid[0]?.prompt.startsWith('把服务部署') && hybrid[0].found.includes('kw'), 'hybrid search puts the turn that has the word first')
+    const filler = await hits(a.access, '怎么上线')
+    ok(filler[0]?.prompt.startsWith('把服务部署') && !filler.some(h => h.found.includes('kw')), `hybrid search ranks by meaning when no turn has every word: 怎么上线 → ${filler[0]?.prompt.slice(0, 12) ?? 'nothing'}`)
   }
 
   const top = (await hits(a.access, '迁移', { mode: 'keyword' }))[0]

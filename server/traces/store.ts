@@ -124,13 +124,17 @@ export async function putTurns(db: Db, session: Session, turns: (Turn & { embedd
 
 // The keyword half of a search, as a CTE named kw over $1 (scopes) and the
 // filters' parameters, ranked from 1; null when the query has nothing to match.
+// Every word of the query must be in a turn, as with pairs of characters:
+// BM25 alone scores a turn that has any one of them, so 「怎么上线」 found
+// 「缓存击穿怎么处理」 by 「怎么」 alone.
 function keywordPart(query: string, cjk: boolean, params: unknown[], filters: string): string | null {
   if (cjk) {
     params.push(query)
+    const q = `$${params.length}`
     return `kw as (
       select session_id, turn_id, rank() over (order by s, at desc) as r from (
-        select session_id, turn_id, at, tsv_cjk <@> to_bm25query(to_tsvector('${CJK_CONFIG}', $${params.length}), 'turns_bm25') as s
-        from turns where scope = any($1)${filters}) z
+        select session_id, turn_id, at, tsv_cjk <@> to_bm25query(to_tsvector('${CJK_CONFIG}', ${q}), 'turns_bm25') as s
+        from turns where scope = any($1) and tsv_cjk @@ plainto_tsquery('${CJK_CONFIG}', ${q})${filters}) z
       where s < 0 order by s, at desc limit ${CANDIDATES})`
   }
   const words = queryWords(query)
