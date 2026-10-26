@@ -1,7 +1,7 @@
-// Room logic for the Cloudflare Durable Object (worker.ts), and all that
-// worker.ts, teams.ts, traces and the tests import of it. Everything
-// speaks the Fetch API: a Request in, a Response out, and the sockets,
-// timers and storage stay in worker.ts.
+// Room logic for the Cloudflare Durable Object (server/worker/), and all
+// that server/worker/, teams.ts, traces and the tests import of it.
+// Everything speaks the Fetch API: a Request in, a Response out, and the
+// sockets, timers and storage stay in server/worker/.
 //
 // A room is one shared Claude Code session. The host's session posts what its
 // transcript keeps (rows), live text (deltas) and turn state; guests post
