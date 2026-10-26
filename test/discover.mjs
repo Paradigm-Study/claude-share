@@ -1,4 +1,4 @@
-// Standalone Node 20+ checks for plugin/relay/discover.cjs: no model, deps or network.
+// Standalone Node 22.18+ checks for plugin/relay/discover.cjs: no model, deps or network.
 //   node test/discover.mjs
 // Parser fixtures first, then real listeners started here: a temp git project
 // with web services, a silent one, raw TCP, a fake debugger, Node's inspector

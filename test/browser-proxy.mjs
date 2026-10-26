@@ -1,4 +1,4 @@
-// Standalone Node 20+ checks for the isolated preview browser's SOCKS5 proxy:
+// Standalone Node 22.18+ checks for the isolated preview browser's SOCKS5 proxy:
 // no models, dependencies or outside connections. Names and interfaces are
 // injected (one stdout check resolves a reserved .invalid name for real, and
 // its DNS-over-HTTPS goes only to a local fixture upstream). The DoH checks

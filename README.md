@@ -28,7 +28,7 @@ claude plugin install shared-session@claude-share
 
 Leave the optional share-server setting empty to use the public server. Start a new session after installing. Quit and reopen Claude Desktop to load the plugin into sessions already open.
 
-**Have Desktop but an older terminal CLI?** With Git and Node 20+ installed, the setup script can find the newer Claude Code bundled with Desktop on macOS:
+**Have Desktop but an older terminal CLI?** With Git and Node 22.18+ installed, the setup script can find the newer Claude Code bundled with Desktop on macOS:
 
 ```bash
 git clone https://github.com/Paradigm-Study/claude-share.git
@@ -49,7 +49,7 @@ Try this with a new session in a scratch project:
 
 Sharing a session with existing history asks whether to include it. Choose **Only from now on** or `/share-session new` to leave earlier messages out. Anything you share passes through the room server; [read what it sees and keeps](#privacy-and-the-public-server).
 
-Use `/room` for people, the timeline of turns, the files Claude changed, side chat and host controls, and `/who` for who's here. In the transcript, react to Claude's replies, see who has seen each, and `@name` a teammate. Use `/team` for optional teams. To let teammates open a local dev server, run `/share-preview <port>` on the host; the plugin also asks about the other web servers the same project runs (a backend on 3510 and 3511, say), one server at a time (three ports a question at most), for the host to share with a click each. Guests press **Open preview**, and the page opens at the host's own address (`http://localhost:3000`), so OAuth callbacks and hard-coded `127.0.0.1` backends work. When those port numbers are free on the guest's machine, the page opens there, as VS Code's port forwarding does: in Claude's browser in Claude Desktop, in the guest's own browser in a terminal (**Room → Settings → Previews** changes it). When one is taken, it opens in a separate browser window instead (Chrome, Edge, Brave, Chromium, Firefox 140+, Vivaldi or Opera, on macOS and Linux), so the guest's own servers on those ports are untouched. **Close** in **Room → Shown**, or the host's **Stop** of that preview, frees the ports again. Previews require Node 20+, POSIX `sh` and the host's live `curl` stream. [Commands and supported previews](docs/guide.md#use-it).
+Use `/room` for people, the timeline of turns, the files Claude changed, side chat and host controls, and `/who` for who's here. In the transcript, react to Claude's replies, see who has seen each, and `@name` a teammate. Use `/team` for optional teams. To let teammates open a local dev server, run `/share-preview <port>` on the host; the plugin also asks about the other web servers the same project runs (a backend on 3510 and 3511, say), one server at a time (three ports a question at most), for the host to share with a click each. Guests press **Open preview**, and the page opens at the host's own address (`http://localhost:3000`), so OAuth callbacks and hard-coded `127.0.0.1` backends work. When those port numbers are free on the guest's machine, the page opens there, as VS Code's port forwarding does: in Claude's browser in Claude Desktop, in the guest's own browser in a terminal (**Room → Settings → Previews** changes it). When one is taken, it opens in a separate browser window instead (Chrome, Edge, Brave, Chromium, Firefox 140+, Vivaldi or Opera, on macOS and Linux), so the guest's own servers on those ports are untouched. **Close** in **Room → Shown**, or the host's **Stop** of that preview, frees the ports again. Previews require Node 22.18+, POSIX `sh` and the host's live `curl` stream. [Commands and supported previews](docs/guide.md#use-it).
 
 **Keep it running in the cloud.** **Room → Settings → Move to cloud** hands your session's host to a Claude Code the room server runs in a container, so teammates keep working while your computer sleeps. It signs in as you (a token from `claude setup-token`, copied once and kept on your computer). Every call a teammate's prompt makes, and anything of its localhost before it's shared, asks you first, above the prompt and in the Room wherever you are, and the Room's settings stay yours to change. **Bring home** takes the session back here with the cloud's changes to your files. [How it works](docs/cloud-host.md).
 
@@ -71,7 +71,7 @@ Sharing by link works with the public server. Teams that want their own infrastr
 node scripts/setup.mjs deploy
 ```
 
-Run that from a clone with Node 22+ (wrangler needs it); Cloudflare account setup and browser authorization need a person. For an existing server, use `node scripts/setup.mjs host --server https://your-server`. [Cloudflare and team sign-in setup](docs/guide.md#host-a-server).
+Run that from a clone with Node 22.18+; Cloudflare account setup and browser authorization need a person. For an existing server, use `node scripts/setup.mjs host --server https://your-server`. [Cloudflare and team sign-in setup](docs/guide.md#host-a-server).
 
 ## Troubleshooting
 

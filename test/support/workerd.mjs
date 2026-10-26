@@ -18,9 +18,6 @@ import { fileURLToPath } from 'node:url'
 
 const ROOT = fileURLToPath(new URL('../..', import.meta.url))
 const WRANGLER = join(ROOT, 'node_modules/wrangler/bin/wrangler.js')
-// wrangler needs Node 22+. The suites run on Node 20 too (the relay helpers
-// promise it), so WRANGLER_NODE names a newer Node for wrangler alone.
-const WRANGLER_NODE = process.env.WRANGLER_NODE || process.execPath
 
 export function freePort() {
   return new Promise((resolve, reject) => {
@@ -62,7 +59,6 @@ async function ready(origin, child, logs, ms) {
 // deploy or an eviction would; `stop()` ends them and deletes their storage.
 function checkTools() {
   if (!existsSync(WRANGLER)) throw new Error('wrangler is not installed: run npm install first')
-  if (WRANGLER_NODE === process.execPath && Number(process.versions.node.split('.')[0]) < 22) throw new Error(`wrangler needs Node 22 or newer (this is ${process.version}): set WRANGLER_NODE to one`)
 }
 
 export async function startWorkerd({ vars = {}, quiet = true, containers = false, port: fixedPort, previewPort: fixedPreview, extra = '' } = {}) {
@@ -83,7 +79,7 @@ export async function startWorkerd({ vars = {}, quiet = true, containers = false
     const args = ['dev', '-c', config, '--ip', '127.0.0.1', '--port', String(p), '--inspector-port', '0',
       '--persist-to', join(dir, 'state'), '--show-interactive-dev-session=false', '--log-level', quiet ? 'warn' : 'log',
       ...Object.entries(all).flatMap(([k, v]) => ['--var', `${k}:${v}`])]
-    const child = spawn(WRANGLER_NODE, [WRANGLER, ...args], { cwd: dir, env: { ...process.env, WRANGLER_SEND_METRICS: 'false', CI: '1' }, stdio: ['ignore', 'pipe', 'pipe'] })
+    const child = spawn(process.execPath, [WRANGLER, ...args], { cwd: dir, env: { ...process.env, WRANGLER_SEND_METRICS: 'false', CI: '1' }, stdio: ['ignore', 'pipe', 'pipe'] })
     child.stdout.on('data', b => { output += b })
     child.stderr.on('data', b => { output += b })
     return child
