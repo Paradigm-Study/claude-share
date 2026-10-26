@@ -85,6 +85,7 @@ jobs:
       # tools' versions are package.json's, pinned exactly, so a local run sees
       # the same types.
       - run: npm install --no-package-lock --ignore-scripts
-      # npm run check: every type check (server, scripts, the relay helpers, test) and oxlint's,
-      # type-aware: a promise nobody awaits or catches fails it (.oxlintrc.json).
+      # npm run check: every type check (server, scripts, the relay helpers, test), oxlint's,
+      # type-aware (a promise nobody awaits or catches fails it, .oxlintrc.json), and
+      # oxfmt's check of server/ and scripts/ (.oxfmtrc.json).
       - run: npm run check
