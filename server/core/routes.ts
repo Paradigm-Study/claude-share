@@ -16,31 +16,10 @@ import {
   readBoundedJson,
   statusOf,
 } from './http.ts'
-import {
-  Room,
-  maxOf,
-  pageOf,
-  newestOf,
-  HOST_TYPES,
-  GUEST_TYPES,
-  bodyBytes,
-  clampBody,
-  tidyMark,
-  LIVE_TYPES,
-} from './room.ts'
+import { Room, maxOf, pageOf, newestOf, HOST_TYPES, GUEST_TYPES, bodyBytes, clampBody, tidyMark, LIVE_TYPES } from './room.ts'
 import { stopCloud, cloudSummary, endCloud, cloudRoutes, isApprover, cloudAnswer, cloudSet } from './cloud.ts'
 import { landingPage } from './pages.ts'
-import {
-  ROOM_SEATS_MAX,
-  PAGE_BYTES_CAP,
-  POLL_WAIT_MS,
-  EVENT_BYTES,
-  FILE_UPLOADS,
-  FILE_MAX,
-  ROOM_FILES_MAX,
-  ROOM_FILES_COUNT,
-  PEER_LIMIT,
-} from './limits.ts'
+import { ROOM_SEATS_MAX, PAGE_BYTES_CAP, POLL_WAIT_MS, EVENT_BYTES, FILE_UPLOADS, FILE_MAX, ROOM_FILES_MAX, ROOM_FILES_COUNT, PEER_LIMIT } from './limits.ts'
 import { previewRoutes, needRoute } from './previews.ts'
 import { serveReserve, SERVED_ALL } from './tcp.ts'
 import type { Auth, FileMeta, JsonObject, RoomContext, RoomTeam, RouteResult } from './types.ts'
@@ -53,7 +32,11 @@ export async function createRoom(req: Request, id: string, now: number, origin: 
   // The body arrives as a stream: one past its bound, or not JSON, is said
   // as such, never thrown out of the room as a 500.
   let body
-  try { body = await readJson(req) } catch (error) { return bodyFailure(statusOf(error) ? error : { message: 'Expected a JSON body.' }) }
+  try {
+    body = await readJson(req)
+  } catch (error) {
+    return bodyFailure(statusOf(error) ? error : { message: 'Expected a JSON body.' })
+  }
   const team = body.team ? await teamFor(req, body.team, ctx) : null
   if (team && 'error' in team) return { response: team.error }
   // Signed in, the host is known by account: their other sessions are them.
@@ -175,7 +158,8 @@ async function handleRoom(room: Room, req: Request, rest: string, now: number, o
       const team = room.team
       const gen = room.teamGen
       const check = await directory.joinCheck(team.id, accountOf(req))
-      if (!check.ok) return { response: json({ error: check.error, team: team.name, signIn: check.status === 401 || undefined }, check.status === 401 ? 403 : check.status) }
+      if (!check.ok)
+        return { response: json({ error: check.error, team: team.name, signIn: check.status === 401 || undefined }, check.status === 401 ? 403 : check.status) }
       if (room.teamGen === gen) break
       if (tries >= 2) return { response: json({ error: 'Who is in the team changed while you joined. Try again.' }, 409) }
     }
@@ -263,7 +247,6 @@ async function handleRoom(room: Room, req: Request, rest: string, now: number, o
   const cloud = await cloudRoutes(room, req, rest, auth, now, ctx, origin)
   if (cloud) return cloud
 
-
   if (rest === 'events' && method === 'GET') {
     const after = Number(url.searchParams.get('after') ?? 0) || 0
     const wait = Math.min(Number(url.searchParams.get('wait') ?? POLL_WAIT_MS) || 0, 25_000)
@@ -301,7 +284,9 @@ async function handleRoom(room: Room, req: Request, rest: string, now: number, o
     // the cloud host's watch-only setting keeps to teammates.
     const approver = isApprover(room, auth)
     room.touch(auth, now)
-    const items: { type: string; body?: JsonObject }[] = (Array.isArray(body.events) ? body.events.slice(0, 200) : []).filter((item: JsonObject | null) => item && allowed.has(item.type))
+    const items: { type: string; body?: JsonObject }[] = (Array.isArray(body.events) ? body.events.slice(0, 200) : []).filter(
+      (item: JsonObject | null) => item && allowed.has(item.type),
+    )
     // A guest's event past EVENT_BYTES, clamped, is refused, and the post with
     // it (nothing a guest's plugin sends is that big); a host's is cut.
     if (auth.role !== 'host' && items.some(item => bodyBytes(clampBody(item.body)) > EVENT_BYTES)) {
@@ -365,7 +350,11 @@ async function handleRoom(room: Room, req: Request, rest: string, now: number, o
     if (!directory) return { response: json({ error: "This share server doesn't have accounts." }, 400) }
     if (!room.posts.hit('events', 'all', now)) return { response: limitedResponse('events') }
     const body = await readJson(req)
-    const result = await directory.sessionInvite(accountOf(req), { id: room.id, url: shareUrl(origin, room.id), title: room.title, host: room.host.name }, body.to)
+    const result = await directory.sessionInvite(
+      accountOf(req),
+      { id: room.id, url: shareUrl(origin, room.id), title: room.title, host: room.host.name },
+      body.to,
+    )
     if (!result.ok) return { response: json({ error: result.error }, result.status) }
     return { response: json({ invited: result.invited, refused: result.refused }) }
   }
@@ -406,7 +395,10 @@ const fileName = (raw: unknown) => {
 }
 // A file's type, as its name: no control characters (no type has one, and a
 // record written as JSON takes six bytes for each), at most 100 characters.
-const fileType = (raw: unknown) => String(raw ?? '').replace(/[\u0000-\u001f]/g, '').slice(0, 100) || 'application/octet-stream'
+const fileType = (raw: unknown) =>
+  String(raw ?? '')
+    .replace(/[\u0000-\u001f]/g, '')
+    .slice(0, 100) || 'application/octet-stream'
 
 async function fileRoutes(room: Room, req: Request, rest: string, auth: Auth, now: number): Promise<RouteResult | null> {
   if (rest === 'files' && req.method === 'POST') {
@@ -415,7 +407,9 @@ async function fileRoutes(room: Room, req: Request, rest: string, auth: Auth, no
     room.uploading += 1
     try {
       let bytes
-      try { bytes = await readBody(req, FILE_MAX) } catch (error) {
+      try {
+        bytes = await readBody(req, FILE_MAX)
+      } catch (error) {
         return statusOf(error) === 413 ? { response: json({ error: `Files are limited to ${FILE_MAX / 1024 / 1024} MB.` }, 413) } : bodyFailure(error)
       }
       const id = await sha256(bytes)
@@ -423,8 +417,15 @@ async function fileRoutes(room: Room, req: Request, rest: string, auth: Auth, no
       // checked and reserved together, before anything waits.
       const sizes = new Map<string, number>([...room.filesPending, ...[...room.files.values()].map((f): [string, number] => [f.id, f.size])])
       const used = [...sizes].reduce((n, [other, size]) => n + (other === id ? 0 : size), 0)
-      if (used + bytes.length > ROOM_FILES_MAX || (!sizes.has(id) && sizes.size >= ROOM_FILES_COUNT)) return { response: json({ error: 'This room is out of room for files.' }, 413) }
-      const meta: FileMeta = { id, name: fileName(req.headers.get('x-file-name')), type: fileType(req.headers.get('content-type')), size: bytes.length, ts: now }
+      if (used + bytes.length > ROOM_FILES_MAX || (!sizes.has(id) && sizes.size >= ROOM_FILES_COUNT))
+        return { response: json({ error: 'This room is out of room for files.' }, 413) }
+      const meta: FileMeta = {
+        id,
+        name: fileName(req.headers.get('x-file-name')),
+        type: fileType(req.headers.get('content-type')),
+        size: bytes.length,
+        ts: now,
+      }
       const mine = !room.filesPending.has(id)
       if (mine) room.filesPending.set(id, bytes.length)
       try {
@@ -495,13 +496,19 @@ function peerProblem(body: JsonObject, kind: PeerKind) {
     if (typeof status !== 'string' || !PEER_STATUS.has(status)) return `A status: ${[...PEER_STATUS].join(', ')}.`
     const of = kind === 'guestStatus' ? ref : id
     if (typeof of !== 'string' || !PEER_ID.test(of)) return 'The message id a receipt names, a UUID.'
-    if (reason !== undefined && (status !== 'dropped' || typeof reason !== 'string' || !PEER_DROPS.has(reason))) return `Why a message was dropped: ${[...PEER_DROPS].join(', ')}.`
+    if (reason !== undefined && (status !== 'dropped' || typeof reason !== 'string' || !PEER_DROPS.has(reason)))
+      return `Why a message was dropped: ${[...PEER_DROPS].join(', ')}.`
     return null
   }
   if (kind === 'guest') {
-    if (typeof name !== 'string' || !name || name.length > PEER_LIMIT.nameChars || /[\x00-\x1f\x7f]/.test(name)) return `A name of 1 to ${PEER_LIMIT.nameChars} characters, without control characters.`
+    if (typeof name !== 'string' || !name || name.length > PEER_LIMIT.nameChars || /[\x00-\x1f\x7f]/.test(name))
+      return `A name of 1 to ${PEER_LIMIT.nameChars} characters, without control characters.`
     if (mode !== undefined && (typeof mode !== 'string' || !PEER_MODE.test(mode))) return 'A permission mode class as Claude Code spells it.'
-    if (chain !== undefined && (!Array.isArray(chain) || chain.length > PEER_LIMIT.chain || chain.some((t: unknown) => typeof t !== 'string' || !PEER_TOKEN.test(t)))) return `A hop chain of at most ${PEER_LIMIT.chain} tokens of 24 hex characters.`
+    if (
+      chain !== undefined &&
+      (!Array.isArray(chain) || chain.length > PEER_LIMIT.chain || chain.some((t: unknown) => typeof t !== 'string' || !PEER_TOKEN.test(t)))
+    )
+      return `A hop chain of at most ${PEER_LIMIT.chain} tokens of 24 hex characters.`
     if (typeof id !== 'string' || !PEER_ID.test(id)) return "The message's id, a UUID."
     if (typeof pid !== 'string' || !PEER_PID.test(pid)) return 'An id of 1 to 64 letters, digits, - or _.'
   }
@@ -515,9 +522,14 @@ async function peerRoute(room: Room, req: Request, auth: Auth, now: number, ctx:
   const before = roomAccessError(room, req, ctx, host)
   if (before) return { response: before }
   // Counted before the body is read: every message costs, a refused one included.
-  if (!peerAllowed(room, host ? 'host' : auth.seat, now)) return { response: json({ error: 'Too many messages between sessions. Try again in a minute.' }, 429) }
+  if (!peerAllowed(room, host ? 'host' : auth.seat, now))
+    return { response: json({ error: 'Too many messages between sessions. Try again in a minute.' }, 429) }
   let body
-  try { body = await readBoundedJson(req, PEER_LIMIT.bodyBytes) } catch (error) { return bodyFailure(error) }
+  try {
+    body = await readBoundedJson(req, PEER_LIMIT.bodyBytes)
+  } catch (error) {
+    return bodyFailure(error)
+  }
   const after = roomAccessError(room, req, ctx, host)
   if (after) return { response: after }
   if (!body || typeof body !== 'object' || Array.isArray(body)) return { response: json({ error: 'Expected a JSON object.' }, 400) }

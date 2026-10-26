@@ -17,7 +17,15 @@ import type { Author, Turn } from './turns.ts'
 // What pg's Client gives, and all this uses of it.
 export type Db = { query(text: string, params?: unknown[]): Promise<{ rows: any[] }> }
 export type Session = { id: string; scope: string; team?: string | null; owner?: { name: string; account: string | null }; title?: string | null }
-export type SearchOptions = { query?: string; embedding?: number[] | null; since?: number; person?: string; limit?: number; mode?: string; keywords?: 'bm25' | 'bigram' }
+export type SearchOptions = {
+  query?: string
+  embedding?: number[] | null
+  since?: number
+  person?: string
+  limit?: number
+  mode?: string
+  keywords?: 'bm25' | 'bigram'
+}
 export type ListOptions = { since?: number; before?: number; limit?: number }
 
 export const DIMENSIONS = 1024
@@ -94,7 +102,8 @@ export async function putTurns(db: Db, session: Session, turns: (Turn & { embedd
   if (!turns.length) return
   await db.query('begin')
   try {
-    const first = Math.min(...turns.map(t => t.at)), last = Math.max(...turns.map(t => t.at))
+    const first = Math.min(...turns.map(t => t.at)),
+      last = Math.max(...turns.map(t => t.at))
     await db.query(
       `insert into sessions (id, scope, team_id, owner_account, owner_name, title, started_at, updated_at) values ($1, $2, $3, $4, $5, $6, $7, $8)
        on conflict (id) do update set title = coalesce(excluded.title, sessions.title),
@@ -111,7 +120,21 @@ export async function putTurns(db: Db, session: Session, turns: (Turn & { embedd
            author_account = excluded.author_account, author_role = excluded.author_role, prompt = excluded.prompt,
            reply = excluded.reply, tools = excluded.tools, tsv_simple = excluded.tsv_simple, tsv_cjk = excluded.tsv_cjk,
            embedding = coalesce(excluded.embedding, turns.embedding)`,
-        [session.id, t.turnId, session.scope, ms(t.at), t.author?.name ?? '', t.author?.account ?? null, t.author?.role ?? 'unknown', t.prompt, t.reply, t.tools ?? [], grams(t.prompt), grams(t.reply), vec(t.embedding)],
+        [
+          session.id,
+          t.turnId,
+          session.scope,
+          ms(t.at),
+          t.author?.name ?? '',
+          t.author?.account ?? null,
+          t.author?.role ?? 'unknown',
+          t.prompt,
+          t.reply,
+          t.tools ?? [],
+          grams(t.prompt),
+          grams(t.reply),
+          vec(t.embedding),
+        ],
       )
     }
     await db.query('update sessions set turn_count = (select count(*) from turns where session_id = $1) where id = $1', [session.id])
@@ -159,8 +182,14 @@ export async function search(db: Db, scopes: string[], opts: SearchOptions = {})
   const cjk = keywords ? keywords === 'bm25' : await hasCjk(db)
   const params: unknown[] = [scopes]
   let filters = ''
-  if (since) { params.push(ms(since)); filters += ` and at >= $${params.length}` }
-  if (person) { params.push(person); filters += ` and (author_name = $${params.length} or author_account = $${params.length})` }
+  if (since) {
+    params.push(ms(since))
+    filters += ` and at >= $${params.length}`
+  }
+  if (person) {
+    params.push(person)
+    filters += ` and (author_name = $${params.length} or author_account = $${params.length})`
+  }
   const parts: string[] = []
   if (mode !== 'semantic' && query) {
     const kw = keywordPart(query, cjk, params, filters)
@@ -204,9 +233,16 @@ export async function search(db: Db, scopes: string[], opts: SearchOptions = {})
 
 export function snippet(text: string, query: string | undefined, width = 300) {
   const flat = text.replace(/\s+/g, ' ')
-  const words = String(query ?? '').trim().split(/\s+/).filter(Boolean)
+  const words = String(query ?? '')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
   const lower = flat.toLowerCase()
-  const at = words.map(w => lower.indexOf(w.toLowerCase())).filter(i => i >= 0).sort((a, b) => a - b)[0] ?? 0
+  const at =
+    words
+      .map(w => lower.indexOf(w.toLowerCase()))
+      .filter(i => i >= 0)
+      .sort((a, b) => a - b)[0] ?? 0
   const from = Math.max(0, at - width / 3)
   return `${from > 0 ? '…' : ''}${flat.slice(from, from + width)}${from + width < flat.length ? '…' : ''}`
 }
@@ -219,15 +255,37 @@ export async function getTurn(db: Db, scopes: string[], session: string, turn: s
     [scopes, session, turn],
   )
   const r = rows[0]
-  return r ? { session: r.session_id, turn: r.turn_id, title: r.title, at: new Date(r.at).toISOString(), who: by(r), sharedBy: { name: r.owner_name, account: r.owner_account }, prompt: r.prompt, reply: r.reply, tools: r.tools } : null
+  return r
+    ? {
+        session: r.session_id,
+        turn: r.turn_id,
+        title: r.title,
+        at: new Date(r.at).toISOString(),
+        who: by(r),
+        sharedBy: { name: r.owner_name, account: r.owner_account },
+        prompt: r.prompt,
+        reply: r.reply,
+        tools: r.tools,
+      }
+    : null
 }
 
 export async function getSession(db: Db, scopes: string[], session: string) {
-  const { rows: [s] } = await db.query('select * from sessions where id = $2 and scope = any($1)', [scopes, session])
+  const {
+    rows: [s],
+  } = await db.query('select * from sessions where id = $2 and scope = any($1)', [scopes, session])
   if (!s) return null
-  const { rows } = await db.query(`select turn_id, at, author_name, author_account, author_role, left(prompt, 200) as prompt, tools from turns where session_id = $1 order by at, turn_id`, [session])
+  const { rows } = await db.query(
+    `select turn_id, at, author_name, author_account, author_role, left(prompt, 200) as prompt, tools from turns where session_id = $1 order by at, turn_id`,
+    [session],
+  )
   return {
-    session: s.id, scope: s.scope, title: s.title, sharedBy: { name: s.owner_name, account: s.owner_account }, started: new Date(s.started_at).toISOString(), updated: new Date(s.updated_at).toISOString(),
+    session: s.id,
+    scope: s.scope,
+    title: s.title,
+    sharedBy: { name: s.owner_name, account: s.owner_account },
+    started: new Date(s.started_at).toISOString(),
+    updated: new Date(s.updated_at).toISOString(),
     turns: rows.map(r => ({ turn: r.turn_id, at: new Date(r.at).toISOString(), who: by(r), prompt: r.prompt, tools: r.tools })),
   }
 }
@@ -236,8 +294,25 @@ export async function listSessions(db: Db, scopes: string[], opts: ListOptions =
   const { since, before, limit = 50 } = opts
   const params: unknown[] = [scopes, Math.min(Math.max(1, limit), 50)]
   let filters = ''
-  if (since) { params.push(ms(since)); filters += ` and updated_at >= $${params.length}` }
-  if (before) { params.push(ms(before)); filters += ` and updated_at < $${params.length}` }
-  const { rows } = await db.query(`select id, scope, title, owner_name, owner_account, started_at, updated_at, turn_count from sessions where scope = any($1)${filters} order by updated_at desc limit $2`, params)
-  return rows.map(r => ({ session: r.id, scope: r.scope, title: r.title, sharedBy: { name: r.owner_name, account: r.owner_account }, started: new Date(r.started_at).toISOString(), updated: new Date(r.updated_at).toISOString(), turns: r.turn_count }))
+  if (since) {
+    params.push(ms(since))
+    filters += ` and updated_at >= $${params.length}`
+  }
+  if (before) {
+    params.push(ms(before))
+    filters += ` and updated_at < $${params.length}`
+  }
+  const { rows } = await db.query(
+    `select id, scope, title, owner_name, owner_account, started_at, updated_at, turn_count from sessions where scope = any($1)${filters} order by updated_at desc limit $2`,
+    params,
+  )
+  return rows.map(r => ({
+    session: r.id,
+    scope: r.scope,
+    title: r.title,
+    sharedBy: { name: r.owner_name, account: r.owner_account },
+    started: new Date(r.started_at).toISOString(),
+    updated: new Date(r.updated_at).toISOString(),
+    turns: r.turn_count,
+  }))
 }

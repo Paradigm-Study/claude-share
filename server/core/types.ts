@@ -83,7 +83,11 @@ export type DirectoryClient = {
   joinCheck(teamId: string, account: string): Promise<{ ok: true; account?: Person } | Refusal>
   whoIs(account: string): Promise<Person | null>
   teamAccess(teamId: string): Promise<string | null>
-  sessionInvite(account: string, room: { id: string; url: string; title: string; host: string }, to: unknown): Promise<{ ok: true; invited: string[]; refused: string[] } | Refusal>
+  sessionInvite(
+    account: string,
+    room: { id: string; url: string; title: string; host: string },
+    to: unknown,
+  ): Promise<{ ok: true; invited: string[]; refused: string[] } | Refusal>
   roomEnded(roomId: string, teamId: string | null): Promise<void>
   register(teamId: string, room: TeamListing): Promise<void>
   unregister(teamId: string, roomId: string): Promise<void>

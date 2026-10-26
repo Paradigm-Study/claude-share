@@ -61,7 +61,8 @@ function mintAllowed(room: Room, seat: string, now: number) {
 function linkPath(raw: unknown) {
   if (typeof raw !== 'string' || raw.length > PUBLIC_LIMITS.pathBytes || !raw.startsWith('/') || raw.startsWith('//')) return '/'
   let out = ''
-  for (const b of new TextEncoder().encode(raw)) out += b > 0x20 && b < 0x7f && b !== 0x5c ? String.fromCharCode(b) : `%${b.toString(16).toUpperCase().padStart(2, '0')}`
+  for (const b of new TextEncoder().encode(raw))
+    out += b > 0x20 && b < 0x7f && b !== 0x5c ? String.fromCharCode(b) : `%${b.toString(16).toUpperCase().padStart(2, '0')}`
   return out.length <= PUBLIC_LIMITS.pathBytes ? out : '/'
 }
 
@@ -78,9 +79,18 @@ function dropOldest(room: Room, entries: [string, Ticket][], keep: number) {
 // A new link, kept with the room: expired ones go first, then, to make room,
 // the seat's oldest past its newest few and the room's past its newest. The
 // second link after clearing (`clear`) counts like any other.
-function mintTicket(room: Room, { pid, path, seat, clear = false }: { pid: string; path: string; seat: string; clear?: boolean }, now: number, ticket = token(18)) {
+function mintTicket(
+  room: Room,
+  { pid, path, seat, clear = false }: { pid: string; path: string; seat: string; clear?: boolean },
+  now: number,
+  ticket = token(18),
+) {
   for (const [old, entry] of room.tickets) if (entry.exp <= now) room.tickets.delete(old)
-  dropOldest(room, [...room.tickets].filter(([, entry]) => entry.seat === seat), PUBLIC_LIMITS.seatTickets - 1)
+  dropOldest(
+    room,
+    [...room.tickets].filter(([, entry]) => entry.seat === seat),
+    PUBLIC_LIMITS.seatTickets - 1,
+  )
   dropOldest(room, [...room.tickets], PUBLIC_LIMITS.roomTickets - 1)
   room.tickets.set(ticket, { pid, exp: now + (clear ? CLEAR_TICKET_MS : TICKET_MS), path, seat, ...(clear ? { clear: true } : {}) })
   return ticket
@@ -90,7 +100,8 @@ function mintTicket(room: Room, { pid, path, seat, clear = false }: { pid: strin
 // once the link itself has expired. On a server whose previews each room has
 // a host name of its own (PREVIEW_URL `https://*.previews.example`), that
 // host name is the room's (`previewLabel`).
-const enterUrl = (origin: string, room: Room, ticket: string, pid: string) => `${origin.replace('//*.', `//${previewLabel(room.previewKey)}.`)}/__share/enter?room=${room.previewKey}&ticket=${ticket}&pid=${pid}`
+const enterUrl = (origin: string, room: Room, ticket: string, pid: string) =>
+  `${origin.replace('//*.', `//${previewLabel(room.previewKey)}.`)}/__share/enter?room=${room.previewKey}&ticket=${ticket}&pid=${pid}`
 
 // Per-room preview origins. With PREVIEW_URL a wildcard
 // (`https://*.previews.example`), each room's previews are served on a host
@@ -102,7 +113,9 @@ const enterUrl = (origin: string, room: Room, ticket: string, pid: string) => `$
 // characters at most, under the 63 a label may hold.
 const BASE32 = 'abcdefghijklmnopqrstuvwxyz234567'
 function base32(bytes: Uint8Array) {
-  let out = '', bits = 0, value = 0
+  let out = '',
+    bits = 0,
+    value = 0
   for (const byte of bytes) {
     value = ((value << 8) | byte) & 0xffff
     bits += 8
@@ -115,7 +128,8 @@ function base32(bytes: Uint8Array) {
 }
 function unbase32(text: string) {
   const out: number[] = []
-  let bits = 0, value = 0
+  let bits = 0,
+    value = 0
   for (const c of text) {
     const n = BASE32.indexOf(c)
     if (n < 0) return null
@@ -131,7 +145,9 @@ function unbase32(text: string) {
 }
 const HEX_KEY = /^[0-9a-f]{64}$/
 export function previewLabel(key: string) {
-  const bytes = HEX_KEY.test(key) ? Uint8Array.from(key.match(/../g) ?? [], h => parseInt(h, 16)) : Uint8Array.from(atob(key.replaceAll('-', '+').replaceAll('_', '/')), c => c.charCodeAt(0))
+  const bytes = HEX_KEY.test(key)
+    ? Uint8Array.from(key.match(/../g) ?? [], h => parseInt(h, 16))
+    : Uint8Array.from(atob(key.replaceAll('-', '+').replaceAll('_', '/')), c => c.charCodeAt(0))
   return base32(bytes)
 }
 // A label's preview key, as each adapter writes keys: a Durable Object's id
@@ -139,7 +155,13 @@ export function previewLabel(key: string) {
 export function previewKeyOf(label: string | null | undefined) {
   const bytes = label && /^[a-z2-7]{1,63}$/.test(label) ? unbase32(label) : null
   if (!bytes) return null
-  return { hex: [...bytes].map(b => b.toString(16).padStart(2, '0')).join(''), base64url: btoa(String.fromCharCode(...bytes)).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '') }
+  return {
+    hex: [...bytes].map(b => b.toString(16).padStart(2, '0')).join(''),
+    base64url: btoa(String.fromCharCode(...bytes))
+      .replaceAll('+', '-')
+      .replaceAll('/', '_')
+      .replaceAll('=', ''),
+  }
 }
 // Whether PREVIEW_URL gives each room's previews a host name of their own.
 export const roomOrigins = (previewUrl: string | null | undefined): previewUrl is string => /^https?:\/\/\*\./.test(previewUrl ?? '')
@@ -160,7 +182,11 @@ export async function previewRoutes(room: Room, req: Request, rest: string, auth
     const before = roomAccessError(room, req, ctx, true)
     if (before) return { response: before }
     let body
-    try { body = await readBoundedJson(req) } catch (error) { return bodyFailure(error) }
+    try {
+      body = await readBoundedJson(req)
+    } catch (error) {
+      return bodyFailure(error)
+    }
     const after = roomAccessError(room, req, ctx, true)
     if (after) return { response: after }
     const port = Number(body.port)
@@ -176,8 +202,15 @@ export async function previewRoutes(room: Room, req: Request, rest: string, auth
       return { changed: true, response: json({ pid: existing.pid, tcp: true }) }
     }
     if (existing) return { response: json({ pid: existing.pid, tcp: existing.tcp === true }) }
-    if (room.previews.size >= ROOM_PREVIEWS_MAX) return { response: json({ error: `This session shares ${ROOM_PREVIEWS_MAX} previews, as many as it keeps. Stop one first.` }, 429) }
-    const preview: Preview = { pid: token(8), port, title: String(body.title ?? '').slice(0, 120) || `localhost:${port}`, ts: now, ...(tcp ? { tcp: true } : {}) }
+    if (room.previews.size >= ROOM_PREVIEWS_MAX)
+      return { response: json({ error: `This session shares ${ROOM_PREVIEWS_MAX} previews, as many as it keeps. Stop one first.` }, 429) }
+    const preview: Preview = {
+      pid: token(8),
+      port,
+      title: String(body.title ?? '').slice(0, 120) || `localhost:${port}`,
+      ts: now,
+      ...(tcp ? { tcp: true } : {}),
+    }
     room.previews.set(preview.pid, preview)
     room.append(fromHost(room), 'preview', previewOpened(preview), now)
     room.wake()
@@ -207,7 +240,11 @@ export async function previewRoutes(room: Room, req: Request, rest: string, auth
     if (!mintAllowed(room, auth.seat, now)) return { response: json({ error: 'Too many preview links. Try again in a minute.' }, 429) }
     // Where the link lands: a page of the app (one path on it), else its root.
     let asked: JsonObject = {}
-    try { asked = await readBoundedJson(req) } catch (error) { if (statusOf(error) === 413) return bodyFailure(error) }
+    try {
+      asked = await readBoundedJson(req)
+    } catch (error) {
+      if (statusOf(error) === 413) return bodyFailure(error)
+    }
     // A Leave, a Stop or the room's end while the body arrived mints nothing.
     const after = check()
     if (after) return { response: after }
@@ -227,7 +264,9 @@ async function proxyAnswer(room: Room, req: Request, id: string, auth: Auth): Pr
   if (!room.proxied.has(id)) return { response: json({ error: 'That request is no longer waiting.' }, 410) }
   const failed = (text: string) => room.proxied.get(id)?.(previewPage(502, 'The preview did not answer', text))
   let bytes
-  try { bytes = await readBody(req, PROXY_HEAD_MAX + 1 + PROXY_RESPONSE_MAX) } catch (error) {
+  try {
+    bytes = await readBody(req, PROXY_HEAD_MAX + 1 + PROXY_RESPONSE_MAX)
+  } catch (error) {
     failed(statusOf(error) === 413 ? `Its answer was over ${PROXY_RESPONSE_MAX / 1024 / 1024} MB, more than a preview carries.` : 'Its answer was cut short.')
     return bodyFailure(error)
   }
@@ -270,7 +309,11 @@ export async function needRoute(room: Room, req: Request, auth: Auth, now: numbe
   // Counted before the body is read: every ask costs, a refused one included.
   if (!needAllowed(room, auth.seat, now)) return { response: json({ error: 'Too many preview port requests. Try again in a minute.' }, 429) }
   let body
-  try { body = await readBoundedJson(req, NEED_LIMIT.bodyBytes) } catch (error) { return bodyFailure(error) }
+  try {
+    body = await readBoundedJson(req, NEED_LIMIT.bodyBytes)
+  } catch (error) {
+    return bodyFailure(error)
+  }
   const after = roomAccessError(room, req, ctx)
   if (after) return { response: after }
   const keys = Object.keys(body)
@@ -305,9 +348,14 @@ function proxiedAnswer(status: number, pairs: [string, string][], body: Uint8Arr
       // The app's cookies stay on the preview's own host name: none for a
       // whole domain (every room's previews under it), and never the room's.
       if (value.trimStart().startsWith(`${COOKIE}=`)) continue
-      value = value.split(';').filter(part => !/^\s*domain\s*=/i.test(part)).join(';')
+      value = value
+        .split(';')
+        .filter(part => !/^\s*domain\s*=/i.test(part))
+        .join(';')
     }
-    try { headers.append(name, value) } catch {}
+    try {
+      headers.append(name, value)
+    } catch {}
   }
   return new Response(NULL_BODY.has(code) ? null : body, { status: code, headers })
 }
@@ -318,7 +366,11 @@ function answerOf(bytes: Uint8Array): { status: number; headers: [string, string
   const end = bytes.subarray(0, PROXY_HEAD_MAX + 1).indexOf(0x0a)
   if (end < 0) return null
   let head
-  try { head = JSON.parse(new TextDecoder('utf-8', { fatal: true, ignoreBOM: false }).decode(bytes.subarray(0, end))) } catch { return null }
+  try {
+    head = JSON.parse(new TextDecoder('utf-8', { fatal: true, ignoreBOM: false }).decode(bytes.subarray(0, end)))
+  } catch {
+    return null
+  }
   if (!head || typeof head !== 'object' || Array.isArray(head) || !Number.isInteger(head.status) || !Array.isArray(head.headers)) return null
   if (!head.headers.every((h: unknown) => Array.isArray(h) && h.length === 2 && typeof h[0] === 'string' && typeof h[1] === 'string')) return null
   return { status: head.status, headers: head.headers, body: bytes.subarray(end + 1) }
@@ -380,7 +432,15 @@ const redirect = (location: string) => new Response(null, { status: 302, headers
 const clearingPage = (next: string) =>
   new Response(
     `<!doctype html><meta charset="utf-8"><meta http-equiv="refresh" content="0;url=${escapeHtml(next)}"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Opening the preview</title><body style="margin:0;display:grid;place-items:center;min-height:100vh;font-family:-apple-system,Helvetica,sans-serif;background:#faf8f7;color:#011121"><p>Opening the preview… <a href="${escapeHtml(next)}">Continue</a></p>`,
-    { status: 200, headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'referrer-policy': 'no-referrer', 'clear-site-data': '"cache", "cookies", "storage"' } },
+    {
+      status: 200,
+      headers: {
+        'content-type': 'text/html; charset=utf-8',
+        'cache-control': 'no-store',
+        'referrer-policy': 'no-referrer',
+        'clear-site-data': '"cache", "cookies", "storage"',
+      },
+    },
   )
 
 // A seat's newest few browsers per preview, and the room's newest (they're
@@ -408,7 +468,14 @@ function enterPreview(room: Room, req: Request, url: URL, now: number, secure: b
   if (!ticket || ticket.used || ticket.exp <= now || !room.previews.has(ticket.pid) || room.endedAt || !seatKnown(room, ticket.seat)) {
     const pid = ticket?.pid ?? url.searchParams.get('pid')
     if (own && pid && own.pid === pid && room.previews.has(pid) && !room.endedAt) return { changed: pruned, response: redirect(ticket?.path ?? '/') }
-    return { changed: pruned, response: previewPage(403, 'This preview link has been used', 'Each link opens the preview in one browser, within ten minutes. For a new one, press <b>Open</b> in the Room panel in Claude Code.') }
+    return {
+      changed: pruned,
+      response: previewPage(
+        403,
+        'This preview link has been used',
+        'Each link opens the preview in one browser, within ten minutes. For a new one, press <b>Open</b> in the Room panel in Claude Code.',
+      ),
+    }
   }
   const path = ticket.path
   // Spent, but kept until it expires, so the browser that used it is known.
@@ -429,7 +496,11 @@ function enterPreview(room: Room, req: Request, url: URL, now: number, secure: b
   const sid = reuse ?? token(18)
   const response = new Response(null, {
     status: 302,
-    headers: { location: path, 'cache-control': 'no-store', 'set-cookie': `${COOKIE}=${room.previewKey}.${sid}; Path=/; HttpOnly; SameSite=Lax${secure ? '; Secure' : ''}` },
+    headers: {
+      location: path,
+      'cache-control': 'no-store',
+      'set-cookie': `${COOKIE}=${room.previewKey}.${sid}; Path=/; HttpOnly; SameSite=Lax${secure ? '; Secure' : ''}`,
+    },
   })
   ticket.used = true
   const renewed = reuse ? room.previewSessions.get(reuse) : undefined
@@ -444,7 +515,12 @@ function enterPreview(room: Room, req: Request, url: URL, now: number, secure: b
 // Everything on the preview host name. /__share/enter trades a ticket for a
 // cookie; anything else, with the cookie, goes to the host's localhost.
 // `own`: it came on this room's own host name (PREVIEW_URL a wildcard).
-export async function previewRequest(room: Room, req: Request, now: number, { secure = true, own = false }: { secure?: boolean; own?: boolean } = {}): Promise<RouteResult> {
+export async function previewRequest(
+  room: Room,
+  req: Request,
+  now: number,
+  { secure = true, own = false }: { secure?: boolean; own?: boolean } = {},
+): Promise<RouteResult> {
   const url = new URL(req.url)
   // No service worker registers here: one would outlive its room and answer
   // for every other room's previews in that browser, all on this host name.
@@ -461,7 +537,9 @@ export async function previewRequest(room: Room, req: Request, now: number, { se
   if (!serveLeft(room, session.seat ?? '', now)) return { response: previewPage(429, 'The preview has sent all it may for now', SERVED_ALL) }
   let body: Uint8Array = new Uint8Array()
   if (req.method !== 'GET' && req.method !== 'HEAD') {
-    try { body = await readBody(req, PROXY_BODY_MAX) } catch (error) {
+    try {
+      body = await readBody(req, PROXY_BODY_MAX)
+    } catch (error) {
       return { response: statusOf(error) === 413 ? previewTooLarge() : previewPage(400, 'The request did not arrive', 'Its body was cut short.') }
     }
     // The browser's session, its preview and the room may have gone while the body arrived.
@@ -474,7 +552,10 @@ export async function previewRequest(room: Room, req: Request, now: number, { se
     const n = name.toLowerCase()
     if (HOP.has(n) || n === 'host' || n === 'accept-encoding' || n.startsWith('cf-') || n.startsWith('x-forwarded') || n === 'x-real-ip') continue
     if (n === 'cookie') {
-      const rest = value.split(/;\s*/).filter(c => !c.startsWith(`${COOKIE}=`)).join('; ')
+      const rest = value
+        .split(/;\s*/)
+        .filter(c => !c.startsWith(`${COOKIE}=`))
+        .join('; ')
       if (rest) headers.push([name, rest])
       continue
     }
@@ -487,14 +568,28 @@ export async function previewRequest(room: Room, req: Request, now: number, { se
       resolve(previewPage(504, 'The preview did not answer', `${room.host.name}'s app took too long to respond.`))
     }, PROXY_TIMEOUT_MS)
     // Whose browser it is: its answer counts against that seat (`serveReserve`).
-    room.proxied.set(id, Object.assign((response: Response) => {
-      clearTimeout(timer)
-      room.proxied.delete(id)
-      resolve(response)
-    }, { seat: session.seat ?? '' }))
+    room.proxied.set(
+      id,
+      Object.assign(
+        (response: Response) => {
+          clearTimeout(timer)
+          room.proxied.delete(id)
+          resolve(response)
+        },
+        { seat: session.seat ?? '' },
+      ),
+    )
   })
   const sent = room.toHost({
-    proxy: { id, pid: preview.pid, port: preview.port, method: req.method, path: `${url.pathname}${url.search}`, headers, body: body.length ? toBase64(body) : '' },
+    proxy: {
+      id,
+      pid: preview.pid,
+      port: preview.port,
+      method: req.method,
+      path: `${url.pathname}${url.search}`,
+      headers,
+      body: body.length ? toBase64(body) : '',
+    },
   })
   if (!sent) {
     room.proxied.get(id)?.(previewPage(503, 'The preview is not reachable', `${room.host.name}'s Claude Code isn't connected right now.`))
@@ -514,7 +609,12 @@ export const SOCKET_ID = /^[A-Za-z0-9_-]{8,40}$/
 // Whom a browser's socket is for: its preview session, the port, the path.
 // `active` is every public pair the adapter holds for this room, pending or
 // paired (each { ownerSeat }): a seat and the room have PUBLIC_LIMITS' share.
-export function previewSocketTarget(room: Room, req: Request, now: number, active: { ownerSeat?: string }[] = []): SocketTarget | { ok: false; status: number; error?: string } {
+export function previewSocketTarget(
+  room: Room,
+  req: Request,
+  now: number,
+  active: { ownerSeat?: string }[] = [],
+): SocketTarget | { ok: false; status: number; error?: string } {
   const session = previewSession(room, req, now)
   const preview = session ? room.previews.get(session.pid) : null
   if (!session || !preview || room.endedAt) return { ok: false, status: 404 }
@@ -540,8 +640,19 @@ export function previewSocketTarget(room: Room, req: Request, now: number, activ
 // whichever adapter holds them.
 export function publicPairValid(room: Room | null | undefined, pair: PublicPair | null | undefined, now: number) {
   const session = pair ? room?.previewSessions.get(pair.session) : undefined
-  return Boolean(room && !room.endedAt && pair && !pair.closed && pair.exp > now && room.previews.has(pair.pid) && session && session.pid === pair.pid && session.exp > now &&
-    session.seat && seatKnown(room, session.seat))
+  return Boolean(
+    room &&
+    !room.endedAt &&
+    pair &&
+    !pair.closed &&
+    pair.exp > now &&
+    room.previews.has(pair.pid) &&
+    session &&
+    session.pid === pair.pid &&
+    session.exp > now &&
+    session.seat &&
+    seatKnown(room, session.seat),
+  )
 }
 
 // Asks the host for a relay; false when the host's Claude Code isn't connected.
@@ -560,7 +671,11 @@ export function hostSocketAllowed(room: Room, req: Request) {
 // never a relay's error text.
 export async function relayRejectCode(req: Request) {
   let body
-  try { body = JSON.parse(new TextDecoder('utf-8', { fatal: true, ignoreBOM: false }).decode(await readBody(req, TCP_LIMITS.controlBytes))) } catch { return 0 }
+  try {
+    body = JSON.parse(new TextDecoder('utf-8', { fatal: true, ignoreBOM: false }).decode(await readBody(req, TCP_LIMITS.controlBytes)))
+  } catch {
+    return 0
+  }
   if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).join(',') !== 'code') return 0
   return body.code === 'BUSY' ? 1013 : body.code === 'CONNECT' ? 1011 : 0
 }

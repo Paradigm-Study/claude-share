@@ -10,7 +10,7 @@ import { migrate } from '../server/traces/store.ts'
 
 const url = process.env.TRACES_DATABASE_URL
 if (!url) {
-  console.log('FAIL TRACES_DATABASE_URL is not set: the traces database\'s connection string')
+  console.log("FAIL TRACES_DATABASE_URL is not set: the traces database's connection string")
   process.exit(1)
 }
 const db = new pg.Client({ connectionString: url })

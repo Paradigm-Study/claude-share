@@ -4,14 +4,23 @@
 // Checked by npm run typecheck:scripts.
 {
   "compilerOptions": {
-    "target": "es2023", "lib": ["es2023"], "types": ["node"],
-    "module": "nodenext", "moduleResolution": "nodenext", "resolveJsonModule": true,
+    "target": "es2023",
+    "lib": ["es2023"],
+    "types": ["node"],
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "resolveJsonModule": true,
     "strict": true,
-    "noImplicitOverride": true, "noFallthroughCasesInSwitch": true,
-    "noUnusedLocals": true, "noUnusedParameters": true,
-    "noEmit": true, "skipLibCheck": true,
-    "allowImportingTsExtensions": true, "rewriteRelativeImportExtensions": false,
-    "verbatimModuleSyntax": true, "erasableSyntaxOnly": true
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "allowImportingTsExtensions": true,
+    "rewriteRelativeImportExtensions": false,
+    "verbatimModuleSyntax": true,
+    "erasableSyntaxOnly": true
   },
   "include": ["*.ts"]
 }

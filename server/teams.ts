@@ -53,7 +53,15 @@ export type Account = {
   seenAt: number
 }
 // Who a provider said someone is.
-export type Identity = { provider: string; subject: string; name?: string; login?: string; email?: string; emailVerified: boolean; githubOrgs?: string | string[] }
+export type Identity = {
+  provider: string
+  subject: string
+  name?: string
+  login?: string
+  email?: string
+  emailVerified: boolean
+  githubOrgs?: string | string[]
+}
 type Role = 'owner' | 'member'
 export type Team = { id: string; name: string; createdAt: number; access: 'members' | 'link'; domains?: string[]; githubOrgs?: string[]; invite: string }
 type Membership = { role: Role; at: number }
@@ -94,7 +102,9 @@ const DOMAIN = /^(?=.{3,253}$)[a-z0-9-]+(\.[a-z0-9-]+)+$/
 const ORG = /^[a-z0-9](?:[a-z0-9-]{0,38})$/
 // Email providers anyone can sign up at: a team can't take everyone at one.
 const PUBLIC_DOMAINS = new Set(
-  'gmail.com googlemail.com outlook.com hotmail.com live.com msn.com yahoo.com ymail.com icloud.com me.com mac.com aol.com proton.me protonmail.com pm.me gmx.com gmx.net mail.com yandex.com yandex.ru zoho.com qq.com 163.com 126.com naver.com hey.com fastmail.com tutanota.com duck.com users.noreply.github.com'.split(' '),
+  'gmail.com googlemail.com outlook.com hotmail.com live.com msn.com yahoo.com ymail.com icloud.com me.com mac.com aol.com proton.me protonmail.com pm.me gmx.com gmx.net mail.com yandex.com yandex.ru zoho.com qq.com 163.com 126.com naver.com hey.com fastmail.com tutanota.com duck.com users.noreply.github.com'.split(
+    ' ',
+  ),
 )
 
 // A store key's last part: the team in dom:<domain>:<team>, the account in
@@ -116,7 +126,13 @@ export const PROVIDERS: Record<string, { label: string; authorize: string; scope
 
 // Which providers this server can sign people in with: those with a client id
 // and secret configured (and the test one, for the end-to-end test only).
-export function providersFrom(env: { GITHUB_CLIENT_ID?: string; GITHUB_CLIENT_SECRET?: string; GOOGLE_CLIENT_ID?: string; GOOGLE_CLIENT_SECRET?: string; AUTH_TEST?: string }) {
+export function providersFrom(env: {
+  GITHUB_CLIENT_ID?: string
+  GITHUB_CLIENT_SECRET?: string
+  GOOGLE_CLIENT_ID?: string
+  GOOGLE_CLIENT_SECRET?: string
+  AUTH_TEST?: string
+}) {
   const out: Record<string, ProviderKeys> = {}
   if (env.GITHUB_CLIENT_ID && env.GITHUB_CLIENT_SECRET) out.github = { id: env.GITHUB_CLIENT_ID, secret: env.GITHUB_CLIENT_SECRET }
   if (env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET) out.google = { id: env.GOOGLE_CLIENT_ID, secret: env.GOOGLE_CLIENT_SECRET }
@@ -129,10 +145,25 @@ async function sha256(text: string) {
   return [...digest].map(b => b.toString(16).padStart(2, '0')).join('')
 }
 
-const clean = (v: unknown, max = NAME_MAX) => String(v ?? '').replace(/[\u0000-\u001f]/g, '').trim().slice(0, max)
-const domainOf = (email: unknown) => (String(email ?? '').toLowerCase().split('@')[1] ?? '').trim()
+const clean = (v: unknown, max = NAME_MAX) =>
+  String(v ?? '')
+    .replace(/[\u0000-\u001f]/g, '')
+    .trim()
+    .slice(0, max)
+const domainOf = (email: unknown) =>
+  (
+    String(email ?? '')
+      .toLowerCase()
+      .split('@')[1] ?? ''
+  ).trim()
 const listOf = (value: unknown, test: RegExp): string[] =>
-  [...new Set((Array.isArray(value) ? value : String(value ?? '').split(/[\s,]+/)).map((v: unknown) => String(v).trim().toLowerCase().replace(/^@/, '')).filter(v => v && test.test(v)))].slice(0, 20)
+  [
+    ...new Set(
+      (Array.isArray(value) ? value : String(value ?? '').split(/[\s,]+/))
+        .map((v: unknown) => String(v).trim().toLowerCase().replace(/^@/, ''))
+        .filter(v => v && test.test(v)),
+    ),
+  ].slice(0, 20)
 
 const ESCAPES: Record<string, string> = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }
 const esc = (s: unknown) => String(s).replace(/[&<>"]/g, c => ESCAPES[c] ?? c)
@@ -185,7 +216,10 @@ const CONTINUE_SCRIPT = `(function () {
 })();`
 // …allowed by its hash, the one script the page may run.
 let continueHash: Promise<string> | null = null
-const continueSource = () => (continueHash ??= crypto.subtle.digest('SHA-256', new TextEncoder().encode(CONTINUE_SCRIPT)).then(d => `'sha256-${btoa(String.fromCharCode(...new Uint8Array(d)))}'`))
+const continueSource = () =>
+  (continueHash ??= crypto.subtle
+    .digest('SHA-256', new TextEncoder().encode(CONTINUE_SCRIPT))
+    .then(d => `'sha256-${btoa(String.fromCharCode(...new Uint8Array(d)))}'`))
 
 // The page whose Continue finishes a sign-in: never in a frame (nothing drawn
 // over it can take the click), running no script but its own, never cached,
@@ -232,7 +266,9 @@ export class Directory {
   // -- accounts --------------------------------------------------------------
 
   async accountOf(tokenText: unknown): Promise<Account | null> {
-    const t = String(tokenText ?? '').replace(/^Bearer\s+/i, '').trim()
+    const t = String(tokenText ?? '')
+      .replace(/^Bearer\s+/i, '')
+      .trim()
     if (!/^ssa_[A-Za-z0-9_-]{20,80}$/.test(t)) return null
     const rec = await this.kv.get(`tok:${await sha256(t)}`)
     return rec ? ((await this.kv.get(`acct:${rec.account}`)) ?? null) : null
@@ -259,7 +295,7 @@ export class Directory {
       // no team by its domain.
       email: email || before?.email || '',
       emailVerified: Boolean(email),
-      githubOrgs: identity.githubOrgs ? listOf(identity.githubOrgs, ORG) : before?.githubOrgs ?? [],
+      githubOrgs: identity.githubOrgs ? listOf(identity.githubOrgs, ORG) : (before?.githubOrgs ?? []),
       idents: [...new Set([...(before?.idents ?? []), ident])],
       createdAt: before?.createdAt ?? now,
       seenAt: now,
@@ -396,8 +432,20 @@ export class Directory {
     if (!team) return { ok: false, status: 403, error: 'This session was shared with a team that no longer exists. Ask the host to share it again.' }
     if (team.access === 'link') return { ok: true }
     const account = await this.accountOf(tokenText)
-    if (!account) return { ok: false, status: 401, team: team.name, error: `This session is for ${team.name}. Sign in with an account in that team (/team in Claude Code), then open the link again.` }
-    if (!(await this.kv.get(`mem:${team.id}:${account.id}`))) return { ok: false, status: 403, team: team.name, error: `This session is for ${team.name}, and ${account.name} isn't in it. Ask someone in the team for its invite link.` }
+    if (!account)
+      return {
+        ok: false,
+        status: 401,
+        team: team.name,
+        error: `This session is for ${team.name}. Sign in with an account in that team (/team in Claude Code), then open the link again.`,
+      }
+    if (!(await this.kv.get(`mem:${team.id}:${account.id}`)))
+      return {
+        ok: false,
+        status: 403,
+        team: team.name,
+        error: `This session is for ${team.name}, and ${account.name} isn't in it. Ask someone in the team for its invite link.`,
+      }
     return { ok: true, account: { id: account.id, name: account.name } }
   }
 
@@ -527,13 +575,18 @@ export class Directory {
 
   // Every path this owns: /auth/…, /api/auth/…, /api/me, /api/teams…, /api/invites/…, /i/<code>.
   static owns(pathname: string) {
-    return pathname === '/api/native-pool/enrollment' || /^\/(auth\/|api\/auth\/|api\/me(\/invites(\/[^/]+)?)?$|api\/teams(\/|$)|api\/invites\/|i\/)/.test(pathname)
+    return (
+      pathname === '/api/native-pool/enrollment' || /^\/(auth\/|api\/auth\/|api\/me(\/invites(\/[^/]+)?)?$|api\/teams(\/|$)|api\/invites\/|i\/)/.test(pathname)
+    )
   }
 
   // What one address may do only so often (the join limit): start a sign-in,
   // make a team, take an invite. Polling and listing are not counted.
   static limited(pathname: string, method: string) {
-    return /^\/auth\/[^/]+\/start$/.test(pathname) || (method === 'POST' && (/^\/api\/(teams|invites\/[^/]+)$/.test(pathname) || pathname === '/api/native-pool/enrollment'))
+    return (
+      /^\/auth\/[^/]+\/start$/.test(pathname) ||
+      (method === 'POST' && (/^\/api\/(teams|invites\/[^/]+)$/.test(pathname) || pathname === '/api/native-pool/enrollment'))
+    )
   }
 
   async handle(req: Request, origin: string, now = Date.now()): Promise<Response> {
@@ -546,7 +599,8 @@ export class Directory {
       }
       if (parts[0] === 'auth' && parts.length === 3 && parts[2] === 'start') return this.start(parts[1]!, url, origin, now)
       if (parts[0] === 'auth' && parts.length === 3 && parts[2] === 'callback') return this.callback(parts[1]!, url, origin, now)
-      if (url.pathname === '/auth/confirm') return method === 'POST' ? this.confirm(await readForm(req), now) : page('Sign-in', "This sign-in link isn't complete", startAgain)
+      if (url.pathname === '/auth/confirm')
+        return method === 'POST' ? this.confirm(await readForm(req), now) : page('Sign-in', "This sign-in link isn't complete", startAgain)
       if (url.pathname === '/api/auth/poll' && method === 'POST') return this.poll(await readBody(req), now)
       if (parts[0] === 'i' && parts.length === 2) return this.invitePage(parts[1]!, origin)
 
@@ -554,7 +608,13 @@ export class Directory {
       if (!account) return json({ error: 'Sign in first: /team in Claude Code.' }, 401)
 
       if (url.pathname === '/api/auth/logout' && method === 'POST') {
-        await this.kv.delete(`tok:${await sha256(String(req.headers.get('authorization')).replace(/^Bearer\s+/i, '').trim())}`)
+        await this.kv.delete(
+          `tok:${await sha256(
+            String(req.headers.get('authorization'))
+              .replace(/^Bearer\s+/i, '')
+              .trim(),
+          )}`,
+        )
         return json({ ok: true })
       }
       if (url.pathname === '/api/me' && method === 'DELETE') return this.deleteAccount(account)
@@ -562,7 +622,8 @@ export class Directory {
       // and deleting the account always go through.
       if (method !== 'GET' && !this.change(account.id, now)) return json({ error: CHANGES.message }, 429)
       if (url.pathname === '/api/native-pool/enrollment' && method === 'POST') return this.nativePool.enroll(account.id, req, now)
-      if (url.pathname === '/api/me' && method === 'GET') return json({ account: this.accountView(account), teams: await this.teamsOf(account), teammates: await this.teammates(account) })
+      if (url.pathname === '/api/me' && method === 'GET')
+        return json({ account: this.accountView(account), teams: await this.teamsOf(account), teammates: await this.teammates(account) })
       if (url.pathname === '/api/me/invites' && method === 'GET') return json({ invites: await this.invitesOf(account, now) })
       if (parts[0] === 'api' && parts[1] === 'me' && parts[2] === 'invites' && parts.length === 4 && method === 'DELETE') {
         await this.dropInvite(account.id, parts[3]!)
@@ -670,7 +731,12 @@ export class Directory {
     for (const o of orgs) await this.kv.put(`org:${o}:${team.id}`, 1)
     await this.kv.put(`team:${team.id}`, next)
     // Turned members-only: its sessions keep only its members.
-    if (next.access === 'members' && team.access !== 'members') await this.enforce(team.id, (await this.kv.list(`live:${team.id}:`)).map(([, entry]) => entry.id), 'members')
+    if (next.access === 'members' && team.access !== 'members')
+      await this.enforce(
+        team.id,
+        (await this.kv.list(`live:${team.id}:`)).map(([, entry]) => entry.id),
+        'members',
+      )
     // People already signed in whom the new rules take in. Only an account
     // says which organizations it's in, so a new one reads every account
     // once; a new domain alone reads the verified-email index.
@@ -729,7 +795,8 @@ export class Directory {
   // answer only asks (ask): the browser says yes before anything is signed
   // in. An invite code, when given, is taken once they're signed in.
   async start(provider: string, url: URL, origin: string, now: number) {
-    if (!this.providers[provider]) return page('Sign-in', "This sign-in isn't set up", 'This share server has no sign-in with that provider. Sharing by link works without one.')
+    if (!this.providers[provider])
+      return page('Sign-in', "This sign-in isn't set up", 'This share server has no sign-in with that provider. Sharing by link works without one.')
     const login = url.searchParams.get('login') ?? ''
     if (!LOGIN_ID.test(login)) return page('Sign-in', "This sign-in link isn't complete", startAgain)
     const invite = url.searchParams.get('invite') ?? ''
@@ -743,7 +810,14 @@ export class Directory {
       // The end-to-end test's own provider: who to be comes in the link. It
       // asks in the browser as the others do.
       const email = clean(url.searchParams.get('email'), 120).toLowerCase()
-      const identity: Identity = { provider: 'test', subject: email || login, name: url.searchParams.get('name') || email, email, emailVerified: Boolean(email), githubOrgs: url.searchParams.get('orgs') ?? '' }
+      const identity: Identity = {
+        provider: 'test',
+        subject: email || login,
+        name: url.searchParams.get('name') || email,
+        email,
+        emailVerified: Boolean(email),
+        githubOrgs: url.searchParams.get('orgs') ?? '',
+      }
       return this.ask(identity, login, invite, now)
     }
     const state = token(18)
@@ -786,13 +860,20 @@ export class Directory {
     const team = invite ? await this.inviteTeam(invite) : null
     const code = `${login.slice(0, 4)}-${login.slice(4, 8)}`.toUpperCase()
     const who = `Claude Code is signing in as ${esc(name)}${email ? ` (${esc(email)})` : ''}.`
-    return guarded(page('Sign-in', 'Finish signing in', [
-      `${who} It shows the code <b>${code}</b>. Continue only if you started signing in from Claude Code just now and the codes match.`,
-      ...(team ? [`Continuing also joins you to the team <b>${esc(team.name)}</b>.`] : []),
-    ], {
-      after: `<form class="cta" method="post" action="/auth/confirm"><input type="hidden" name="login" value="${esc(login)}"><input type="hidden" name="nonce" value="${esc(nonce)}"><button type="submit" class="btn-primary" id="continue" disabled>Continue</button><noscript><style>#continue{display:none}</style><button type="submit" class="btn-primary">Continue</button></noscript></form>`,
-      script: CONTINUE_SCRIPT,
-    }))
+    return guarded(
+      page(
+        'Sign-in',
+        'Finish signing in',
+        [
+          `${who} It shows the code <b>${code}</b>. Continue only if you started signing in from Claude Code just now and the codes match.`,
+          ...(team ? [`Continuing also joins you to the team <b>${esc(team.name)}</b>.`] : []),
+        ],
+        {
+          after: `<form class="cta" method="post" action="/auth/confirm"><input type="hidden" name="login" value="${esc(login)}"><input type="hidden" name="nonce" value="${esc(nonce)}"><button type="submit" class="btn-primary" id="continue" disabled>Continue</button><noscript><style>#continue{display:none}</style><button type="submit" class="btn-primary">Continue</button></noscript></form>`,
+          script: CONTINUE_SCRIPT,
+        },
+      ),
+    )
   }
 
   // The confirmation page's Continue. Only the page's own nonce finishes
@@ -807,7 +888,12 @@ export class Directory {
     }
     if (rec.status === 'done') return alreadyIn()
     if (rec.status !== 'confirm' || !rec.nonce || form.get('nonce') !== rec.nonce) {
-      return page('Sign-in', 'This sign-in page is out of date', ['Nothing changed: a newer sign-in started since it opened, or it came from somewhere else.', startAgain], { status: 403 })
+      return page(
+        'Sign-in',
+        'This sign-in page is out of date',
+        ['Nothing changed: a newer sign-in started since it opened, or it came from somewhere else.', startAgain],
+        { status: 403 },
+      )
     }
     return this.finish(rec.identity, login, rec.invite, now)
   }
@@ -845,7 +931,13 @@ export class Directory {
     // hand over.
     const account = rec.account ? await this.kv.get(`acct:${rec.account}`) : null
     if (!account) return json({ status: 'expired' })
-    return json({ status: 'done', token: await this.mint(account.id, now), joined: rec.joined ?? null, account: this.accountView(account), teams: await this.teamsOf(account) })
+    return json({
+      status: 'done',
+      token: await this.mint(account.id, now),
+      joined: rec.joined ?? null,
+      account: this.accountView(account),
+      teams: await this.teamsOf(account),
+    })
   }
 
   async identity(provider: string, code: string, redirect: string): Promise<Identity> {
@@ -858,13 +950,24 @@ export class Directory {
         body: JSON.stringify({ client_id: cfg.id, client_secret: cfg.secret, code, redirect_uri: redirect }),
       }).then(r => r.json() as Promise<JsonObject>)
       if (!tok.access_token) throw new Error(`GitHub sign-in failed: ${tok.error_description ?? tok.error ?? 'no token'}`)
-      const gh = (path: string): Promise<any> => this.fetch(`https://api.github.com${path}`, { headers: { authorization: `Bearer ${tok.access_token}`, accept: 'application/vnd.github+json', 'user-agent': 'claude-share' } }).then(r => (r.ok ? r.json() : null))
+      const gh = (path: string): Promise<any> =>
+        this.fetch(`https://api.github.com${path}`, {
+          headers: { authorization: `Bearer ${tok.access_token}`, accept: 'application/vnd.github+json', 'user-agent': 'claude-share' },
+        }).then(r => (r.ok ? r.json() : null))
       const [user, emails, orgs] = await Promise.all([gh('/user'), gh('/user/emails'), gh('/user/orgs?per_page=100')])
       if (!user?.id) throw new Error('GitHub sign-in failed: no user')
       // Its addresses unread say nothing either way: try again, rather than take that as none.
       if (!Array.isArray(emails)) throw new Error("GitHub sign-in failed: couldn't read your email addresses. Try again.")
       const primary = emails.find((e: JsonObject) => e.primary && e.verified) ?? emails.find((e: JsonObject) => e.verified) ?? null
-      return { provider, subject: String(user.id), login: user.login, name: user.name || user.login, email: primary?.email ?? '', emailVerified: Boolean(primary), githubOrgs: Array.isArray(orgs) ? orgs.map((o: JsonObject) => o.login) : [] }
+      return {
+        provider,
+        subject: String(user.id),
+        login: user.login,
+        name: user.name || user.login,
+        email: primary?.email ?? '',
+        emailVerified: Boolean(primary),
+        githubOrgs: Array.isArray(orgs) ? orgs.map((o: JsonObject) => o.login) : [],
+      }
     }
     if (provider === 'google') {
       const tok = await this.fetch('https://oauth2.googleapis.com/token', {
@@ -873,7 +976,9 @@ export class Directory {
         body: new URLSearchParams({ code, client_id: cfg.id ?? '', client_secret: cfg.secret ?? '', redirect_uri: redirect, grant_type: 'authorization_code' }),
       }).then(r => r.json() as Promise<JsonObject>)
       if (!tok.access_token) throw new Error(`Google sign-in failed: ${tok.error_description ?? tok.error ?? 'no token'}`)
-      const user = await this.fetch('https://openidconnect.googleapis.com/v1/userinfo', { headers: { authorization: `Bearer ${tok.access_token}` } }).then(r => r.json() as Promise<JsonObject>)
+      const user = await this.fetch('https://openidconnect.googleapis.com/v1/userinfo', { headers: { authorization: `Bearer ${tok.access_token}` } }).then(
+        r => r.json() as Promise<JsonObject>,
+      )
       if (!user?.sub) throw new Error('Google sign-in failed: no user')
       return { provider, subject: user.sub, name: user.name || user.email, email: user.email ?? '', emailVerified: user.email_verified === true }
     }
@@ -884,11 +989,21 @@ export class Directory {
   // Claude Code (Desktop opens a new session with the link as its prompt).
   async invitePage(code: string, origin: string) {
     const team = await this.inviteTeam(code)
-    if (!team) return page('Team invite', "This invite doesn't work any more", 'Someone in the team made a new link, or the team is gone. Ask them for the current one.', { status: 404 })
+    if (!team)
+      return page(
+        'Team invite',
+        "This invite doesn't work any more",
+        'Someone in the team made a new link, or the team is gone. Ask them for the current one.',
+        { status: 404 },
+      )
     const link = `${origin}/i/${code}`
     const name = esc(team.name)
-    return page('Team invite', `Join ${team.name}`, [`${name} shares its Claude Code sessions here. Join, and they show in your Team panel as they go live, a press from joining.`], {
-      after: `<div class="cta">
+    return page(
+      'Team invite',
+      `Join ${team.name}`,
+      [`${name} shares its Claude Code sessions here. Join, and they show in your Team panel as they go live, a press from joining.`],
+      {
+        after: `<div class="cta">
   <a class="btn-primary" href="claude://code/new?q=${encodeURIComponent(link)}"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17 17 7M9 7h8v8"/></svg>Open in Claude Desktop</a>
   <button type="button" class="btn-ghost" data-copy="invite-link">Copy link</button>
 </div>
@@ -900,8 +1015,9 @@ export class Directory {
   ${commandBox('install', INSTALL_COMMAND, 'Copy install command')}
   <p>In a terminal instead of Desktop? Start <code class="inline">claude</code> and paste the invite link as your message.</p>
 </details>`,
-      script: COPY_SCRIPT,
-    })
+        script: COPY_SCRIPT,
+      },
+    )
   }
 }
 

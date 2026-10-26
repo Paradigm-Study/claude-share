@@ -24,14 +24,21 @@ export function takeTurns(events: RoomEvent[], open: Turn | null = null, resolve
     if (turn && (turn.prompt || turn.reply)) closed.push(turn)
     turn = null
   }
-  const start = (e: RoomEvent, name: string, prompt: string): Turn => ({ turnId: String(e.seq), at: e.ts, author: resolve(name), prompt: prompt.slice(0, PROMPT_MAX), reply: '', tools: [] })
+  const start = (e: RoomEvent, name: string, prompt: string): Turn => ({
+    turnId: String(e.seq),
+    at: e.ts,
+    author: resolve(name),
+    prompt: prompt.slice(0, PROMPT_MAX),
+    reply: '',
+    tools: [],
+  })
   for (const e of events) {
     if (e.from?.role !== 'host') continue
     const body = e.body ?? {}
     if (e.type === 'row' && typeof body.text === 'string') {
       if (body.kind === 'user') {
         close()
-        turn = start(e, typeof body.who === 'string' ? body.who : e.from.name ?? '', body.text)
+        turn = start(e, typeof body.who === 'string' ? body.who : (e.from.name ?? ''), body.text)
       } else if (body.kind === 'assistant' && body.text.trim()) {
         turn ??= start(e, '', '')
         if (turn.reply.length < REPLY_MAX) turn.reply = (turn.reply ? `${turn.reply}\n\n${body.text}` : body.text).slice(0, REPLY_MAX)

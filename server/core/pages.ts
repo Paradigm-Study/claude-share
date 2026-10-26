@@ -49,8 +49,12 @@ section.more { padding:0 0 72px; }
     <ul>
       <li><b>What passes through:</b> while a session is shared, its prompts and the files people attach to them, Claude's replies and, while someone else is in the room, its thinking as it happens (passed along, never kept), the tools it runs with the first lines of their results and the pictures in them (screenshots, images it opens), the side chat, people's reactions to Claude's replies and which replies each person has had on screen, any files or local previews the host's Claude shows, and messages between a teammate's own other sessions and the host's session, which go to the other side alone (passed along, never kept). Sharing a session that already has history asks first whether to include it.</li>
       <li><b>How long:</b> a room and everything in it is deleted 24 hours after the host stops sharing or was last seen. A room keeps its newest 5000 events, 16 MB of them at most. For TCP previews the room keeps only coarse connection and byte-budget counters, until the room is deleted. For a preview opened through its link, the room keeps the link (which preview, which seat made it, the page it opens) for 10 minutes, and the browser session it starts (which preview and seat) for 12 hours from the last link that browser opened; both end when that seat leaves or the host stops the preview. A seat keeps its newest 4 browser sessions per preview, and a room its newest 128 links and 256 browser sessions. A link or session that expired is removed at the room's next activity, or with the room; one that ended goes at once. Application bytes are relayed, never stored. To count the rooms each network makes in a day, the server on Cloudflare keeps a hash of each new room's network address, keyed by a random key made for that day, with that count, until the day (UTC) ends; then all of it goes, the key too. There are no analytics, and no request logs kept.</li>
-${traces ? `      <li><b>Traces, kept on this server:</b> this server keeps the turns of sessions shared by someone signed in, so their team can search them later from Claude Code. Each turn keeps its prompt, Claude's reply, the names of the tools it ran (not what they were given or answered), when it was, who asked it and who shared the session. Files, pictures, the side chat, reactions and thinking are not kept. A session shared with a team can be searched by anyone in that team, including people who join it later; one shared with no team, by its host alone. A session shared without signing in is not kept. Turns are kept with no end date, and there is no way yet to delete them: deleting your account doesn't. Each turn's words go to Cloudflare's Workers AI to be indexed by meaning. Searching needs a sign-in on this server's page, the same as for teams.</li>
-` : ''}      <li><b>Previews share a host name:</b> every shared session's previews are served on one preview host name, and their links name the session by a key of its own, which can't join it. A browser not already in a session's previews has that host name's storage and cache, and its domain's cookies, cleared before it enters; browsers clear them only over HTTPS (or on localhost). No preview can register a service worker there. Clearing can't stop a page that's still open, though: a preview page of one session left open in a browser can reach the previews of another session that browser opens after it. Close the previews of a session you don't trust before opening another's, or open them in a browser profile of their own. A server of your own can give each session's previews a host name of its own, which closes this (<a href="https://github.com/Paradigm-Study/claude-share/blob/main/docs/guide.md#host-a-server">how</a>).</li>
+${
+  traces
+    ? `      <li><b>Traces, kept on this server:</b> this server keeps the turns of sessions shared by someone signed in, so their team can search them later from Claude Code. Each turn keeps its prompt, Claude's reply, the names of the tools it ran (not what they were given or answered), when it was, who asked it and who shared the session. Files, pictures, the side chat, reactions and thinking are not kept. A session shared with a team can be searched by anyone in that team, including people who join it later; one shared with no team, by its host alone. A session shared without signing in is not kept. Turns are kept with no end date, and there is no way yet to delete them: deleting your account doesn't. Each turn's words go to Cloudflare's Workers AI to be indexed by meaning. Searching needs a sign-in on this server's page, the same as for teams.</li>
+`
+    : ''
+}      <li><b>Previews share a host name:</b> every shared session's previews are served on one preview host name, and their links name the session by a key of its own, which can't join it. A browser not already in a session's previews has that host name's storage and cache, and its domain's cookies, cleared before it enters; browsers clear them only over HTTPS (or on localhost). No preview can register a service worker there. Clearing can't stop a page that's still open, though: a preview page of one session left open in a browser can reach the previews of another session that browser opens after it. Close the previews of a session you don't trust before opening another's, or open them in a browser profile of their own. A server of your own can give each session's previews a host name of its own, which closes this (<a href="https://github.com/Paradigm-Study/claude-share/blob/main/docs/guide.md#host-a-server">how</a>).</li>
       <li><b>Accounts, only for teams:</b> sharing and joining need none. If you sign in (GitHub or Google) to use teams, the server keeps your name, username, the email your provider last verified (once it stops verifying one, it's shown but no longer signs anyone in or matches a team's domain), which GitHub organizations you're in, the teams you're in and their settings, which open sessions are shared with each team, and invites to a session (who invited whom, until it's joined, dismissed, ends, or 12 hours pass). Signing in finishes only when you press Continue on this server's page. The page and Claude Code show the same code, and you continue only if they match. Until you press Continue, the server keeps who GitHub or Google said you are; after ten minutes that sign-in stops working, and it's deleted then. Claude Code's token is made when it picks up the sign-in, and the server keeps only its hash, never the token itself. Sign-ins stay until you delete your account (<code>/team delete-account</code>), which removes them at once. Signed in, a session you share or join also knows your account for as long as it lasts, so your sessions count as one person.</li>
       <li><b>Native subscription pools, where configured:</b> a separate Mac helper may use your Share sign-in to enroll in a pool for a configured team. Share checks actual team membership and keeps a hashed grant with the account, team, device name and verifier hash for at most two minutes. The pool receives the account and team IDs and device name and checks current membership before giving out credentials. Your Share sign-in token stays with Share. A room link grants no pool access, and one-time Mac setup is required.</li>
       <li><b>In the cloud, if a host chooses it:</b> Move to cloud sends the session's project files, its conversation and the host's Claude token to a container this server starts for that room, which runs Claude Code as the host. The server passes them on and keeps none of them. The container, with everything in it, is deleted when the host brings the session home, the room ends, or a week after the move; its changes are kept as a room file for Bring home, deleted with the room.</li>
@@ -71,7 +75,25 @@ ${traces ? `      <li><b>Traces, kept on this server:</b> this server keeps the 
 // A page in the site's own look: the nav, an eyebrow, a serif heading, its
 // words, then whatever follows (buttons, a command to copy). The account,
 // invite and not-found pages are all this; callers escape what they pass.
-export function brandPage({ title, eyebrow = '', heading, body = '', after = '', mark = '', status = 200, script = '' }: { title: string; eyebrow?: string; heading: string; body?: string; after?: string; mark?: string; status?: number; script?: string }) {
+export function brandPage({
+  title,
+  eyebrow = '',
+  heading,
+  body = '',
+  after = '',
+  mark = '',
+  status = 200,
+  script = '',
+}: {
+  title: string
+  eyebrow?: string
+  heading: string
+  body?: string
+  after?: string
+  mark?: string
+  status?: number
+  script?: string
+}) {
   const html = `<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -107,8 +129,10 @@ ${script ? `<script>${script}</script>` : ''}
 // The one-line install, as a command to copy (pages that hand people off to
 // Claude Code show it under "First time?").
 export const INSTALL_COMMAND = 'claude plugin marketplace add Paradigm-Study/claude-share && claude plugin install shared-session@claude-share'
-export const COPY_ICON = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2.5"/><path d="M5 15V6a2 2 0 0 1 2-2h9"/></svg>'
-export const commandBox = (id: string, text: string, label: string) => `<div class="composer"><span class="slash" aria-hidden="true">$</span><code id="${id}">${escapeHtml(text)}</code><button type="button" data-copy="${id}" aria-label="${escapeHtml(label)}">${COPY_ICON}</button></div>`
+export const COPY_ICON =
+  '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2.5"/><path d="M5 15V6a2 2 0 0 1 2-2h9"/></svg>'
+export const commandBox = (id: string, text: string, label: string) =>
+  `<div class="composer"><span class="slash" aria-hidden="true">$</span><code id="${id}">${escapeHtml(text)}</code><button type="button" data-copy="${id}" aria-label="${escapeHtml(label)}">${COPY_ICON}</button></div>`
 // Every [data-copy] button copies its code's text and says so for a moment:
 // in the code's place when it shows, else on the button itself.
 export const COPY_SCRIPT = `document.querySelectorAll('[data-copy]').forEach(function (b) { b.addEventListener('click', function () {
@@ -391,12 +415,22 @@ ${PAGE_CSS}</style></head>
 })();
 </script>
 </body></html>`
-  return new Response(html, { headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'content-security-policy': landingPolicy(nonce) } })
+  return new Response(html, {
+    headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'content-security-policy': landingPolicy(nonce) },
+  })
 }
 
 // The room page runs its one script, by this response's nonce, and loads its
 // fonts; anything a name or title might smuggle in runs nowhere.
-const landingPolicy = (nonce: string) => [
-  "default-src 'none'", `script-src 'nonce-${nonce}'`, "style-src 'unsafe-inline' https://fonts.googleapis.com", 'font-src https://fonts.gstatic.com',
-  "img-src 'self' data:", "connect-src 'self'", "base-uri 'none'", "form-action 'none'", "frame-ancestors 'none'",
-].join('; ')
+const landingPolicy = (nonce: string) =>
+  [
+    "default-src 'none'",
+    `script-src 'nonce-${nonce}'`,
+    "style-src 'unsafe-inline' https://fonts.googleapis.com",
+    'font-src https://fonts.gstatic.com',
+    "img-src 'self' data:",
+    "connect-src 'self'",
+    "base-uri 'none'",
+    "form-action 'none'",
+    "frame-ancestors 'none'",
+  ].join('; ')

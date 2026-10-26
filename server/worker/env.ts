@@ -34,7 +34,8 @@ export const traces = () => import('../traces/index.ts')
 export const hasDirectory = (env: ServerEnv): env is ServerEnv & { DIRECTORY: DurableObjectNamespace<DirectoryObject> } => Boolean(env.DIRECTORY)
 
 // The one directory of accounts and teams.
-export const directoryStub = (env: ServerEnv & { DIRECTORY: DurableObjectNamespace<DirectoryObject> }) => env.DIRECTORY.get(env.DIRECTORY.idFromName('directory'))
+export const directoryStub = (env: ServerEnv & { DIRECTORY: DurableObjectNamespace<DirectoryObject> }) =>
+  env.DIRECTORY.get(env.DIRECTORY.idFromName('directory'))
 
 // What a room asks the directory: its stub, whose methods are the
 // DirectoryObject's below.

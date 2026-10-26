@@ -136,13 +136,17 @@ function enableFunctionHooks(version: string) {
   try {
     if (existsSync(SETTINGS)) settings = JSON.parse(readFileSync(SETTINGS, 'utf8'))
   } catch {
-    return note(`Claude Code ${version} needs CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 for this plugin, and ${SETTINGS} couldn't be read to set it; set it in your environment, or run \`claude update\``)
+    return note(
+      `Claude Code ${version} needs CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 for this plugin, and ${SETTINGS} couldn't be read to set it; set it in your environment, or run \`claude update\``,
+    )
   }
   if (settings.env?.CLAUDE_CODE_ENABLE_FUNCTION_HOOKS === '1') return
   settings.env = { ...(settings.env ?? {}), CLAUDE_CODE_ENABLE_FUNCTION_HOOKS: '1' }
   mkdirSync(CONFIG_DIR, { recursive: true })
   writeFileSync(SETTINGS, `${JSON.stringify(settings, null, 2)}\n`)
-  ok(`Claude Code ${version} runs this plugin with function hooks on: set CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 in ${SETTINGS} (\`claude update\` to 2.1.286 or newer makes it unnecessary)`)
+  ok(
+    `Claude Code ${version} runs this plugin with function hooks on: set CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 in ${SETTINGS} (\`claude update\` to 2.1.286 or newer makes it unnecessary)`,
+  )
 }
 
 function needClaude() {
@@ -243,7 +247,7 @@ function enableAutoUpdate() {
   settings.extraKnownMarketplaces = { ...known, 'claude-share': { ...entry, autoUpdate: true } }
   mkdirSync(CONFIG_DIR, { recursive: true })
   writeFileSync(SETTINGS, `${JSON.stringify(settings, null, 2)}\n`)
-  ok('updates now install by themselves (the marketplace\'s autoUpdate is on)')
+  ok("updates now install by themselves (the marketplace's autoUpdate is on)")
 }
 
 function configureServer(claude: string, server: string) {
@@ -331,7 +335,7 @@ async function firstStreamLine(url: string, token: string) {
     return Array.isArray(line.events) && line.people?.some((p: Json) => p.name === 'setup-guest') ? true : 'an unexpected first line'
   } catch (error) {
     const e = error as Failure
-    return String(e?.name === 'AbortError' ? 'no line within 10 s' : e?.message ?? error)
+    return String(e?.name === 'AbortError' ? 'no line within 10 s' : (e?.message ?? error))
   } finally {
     clearTimeout(timer)
     ctl.abort()
@@ -397,10 +401,15 @@ function cloudImageConfig(whoami: string) {
   const accounts = [...whoami.matchAll(/\b([0-9a-f]{32})\b/g)].map(m => m[1])
   if (!owner || !accounts.length || accounts.includes(owner)) return []
   if (run('docker', ['buildx', 'version']).code !== 0) {
-    human("This Cloudflare account builds the cloud host's image from cloud/Dockerfile, which needs Docker with buildx: start Docker (or add buildx), then run `node scripts/setup.ts deploy` again.")
+    human(
+      "This Cloudflare account builds the cloud host's image from cloud/Dockerfile, which needs Docker with buildx: start Docker (or add buildx), then run `node scripts/setup.ts deploy` again.",
+    )
     return null
   }
-  writeFileSync(new URL('../wrangler.selfhost.toml', import.meta.url), toml.replace(/^image = ".*"$/m, 'image = "./cloud/Dockerfile"\nimage_build_context = "."'))
+  writeFileSync(
+    new URL('../wrangler.selfhost.toml', import.meta.url),
+    toml.replace(/^image = ".*"$/m, 'image = "./cloud/Dockerfile"\nimage_build_context = "."'),
+  )
   note("the cloud host's image is built here from cloud/Dockerfile: this project's prebuilt one is in another Cloudflare account")
   return ['-c', 'wrangler.selfhost.toml']
 }
@@ -410,7 +419,9 @@ async function deploy(claude: string) {
   const env = { ...process.env, WRANGLER_SEND_METRICS: 'false' }
   const who = run(npx, ['-y', 'wrangler@4', 'whoami'], { env })
   if (/not authenticated/i.test(who.out)) {
-    human('Cloudflare sign-in: run `npx wrangler login` in this folder. It opens a browser where a person approves access; then run `node scripts/setup.ts deploy` again.')
+    human(
+      'Cloudflare sign-in: run `npx wrangler login` in this folder. It opens a browser where a person approves access; then run `node scripts/setup.ts deploy` again.',
+    )
     return
   }
   if (who.code !== 0) return fail(`checking Cloudflare sign-in: ${who.out.trim().split('\n').pop()}`)
@@ -435,7 +446,10 @@ async function deploy(claude: string) {
   const update = run(npx, ['-y', 'wrangler@4', 'deployments', 'list'], { env }).code === 0
   if (update) {
     const preview = previews()
-    if (!preview.deployed) return fail(`the preview Worker didn't deploy (${preview.why}), so nothing was updated and previews of localhost work as they did; fix that, then run \`node scripts/setup.ts deploy\` again`)
+    if (!preview.deployed)
+      return fail(
+        `the preview Worker didn't deploy (${preview.why}), so nothing was updated and previews of localhost work as they did; fix that, then run \`node scripts/setup.ts deploy\` again`,
+      )
     ok(preview.said)
   }
   const out = run(npx, ['-y', 'wrangler@4', 'deploy', ...config], { env, timeout: 600_000 }).out
@@ -452,14 +466,26 @@ async function deploy(claude: string) {
   if (!update) {
     const preview = previews()
     if (preview.deployed) ok(preview.said)
-    else note(`previews didn't deploy (${preview.why}); sharing works, previews of localhost won't until \`npx wrangler deploy -c wrangler.preview.toml\` succeeds`)
+    else
+      note(
+        `previews didn't deploy (${preview.why}); sharing works, previews of localhost won't until \`npx wrangler deploy -c wrangler.preview.toml\` succeeds`,
+      )
   }
   const ready = await health(url, { waitMs: 300_000 }) // a new subdomain's certificate takes a minute or so
-  if (ready !== true) return fail(`the server is not answering yet (${ready}); a new workers.dev certificate can take a few minutes — run \`node scripts/setup.ts check --server ${url}\` shortly`)
+  if (ready !== true)
+    return fail(
+      `the server is not answering yet (${ready}); a new workers.dev certificate can take a few minutes — run \`node scripts/setup.ts check --server ${url}\` shortly`,
+    )
   ok('server is up')
   // Teams need sign-in, which only a person can set up (OAuth apps, secrets).
-  const providers: unknown[] = await fetch(`${url}/api/auth/providers`).then(r => r.json() as Promise<Json>).then(d => d.providers ?? []).catch(() => [])
-  if (!providers.length) note(`teams are off on this server until it has sign-in: make a GitHub and/or Google OAuth app with callback ${url}/auth/github/callback (or /auth/google/callback), then \`npx wrangler secret put GITHUB_CLIENT_ID\` and the rest (README: "Teams on your own server"). Sharing and joining by link work without it`)
+  const providers: unknown[] = await fetch(`${url}/api/auth/providers`)
+    .then(r => r.json() as Promise<Json>)
+    .then(d => d.providers ?? [])
+    .catch(() => [])
+  if (!providers.length)
+    note(
+      `teams are off on this server until it has sign-in: make a GitHub and/or Google OAuth app with callback ${url}/auth/github/callback (or /auth/google/callback), then \`npx wrangler secret put GITHUB_CLIENT_ID\` and the rest (README: "Teams on your own server"). Sharing and joining by link work without it`,
+    )
   installPlugin(claude, url)
   console.log(`\nTeammates install with one line:\n  claude plugin marketplace add ${MARKETPLACE} && claude plugin install ${PLUGIN} --config server=${url}`)
 }
@@ -484,7 +510,9 @@ async function forgetRooms(sessions: string[]) {
       try {
         if (!existsSync(path)) continue
         let room: Json | null = null
-        try { room = JSON.parse(readFileSync(path, 'utf8'))?.value?.room ?? null } catch {}
+        try {
+          room = JSON.parse(readFileSync(path, 'utf8'))?.value?.room ?? null
+        } catch {}
         if (prefix === 'hosting:' && room?.id && room.token) {
           // A room's token goes only where the plugin would send it.
           const server = validServer(room.server)
@@ -493,7 +521,8 @@ async function forgetRooms(sessions: string[]) {
             const ended = await endRoom(server, room.id, room.token)
             if (ended.ok) note(`ended the room the check's session left open on ${server}`)
             // Gone already (ended, expired): nothing is open.
-            else if (ended.status !== 404 && ended.status !== 410) fail(`the check's session left a room open on ${server} and ending it failed (${why(ended)}): ${room.url ?? room.id}`)
+            else if (ended.status !== 404 && ended.status !== 410)
+              fail(`the check's session left a room open on ${server} and ending it failed (${why(ended)}): ${room.url ?? room.id}`)
           }
         }
         rmSync(path, { force: true })
@@ -516,18 +545,25 @@ async function check(claude: string) {
   if (!config) return
   const saved = config.value
   const supplied = flag('server')
-  if (supplied !== undefined && !validServer(supplied)) return fail('check --server needs a valid https:// server address (plain http:// only for a server on this computer)')
+  if (supplied !== undefined && !validServer(supplied))
+    return fail('check --server needs a valid https:// server address (plain http:// only for a server on this computer)')
   const environment = config.environment || process.env.SHARED_SESSION_SERVER
   const effective = saved || environment || defaultServer()
   const server = validServer(supplied ?? effective)
   if (!server) {
-    return fail('the share server is not a valid https:// address (plain http:// only for a server on this computer); run `node scripts/setup.ts host --server <url>`')
+    return fail(
+      'the share server is not a valid https:// address (plain http:// only for a server on this computer); run `node scripts/setup.ts host --server <url>`',
+    )
   }
   const savedSetting = saved || config.environment
   if (flag('live') && supplied && savedSetting && validServer(savedSetting) !== server) {
-    return fail('the saved server setting overrides --server in a real session; run `node scripts/setup.ts check --live` to check the saved server, or configure the intended server first with `node scripts/setup.ts host --server <url>`')
+    return fail(
+      'the saved server setting overrides --server in a real session; run `node scripts/setup.ts check --live` to check the saved server, or configure the intended server first with `node scripts/setup.ts host --server <url>`',
+    )
   }
-  note(`checking ${server}${supplied ? ' as given' : saved ? ' from the saved plugin setting' : environment ? ' from SHARED_SESSION_SERVER' : ' (the plugin\'s default server)'}`)
+  note(
+    `checking ${server}${supplied ? ' as given' : saved ? ' from the saved plugin setting' : environment ? ' from SHARED_SESSION_SERVER' : " (the plugin's default server)"}`,
+  )
   const up = await health(server)
   if (up !== true) return fail(`share server ${server} is not answering (${up})`)
   ok(`share server ${server} is up`)
@@ -544,7 +580,8 @@ async function check(claude: string) {
   const dir = mkdtempSync(join(tmpdir(), 'shared-session-check-'))
   // A session that closes keeps its room for when it's opened again; the
   // sharing one is opened again to stop sharing, which ends it.
-  const session = randomUUID(), guest = randomUUID()
+  const session = randomUUID(),
+    guest = randomUUID()
   try {
     // Neither session is the Claude Desktop session this may run in: with its
     // id (CLAUDE_CODE_HOST_SESSION_ID), the plugin would take up a room that
@@ -558,7 +595,8 @@ async function check(claude: string) {
       const kept = (await call(`${server}/api/rooms/${link[1]}`)).body
       run(claude, ['-p', '--resume', session, '/stop-sharing'], { cwd: dir, env, timeout: 120_000 })
       const room = (await call(`${server}/api/rooms/${link[1]}`)).body
-      if (!kept.ended && room.ended) ok(`a real session shared${saved ? ' with the saved setting' : ''}; its room stayed open when the session closed, and ended when it stopped sharing`)
+      if (!kept.ended && room.ended)
+        ok(`a real session shared${saved ? ' with the saved setting' : ''}; its room stayed open when the session closed, and ended when it stopped sharing`)
       else if (kept.ended) fail('a real session shared, but its room ended when the session closed (an older plugin?)')
       else fail('a real session shared, but /stop-sharing in it, reopened, left the room open')
     }

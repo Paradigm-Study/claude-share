@@ -15,7 +15,28 @@ import {
 } from './limits.ts'
 import { cloudSummary } from './cloud.ts'
 import { revokeMatches } from './tcp.ts'
-import type { Auth, Cloud, FileMeta, FileStore, From, Host, JsonObject, Minute, Preview, PreviewSession, RevokeFilter, RoomData, RoomEvent, RoomTeam, Seat, Settle, Subscriber, TCPStats, Ticket, Waiter } from './types.ts'
+import type {
+  Auth,
+  Cloud,
+  FileMeta,
+  FileStore,
+  From,
+  Host,
+  JsonObject,
+  Minute,
+  Preview,
+  PreviewSession,
+  RevokeFilter,
+  RoomData,
+  RoomEvent,
+  RoomTeam,
+  Seat,
+  Settle,
+  Subscriber,
+  TCPStats,
+  Ticket,
+  Waiter,
+} from './types.ts'
 
 const sizeOf = (event: RoomEvent | undefined) => utf8Length(JSON.stringify(event)) + 1
 
@@ -80,7 +101,11 @@ export const ROOM_ID = /^[A-Za-z0-9_-]{16,64}$/
 // never only dots. Teammates' plugins name a folder after it, where `..`
 // would be its parent.
 const clampName = (name: unknown) => {
-  const text = String(name ?? '').replace(/[\x00-\x1f\x7f]+/g, ' ').trim().slice(0, 40).trim()
+  const text = String(name ?? '')
+    .replace(/[\x00-\x1f\x7f]+/g, ' ')
+    .trim()
+    .slice(0, 40)
+    .trim()
   return text && !/^\.+$/.test(text) ? text : 'teammate'
 }
 
@@ -253,10 +278,31 @@ export class Room {
     return room
   }
 
-  static create({ id, name, title, now, fromNow, version, team, account }: { id: string; name: unknown; title: unknown; now: number; fromNow?: unknown; version?: string | null; team?: RoomTeam | null; account?: string | null }) {
+  static create({
+    id,
+    name,
+    title,
+    now,
+    fromNow,
+    version,
+    team,
+    account,
+  }: {
+    id: string
+    name: unknown
+    title: unknown
+    now: number
+    fromNow?: unknown
+    version?: string | null
+    team?: RoomTeam | null
+    account?: string | null
+  }) {
     return new Room({
       id,
-      title: String(title ?? '').trim().slice(0, 120) || 'Claude Code session',
+      title:
+        String(title ?? '')
+          .trim()
+          .slice(0, 120) || 'Claude Code session',
       host: { name: clampName(name), token: token(24), lastSeen: now, version: version ?? undefined, account: account ?? undefined },
       createdAt: now,
       fromNow: fromNow === true,
@@ -336,8 +382,7 @@ export class Room {
         this.cloud.state = 'running'
         this.append({ seat: 'host', name: this.host.name, role: 'host' }, 'cloud', { state: 'running' }, now)
       }
-    }
-    else for (const seat of this.seats.values()) if (seat.id === auth.seat) seat.lastSeen = now
+    } else for (const seat of this.seats.values()) if (seat.id === auth.seat) seat.lastSeen = now
   }
 
   // Everyone here, once each: a person signed in from several sessions (two
@@ -348,7 +393,16 @@ export class Room {
     // Each one's plugin version, as their requests say it: who needs to update.
     const v = (version: string | undefined) => (version ? { version } : {})
     const a = (account: string | undefined) => (account ? { account } : {})
-    const host: Person = { id: 'host', name: this.host.name, role: 'host', online, seats: ['host'], ...v(this.host.version), ...a(this.host.account), ...(this.cloud ? { cloud: true } : {}) }
+    const host: Person = {
+      id: 'host',
+      name: this.host.name,
+      role: 'host',
+      online,
+      seats: ['host'],
+      ...v(this.host.version),
+      ...a(this.host.account),
+      ...(this.cloud ? { cloud: true } : {}),
+    }
     const out = [host]
     const byAccount = new Map<string, Person>(this.host.account ? [[this.host.account, host]] : [])
     for (const s of this.seats.values()) {
@@ -415,7 +469,16 @@ export class Room {
   // What a client is sent: everything after its cursor, and the room now:
   // who's here and what's shared.
   page(after: number, now: number) {
-    return { seq: this.seq, events: this.since(after), people: this.people(now), previews: this.previewList(), ended: Boolean(this.endedAt), title: this.title, team: this.team?.name, cloud: cloudSummary(this) }
+    return {
+      seq: this.seq,
+      events: this.since(after),
+      people: this.people(now),
+      previews: this.previewList(),
+      ended: Boolean(this.endedAt),
+      title: this.title,
+      team: this.team?.name,
+      cloud: cloudSummary(this),
+    }
   }
 
   since(after: number) {

@@ -58,10 +58,15 @@ export async function readBody(req: Request, max: number): Promise<Uint8Array> {
       if ((size += value.byteLength) > max) throw tooLarge()
       chunks.push(value)
     }
-  } finally { reader.releaseLock() }
+  } finally {
+    reader.releaseLock()
+  }
   const bytes = new Uint8Array(size)
   let at = 0
-  for (const chunk of chunks) { bytes.set(chunk, at); at += chunk.byteLength }
+  for (const chunk of chunks) {
+    bytes.set(chunk, at)
+    at += chunk.byteLength
+  }
   return bytes
 }
 export async function readJson(req: Request): Promise<JsonObject> {
@@ -74,8 +79,15 @@ export async function readJson(req: Request): Promise<JsonObject> {
 // readBody with their own bound (end reads none). Both outer
 // adapters must pass a stream, not buffer it first; a Node request whose body
 // wasn't read closes its socket.
-export const streamedRoomBody = (method: string, rest: string) => (method === 'POST' &&
-  (rest === 'previews' || rest === 'need' || rest === 'peer' || rest === 'cloud' || /^previews\/[^/]+\/(?:end|ticket)$/.test(rest) || /^ws\/[^/]+\/reject$/.test(rest) || /^proxy\/[^/]+$/.test(rest))) ||
+export const streamedRoomBody = (method: string, rest: string) =>
+  (method === 'POST' &&
+    (rest === 'previews' ||
+      rest === 'need' ||
+      rest === 'peer' ||
+      rest === 'cloud' ||
+      /^previews\/[^/]+\/(?:end|ticket)$/.test(rest) ||
+      /^ws\/[^/]+\/reject$/.test(rest) ||
+      /^proxy\/[^/]+$/.test(rest))) ||
   // The cloud host's packed session goes on to it as it comes (HostContainer).
   (method === 'PUT' && rest === 'cloud/bundle')
 
@@ -89,12 +101,18 @@ export const bodyTooLarge = (max: number) => json({ error: `Request bodies here 
 
 export async function readBoundedJson(req: Request, max = BOUNDED_BODY): Promise<JsonObject> {
   let bytes
-  try { bytes = await readBody(req, max) } catch (error) { throw statusOf(error) ? error : bodyError('Expected valid UTF-8 JSON.') }
+  try {
+    bytes = await readBody(req, max)
+  } catch (error) {
+    throw statusOf(error) ? error : bodyError('Expected valid UTF-8 JSON.')
+  }
   let body
   try {
     const text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: false }).decode(bytes)
     body = text ? JSON.parse(text) : {}
-  } catch { throw bodyError('Expected valid UTF-8 JSON.') }
+  } catch {
+    throw bodyError('Expected valid UTF-8 JSON.')
+  }
   if (!body || typeof body !== 'object' || Array.isArray(body)) throw bodyError('Expected a JSON object.')
   return body
 }
@@ -141,7 +159,10 @@ export const PLUGIN_LATEST: string = manifest.version
 export const PLUGIN_MIN = '0.11.31'
 export const UPDATE_COMMAND = 'claude plugin marketplace update claude-share && claude plugin update shared-session@claude-share'
 
-const versionParts = (v: string) => String(v).split('.').map(n => Number.parseInt(n, 10) || 0)
+const versionParts = (v: string) =>
+  String(v)
+    .split('.')
+    .map(n => Number.parseInt(n, 10) || 0)
 export function compareVersions(a: string, b: string) {
   const x = versionParts(a)
   const y = versionParts(b)
@@ -186,12 +207,22 @@ export function clientVersion(req: Request) {
 
 // `traces`: this server keeps shared sessions' turns (server/traces), which
 // the plugin says as Share asks.
-export const versionInfo = ({ traces = false }: { traces?: boolean } = {}) => json({ latest: PLUGIN_LATEST, min: PLUGIN_MIN, update: UPDATE_COMMAND, ...(traces ? { traces: true } : {}) })
+export const versionInfo = ({ traces = false }: { traces?: boolean } = {}) =>
+  json({ latest: PLUGIN_LATEST, min: PLUGIN_MIN, update: UPDATE_COMMAND, ...(traces ? { traces: true } : {}) })
 export const limitedResponse = (kind: LimitKind) => json({ error: LIMITS[kind].message }, 429)
 export const busyResponse = () =>
-  json({ error: 'The public share server has made as many shared sessions as it will today. Joining links still works; to share now, run your own server (see the README).' }, 503)
+  json(
+    {
+      error:
+        'The public share server has made as many shared sessions as it will today. Joining links still works; to share now, run your own server (see the README).',
+    },
+    503,
+  )
 export const closedResponse = () =>
-  json({ error: 'This share server is not taking new shared sessions right now. Joining links still works; to share, run your own server (see the README).' }, 503)
+  json(
+    { error: 'This share server is not taking new shared sessions right now. Joining links still works; to share, run your own server (see the README).' },
+    503,
+  )
 
 // Which limit a request counts against, and under what key; null for none.
 export function limitOf(req: Request, id: string, rest: string, ip: string): { kind: LimitKind; key: string } | null {

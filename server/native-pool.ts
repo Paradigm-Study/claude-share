@@ -26,7 +26,9 @@ export function nativePoolConfig(env: { NATIVE_POOL_TEAM_ID?: string; NATIVE_POO
     const url = new URL(env.NATIVE_POOL_URL ?? '')
     if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash || url.pathname !== '/') return null
     return { teamId: env.NATIVE_POOL_TEAM_ID!, server: url.origin }
-  } catch { return null }
+  } catch {
+    return null
+  }
 }
 
 export class NativePoolGrants {
@@ -54,7 +56,8 @@ export class NativePoolGrants {
     // The pool revokes a device on a definitive nonmembership result. A
     // configuration outage or mismatched deployment cannot establish that
     // someone left the team; report an error so the pool pauses instead.
-    if (!config || teamId !== config.teamId || server !== config.server) return refused(503, 'Native pool membership configuration is unavailable or does not match.')
+    if (!config || teamId !== config.teamId || server !== config.server)
+      return refused(503, 'Native pool membership configuration is unavailable or does not match.')
     if (typeof accountId !== 'string' || !ID.test(accountId)) return refused(400, 'Invalid account identifier.')
     const account = await this.kv.get(`acct:${accountId}`)
     const team: Team | undefined = await this.kv.get(`team:${config.teamId}`)
@@ -64,14 +67,29 @@ export class NativePoolGrants {
 
   async enroll(accountId: string, req: Request, now: number): Promise<Response> {
     let body: unknown
-    try { body = JSON.parse(new TextDecoder().decode(await readBody(req, NATIVE_POOL_BODY_MAX))) } catch { return json({ error: 'Invalid enrollment request.' }, 400) }
-    if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).sort().join(',') !== 'challenge,device_name') return json({ error: 'Provide only challenge and device_name.' }, 400)
+    try {
+      body = JSON.parse(new TextDecoder().decode(await readBody(req, NATIVE_POOL_BODY_MAX)))
+    } catch {
+      return json({ error: 'Invalid enrollment request.' }, 400)
+    }
+    if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).sort().join(',') !== 'challenge,device_name')
+      return json({ error: 'Provide only challenge and device_name.' }, 400)
     const { challenge, device_name: device } = body as Record<string, unknown>
-    if (typeof challenge !== 'string' || !CHALLENGE.test(challenge) || typeof device !== 'string' || !device.trim() || device !== device.trim() || device.length > 80 || /[\p{Cc}\p{Cf}\p{Cs}]/u.test(device)) return json({ error: 'Invalid challenge or device name.' }, 400)
+    if (
+      typeof challenge !== 'string' ||
+      !CHALLENGE.test(challenge) ||
+      typeof device !== 'string' ||
+      !device.trim() ||
+      device !== device.trim() ||
+      device.length > 80 ||
+      /[\p{Cc}\p{Cf}\p{Cs}]/u.test(device)
+    )
+      return json({ error: 'Invalid challenge or device name.' }, 400)
     return this.serial(async () => {
       const config = this.config
       if (!config) return json({ error: 'Native subscription enrollment is not configured.' }, 503)
-      if (!(await this.member(accountId, config.teamId, config.server)).ok) return json({ error: 'Membership in the configured Claude Share team is required.' }, 403)
+      if (!(await this.member(accountId, config.teamId, config.server)).ok)
+        return json({ error: 'Membership in the configured Claude Share team is required.' }, 403)
       let outstanding = 0
       // The record is the source of truth. No second index can be left out
       // by an interrupted write and accidentally bypass the account cap.
@@ -96,7 +114,8 @@ export class NativePoolGrants {
 
   consume(grant: unknown, verifier: unknown, server: unknown, now = Date.now()): Promise<Consumed | Refused> {
     return this.serial(async () => {
-      if (typeof grant !== 'string' || !GRANT.test(grant) || typeof verifier !== 'string' || !VERIFIER.test(verifier)) return refused(400, 'Invalid enrollment proof.')
+      if (typeof grant !== 'string' || !GRANT.test(grant) || typeof verifier !== 'string' || !VERIFIER.test(verifier))
+        return refused(400, 'Invalid enrollment proof.')
       const config = this.config
       if (!config || server !== config.server) return refused(403, 'The pool is not authorized.')
       const hash = await digest(grant)
@@ -106,7 +125,8 @@ export class NativePoolGrants {
         await this.kv.delete(`npgrant:${hash}`)
         return refused(401, 'Enrollment grant has expired.')
       }
-      if (record.server !== server || record.team !== config.teamId || await digest(verifier) !== record.challenge) return refused(403, 'Enrollment proof does not match.')
+      if (record.server !== server || record.team !== config.teamId || (await digest(verifier)) !== record.challenge)
+        return refused(403, 'Enrollment proof does not match.')
       const allowed = await this.member(record.account, record.team, server)
       await this.kv.delete(`npgrant:${hash}`)
       if (!allowed.ok) return refused(403, 'Team membership is no longer active.')
