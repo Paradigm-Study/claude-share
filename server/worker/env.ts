@@ -16,6 +16,8 @@ export type ServerEnv = Omit<TracesEnv, 'DIRECTORY'> & {
   MAX_ROOMS_PER_DAY?: string
   ADMIN_TOKEN?: string
   PLUGIN_SOURCE?: string
+  NATIVE_POOL_TEAM_ID?: string
+  NATIVE_POOL_URL?: string
   CREATE_LIMIT: RateLimit
   JOIN_LIMIT: RateLimit
   EVENTS_LIMIT: RateLimit

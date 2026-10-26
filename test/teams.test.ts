@@ -169,6 +169,12 @@ async function continueInChrome() {
       enter: () => key('Enter', 'Enter', 13, '\r'),
       focused: () => value("document.activeElement?.id === 'continue'"),
       shown: () => value("document.visibilityState === 'visible' && document.hasFocus()"),
+      hiddenInput: () => value(`(() => {
+        for (const screenX of [10, 20]) document.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, screenX, screenY: 10, movementX: 10 }));
+        const button = document.getElementById('continue');
+        button.click();
+        return { shown: document.visibilityState === 'visible' && document.hasFocus(), disabled: button.disabled };
+      })()`),
       // Where the sign-in is: 'confirm' until a Continue goes through, then 'done'.
       status: async (until = '') => {
         let status = ''
@@ -219,8 +225,10 @@ async function continueInChrome() {
     const behind = await f.shown()
     if (!alone || behind !== false) console.log(`SKIP out of sight in ${browserName} (its headless tab ${alone ? 'still shows behind another' : "isn't shown in front"})`)
     else {
-      await f.move()
-      await f.click()
+      // A hidden tab has no input surface: its CDP mouse-move acknowledgments
+      // took 5.0–5.1 s each locally and could exhaust CI's test deadline.
+      // Exercise its page handlers directly; visible tabs still use real input.
+      expect(await f.hiddenInput()).toEqual({ shown: false, disabled: true })
       await wait(300)
       const hidden = await f.status()
       await send('Target.closeTarget', { targetId: front })
@@ -283,7 +291,7 @@ describe('on the room server', () => {
     S = (process.env.TEAMS_SERVER ?? srv!.origin).replace(/\/+$/, '')
   })
   afterAll(() => srv?.stop())
-  test('sign-in and its Continue, teams, who joins by domain and invite, members-only sessions, the access setting, the list, leaving and deleting', async () => {
+  test('sign-in requires its matching Continue, including in a real browser', async () => {
     ok((await call('/api/auth/providers')).data.providers.some((p: any) => p.id === 'test'), 'test provider listed')
     // A start link someone else made: its maker chose the login (the hash of
     // their own secret), so finishing the provider's sign-in in the victim's
@@ -316,6 +324,12 @@ describe('on the room server', () => {
       ok(says((await call(`/auth/test/start?login=${'A'.repeat(64)}&email=x@acme.com`)).data, "This sign-in link isn't complete"), "a login that isn't a SHA-256 in hex is refused at the start")
     }
     await continueInChrome()
+  })
+
+  // Browser startup and the Continue timing scenarios have their own test
+  // budget. They must not consume the team journey's time for real Worker
+  // requests, or a slow browser hides which independent journey timed out.
+  test('teams, who joins by domain and invite, members-only sessions, the access setting, the list, leaving and deleting', async () => {
     const alice = await signIn('alice@acme.com', 'Alice')
     const team = (await call('/api/teams', { method: 'POST', tok: alice, body: { name: 'Acme' } })).data.team
     ok(team?.role === 'owner' && team.access === 'members', 'Alice makes Acme, members only')

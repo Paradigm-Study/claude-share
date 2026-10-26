@@ -168,6 +168,8 @@ Don't undo these without new evidence. Names in backticks are where to look.
 
 ## Release
 
+Native pool enrollment (`server/native-pool.ts`, `docs/native-pool.md`) uses exact live account/team membership, never `joinCheck` or link access. Its two named `/rpc/` fetch paths belong only to the private `DirectoryObject` cross-script binding; `Directory.owns` must never include them and the public worker must never forward them. Native enrollment grants are hashed, verifier-bound, pool-origin-bound, single-use, capped per account and swept after two minutes. Keep their sign-in tokens, grants and verifiers out of URLs and logs.
+
 1. Bump `plugin/.claude-plugin/plugin.json` `version`. Claude Code updates by version, not by commit: a push without a bump reaches nobody.
 2. Run the checks above.
 3. Push to `main`, then deploy the server, in that order. On an update, deploy the preview Worker first (`npx wrangler deploy -c wrangler.preview.toml`, then `npx wrangler deploy`), since it must already route what the new main Worker's rooms make; the first time, the main Worker goes first, since the preview Worker's `ROOMS` binding names its `RoomObject`. `node scripts/setup.ts deploy` does both in the right order, and on an update stops with FAIL before the main Worker if the preview Worker's deploy fails. The server reports the version it was deployed with as the newest, and plugins that update in place then download `main`, so `main` must already have it; the others show "Version X is out". Without updates in place: `claude plugin marketplace update claude-share && claude plugin update shared-session@claude-share`.

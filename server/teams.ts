@@ -12,6 +12,7 @@
 //                             said, waiting for the browser's Continue), then 'done' (the account id, until
 //                             Claude Code collects it: its token is made then)
 //   state:<id>                a provider's sign-in under way (ten minutes)
+//   npgrant:<hash>            a native-pool enrollment proof (two minutes); only its hash is kept
 //   team:<id>                 { id, name, createdAt, access: 'members' | 'link', domains, githubOrgs, invite }
 //   inv:<code>                → team id
 //   mem:<team>:<acct>         { role: 'owner' | 'member', at }; myteam:<acct>:<team> → 1
@@ -34,6 +35,8 @@
 
 import { json, token, brandPage, commandBox, COPY_SCRIPT, INSTALL_COMMAND } from './core/index.ts'
 import type { DirectoryClient, JsonObject } from './core/index.ts'
+import { NativePoolGrants } from './native-pool.ts'
+import type { NativePoolConfig } from './native-pool.ts'
 
 // The records above, as the directory writes them.
 export type Account = {
@@ -74,6 +77,7 @@ export type DirectoryOptions = {
   keepTeam?: (room: string, team: string, allowed: string[]) => Promise<unknown>
   onDue?: (at: number) => void
   fetch?: typeof fetch
+  nativePool?: NativePoolConfig | null
 }
 
 const LOGIN_MS = 10 * 60 * 1000
@@ -203,6 +207,7 @@ export class Directory {
   onDue: (at: number) => void
   fetch: typeof fetch
   changes: Map<string, { start: number; count: number }>
+  nativePool: NativePoolGrants
 
   constructor(kv: Kv, opts: DirectoryOptions = {}) {
     this.kv = kv
@@ -212,6 +217,7 @@ export class Directory {
     this.onDue = opts.onDue ?? (() => {})
     this.fetch = opts.fetch ?? ((input, init) => fetch(input, init))
     this.changes = new Map() // account id → { start, count }: its minute (CHANGES)
+    this.nativePool = new NativePoolGrants(kv, opts.nativePool ?? null, this.onDue)
   }
 
   // One change on the account's minute: false once it has made CHANGES.limit.
@@ -455,7 +461,7 @@ export class Directory {
   // What's due goes: invites past their 12 hours, sign-ins past their ten
   // minutes. Returns when the next is due, or null.
   async sweep(now: number) {
-    let next: number | null = null
+    let next: number | null = await this.nativePool.sweep(now)
     for (const prefix of ['sinv:', 'login:', 'state:']) {
       for (const [key, rec] of await this.kv.list(prefix)) {
         if (!(rec?.exp > now)) {
@@ -521,13 +527,13 @@ export class Directory {
 
   // Every path this owns: /auth/…, /api/auth/…, /api/me, /api/teams…, /api/invites/…, /i/<code>.
   static owns(pathname: string) {
-    return /^\/(auth\/|api\/auth\/|api\/me(\/invites(\/[^/]+)?)?$|api\/teams(\/|$)|api\/invites\/|i\/)/.test(pathname)
+    return pathname === '/api/native-pool/enrollment' || /^\/(auth\/|api\/auth\/|api\/me(\/invites(\/[^/]+)?)?$|api\/teams(\/|$)|api\/invites\/|i\/)/.test(pathname)
   }
 
   // What one address may do only so often (the join limit): start a sign-in,
   // make a team, take an invite. Polling and listing are not counted.
   static limited(pathname: string, method: string) {
-    return /^\/auth\/[^/]+\/start$/.test(pathname) || (method === 'POST' && /^\/api\/(teams|invites\/[^/]+)$/.test(pathname))
+    return /^\/auth\/[^/]+\/start$/.test(pathname) || (method === 'POST' && (/^\/api\/(teams|invites\/[^/]+)$/.test(pathname) || pathname === '/api/native-pool/enrollment'))
   }
 
   async handle(req: Request, origin: string, now = Date.now()): Promise<Response> {
@@ -555,6 +561,7 @@ export class Directory {
       // Every other change counts against the account's minute; signing out
       // and deleting the account always go through.
       if (method !== 'GET' && !this.change(account.id, now)) return json({ error: CHANGES.message }, 429)
+      if (url.pathname === '/api/native-pool/enrollment' && method === 'POST') return this.nativePool.enroll(account.id, req, now)
       if (url.pathname === '/api/me' && method === 'GET') return json({ account: this.accountView(account), teams: await this.teamsOf(account), teammates: await this.teammates(account) })
       if (url.pathname === '/api/me/invites' && method === 'GET') return json({ invites: await this.invitesOf(account, now) })
       if (parts[0] === 'api' && parts[1] === 'me' && parts[2] === 'invites' && parts.length === 4 && method === 'DELETE') {

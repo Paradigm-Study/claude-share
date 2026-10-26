@@ -1,8 +1,9 @@
 // DirectoryObject: accounts and teams (server/teams.ts) in one Durable Object.
 
 import { DurableObject } from 'cloudflare:workers'
-import { ROOM_ID } from '../core/index.ts'
+import { ROOM_ID, json, readBody } from '../core/index.ts'
 import { Directory, providersFrom } from '../teams.ts'
+import { nativePoolConfig, NATIVE_POOL_BODY_MAX } from '../native-pool.ts'
 import type { Kv, RoomInfo } from '../teams.ts'
 import type { ServerEnv } from './env.ts'
 
@@ -29,7 +30,7 @@ export class DirectoryObject extends DurableObject<ServerEnv> {
     }
     // What's timed goes when it's due: the alarm is set for the soonest.
     const onDue = (at: number) => void this.wakeAt(at).catch(() => {})
-    this.directory = new Directory(kv, { providers: providersFrom(env), roomInfo, keepTeam, onDue })
+    this.directory = new Directory(kv, { providers: providersFrom(env), roomInfo, keepTeam, onDue, nativePool: nativePoolConfig(env) })
   }
 
   async wakeAt(at: number) {
@@ -53,6 +54,19 @@ export class DirectoryObject extends DurableObject<ServerEnv> {
   unregister(teamId: string, roomId: string) { return this.directory.unregister(teamId, roomId) }
 
   override async fetch(req: Request) {
+    const path = new URL(req.url).pathname
+    // Only a private Durable Object binding can reach these. The public
+    // Worker forwards Directory.owns paths alone, which excludes /rpc/.
+    if (path === '/rpc/consumeNativePoolGrant' || path === '/rpc/nativePoolMembership') {
+      if (req.method !== 'POST') return json({ result: { ok: false, status: 405, error: 'POST required.' } }, 405)
+      let args: unknown
+      try { args = JSON.parse(new TextDecoder().decode(await readBody(req, NATIVE_POOL_BODY_MAX))) } catch { return json({ result: { ok: false, status: 400, error: 'Invalid request.' } }, 400) }
+      if (!Array.isArray(args) || args.length !== 3 || !args.every(value => typeof value === 'string')) return json({ result: { ok: false, status: 400, error: 'Invalid arguments.' } }, 400)
+      const result = path === '/rpc/consumeNativePoolGrant'
+        ? await this.directory.nativePool.consume(args[0], args[1], args[2])
+        : await this.directory.nativePool.member(args[0], args[1], args[2])
+      return json({ result })
+    }
     return this.directory.handle(req, req.headers.get('x-share-origin') ?? new URL(req.url).origin)
   }
 }

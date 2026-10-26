@@ -888,7 +888,10 @@ async function admit(w, url, cookie) {
   assert.deepEqual([SERVE_LIMITS.roomBytesPerDay, SERVE_LIMITS.seatBytesPerMinute, SERVE_LIMITS.periodMs], [8 * 1024 ** 3, 256 * 1024 ** 2, 60_000])
   assert.equal([HISTORY_BYTES, EVENT_BYTES, ROOM_FILES_COUNT, ROOM_PREVIEWS_MAX, PUBLIC_LIMITS.roomTickets, PUBLIC_LIMITS.roomSessions, PUBLIC_LIMITS.pendingBytes, PUBLIC_LIMITS.bytesPerWindow, TCP_LIMITS.bufferBytes,
     TCP_LIMITS.seatPairs, TCP_LIMITS.roomPairs, TCP_LIMITS.opensPerMinute, TCP_LIMITS.seatOpensPerMinute, TCP_LIMITS.pairMs].join(), [16 * 1024 ** 2, 128 * 1024, 10_240, 128, 128, 256, 8 * 1024 ** 2, 4 * 1024 ** 2, 1024 ** 2, 32, 64, 1200, 240, 10_000].join())
-  assert.equal(text.includes('grant'), false, 'no grants to speak of')
+  const nativePool = text.match(/<li><b>Native subscription pools, where configured:<\/b>[\s\S]*?<\/li>/)?.[0]
+  assert(nativePool, 'the optional native subscription pool explains its separate enrollment records')
+  for (const said of ['Share checks actual team membership', 'a hashed grant with the account, team, device name and verifier hash for at most two minutes', 'Your Share sign-in token stays with Share', 'A room link grants no pool access', 'one-time Mac setup is required']) assert(nativePool.includes(said), said)
+  assert.equal(text.replace(nativePool, '').includes('grant'), false, 'room previews have no separate grants; only native pool enrollment does')
   assert.equal(text.includes('Traces, kept on this server'), false, 'a server without traces says nothing of them')
   console.log('OK the home page says when expired links and sessions go, that a new link renews a session, that clearing needs HTTPS, how a sign-in finishes, what TCP keeps, and the limits as the server keeps them')
 }
