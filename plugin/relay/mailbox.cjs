@@ -201,6 +201,19 @@ async function start(raw, { emit = notify, launcher } = {}) {
     } finally { posts.delete(controller) }
   }
 
+  // One post at a time a mailbox, in the order its frames came: receipts
+  // sent close together (held, then refused or delivered) reach the seat as
+  // they were sent. Each a fetch of its own, they could cross on the way.
+  // As many as may be in flight at once wait, at most (LIMITS.posts); past
+  // that, as past it at once, it's busy.
+  function inTurn(box, body) {
+    if (box.waiting >= LIMITS.posts) return Promise.resolve('busy')
+    box.waiting++
+    const turn = box.lane.then(() => post(box, body)).catch(() => 'refused').finally(() => { box.waiting-- })
+    box.lane = turn
+    return turn
+  }
+
   // A receipt into this session, from a mailbox: what became of a message it
   // wrote there. A `delivered` only after a `held` (as Claude Code sends them).
   async function receiptHere(box, status, ref, reason) {
@@ -224,11 +237,11 @@ async function start(raw, { emit = notify, launcher } = {}) {
       const read = frameRead(line)
       // Only from this session: a mailbox is its way to the seat, no one else's.
       if (read.kind === 'auth' || read.kind === 'bad' || read.from !== own) return
-      if (read.kind === 'receipt') return void post(box, read.receipt)
+      if (read.kind === 'receipt') return void inTurn(box, read.receipt)
       // What this session wrote here: the seat's receipts may name these alone.
       box.refs.add(read.message.ref)
       if (box.refs.size > LIMITS.held) box.refs.delete(box.refs.values().next().value)
-      void post(box, read.message).then(result => {
+      void inTurn(box, read.message).then(result => {
         // Where it didn't go, this session hears so as it would from that session.
         if (result === 'delivered' || result === 'stopped') return
         void receiptHere(box, result === 'gone' ? 'refused' : 'dropped', read.message.ref, result === 'busy' ? 'rate-limited' : undefined)
@@ -265,7 +278,7 @@ async function start(raw, { emit = notify, launcher } = {}) {
       if (Date.now() >= end) return { status: 409, code: 'EADDRINUSE' }
       await sleep(200)
     }
-    const box = { seat, handle, server: null, file, ino: 0, conns: new Set(), refs: new Set() }
+    const box = { seat, handle, server: null, file, ino: 0, conns: new Set(), refs: new Set(), lane: Promise.resolve(), waiting: 0 }
     const server = net.createServer({ allowHalfOpen: true }, socket => inbound(id, socket))
     server.on('error', () => {})
     box.server = server
