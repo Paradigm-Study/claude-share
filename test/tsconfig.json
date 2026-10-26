@@ -3,6 +3,8 @@
 // the Worker's, for the server they load (wrangler writes them).
 {
   "extends": "../server/tsconfig.json",
-  "compilerOptions": { "types": ["node"] },
+  // noUncheckedIndexedAccess is the server's alone until the suites' move to
+  // Vitest is done: then they take it too.
+  "compilerOptions": { "types": ["node"], "noUncheckedIndexedAccess": false },
   "include": ["../server/worker-configuration.d.ts", "**/*.ts", "../vitest.config.ts"]
 }

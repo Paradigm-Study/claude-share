@@ -6,7 +6,7 @@
   "compilerOptions": {
     "target": "es2023", "lib": ["es2023"], "types": [],
     "module": "esnext", "moduleResolution": "bundler", "resolveJsonModule": true,
-    "strict": true,
+    "strict": true, "noUncheckedIndexedAccess": true,
     "noImplicitOverride": true, "noFallthroughCasesInSwitch": true,
     "noUnusedLocals": true, "noUnusedParameters": true,
     "noEmit": true, "skipLibCheck": true,
