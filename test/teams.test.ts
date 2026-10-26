@@ -169,6 +169,12 @@ async function continueInChrome() {
       enter: () => key('Enter', 'Enter', 13, '\r'),
       focused: () => value("document.activeElement?.id === 'continue'"),
       shown: () => value("document.visibilityState === 'visible' && document.hasFocus()"),
+      hiddenInput: () => value(`(() => {
+        for (const screenX of [10, 20]) document.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, screenX, screenY: 10, movementX: 10 }));
+        const button = document.getElementById('continue');
+        button.click();
+        return { shown: document.visibilityState === 'visible' && document.hasFocus(), disabled: button.disabled };
+      })()`),
       // Where the sign-in is: 'confirm' until a Continue goes through, then 'done'.
       status: async (until = '') => {
         let status = ''
@@ -219,8 +225,10 @@ async function continueInChrome() {
     const behind = await f.shown()
     if (!alone || behind !== false) console.log(`SKIP out of sight in ${browserName} (its headless tab ${alone ? 'still shows behind another' : "isn't shown in front"})`)
     else {
-      await f.move()
-      await f.click()
+      // A hidden tab has no input surface: its CDP mouse-move acknowledgments
+      // took 5.0–5.1 s each locally and could exhaust CI's test deadline.
+      // Exercise its page handlers directly; visible tabs still use real input.
+      expect(await f.hiddenInput()).toEqual({ shown: false, disabled: true })
       await wait(300)
       const hidden = await f.status()
       await send('Target.closeTarget', { targetId: front })
