@@ -18,7 +18,6 @@
 // share with a team and join one; it asks rooms how they are when listing.
 // They call each other's methods (Durable Object RPC), never a path: what
 // only the objects say to each other has no URL the Worker could forward.
-// The paths of the version before RPC stay for one release (__team, /rpc/).
 
 import { DurableObject } from 'cloudflare:workers'
 import {
@@ -203,8 +202,7 @@ export default {
     }
     if (!ROOM_ID.test(id)) return notFound()
     // Previews have a host name of their own: this origin serves none, page
-    // or socket (only previewFetch makes these paths, by the room's key);
-    // nor does it take what an older directory tells a room (__team).
+    // or socket (only previewFetch makes these paths, by the room's key).
     if (rest.startsWith('__')) return notFound()
     const limit = limitOf(req, id, rest, req.headers.get('cf-connecting-ip') ?? 'unknown')
     const limiter = limit && { create: env.CREATE_LIMIT, join: env.JOIN_LIMIT, events: env.EVENTS_LIMIT }[limit.kind]
@@ -443,13 +441,6 @@ export class RoomObject extends DurableObject {
 
     const room = this.room
     if (preview ? id !== room.previewKey : id !== room.id) return preview ? previewMissing() : notFound()
-    // A directory of the version before RPC tells a room by this path: kept
-    // while a deploy runs both versions. Remove it in the release after.
-    if (rest === '__team' && req.method === 'POST') {
-      const body = await req.json().catch(() => ({}))
-      await this.keepTeam(body.team, body.allowed)
-      return json({ ok: true })
-    }
     // What expired is swept by the alarm, and by roomRequest for ordinary
     // requests; upgrades check what they need where they admit.
     if (req.method === 'POST') {
@@ -1187,10 +1178,6 @@ const directoryStub = env => env.DIRECTORY.get(env.DIRECTORY.idFromName('directo
 // DirectoryObject's below.
 const directoryClient = env => env?.DIRECTORY ? directoryStub(env) : null
 
-// What a room of the version before RPC asks, over /rpc/<name> on the stub
-// (paths the Worker never forwards from outside). Remove these with __team.
-const DIRECTORY_CALLS = ['shareCheck', 'joinCheck', 'register', 'unregister', 'roomEnded', 'teamAccess', 'sessionInvite', 'whoIs']
-
 export class DirectoryObject extends DurableObject {
   constructor(state, env) {
     super(state, env)
@@ -1202,28 +1189,12 @@ export class DirectoryObject extends DurableObject {
       delete: key => storage.delete(key),
       list: async prefix => [...(await storage.list({ prefix })).entries()],
     }
-    // A room of the version before RPC has neither method below, so each
-    // falls back to that version's path while a deploy runs both versions.
     // How a room is, for a team's list: its own info, or nothing once it's gone.
-    const roomInfo = async id => {
-      if (!ROOM_ID.test(id)) return null
-      const room = env.ROOMS.get(env.ROOMS.idFromName(id))
-      try {
-        return await room.info()
-      } catch {
-        const res = await room.fetch(`https://room.internal/${id}/`)
-        return res.ok ? res.json() : null
-      }
-    }
+    const roomInfo = async id => ROOM_ID.test(id) ? env.ROOMS.get(env.ROOMS.idFromName(id)).info() : null
     // A members-only team's people now, for its room to let the others go.
     const keepTeam = async (id, team, allowed) => {
       if (!ROOM_ID.test(id)) return
-      const room = env.ROOMS.get(env.ROOMS.idFromName(id))
-      try {
-        await room.keepTeam(team, allowed)
-      } catch {
-        await room.fetch(`https://room.internal/${id}/__team`, { method: 'POST', body: JSON.stringify({ team, allowed }) })
-      }
+      await env.ROOMS.get(env.ROOMS.idFromName(id)).keepTeam(team, allowed)
     }
     // What's timed goes when it's due: the alarm is set for the soonest.
     const onDue = at => void this.wakeAt(at).catch(() => {})
@@ -1251,16 +1222,6 @@ export class DirectoryObject extends DurableObject {
   unregister(teamId, roomId) { return this.directory.unregister(teamId, roomId) }
 
   async fetch(req) {
-    const url = new URL(req.url)
-    if (url.pathname.startsWith('/rpc/')) {
-      const name = url.pathname.slice('/rpc/'.length)
-      if (!DIRECTORY_CALLS.includes(name)) return json({ error: 'Not found' }, 404)
-      try {
-        return json({ result: (await this.directory[name](...(await req.json()))) ?? null })
-      } catch (error) {
-        return json({ error: String(error?.message ?? error) }, 500)
-      }
-    }
-    return this.directory.handle(req, req.headers.get('x-share-origin') ?? url.origin)
+    return this.directory.handle(req, req.headers.get('x-share-origin') ?? new URL(req.url).origin)
   }
 }

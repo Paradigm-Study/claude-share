@@ -261,12 +261,8 @@ const ok = label => console.log(`ok ${label}`)
     await objects.get(id).state.barrier
     return objects.get(id)
   }
-  // A stub: the object's methods, as RPC calls them; `fetch` alone is a room of
-  // the version before RPC, which has neither keepTeam nor info.
-  const fetchOf = id => async (input, init) => (await roomObject(id)).obj.fetch(new Request(input, init))
-  const rpcStub = id => ({ fetch: fetchOf(id), keepTeam: async (...args) => (await roomObject(id)).obj.keepTeam(...args), info: async () => (await roomObject(id)).obj.info() })
-  const oldStub = id => ({ fetch: fetchOf(id), keepTeam: async () => { throw new Error('no RPC') }, info: async () => { throw new Error('no RPC') } })
-  env.ROOMS = { idFromName: name => name, get: rpcStub }
+  // A stub: the object's methods, as RPC calls them.
+  env.ROOMS = { idFromName: name => name, get: id => ({ fetch: async (input, init) => (await roomObject(id)).obj.fetch(new Request(input, init)), keepTeam: async (...args) => (await roomObject(id)).obj.keepTeam(...args), info: async () => (await roomObject(id)).obj.info() }) }
   const directoryStorage = new Storage()
   const directory = new DirectoryObject({ storage: directoryStorage }, env)
   // A stub: the object's methods, as RPC calls them.
@@ -330,21 +326,19 @@ const ok = label => console.log(`ok ${label}`)
   assert.equal((await at(`/api/rooms/${room.id}/end`, { method: 'POST', tok: room.token })).status, 200)
   assert.deepEqual(held(), [], "the room's end takes its invites and its place on the team's list")
   await directory.alarm()
-  // While a deploy runs both versions: a room of the version before RPC hears
-  // a removal through __team, and asks the directory through /rpc/.
+  // The directory reads a room for its team's list over RPC; the paths of the
+  // version before RPC are gone from both objects.
   {
     const again = (await at('/api/rooms', { method: 'POST', acct: wes, body: { name: 'Wes', title: 'crew again', team: crew.id } })).data
-    const seat = (await at(`/api/rooms/${again.id}/join`, { method: 'POST', acct: gus, body: { name: 'Gus' } })).data
     assert.equal((await at(`/api/teams/${crew.id}/sessions`, { tok: wes })).data.sessions?.[0]?.id, again.id, "the team's list reads the room through its info")
-    env.ROOMS.get = oldStub
-    assert.equal((await at(`/api/teams/${crew.id}/sessions`, { tok: wes })).data.sessions?.[0]?.id, again.id, "…and through a path from an older room")
-    assert.equal((await at(`/api/teams/${crew.id}/members/${gusId}`, { method: 'DELETE', tok: wes })).status, 200)
-    assert.equal((await at(`/api/rooms/${again.id}/events?after=0&wait=0`, { tok: seat.token })).status, 401, 'an older room lets go of someone removed')
-    env.ROOMS.get = rpcStub
-    const asked = await directory.fetch(new Request('https://directory.internal/rpc/teamAccess', { method: 'POST', body: JSON.stringify([crew.id]) }))
-    assert.equal(asked.status, 200)
-    assert.ok('result' in await asked.json(), 'an older room asks the directory through /rpc/')
-    assert.equal((await directory.fetch(new Request('https://directory.internal/rpc/handle', { method: 'POST', body: '[]' }))).status, 404, 'only the calls a room makes')
+    // An old directory's `__team` lets nobody go: Gus, in the team, is told
+    // the team has no one, and stays.
+    const seat = (await at(`/api/rooms/${again.id}/join`, { method: 'POST', acct: gus, body: { name: 'Gus' } })).data
+    const { obj: againObj } = await roomObject(again.id)
+    assert.notEqual((await againObj.fetch(new Request(`https://room.internal/${again.id}/__team`, { method: 'POST', headers: { ...V, authorization: `Bearer ${again.token}` }, body: JSON.stringify({ team: crew.id, allowed: [] }) }))).status, 200)
+    assert.equal((await at(`/api/rooms/${again.id}/events?after=0&wait=0`, { tok: seat.token })).status, 200)
+    // …and the directory answers no `/rpc/` call.
+    assert.notEqual((await directory.fetch(new Request('https://directory.internal/rpc/teamAccess', { method: 'POST', body: JSON.stringify([crew.id]) }))).status, 200)
   }
   ok("on the Worker, a members-only team's room lets go of someone removed from it as the directory says, closing their stream, saved so; no request from outside can say it; a seat's streams past four end its oldest; and a room's end takes its invites and listing from the directory, whose alarm is set for what's due")
 
