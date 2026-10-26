@@ -241,7 +241,7 @@ await workerdChecks()
     acceptWebSocket(ws, tags) { ws.tags = tags; this.sockets.push(ws) }
     getWebSockets(tag) { return this.sockets.filter(ws => !tag || ws.tags.includes(tag)) }
   }
-  const { RoomObject } = await import('../server/worker.mjs')
+  const { RoomObject } = await import('../server/worker.ts')
   const state = new State()
   const w = { state, obj: new RoomObject(state, {}), id: token(16) }
   await state.barrier

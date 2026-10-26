@@ -200,7 +200,7 @@ export class Room {
     this.previews = new Map(Object.entries(data.previews ?? {})) // pid → { pid, port, title, ts, tcp? }
     // What preview links and cookies name the room by, never its id (which
     // joins it): a key made with the room and kept with it, or a Durable
-    // Object's own id, which worker.mjs puts here.
+    // Object's own id, which worker.ts puts here.
     this.previewKey = data.previewKey ?? token(16)
     // A browser's session on the public link, sid → { pid, exp, seat }.
     this.previewSessions = new Map(Object.entries(data.previewSessions ?? {}))

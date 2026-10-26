@@ -7760,7 +7760,7 @@ async function canAskHost($: $): Promise<boolean> {
 }
 
 // A cloud host's container holds its runner's control port (cloud/runner.mjs,
-// HOST_PORT in server/worker.mjs): never asked about or shared from there.
+// HOST_PORT in server/worker.ts): never asked about or shared from there.
 const RUNNER_PORT = 8080
 const runnerOwn = async ($: $, port: number) => port === RUNNER_PORT && (await isRunner($))
 

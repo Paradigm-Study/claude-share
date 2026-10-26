@@ -799,7 +799,7 @@ try {
 // The Worker sends the same sign-in, its Continue included, to its
 // directory object (Directory.owns), over a stub of the namespace.
 {
-  const { default: worker, DirectoryObject } = await import('../server/worker.mjs')
+  const { default: worker, DirectoryObject } = await import('../server/worker.ts')
   const kept = new Map()
   const storage = { get: async k => kept.get(k), put: async (k, v) => void kept.set(k, v), delete: async k => kept.delete(k), list: async ({ prefix }) => new Map([...kept].filter(([k]) => k.startsWith(prefix))) }
   const env = { AUTH_TEST: '1', PUBLIC_URL: 'https://share.test', JOIN_LIMIT: { limit: async () => ({ success: true }) } }

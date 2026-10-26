@@ -255,9 +255,11 @@ function checkOf(s: TCPHalf) {
 // first. Then the adapter reserves (tcpReserve), makes that durable, checks
 // the half again where it can have changed meanwhile, and steps the same frame
 // again: nothing was charged or counted the first time.
-export function tcpStep(room: Room, from: TCPHalf, to: TCPHalf, frame: TCPFrame, now: number): { reserve: true } | (TCPRelayed & { reserve?: undefined }) {
+export function tcpStep(room: Room, from: TCPHalf, to: TCPHalf | null | undefined, frame: TCPFrame, now: number): { reserve: true } | (TCPRelayed & { reserve?: undefined }) {
   if (!tcpValid(room, from)) throw tcpFailure('TCP access revoked.')
   tcpCheck(from, to, frame, now)
+  // tcpCheck refuses a half without its peer.
+  if (!to) throw tcpFailure('TCP channel is not paired.')
   if (frame.t === 'data' && from.remaining < frame.n) return { reserve: true }
   return tcpRelay(from, to, frame, now)
 }

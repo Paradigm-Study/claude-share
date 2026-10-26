@@ -253,7 +253,7 @@ const ok = label => console.log(`ok ${label}`)
     acceptWebSocket(ws, tags) { ws.tags = tags; this.sockets.push(ws) }
     getWebSockets(tag) { return this.sockets.filter(ws => !tag || ws.tags.includes(tag)) }
   }
-  const { default: worker, RoomObject, DirectoryObject } = await import('../server/worker.mjs')
+  const { default: worker, RoomObject, DirectoryObject } = await import('../server/worker.ts')
   const env = { AUTH_TEST: '1', PUBLIC_URL: 'https://share.test', JOIN_LIMIT: { limit: async () => ({ success: true }) } }
   const objects = new Map()
   const roomObject = async id => {
@@ -368,7 +368,7 @@ const ok = label => console.log(`ok ${label}`)
   // never the address, so a gate loaded again counts on; its alarm at the
   // day's end takes the day's counts and key.
   {
-    const { GateObject } = await import('../server/worker.mjs')
+    const { GateObject } = await import('../server/worker.ts')
     // Its reads take a moment, as a Durable Object's do, so Shares at once overlap.
     const storage = new (class extends Storage { async get(key) { await new Promise(resolve => setTimeout(resolve, 5)); return super.get(key) } })()
     const realNow = Date.now

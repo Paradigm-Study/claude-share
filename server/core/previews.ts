@@ -507,7 +507,7 @@ export async function previewRequest(room: Room, req: Request, now: number, { se
 // the host's stream; the host's plugin starts a relay that opens one to its
 // localhost and one back to the room (ws/<id>, host only), and the room passes
 // messages between the two as they are. The process holding the sockets pairs
-// them (worker.mjs); what's decided about them is here.
+// them (worker.ts); what's decided about them is here.
 export const SOCKET_ID = /^[A-Za-z0-9_-]{8,40}$/
 
 // Whom a browser's socket is for: its preview session, the port, the path.

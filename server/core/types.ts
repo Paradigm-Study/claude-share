@@ -1,4 +1,4 @@
-// The shapes the room's modules and their adapters (worker.mjs) pass between
+// The shapes the room's modules and their adapters (worker.ts) pass between
 // them. A request's JSON is the sender's to shape: it's `JsonObject`, and
 // every route checks what it reads.
 

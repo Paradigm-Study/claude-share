@@ -63,10 +63,9 @@ jobs:
         with:
           node-version: 24
           package-manager-cache: false
-      # tsc checks the server against the Worker's types alone (wrangler writes
-      # them from wrangler.toml; it needs no login): server/*.mjs (checkJs) with
-      # what they import, then the TypeScript (server/core, teams.ts, server/traces)
-      # strictly. The tools' versions are package.json's, pinned exactly, so a
-      # local run sees the same types.
+      # tsc checks the server's TypeScript strictly against the Worker's types
+      # alone (wrangler writes them from wrangler.toml; it needs no login). The
+      # tools' versions are package.json's, pinned exactly, so a local run sees
+      # the same types.
       - run: npm install --no-package-lock --ignore-scripts
       - run: npm run typecheck:server
