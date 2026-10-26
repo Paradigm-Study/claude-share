@@ -40,6 +40,9 @@ const EARLY_VERSION = [2, 1, 285]
 // Claude Code's own folder, CLAUDE_CONFIG_DIR when set and else ~/.claude, as
 // the plugin reads it: its settings and session transcripts are there.
 const CONFIG_DIR = process.env.CLAUDE_CONFIG_DIR?.trim() || join(homedir(), '.claude')
+// The automatic-update folder, told by its path's end as the plugin's
+// runsLive tells it.
+const isLiveDir = path => path.replace(/\/+$/, '').endsWith('/.claude/shared-session/plugin')
 const SETTINGS = join(CONFIG_DIR, 'settings.json')
 
 const [command, ...rest] = process.argv.slice(2)
@@ -270,6 +273,9 @@ async function call(url, init = {}) {
 
 const why = r => (r.status ? `HTTP ${r.status}${r.body.error ? `: ${r.body.error}` : ''}` : r.error)
 
+const endRoom = (server, id, token) =>
+  call(`${server}/api/rooms/${encodeURIComponent(id)}/end`, { method: 'POST', headers: { authorization: `Bearer ${token}` } })
+
 // Create a room, seat a guest, open the guest's stream, serve the link page,
 // end the room. Returns { ok, stream } or { reason }.
 async function roomRoundTrip(server) {
@@ -283,7 +289,7 @@ async function roomRoundTrip(server) {
     if (!page.ok || !url?.startsWith(server)) return { reason: `its link page: ${why(page)}` }
     return { ok: true, stream: await firstStreamLine(`${server}/api/rooms/${id}/stream?after=0`, joined.body.token) }
   } finally {
-    await call(`${server}/api/rooms/${id}/end`, { method: 'POST', headers: { authorization: `Bearer ${token}` } })
+    await endRoom(server, id, token)
   }
 }
 
@@ -323,14 +329,20 @@ function configuredServer(claude, plugins) {
     }
   }
   let r = run(claude, ['plugin', 'configure', PLUGIN, '--json'])
-  // The automatic-update folder can shadow the installed plugin in the CLI,
-  // just as it does in a session. Its option wins; an unset option falls back
-  // to the installed copy's saved option (see the plugin's serverOf).
+  // A plugin folder (CLAUDE_CODE_PLUGIN_DIRS) shadows the installed plugin in
+  // the CLI, just as it does in a session. Its option wins. Only the
+  // automatic-update folder falls back to the installed copy's saved option
+  // when its own is unset (the plugin's serverOf, runsLive); any other
+  // folder, a checkout of this repository, has its own option alone.
   const inline = plugins.find(p => p.id === 'shared-session@inline' && p.enabled)
   let saved = ''
   if (r.code !== 0 && inline) {
     r = run(claude, ['plugin', 'configure', inline.id, '--json'])
-    saved = settings.pluginConfigs?.[PLUGIN]?.options?.server ?? ''
+    // A CLI that doesn't say where the folder is: read it as the
+    // automatic-update folder, as before installPath was looked at.
+    const where = typeof inline.installPath === 'string' ? inline.installPath : ''
+    if (!where || isLiveDir(where)) saved = settings.pluginConfigs?.[PLUGIN]?.options?.server ?? ''
+    else note(`sessions load the plugin from ${where} (CLAUDE_CODE_PLUGIN_DIRS): its own server option counts there, not the installed plugin's`)
   }
   if (r.code !== 0) {
     fail(`reading the share server: ${r.out.trim().split('\n').pop()}`)
@@ -439,6 +451,38 @@ function forgetSessions(dir) {
   for (const entry of readdirSync(projects)) if (entry.includes(basename(dir))) rmSync(join(projects, entry), { recursive: true, force: true })
 }
 
+// What the throwaway sessions left in the plugin's room checkpoints
+// (hosting:<session>, joined:<session>, in the config folder): a room still
+// hosted there is ended with its own token, so a check never leaves one open,
+// wherever the session shared it; then each file goes.
+async function forgetRooms(sessions) {
+  const dir = join(CONFIG_DIR, 'shared-session/rooms')
+  for (const session of sessions) {
+    for (const prefix of ['hosting:', 'joined:']) {
+      const path = join(dir, `${encodeURIComponent(prefix + session)}.json`)
+      try {
+        if (!existsSync(path)) continue
+        let room = null
+        try { room = JSON.parse(readFileSync(path, 'utf8'))?.value?.room ?? null } catch {}
+        if (prefix === 'hosting:' && room?.id && room.token) {
+          // A room's token goes only where the plugin would send it.
+          const server = validServer(room.server)
+          if (!server) fail(`the check's session left a room open on ${room.server}, not https, so it isn't ended from here: ${room.url ?? room.id}`)
+          else {
+            const ended = await endRoom(server, room.id, room.token)
+            if (ended.ok) note(`ended the room the check's session left open on ${server}`)
+            // Gone already (ended, expired): nothing is open.
+            else if (ended.status !== 404 && ended.status !== 410) fail(`the check's session left a room open on ${server} and ending it failed (${why(ended)}): ${room.url ?? room.id}`)
+          }
+        }
+        rmSync(path, { force: true })
+      } catch (error) {
+        fail(`could not clear the check's saved room ${path}: ${error?.message ?? error}`)
+      }
+    }
+  }
+}
+
 async function check(claude) {
   const listed = installedPlugins(claude)
   if (!listed) return
@@ -477,11 +521,15 @@ async function check(claude) {
   // machine's saved settings, one joins a room by its link. Neither touches
   // this machine's other sessions; their transcripts are removed after.
   const dir = mkdtempSync(join(tmpdir(), 'shared-session-check-'))
+  // A session that closes keeps its room for when it's opened again; the
+  // sharing one is opened again to stop sharing, which ends it.
+  const session = randomUUID(), guest = randomUUID()
   try {
-    const env = flag('server') ? { ...process.env, SHARED_SESSION_SERVER: server } : process.env
-    // A session that closes keeps its room for when it's opened again; this
-    // one is opened again to stop sharing, which ends it.
-    const session = randomUUID()
+    // Neither session is the Claude Desktop session this may run in: with its
+    // id (CLAUDE_CODE_HOST_SESSION_ID), the plugin would take up a room that
+    // session saved (savedKey), and the check would end it.
+    const { CLAUDE_CODE_HOST_SESSION_ID: _, ...own } = process.env
+    const env = flag('server') ? { ...own, SHARED_SESSION_SERVER: server } : own
     const shared = run(claude, ['-p', '--session-id', session, '/share-session'], { cwd: dir, env, timeout: 120_000 })
     const link = new RegExp(`${server.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/s/([A-Za-z0-9_-]{16,})`).exec(shared.out)
     if (!link) fail(`a real session could not share: ${shared.out.trim().split('\n').pop()}`)
@@ -497,15 +545,16 @@ async function check(claude) {
     const made = await call(`${server}/api/rooms`, { method: 'POST', body: JSON.stringify({ name: 'setup-check', title: 'setup check' }) })
     if (!made.ok) return fail(`could not make a room for the join check (${why(made)})`)
     const host = made.body
-    run(claude, ['-p', host.url], { cwd: dir, timeout: 120_000 })
+    run(claude, ['-p', '--session-id', guest, host.url], { cwd: dir, env, timeout: 120_000 })
     const page = (await call(`${server}/api/rooms/${host.id}/events?after=0&wait=0`, { headers: { authorization: `Bearer ${host.token}` } })).body
-    await call(`${server}/api/rooms/${host.id}/end`, { method: 'POST', headers: { authorization: `Bearer ${host.token}` } })
+    await endRoom(server, host.id, host.token)
     const joined = (page.events ?? []).find(e => e.type === 'join' && e.from?.role === 'guest')
     if (joined) ok(`a real session joined a room from its link (as "${joined.from.name}")`)
     else fail('a real session given a share link did not join it')
   } finally {
     rmSync(dir, { recursive: true, force: true })
     forgetSessions(dir)
+    await forgetRooms([session, guest])
   }
 }
 
