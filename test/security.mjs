@@ -296,6 +296,15 @@ const ok = label => console.log(`ok ${label}`)
   }
   const [fredWs, gusWs] = [await socketOf(fredSeat), await socketOf(gusSeat)]
   const out = async seat => (await at(`/api/rooms/${room.id}/events?after=0&wait=0`, { tok: seat.token })).status
+  // A share link opens its page with a slash added, or doubled, as it did
+  // before Hono; the server's own paths still don't take one.
+  for (const path of [`/s/${room.id}`, `/s/${room.id}/`, `//s/${room.id}`]) {
+    const page = await at(path)
+    assert.equal(page.status, 200, path)
+    assert.match(String(page.data), /is sharing a Claude Code session/, path)
+  }
+  assert.equal((await at(`/api/rooms/${room.id}/events/?after=0&wait=0`, { tok: fredSeat.token })).status, 200)
+  for (const path of ['/api/version/', '/api/health/', `/s/${room.id}/x`]) assert.equal((await at(path)).status, 404, path)
   // Nobody outside says it: the Worker forwards no __ path to a room.
   assert.equal((await at(`/api/rooms/${room.id}/__team`, { method: 'POST', tok: room.token, body: { team: crew.id, allowed: [] } })).status, 404)
   assert.equal(await out(gusSeat), 200)

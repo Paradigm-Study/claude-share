@@ -184,8 +184,6 @@ async function previewFetch(req: Request, env: ServerEnv): Promise<Response> {
 // back the Response a room gave, a WebSocket's upgrade included.
 type App = { Bindings: ServerEnv }
 const app = new Hono<App>()
-// A path's parts as they came (Hono's params are decoded; a room's id never is).
-const segments = (c: Context<App>) => new URL(c.req.url).pathname.split('/').filter(Boolean)
 const addressOf = (req: Request) => req.headers.get('cf-connecting-ip') ?? 'unknown'
 
 app.all('/api/health', () => json({ ok: true }))
@@ -244,14 +242,19 @@ app.post('/api/rooms', async c => {
   if (!gate.ok) return gate.reason === 'day' ? busyResponse() : limitedResponse('create')
   return toRoom(c, token(16), 'create')
 })
-// The operator ends a room (abuse); the room checks its admin token.
-app.post('/api/admin/rooms/:id/end', c => toRoom(c, segments(c)[3], 'admin-end'))
-// A share link opened in a browser.
-app.all('/s/:id', c => toRoom(c, segments(c)[1], 'page'))
-// Everything else of a room's, its path after the id as the room's `rest`.
-const roomRest = (c: Context<App>) => toRoom(c, segments(c)[2], segments(c).slice(3).join('/'))
-app.all('/api/rooms/:id', roomRest)
-app.all('/api/rooms/:id/*', roomRest)
+// A room's other paths, by the path's parts as the Worker before Hono read
+// them (empty ones dropped: a share link with a slash added still opens):
+// the operator's end (abuse; the room checks its admin token), a share link
+// opened in a browser, and everything under /api/rooms/<id>, the rest of
+// the path being the room's `rest`. Room ids are never decoded.
+app.all('*', c => {
+  const parts = new URL(c.req.url).pathname.split('/').filter(Boolean)
+  const method = c.req.raw.method
+  if (method === 'POST' && parts[0] === 'api' && parts[1] === 'admin' && parts[2] === 'rooms' && parts.length === 5 && parts[4] === 'end') return toRoom(c, parts[3], 'admin-end')
+  if (parts[0] === 's' && parts.length === 2) return toRoom(c, parts[1], 'page')
+  if (parts[0] === 'api' && parts[1] === 'rooms' && parts.length >= 3) return toRoom(c, parts[2], parts.slice(3).join('/'))
+  return notFound()
+})
 
 app.notFound(() => notFound())
 // What throws goes to the runtime as it did before Hono: a 500 of its own.
