@@ -1,6 +1,8 @@
 name = "claude-share"
 main = "server/worker.mjs"
 compatibility_date = "2026-04-01"
+# Session traces' Postgres driver (pg, through Hyperdrive) needs Node's APIs.
+compatibility_flags = ["nodejs_compat"]
 
 [vars]
 # "off" stops new rooms at once (joining existing links still works):

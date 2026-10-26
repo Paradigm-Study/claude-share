@@ -9,6 +9,8 @@
 name = "claude-share-preview"
 main = "server/worker.mjs"
 compatibility_date = "2026-04-01"
+# Session traces' Postgres driver (pg, through Hyperdrive) needs Node's APIs.
+compatibility_flags = ["nodejs_compat"]
 # Optional, and recommended: a host name of its own for each room's previews,
 # on a domain of its own whose DNS has a proxied `*` record (a person adds
 # it in the dashboard; docs/guide.md, "A host name per room"), with

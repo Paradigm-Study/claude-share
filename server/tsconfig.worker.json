@@ -2,5 +2,5 @@
 {
   "extends": "./tsconfig.base.json",
   "compilerOptions": { "types": [] },
-  "include": ["worker-configuration.d.ts", "worker.mjs", "core.mjs", "teams.mjs", "brand.mjs"]
+  "include": ["worker-configuration.d.ts", "worker.mjs", "core.mjs", "teams.mjs", "brand.mjs", "traces/*.ts"]
 }
