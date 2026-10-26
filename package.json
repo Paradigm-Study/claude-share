@@ -6,14 +6,16 @@
     "server": "wrangler dev",
     "deploy": "wrangler deploy",
     "set-server": "node scripts/set-server.ts",
-    "typecheck": "cd plugin && tsc -p .",
-    "test": "vitest run",
-    "typecheck:test": "wrangler types server/worker-configuration.d.ts >/dev/null && tsc -p test/tsconfig.json",
-    "test:e2e": "node test/e2e.mjs",
-    "typecheck:relay": "tsc -p plugin/relay/tsconfig.json",
+    "check": "npm run typecheck && npm run lint",
+    "typecheck": "npm run typecheck:server && npm run typecheck:scripts && npm run typecheck:relay && npm run typecheck:test",
     "typecheck:server": "wrangler types server/worker-configuration.d.ts && tsc -p server/tsconfig.json",
+    "typecheck:scripts": "tsc -p scripts/tsconfig.json",
+    "typecheck:relay": "tsc -p plugin/relay/tsconfig.json",
+    "typecheck:test": "wrangler types server/worker-configuration.d.ts >/dev/null && tsc -p test/tsconfig.json",
+    "typecheck:plugin": "cd plugin && tsc -p .",
     "lint": "wrangler types server/worker-configuration.d.ts >/dev/null && oxlint --type-aware server/ scripts/",
-    "typecheck:scripts": "tsc -p scripts/tsconfig.json"
+    "test": "vitest run",
+    "test:e2e": "node test/e2e.mjs"
   },
   "devDependencies": {
     "@types/node": "22.20.5",
