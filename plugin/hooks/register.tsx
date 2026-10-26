@@ -3966,7 +3966,7 @@ async function endMailbox($: $, run: MailboxRun) {
 // taken since by another process is never signalled.
 async function killHelper($: $, pid: number) {
   if (!Number.isSafeInteger(pid) || pid <= 1) return
-  await sh($, `case "$(ps -o command= -p ${pid} 2>/dev/null)" in\n  *"/relay/mailbox.cjs --serve"*) kill -TERM ${pid} 2>/dev/null ;;\nesac\n`)
+  await sh($, `case "$(ps -o command= -p ${pid} 2>/dev/null)" in\n  *"/relay/mailbox.cjs --serve"* | *"/relay/mailbox.mts --serve"*) kill -TERM ${pid} 2>/dev/null ;;\nesac\n`)
 }
 
 // A reload: the helper the module before this one started goes (its
@@ -4129,7 +4129,7 @@ async function hostPeer($: $, room: ShareRoom, value: Record<string, unknown>) {
   const run = await openMailbox($, room, s, box, route)
   if ('error' in run) {
     return decline(run.error === 'UNSUPPORTED' ? `${room.host}'s computer can't take messages from other sessions, so this didn't reach their Claude.`
-      : run.error === 'NODE' ? `${room.host}'s computer couldn't take this in (it needs Node 20 or later), so this didn't reach their Claude.`
+      : run.error === 'NODE' ? `${room.host}'s computer couldn't take this in (it needs Node 22.18 or later), so this didn't reach their Claude.`
       : `${room.host}'s computer couldn't take this in, so it didn't reach their Claude.`)
   }
   const hops = Array.isArray(chain) ? chain.filter((t): t is string => typeof t === 'string' && HOP_TOKEN.test(t)).slice(-32) : []
@@ -6060,11 +6060,12 @@ async function previewTicket($: $, room: ShareRoom, pid: string, path?: string):
 }
 
 // ---------------------------------------------------------------------------
-// Helpers: the plugin's own Node processes (relay/*.cjs). A guest's
+// Helpers: the plugin's own Node processes (relay/*.cjs, relay/*.mts). A guest's
 // listeners and the window's tunnels (local-preview.cjs), the window's proxy
 // (browser-proxy.cjs), discovery (discover.cjs), the host's TCP worker
 // (tcp-worker.cjs) and its public sockets' relays (ws-relay.cjs) each run
-// under the Node a dev server would (`FIND_NODE`; exit 127: none here), take
+// under the Node a dev server would, 22.18 or later, which runs TypeScript as
+// it is (`FIND_NODE`, by its `--version`; exit 127: none here), take
 // their settings on stdin, never argv, and say what happens in JSON lines on
 // stdout (`helperLines`). One with a listener of its own on 127.0.0.1 takes
 // commands in short POSTs (`controlPost`). Their stderr isn't read: no child
@@ -6075,9 +6076,13 @@ type Child = HookStream<ProcessSpawnChunk, ProcessSpawnResult>
 
 const FIND_NODE = [
   'for n in "$(command -v node 2>/dev/null)" /opt/homebrew/bin/node /usr/local/bin/node "$HOME/.volta/bin/node" $(ls -d "$HOME"/.nvm/versions/node/*/bin/node "$HOME"/.local/share/fnm/node-versions/*/installation/bin/node "$HOME"/.asdf/installs/nodejs/*/bin/node 2>/dev/null | sort -r); do',
-  '  [ -n "$n" ] && [ -x "$n" ] && exec "$n" "$1"',
+  '  [ -n "$n" ] && [ -x "$n" ] || continue',
+  '  v=$("$n" --version 2>/dev/null) || continue',
+  '  v=${v#v}; major=${v%%.*}; rest=${v#*.}; minor=${rest%%.*}',
+  '  case "$major.$minor" in *[!0-9.]* | .* | *.) continue ;; esac',
+  '  if [ "$major" -gt 22 ] || { [ "$major" -eq 22 ] && [ "$minor" -ge 18 ]; }; then exec "$n" "$1"; fi',
   'done',
-  'echo "Shared session: no node to run a helper" >&2; exit 127',
+  'echo "Shared session: no Node 22.18 or later to run a helper" >&2; exit 127',
 ].join('\n')
 
 // A helper's stdout, a line at a time as it comes. A line holds 8192
@@ -6109,7 +6114,7 @@ async function helperEnded(child: Child): Promise<'NODE' | undefined> {
 
 // A helper's control listener on 127.0.0.1 (the window's proxy, the host's
 // TCP worker): one short POST, its secret in a header, two seconds at most.
-// Both answer alike (`controlServer`, relay/tcp-relay.cjs): 200; 400, 403
+// Both answer alike (`controlServer`, relay/tcp-relay.mts): 200; 400, 403
 // or 413 for a request they won't take; 503 while full or closing; and the
 // TCP worker's 429 (BUSY: its connections all taken, which it told the room
 // itself). Which of those is an answer is the caller's (`answers`); anything
@@ -6386,7 +6391,7 @@ async function startLocalPreview($: $, room: ShareRoom, pid: string, run: LocalP
         }
       }
     }
-    if ((await ended) === 'NODE') run.error = 'Local previews need Node on this computer. Install Node and press Open in the Room, or choose Public link.'
+    if ((await ended) === 'NODE') run.error = 'Local previews need Node 22.18 or later on this computer. Install it and press Open in the Room, or choose Public link.'
   } catch {
     // Never echo child diagnostics or credentials: the run's own words stand.
   } finally {
@@ -7390,7 +7395,7 @@ async function readyProxy($: $, open: WindowOpen): Promise<BrowserProxy | Window
   // Without Node nothing here opens a forwarded preview (its listeners run
   // under Node too): only the public link, which goes through the room.
   if ('error' in proxy && proxy.error === 'NODE') {
-    $.ui.toast('Preview windows need Node on this computer. Install Node, then press Open preview again, or choose Public link in Room → Shown.')
+    $.ui.toast('Preview windows need Node 22.18 or later on this computer. Install it, then press Open preview again, or choose Public link in Room → Shown.')
     return 'done'
   }
   if ('error' in proxy) return { failed: "its proxy didn't start" }
@@ -8960,7 +8965,7 @@ async function relayTcp($: $, room: ShareRoom, ask: Record<string, unknown>) {
       if (!refused && s.live) void rejectSocket($, room, id, 'CONNECT')
       // No Node here to run the worker: the host hears it, once a room (the
       // next connection starts one again, so installing Node is enough).
-      if (worker.error === 'NODE') noteOnce($, 'tcp-node', `Forwarding localhost:${port} to teammates needs Node on this computer, and none was found. Install Node; their next connection tries again.`, s)
+      if (worker.error === 'NODE') noteOnce($, 'tcp-node', `Forwarding localhost:${port} to teammates needs Node 22.18 or later on this computer, and none was found. Install it; their next connection tries again.`, s)
     }
   }
 }

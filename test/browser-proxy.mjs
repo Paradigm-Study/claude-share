@@ -281,7 +281,7 @@ async function controlChecks() {
   assert.equal(accepted.status, 200)
   assert.equal(accepted.body, '{"ok":true}')
   assert.match(accepted.text, /\r\nconnection: close\r\n/i)
-  // The helpers' one control server (tcp-relay.cjs): 403 for the token, Host or Origin; 400 malformed; 413 too long.
+  // The helpers' one control server (tcp-relay.mts): 403 for the token, Host or Origin; 400 malformed; 413 too long.
   const cases = [
     [{ auth: null }, 403], [{ auth: `Bearer ${'A'.repeat(43)}` }, 403], [{ auth: `bearer ${TOKEN}` }, 403], [{ auth: `Bearer ${TOKEN}x` }, 403], [{ auth: TOKEN }, 403], [{ auth: `Bearer  ${TOKEN}` }, 403],
     [{ headers: 'Origin: null\r\n' }, 403], [{ headers: 'Origin: http://localhost:3000\r\n' }, 403], [{ headers: 'Origin: \r\n' }, 403],

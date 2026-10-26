@@ -1,35 +1,47 @@
 // Stdlib WebSocket client, shared by the public preview's relay
-// (ws-relay.cjs) and every raw TCP stream (tcp-relay.cjs's bridge).
-// Credentials come from its callers, never argv or addresses. Node 20+, no deps.
-'use strict'
+// (ws-relay.cjs) and every raw TCP stream (tcp-relay.mts's bridge).
+// Credentials come from its callers, never argv or addresses. Node 22.18+
+// (its types are stripped as it loads), no deps.
 
-const net = require('net')
-const http = require('http')
-const https = require('https')
-const crypto = require('crypto')
-const { isUtf8 } = require('buffer')
+import net from 'node:net'
+import http from 'node:http'
+import https from 'node:https'
+import crypto from 'node:crypto'
+import { isUtf8 } from 'node:buffer'
+import type { Duplex } from 'node:stream'
 
-const BUFFER_MAX = 1024 * 1024
+/** What a connection tells its caller. */
+export type WsEvents = {
+  open?: () => void
+  message?: (data: string | Buffer, binary: boolean) => void
+  drain?: () => void
+  close?: (code: number, status?: number) => void
+}
+export type WsOptions = { maxMessage?: number; timeoutMs?: number; insecure?: boolean }
+export type Ws = { send: (data: string | Buffer, binary?: boolean) => boolean; close: (code?: number, reply?: boolean, status?: number) => void; isOpen: () => boolean }
+
+export const BUFFER_MAX = 1024 * 1024
 const HEADER_MAX = 16 * 1024
 const GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11'
-const validClose = code => Number.isInteger(code) && ((code >= 1000 && code <= 1014 && ![1004, 1005, 1006].includes(code)) || (code >= 3000 && code < 5000))
-const sendable = code => validClose(code) ? code : 1000
+const validClose = (code: number) => Number.isInteger(code) && ((code >= 1000 && code <= 1014 && ![1004, 1005, 1006].includes(code)) || (code >= 3000 && code < 5000))
+const sendable = (code: number) => validClose(code) ? code : 1000
 
 // send() accepts the message, returning false until drain when the transport
 // is full. It never pauses WS reads: TCP relays need the reverse direction's ACK.
 // `insecure` skips certificate checks, for a loopback dev server's own
 // certificate alone (start's local leg); everything else verifies.
-function connect(url, headers = {}, protocols = [], on = {}, { maxMessage = BUFFER_MAX, timeoutMs = 10_000, insecure = false } = {}) {
+export function connect(url: string, headers: Record<string, string> = {}, protocols: string[] = [], on: WsEvents = {}, { maxMessage = BUFFER_MAX, timeoutMs = 10_000, insecure = false }: WsOptions = {}): Ws {
   const u = new URL(url)
   if (!['ws:', 'wss:'].includes(u.protocol) || u.username || u.password || u.hash || !Array.isArray(protocols) || protocols.length > 16 || protocols.some(p => typeof p !== 'string' || !/^[!#$%&'*+.^_`|~\w-]{1,128}$/.test(p)) || new Set(protocols).size !== protocols.length || !Number.isInteger(maxMessage) || maxMessage < 1 || maxMessage > BUFFER_MAX || typeof insecure !== 'boolean') throw new Error('Invalid WebSocket settings')
   const secure = u.protocol === 'wss:'
   const hostname = u.hostname.replace(/^\[|\]$/g, '')
   const hosts = hostname === 'localhost' ? ['127.0.0.1', '::1'] : [hostname]
-  const queue = []
-  let queuedBytes = 0, socket, request, open = false, closed = false, closeTimer
+  const queue: [number, Buffer][] = []
+  let queuedBytes = 0, open = false, closed = false
+  let socket: Duplex | undefined, request: http.ClientRequest | undefined, closeTimer: NodeJS.Timeout | undefined
   const timer = setTimeout(() => end(1006), timeoutMs)
 
-  const frame = (op, payload) => {
+  const frame = (op: number, payload: Buffer) => {
     const mask = crypto.randomBytes(4), len = payload.length
     const head = Buffer.alloc(len < 126 ? 2 : len < 65536 ? 4 : 10)
     head[0] = 0x80 | op
@@ -40,12 +52,12 @@ function connect(url, headers = {}, protocols = [], on = {}, { maxMessage = BUFF
     for (let i = 0; i < body.length; i++) body[i] ^= mask[i & 3]
     return Buffer.concat([head, mask, body])
   }
-  const write = (op, payload) => {
+  const write = (op: number, payload: Buffer) => {
     if (!socket || socket.destroyed) return false
     if (socket.writableLength + payload.length + 14 > BUFFER_MAX) { end(1009); return false }
     return socket.write(frame(op, payload))
   }
-  function end(code = 1000, reply = true, status) {
+  function end(code = 1000, reply = true, status?: number): void {
     if (closed) return
     closed = true
     open = false
@@ -60,12 +72,13 @@ function connect(url, headers = {}, protocols = [], on = {}, { maxMessage = BUFF
         if (socket.writableLength + 8 <= BUFFER_MAX) socket.write(frame(8, payload))
       }
       socket.end()
-      closeTimer = setTimeout(() => socket.destroy(), 1000)
+      const s = socket
+      closeTimer = setTimeout(() => s.destroy(), 1000)
       closeTimer.unref()
     }
     on.close?.(code, status)
   }
-  const send = (data, binary = false) => {
+  const send = (data: string | Buffer, binary = false) => {
     if (closed) return false
     const payload = typeof data === 'string' ? Buffer.from(data) : Buffer.from(data)
     if (payload.length > maxMessage) { end(1009); return false }
@@ -79,12 +92,12 @@ function connect(url, headers = {}, protocols = [], on = {}, { maxMessage = BUFF
     return write(binary ? 2 : 1, payload)
   }
 
-  const attach = (s, head) => {
+  const attach = (s: Duplex, head: Buffer) => {
     socket = s
     open = true
     clearTimeout(timer)
-    let buf = Buffer.alloc(0), parts = [], partOp = 0, partBytes = 0, partCount = 0
-    const read = () => {
+    let buf: Buffer = Buffer.alloc(0), parts: Buffer[] = [], partOp = 0, partBytes = 0, partCount = 0
+    const read = (): void => {
       while (!closed && buf.length >= 2) {
         const fin = !!(buf[0] & 0x80), op = buf[0] & 15
         if (buf[0] & 0x70 || buf[1] & 0x80 || ![0, 1, 2, 8, 9, 10].includes(op)) return end(1002)
@@ -128,7 +141,7 @@ function connect(url, headers = {}, protocols = [], on = {}, { maxMessage = BUFF
         }
       }
     }
-    const receive = d => {
+    const receive = (d: Buffer): void => {
       if (closed) return
       // Include fragments retained outside buf in the same hard memory ceiling.
       if (buf.length + partBytes + d.length > BUFFER_MAX) return end(1009)
@@ -152,7 +165,7 @@ function connect(url, headers = {}, protocols = [], on = {}, { maxMessage = BUFF
     if (!closed && !s.writableNeedDrain) on.drain?.()
   }
 
-  const attempt = i => {
+  const attempt = (i: number): void => {
     if (closed) return
     const key = crypto.randomBytes(16).toString('base64')
     const accept = crypto.createHash('sha1').update(key + GUID).digest('base64')
@@ -170,7 +183,7 @@ function connect(url, headers = {}, protocols = [], on = {}, { maxMessage = BUFF
       if (res.statusCode !== 101 || res.headers.upgrade?.toLowerCase() !== 'websocket' || !res.headers.connection?.toLowerCase().split(/\s*,\s*/).includes('upgrade') || res.headers['sec-websocket-accept'] !== accept || res.headers['sec-websocket-extensions'] || (selected !== undefined && !protocols.includes(selected))) { s.destroy(); return end(1002, false) }
       attach(s, head)
     })
-    req.on('response', res => { const status = res.statusCode; res.destroy(); end(status === 401 || status === 403 ? 1008 : status === 429 ? 1013 : 1011, false, status) })
+    req.on('response', (res: http.IncomingMessage) => { const status = res.statusCode; res.destroy(); end(status === 401 || status === 403 ? 1008 : status === 429 ? 1013 : 1011, false, status) })
     req.on('error', () => { if (!closed && !open) i + 1 < hosts.length ? attempt(i + 1) : end(1006, false) })
     req.end()
   }
@@ -178,4 +191,3 @@ function connect(url, headers = {}, protocols = [], on = {}, { maxMessage = BUFF
   return { send, close: end, isOpen: () => open && !closed }
 }
 
-module.exports = { connect, BUFFER_MAX }

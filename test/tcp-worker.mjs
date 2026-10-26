@@ -1446,7 +1446,7 @@ try {
     assert.equal(c.state.storage.alarms, alarms, 'the same deadline again writes no alarm')
     await reconstruct(c)
     assert.equal(c.obj.alarmAt, now + TCP_LIMITS.pairMs, 'a woken room knows the alarm it set')
-    const helper = (await import('../plugin/relay/tcp-relay.cjs')).default
+    const helper = await import('../plugin/relay/tcp-relay.mts')
     assert.deepEqual([helper.DATA_MAX, helper.WINDOW_FRAMES, helper.WINDOW_BYTES], [TCP_LIMITS.dataBytes, TCP_LIMITS.creditFrames, TCP_LIMITS.creditBytes])
     console.log("OK broadcast to streams alone; refused and admitted connections write nothing, under no barrier; alarms only when sooner; the helpers' credit window is the server's")
   }

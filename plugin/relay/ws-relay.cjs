@@ -3,8 +3,8 @@
 // the room. Credentials arrive on stdin, never in argv or addresses. Node 20+, no deps.
 'use strict'
 
-const { connect } = require('./ws.cjs')
-const { failure, tokenOK, loopback, run } = require('./tcp-relay.cjs')
+const { connect } = require('./ws.mts')
+const { failure, tokenOK, loopback, run } = require('./tcp-relay.mts')
 
 // The public preview relay's settings, from the plugin on stdin. The
 // browser's socket goes to `local`, on this computer's loopback alone: ws://,

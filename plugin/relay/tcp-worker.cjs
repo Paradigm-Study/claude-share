@@ -3,7 +3,7 @@
 // only the plugin's independent bearer; room credentials arrive once on stdin.
 'use strict'
 
-const { startHost, controlServer, run, roomSettings, roomPost, endpoint, portOK, notify, failure, safeCode } = require('./tcp-relay.cjs')
+const { startHost, controlServer, run, roomSettings, roomPost, endpoint, portOK, notify, failure, safeCode } = require('./tcp-relay.mts')
 const LIMITS = Object.freeze({ peers: 64, sockets: 8, body: 4096, headers: 8192, notifications: 64, timeoutMs: 2000 })
 const ID = /^[A-Za-z0-9_-]{8,40}$/, PID = /^[A-Za-z0-9_-]{1,64}$/
 

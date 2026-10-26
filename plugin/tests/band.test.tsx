@@ -840,7 +840,7 @@ function world(
       const token = headers.authorization?.replace(/^Bearer /, '') ?? ''
       const control = tcpControls.get(token)
       const reply = (status: number) => ({ value: { status, ok: status === 200, headers: {}, text: status === 200 ? '{"ok":true}' : status === 429 ? '{"ok":false,"code":"BUSY"}' : '{"ok":false}' } })
-      // As relay/tcp-relay.cjs's controlServer answers: 403 for a token it doesn't know.
+      // As relay/tcp-relay.mts's controlServer answers: 403 for a token it doesn't know.
       if (!control) return reply(403)
       if (data.op === 'open') {
         if (opts.tcpControl === 'busy') return reply(429)
@@ -859,7 +859,7 @@ function world(
     }
     if (e.url === 'http://127.0.0.1:47001/') {
       const proxy = proxies.find(p => !p.stopped && headers.authorization === `Bearer ${p.config.controlToken}`)
-      // As relay/tcp-relay.cjs's controlServer answers: 403 for a bad token or an Origin, 400 for a command it doesn't take.
+      // As relay/tcp-relay.mts's controlServer answers: 403 for a bad token or an Origin, 400 for a command it doesn't take.
       if (!proxy || headers.origin !== undefined) return { value: { status: 403, ok: false, headers: {}, text: '{"ok":false}' } }
       if (data.op !== 'routes') return { value: { status: 400, ok: false, headers: {}, text: '{"ok":false}' } }
       proxy.posts += 1
@@ -871,7 +871,7 @@ function world(
       return { value: { status: 200, ok: true, headers: {}, text: '{"ok":true}' } }
     }
     if (e.url === 'http://127.0.0.1:43555/') {
-      // As relay/tcp-relay.cjs's controlServer answers: nothing from a helper
+      // As relay/tcp-relay.mts's controlServer answers: nothing from a helper
       // that's gone, 403 for a token it doesn't know.
       const helper = mailboxes.find(m => headers.authorization === `Bearer ${m.config.controlToken}`)
       if (!helper?.alive) throw new Error('connect ECONNREFUSED 127.0.0.1:43555')
@@ -1549,7 +1549,7 @@ test("a message the host's side declines ends its turn here, and its session hea
   const asked = await guestJoined($, on)
   const { post } = await fromAgent($, asked)
   const ride = riding($, 'relay-1', FROM_AGENT)
-  const reason = "scott's computer couldn't take this in (it needs Node 20 or later), so this didn't reach their Claude."
+  const reason = "scott's computer couldn't take this in (it needs Node 22.18 or later), so this didn't reach their Claude."
   asked.lines.push(page(2, [{ seq: 2, type: 'declined', ts: 902, from: HOST, body: { pid: post.pid, who: 'scott', reason } }]))
   expect(await within(asked.clock, () => ride.ended && asked.peerSends.length > 0, 5_000)).toBe(true)
   expect(ride.said).toBe(`_${reason}_`)
@@ -1710,7 +1710,7 @@ test("the host's peer row, the turn it starts and Claude's answer show the teamm
 // their session why (their plugin says it from their joined session).
 for (const [said, opts, words] of [
   ['a Claude Code without a messaging socket', { env: { CLAUDE_CODE_MESSAGING_SOCKET: '' } }, "scott's computer can't take this: its Claude Code can't pass messages between sessions (that needs Claude Code 2.1.304 or later)."],
-  ['no Node for the mailboxes', { mailbox: 'missing' }, "scott's computer couldn't take this in (it needs Node 20 or later), so this didn't reach their Claude."],
+  ['no Node for the mailboxes', { mailbox: 'missing' }, "scott's computer couldn't take this in (it needs Node 22.18 or later), so this didn't reach their Claude."],
   ['a system the helper can\'t run on', { mailbox: 'unsupported' }, "scott's computer can't take messages from other sessions, so this didn't reach their Claude."],
   ["a mailbox that can't open", { mailbox: { open: 409 } }, "scott's computer couldn't take this in, so it didn't reach their Claude."],
   ['a delivery the session refuses', { mailbox: { deliver: 409 } }, "scott's Claude Code didn't take this, so it didn't reach their Claude."],
@@ -1763,7 +1763,7 @@ test("a reload ends the helper the module before started and opens the same mail
   expect(await within(asked.clock, () => commandsOf(asked, 'open').length > 0, 5_000)).toBe(true)
   expect(asked.killed).toEqual([999])
   const kill = asked.spawned.find(s => s.argv[0] === '/bin/sh' && s.input?.includes('ps -o command= -p 999'))
-  expect(kill?.input).toContain('*"/relay/mailbox.cjs --serve"*) kill -TERM 999')
+  expect(kill?.input).toContain('*"/relay/mailbox.cjs --serve"* | *"/relay/mailbox.mts --serve"*) kill -TERM 999')
   expect(commandsOf(asked, 'open')).toEqual([{ op: 'open', box, seat: 'seat2', handle: HANDLE_A }])
   expect(asked.state.mailboxHelper).toEqual({ room: 'http://localhost:8787/room0000000000000002', pid: asked.mailboxes[0]!.pid, port: 43555 })
   await $.command.run({ command: 'stop-sharing', args: '' } as never)
@@ -2644,13 +2644,13 @@ test("no Node to run the TCP worker: each connection is refused at once, the hos
   await $.command.run({ command: 'share-preview', args: '3340 App' } as never)
   const workers = () => asked.spawned.filter(s => s.argv.at(-1)?.endsWith('/relay/tcp-worker.cjs')).length
   const refused = (id: string) => asked.spawned.filter(s => s.argv[0] === 'curl' && s.input?.includes(`/ws/${id}/reject"`))
-  const said = () => asked.toasted.filter(t => t.includes('needs Node on this computer'))
+  const said = () => asked.toasted.filter(t => t.includes('needs Node 22.18 or later on this computer'))
   stream.push({ tcp: { id: 'connection0001', pid: 'pv1', port: 3340 } })
   await asked.clock.advance(1000)
   await eventually(asked.clock, () => refused('connection0001').length)
   stream.length = 0
   expect(refused('connection0001')[0]!.input).toContain('data = "{\\"code\\":\\"CONNECT\\"}"')
-  expect(said()).toEqual(['Forwarding localhost:3340 to teammates needs Node on this computer, and none was found. Install Node; their next connection tries again.'])
+  expect(said()).toEqual(['Forwarding localhost:3340 to teammates needs Node 22.18 or later on this computer, and none was found. Install it; their next connection tries again.'])
   // The next connection starts a worker again: refused the same way, and not said again.
   const before = workers()
   stream.push({ tcp: { id: 'connection0002', pid: 'pv1', port: 3340 } })
@@ -8634,7 +8634,7 @@ test("a window whose proxy can't start again for another reason than its port (n
   await eventually(asked.clock, () => asked.toasted.some(t => t.startsWith('Preview windows need Node')))
   await asked.clock.advance(10)
   // Nothing else opens it (its listeners need Node too).
-  expect(asked.toasted).toContain('Preview windows need Node on this computer. Install Node, then press Open preview again, or choose Public link in Room → Shown.')
+  expect(asked.toasted).toContain('Preview windows need Node 22.18 or later on this computer. Install it, then press Open preview again, or choose Public link in Room → Shown.')
   expect(asked.windowState.kills).toBe(0)
   expect(asked.windowState.alive).toBe(true)
   expect(asked.launches).toHaveLength(0)

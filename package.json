@@ -10,6 +10,7 @@
     "test": "vitest run",
     "typecheck:test": "wrangler types server/worker-configuration.d.ts >/dev/null && tsc -p test/tsconfig.json",
     "test:e2e": "node test/e2e.mjs",
+    "typecheck:relay": "tsc -p plugin/relay/tsconfig.json",
     "typecheck:server": "wrangler types server/worker-configuration.d.ts && tsc -p server/tsconfig.json",
     "lint": "wrangler types server/worker-configuration.d.ts >/dev/null && oxlint --type-aware server/ scripts/",
     "typecheck:scripts": "tsc -p scripts/tsconfig.json"

@@ -4,7 +4,7 @@
 'use strict'
 
 const net = require('net')
-const { bridge, run, vacant, endpoint, portOK, tokenOK, notify, failure, safeCode, UNSUPPORTED_V6, DATA_MAX } = require('./tcp-relay.cjs')
+const { bridge, run, vacant, endpoint, portOK, tokenOK, notify, failure, safeCode, UNSUPPORTED_V6, DATA_MAX } = require('./tcp-relay.mts')
 // A bind the system refuses this user: a port below 1024 on Linux, a sandbox.
 const REFUSED = new Set(['EACCES', 'EPERM'])
 const BIND_TRIES = 8, SOCKETS_MAX = 32

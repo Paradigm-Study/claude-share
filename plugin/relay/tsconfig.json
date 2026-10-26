@@ -1,0 +1,14 @@
+// The relay helpers (plugin/relay/*.mts), which Node 22.18+ runs as they are,
+// its types stripped as each loads: so only erasable TypeScript (no enums,
+// namespaces or parameter properties), and imports name their .mts files.
+// Checked against Node's own types (the repository's @types/node), apart from
+// the plugin's hooks, which are checked against the engine's alone.
+{
+  "compilerOptions": {
+    "target": "es2023", "lib": ["es2023"], "types": ["node"],
+    "module": "nodenext", "moduleResolution": "nodenext",
+    "strict": true, "noEmit": true, "skipLibCheck": true,
+    "erasableSyntaxOnly": true, "verbatimModuleSyntax": true, "allowImportingTsExtensions": true
+  },
+  "include": ["*.mts"]
+}

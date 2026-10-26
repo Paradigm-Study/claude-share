@@ -18,8 +18,8 @@ import { fileURLToPath } from 'node:url'
 import { setTimeout as pause } from 'node:timers/promises'
 import helper from '../plugin/relay/local-preview.cjs'
 import wsHelper from '../plugin/relay/ws-relay.cjs'
-import ws from '../plugin/relay/ws.cjs'
-import tcpRelay from '../plugin/relay/tcp-relay.cjs'
+import * as ws from '../plugin/relay/ws.mts'
+import * as tcpRelay from '../plugin/relay/tcp-relay.mts'
 import { startWorkerd } from './support/workerd.mjs'
 
 const ROOT = fileURLToPath(new URL('../', import.meta.url))
@@ -831,7 +831,7 @@ async function workerChecks() {
   const controlToken = randomBytes(32).toString('hex'), cfg = { room, token: CAP, controlToken, version: VERSION }
   for (const bad of ['{bad', 'x'.repeat(20_000), { ...cfg, extra: 1 }, { ...cfg, token: 'bad' }, { ...cfg, controlToken: CAP }, { ...cfg, token: controlToken }, { ...cfg, controlToken: 'x'.repeat(42) }, { ...cfg, room: room + '/' }, { ...cfg, room: room + '?x=1' }, { ...cfg, room: room.replace('http:', 'ws:') }, { ...cfg, room: room.replace('127.0.0.1', 'other.test') }, { ...cfg, room: room.replace('/api/', '/a/../api/') }, { ...cfg, room: room.replace('http://', 'http://user:pass@') }]) await startupError(bad, 'INVALID_CONFIG', HOST)
   const host = await worker(room), row = { op: 'open', id: 'CH0000000000', pid: 'pv1', port: await freePort() }
-  // The helpers' one control server (tcp-relay.cjs): 403 for the token, Host or Origin; 413 over the 4 KiB body; 400 malformed.
+  // The helpers' one control server (tcp-relay.mts): 403 for the token, Host or Origin; 413 over the 4 KiB body; 400 malformed.
   for (const [options, status] of [[{ headers: { authorization: '' } }, 403], [{ headers: { authorization: `Bearer ${CAP}` } }, 403], [{ headers: { host: `localhost:${host.port}` } }, 403], [{ headers: { origin: '' } }, 403], [{ headers: { origin: 'https://elsewhere.test' } }, 403], [{ method: 'PUT' }, 400], [{ path: '/open' }, 400], [{ headers: { 'content-type': 'text/plain' } }, 400], [{ body: 'x'.repeat(4097) }, 413], [{ body: 'x'.repeat(4097), headers: { 'transfer-encoding': 'chunked' } }, 413], [{ body: '{bad' }, 400], [{ body: Buffer.from([255]) }, 400]]) assert.equal((await ipc(host, row, options)).status, status, JSON.stringify(options).slice(0, 80))
   for (const bad of [null, [], {}, { ...row, id: '../not-an-id' }, { ...row, pid: '' }, { ...row, pid: 'a'.repeat(65) }, { ...row, port: '123' }, { ...row, port: 0 }, { ...row, port: 65536 }, { ...row, token: CAP }, { ...row, url: room }, { op: 'close-preview' }, { op: 'close-preview', pid: 'pv1', port: 1 }, { op: 'reject', id: row.id, code: 'AUTH' }, { op: 'reject', id: row.id, code: 'CONNECT', url: room }]) assert.equal((await ipc(host, bad)).status, 400)
   assert.equal(upgrades.length, 0, 'invalid commands never reach a target')
