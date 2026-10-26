@@ -93,6 +93,7 @@ Out of the box, Share uses `https://claude-share.proud-limit-da0a.workers.dev`, 
 - **Local room recovery:** your machine keeps the room credentials and session state needed to resume in private files under `~/.claude/shared-session/rooms` (under `CLAUDE_CONFIG_DIR` when set). Forwarded previews are recovered by their host and local ports, never by worker-control credentials. Stopping, leaving or consuming a saved checkpoint deletes it. These files are separate from the plugin code and are not uploaded as diagnostics.
 - **Preview window profiles:** a guest's preview window keeps its cookies and sign-ins in a browser profile of its own under `~/.claude/shared-session/browser` (under `CLAUDE_CONFIG_DIR` when set), readable only by you, which is what keeps them private: a Chrome-family window encrypts them with a fixed key rather than one from your Keychain or keyring, so it never asks for those. For a host who is signed in, there is one profile for all of that host's sessions on that server: it is kept when you leave, so you stay signed in to their apps, and deleted after 30 days unused (or delete that folder yourself). Otherwise the profile is the room's: kept while you may come back to the room and deleted when you leave, the room ends, or `/clear` or a logout ends your place; leftovers older than a day are swept at the next session start. Nothing in either is sent anywhere by the plugin.
 - **Finding what a preview needs:** on the host, the plugin lists its own computer's listening ports and the folders their programs run in, and asks those ports for a page, only on that computer. A guest's request for a port goes to the host's live stream and is not kept by the server.
+- **Traces, only on a server that turns them on:** The public server doesn't keep them. A server with traces on keeps the turns of sessions shared by someone signed in, so their team can search them later from Claude Code, and its home page says so. Each turn keeps its prompt, Claude's reply, the names of the tools it ran (not what they were given or answered), when it was, who asked it and who shared the session. Files, pictures, the side chat, reactions and thinking are not kept. A session shared with a team can be searched by anyone in that team, including people who join it later; one shared with no team, by its host alone. A session shared without signing in is not kept. Turns are kept with no end date, and there is no way yet to delete them: deleting your account doesn't. Each turn's words go to Cloudflare's Workers AI to be indexed by meaning. Searching needs a sign-in on that server's page, the same as for teams ([setting it up](#traces-on-your-own-server)).
 - **Who can see it:** anyone with the room's link; for a session shared with a team that keeps its sessions to its people, only people in that team. It's encrypted in transit, not end to end: the server can read what passes through it.
 - **Limits:** per network, 6 new rooms and 30 joins a minute; per room, 20 people, 100 MB of files (10,240 at most), 128 open previews, events (a prompt, a reply's row, a chat line) of 128 KB each and 900 posts a minute; a signed-in account makes at most 30 changes a minute to its teams and invites. A preview's link takes request bodies up to 1 MB and responses up to 20 MB, with 512 requests waiting per room, 32 WebSockets per seat and 128 per room (one the host doesn't take up within 10 seconds closes, and those waiting hold 8 MB per room at most), and 30 new links a minute per seat (120 per room). A room sends out at most 8 GB a day of its files and of what its previews' links answer, and to any one seat at most 256 MB a minute of it. Such a WebSocket closes once 1 MB sent through it waits unread; on Cloudflare, which can't see that, once one side sends more than 4 MB in a second. Forwarded previews have the limits under [Limits](#limits). Abused rooms get ended.
 
@@ -128,6 +129,31 @@ The server runs only on Cloudflare (Workers and Durable Objects). The Node serve
 - **Google:** Google Cloud console → APIs & Services → Credentials → Create credentials → OAuth client ID → Web application. Authorized redirect URI: `https://<your server>/auth/google/callback`. Scopes: `openid email profile`.
 
 On Cloudflare, `npx wrangler secret put GITHUB_CLIENT_ID` (and `GITHUB_CLIENT_SECRET`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`). A server with neither has no sign-in, and teams aren't offered on it.
+
+<a id="traces-on-your-own-server"></a>**Traces on your own server** keep the turns of sessions shared by people signed in, and let them search those turns from Claude Code over MCP. They need teams' sign-in (above), a Postgres database and Workers AI. Without the `TRACES_DB` and `OAUTH_KV` bindings, a server keeps nothing beyond a room's day, and its traces code never loads.
+
+1. Make a Postgres database. Neon works, and its Lakebase Search adds BM25 and a Chinese tokenizer; without it, Chinese is matched by pairs of characters. The database needs the `vector` extension (pgvector).
+2. Make its tables: `TRACES_DATABASE_URL=postgresql://… node scripts/traces-migrate.mjs` (Node 22.18 or newer). It is safe to run again.
+3. Make a Hyperdrive config for it, `npx wrangler hyperdrive create traces --connection-string=postgresql://… --caching-disabled`, with the database's direct host, not a pooler's. Caching off lets a search see a turn as soon as it's kept.
+4. Make a KV namespace for the OAuth grants: `npx wrangler kv namespace create OAUTH_KV`.
+5. Add both, and Workers AI, to `wrangler.toml`:
+
+   ```toml
+   [[hyperdrive]]
+   binding = "TRACES_DB"
+   id = "<the Hyperdrive config's id>"
+
+   [[kv_namespaces]]
+   binding = "OAUTH_KV"
+   id = "<the namespace's id>"
+
+   [ai]
+   binding = "AI"
+   ```
+
+6. Deploy. The home page then says the server keeps turns. Check it does before anyone shares.
+
+Each person then adds the server once: `claude mcp add --transport http shared-session-traces https://<your server>/mcp`. The first search opens a page on the server that asks them to sign in with GitHub or Google and press Allow. Only Claude Code on that computer, or claude.ai, can receive the sign-in. Claude then has four tools: `search` (by words, Chinese included, and by meaning), `get_turn`, `get_session` and `list_sessions`. Each reads only the person's own sessions and their teams' sessions, as their account is at that call: someone who leaves a team, or deletes their account, reads nothing more of it.
 
 **Then point Claude Code at it**, by its `https://` address (plain `http://` works only for a server on the same computer, `localhost` or `127.0.0.1`: anywhere else it would carry everyone's room tokens and sign-ins unencrypted, so the plugin refuses it). Use any one of these:
 

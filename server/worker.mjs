@@ -159,7 +159,7 @@ export default {
 
     if (url.pathname === '/api/health') return json({ ok: true })
     if (url.pathname === '/api/version') return versionInfo()
-    if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/privacy')) return homePage(origin)
+    if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/privacy')) return homePage(origin, { traces: tracesOn(env) })
     // Session traces over MCP, and its OAuth (server/traces/oauth.ts).
     if (tracesOn(env) && env.DIRECTORY) {
       const { isTracesPath, tracesFetch } = await traces()

@@ -192,6 +192,9 @@ try {
   ok(bare.status === 401 && challenge.includes('resource_metadata=') && resourceMeta?.resource === `${S}/mcp` && serverMeta?.authorization_endpoint === `${S}/oauth/authorize` && serverMeta.registration_endpoint === `${S}/oauth/register` && serverMeta.code_challenge_methods_supported?.includes('S256'),
     "MCP without a token: 401 naming the resource's metadata, which names this server's OAuth: registration, authorize, PKCE")
 
+  const home = await (await fetch(`${S}/`)).text()
+  ok(home.includes('<b>Traces, kept on this server:</b>') && home.includes('there is no way yet to delete them'), "the home page says this server keeps turns, for how long, and that they can't be deleted yet")
+
   const alice = await signIn('alice@acme.com', 'Alice')
   const bob = await signIn('bob@other.com', 'Bob')
   ok((await mcp(alice, 'initialize', {})).status === 401, 'an account token from /team is no MCP token')
