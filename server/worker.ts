@@ -417,7 +417,7 @@ export class RoomObject extends DurableObject<ServerEnv> {
     // its outbox for the database to take them.
     this.keeping = Promise.resolve()
     this.keepPending = false
-    state.blockConcurrencyWhile(async () => {
+    void state.blockConcurrencyWhile(async () => {
       this.alarmAt = (await state.storage.getAlarm()) ?? null
       const meta = await state.storage.get<Omit<RoomData, 'events' | 'files'>>('meta')
       if (!meta) { this.cleanupPublic(Date.now()); return }

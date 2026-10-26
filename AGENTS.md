@@ -37,6 +37,7 @@ Facts that matter:
 cd plugin && npx -y -p typescript@5 tsc -p .          # type-check against the engine's API (needs plugin/.claude/types, below)
 npm install                                             # wrangler: the suites that need a room server run the Workers under wrangler dev (test/support/workerd.mjs)
 npm run typecheck:server                                # tsc over the server's TypeScript, strictly (server/tsconfig.json, then server/traces), against the Worker's types alone (wrangler writes them)
+npm run lint                                            # oxlint over server/, type-aware: a promise nobody awaits or catches fails it (.oxlintrc.json)
 claude plugin validate --strict plugin                  # what the engine and the plugin directory check
 claude plugin test plugin                               # plugin/tests: the UI tests (band.test.tsx, desktop and terminal) and the pure modules' (window, preview, proxy, upstream)
 node test/setup.mjs                                     # setup.mjs against a fake CLI and a temporary home, the deploy order included
