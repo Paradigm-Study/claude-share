@@ -24,8 +24,8 @@ import type { RoomContext } from '../server/core/index.ts'
 import { Directory, mapStore } from '../server/teams.ts'
 import worker, { DirectoryObject } from '../server/worker/index.ts'
 import type { ServerEnv } from '../server/worker/index.ts'
-import { startWorkerd } from './support/workerd.mjs'
-import type { Workerd } from './support/workerd.mjs'
+import { startWorkerd } from './support/workerd.ts'
+import type { Workerd } from './support/workerd.ts'
 
 // The server the checks below ask: set before they run.
 let S = ''

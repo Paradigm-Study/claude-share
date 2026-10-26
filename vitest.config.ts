@@ -12,7 +12,7 @@ const WORKERD = ['test/peer.test.ts', 'test/teams.test.ts', 'test/traces.test.ts
 
 export default defineConfig({
   resolve: {
-    alias: { 'cloudflare:workers': fileURLToPath(new URL('./test/support/cloudflare-workers.mjs', import.meta.url)) },
+    alias: { 'cloudflare:workers': fileURLToPath(new URL('./test/support/cloudflare-workers.ts', import.meta.url)) },
   },
   test: {
     pool: 'forks',

@@ -32,7 +32,7 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
           package-manager-cache: false
-      # The room server is the Workers under wrangler dev (test/support/workerd.mjs),
+      # The room server is the Workers under wrangler dev (test/support/workerd.ts),
       # run by the matrix's Node like the suite and the relay helpers it starts.
       - run: npm install --no-package-lock --ignore-scripts
       # Each suite gets its own runner; servers and installer fixtures are local.
