@@ -64,7 +64,7 @@ The default server is [claude-share.proud-limit-da0a.workers.dev](https://claude
 - **Previews in one browser:** a preview page of one session, left open in a browser, can reach the previews of a session that browser opens after it. Close the previews of a session you don't trust before you open another's, or use a server that gives each session's previews a host name of its own ([how](docs/guide.md#host-a-server)).
 - **Moving to the cloud:** a session moved to the cloud sends its project's files, its conversation and its host's Claude token to a container the server starts for that room. The server keeps none of them, and the container is deleted when the session comes home, the room ends, or a week after the move.
 
-Everything else is in [the guide's "Privacy and the public server"](docs/guide.md#privacy-and-the-public-server): every limit, count and expiry, accounts and sign-in, previews and their links, and what stays on your machine.
+Everything else is in [the guide's "Privacy and the public server"](docs/guide.md#privacy-and-the-public-server): every limit, count and expiry, accounts and sign-in, previews and their links, the native subscription pool, and what stays on your machine.
 
 ## Host a server
 
