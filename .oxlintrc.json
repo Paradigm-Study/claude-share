@@ -1,0 +1,27 @@
+// oxlint (npm run lint), on server/ for now: its default correctness rules,
+// and, with --type-aware (oxlint-tsgolint, the TypeScript the tsconfigs
+// name), the rules about promises a Durable Object can't afford to drop.
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "rules": {
+    "typescript/no-floating-promises": "error",
+    "typescript/no-misused-promises": "error",
+    "typescript/await-thenable": "error",
+    // Destructuring to leave a field out names what it leaves out.
+    "no-unused-vars": ["warn", { "ignoreRestSiblings": true }],
+    // `return void (await x)` is this code's way to end a function early.
+    "typescript/no-meaningless-void-operator": "off",
+    // Names, titles and file names have their control characters taken out on purpose.
+    "no-control-regex": "off",
+    // Its spreads copy a Set or Map before a loop that changes it, or turn a
+    // Uint8Array into an array so map() can return strings.
+    "unicorn/no-useless-spread": "off",
+    // A request's values are coerced to strings on purpose, then checked.
+    "typescript/no-base-to-string": "off",
+    "typescript/restrict-template-expressions": "off"
+  },
+  "overrides": [
+    // Search grams are made of code points, on purpose.
+    { "files": ["server/traces/grams.ts"], "rules": { "typescript/no-misused-spread": "off" } }
+  ]
+}

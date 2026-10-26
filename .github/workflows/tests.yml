@@ -69,3 +69,6 @@ jobs:
       # the same types.
       - run: npm install --no-package-lock --ignore-scripts
       - run: npm run typecheck:server
+      # oxlint on server/, with the type-aware rules (oxlint-tsgolint): a
+      # promise nobody awaits or catches fails it (.oxlintrc.json).
+      - run: npm run lint
