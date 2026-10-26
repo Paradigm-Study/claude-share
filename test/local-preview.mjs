@@ -1288,10 +1288,16 @@ async function realChain() {
   // the room's checks proving the host's helper read its acks. 800 frames a
   // second, under the room's 1024 a half (loopback answers far faster than
   // any room across a network, whose round trip bounds a four-frame window).
+  // The room counts in windows of a second, so the bound holds for any
+  // second, not on average: batches of 50, each starting 62.5 ms or more after
+  // the one before, put at most 16 batch starts and one batch's tail in a
+  // second (850). Batches of 400 every 500 ms let a stall bunch one batch's
+  // frames against the next two (about 1,200 in a second), and the room
+  // closed the channel, 1008 "TCP message rate exceeded.".
   {
     const FRAMES = 21_000, began = Date.now()
     let paced = Date.now()
-    const pace = async i => { if (i % 400 === 399) { await pause(Math.max(0, paced + 500 - Date.now())); paced = Date.now() } }
+    const pace = async i => { if (i % 50 === 49) { await pause(Math.max(0, paced + 62.5 - Date.now())); paced = Date.now() } }
     const ping = await wire(raw.port, '127.0.0.1', false)
     let echoed = 0, arrived
     ping.client.on('data', bytes => { echoed += bytes.length; arrived?.() })
