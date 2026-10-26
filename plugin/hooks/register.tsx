@@ -3180,7 +3180,7 @@ async function makeRoom($: $, surface: RenderSurface | undefined, opts: ShareOpt
   const watchOnly = opts.watch ? ', watch-only' : ''
   $.ui.toast(copied.isCopied ? `Sharing${room.team ? ` with ${room.team.name}` : ''}${watchOnly} · link copied` : `Sharing${watchOnly} · the link is in the transcript`)
   const access = room.team ? ((await read($, teamsA)).teams.find(x => x.id === room.team?.id) ?? null) : null
-  $.ui.log(`Sharing${opts.history === false ? ' from now on' : ''}${room.team ? ` with ${room.team.name}` : ''}${watchOnly}. ${whoJoins(room, access)}: ${room.url}`)
+  $.ui.log(`Sharing${opts.history === false ? ' from now on' : ''}${room.team ? ` with ${room.team.name}` : ''}${watchOnly}. ${whoJoins(room, access, opts.watch)}: ${room.url}`)
   if (room.team) void refreshTeams($).catch(() => {})
   void holdRoom($).catch(() => {})
   await markSidebar($, current => `👥 Live · ${current || room.title}`)
@@ -9790,8 +9790,8 @@ async function openExternal($: $, url: string): Promise<boolean> {
 const linkable = (url: string) => /^https:\/\//.test(url) || /^http:\/\/localhost[:/]/.test(url)
 
 // Who can join a room, said plainly.
-function whoJoins(room: ShareRoom, team: ShareTeam | { access?: string } | null): string {
-  if (!room.team) return 'Anyone with this link can join and prompt this session'
+function whoJoins(room: ShareRoom, team: ShareTeam | { access?: string } | null, watch?: boolean): string {
+  if (!room.team) return `Anyone with this link can join and ${watch ? 'watch' : 'prompt'} this session`
   if (team?.access === 'link') return `Everyone in ${room.team.name} sees it in their Team panel, and anyone with the link can join`
   return `Everyone in ${room.team.name} sees it in their Team panel and can join; the link works only for people in ${room.team.name}`
 }
@@ -10540,7 +10540,7 @@ async function shareAsked($: $, choice: string, byLink: boolean, watch: boolean)
     }
     const room = await share($, undefined, { history: choice !== 'new', team: !byLink, watch })
     const team = room.team ? (await read($, teamsA)).teams.find(t => t.id === room.team?.id) ?? null : null
-    return { text: `Sharing this session${choice === 'new' ? ' from now on' : ''}${room.team ? ` with ${room.team.name}` : ''}${watch ? ', watch-only: teammates watch and chat, and only you prompt Claude' : ''}. ${whoJoins(room, team)}: ${room.url}` }
+    return { text: `Sharing this session${choice === 'new' ? ' from now on' : ''}${room.team ? ` with ${room.team.name}` : ''}${watch ? ', watch-only: teammates watch and chat, and only you prompt Claude' : ''}. ${whoJoins(room, team, watch)}: ${room.url}` }
   } catch (error) {
     return { text: `Couldn't share: ${String((error as Error)?.message ?? error)}` }
   }

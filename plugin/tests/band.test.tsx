@@ -1027,6 +1027,7 @@ test('Share asks first what teammates can do; Only watch and chat shares a room 
   expect(asked).toContain('POST /api/rooms')
   expect(asked.posted[0]).toMatchObject({ type: 'policy', body: { prompts: 'watch', approvals: 'edits', files: 'on' } })
   expect(asked.toasted).toContain('Sharing, watch-only · link copied')
+  expect(asked.logged).toContain('Sharing, watch-only. Anyone with this link can join and watch this session: http://localhost:8787/s/room0000000000000002')
   await $.command.run({ command: 'stop-sharing', args: '' } as never)
   // Prompt Claude shares as before: no policy sent.
   const before = asked.posted.length
@@ -1054,7 +1055,7 @@ test('with earlier prompts, Only watch and chat then asks about them, and the ro
 test('/share-session watch shares watch-only at once', async ($, on) => {
   const asked = world(on)
   const said = await $.command.run({ command: 'share-session', args: 'watch' } as never)
-  expect(JSON.stringify(said)).toContain('watch-only')
+  expect(said).toEqual({ text: 'Sharing this session, watch-only: teammates watch and chat, and only you prompt Claude. Anyone with this link can join and watch this session: http://localhost:8787/s/room0000000000000002' })
   await asked.clock.advance(200)
   expect(asked.posted.filter(e => e.type === 'policy').map(e => e.body)).toEqual([{ prompts: 'watch', approvals: 'edits', files: 'on' }])
   await $.command.run({ command: 'stop-sharing', args: '' } as never)
