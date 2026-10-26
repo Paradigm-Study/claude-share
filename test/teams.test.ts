@@ -283,7 +283,7 @@ describe('on the room server', () => {
     S = (process.env.TEAMS_SERVER ?? srv!.origin).replace(/\/+$/, '')
   })
   afterAll(() => srv?.stop())
-  test('sign-in and its Continue, teams, who joins by domain and invite, members-only sessions, the access setting, the list, leaving and deleting', async () => {
+  test('sign-in requires its matching Continue, including in a real browser', async () => {
     ok((await call('/api/auth/providers')).data.providers.some((p: any) => p.id === 'test'), 'test provider listed')
     // A start link someone else made: its maker chose the login (the hash of
     // their own secret), so finishing the provider's sign-in in the victim's
@@ -316,6 +316,12 @@ describe('on the room server', () => {
       ok(says((await call(`/auth/test/start?login=${'A'.repeat(64)}&email=x@acme.com`)).data, "This sign-in link isn't complete"), "a login that isn't a SHA-256 in hex is refused at the start")
     }
     await continueInChrome()
+  })
+
+  // Browser startup and the Continue timing scenarios have their own test
+  // budget. They must not consume the team journey's time for real Worker
+  // requests, or a slow browser hides which independent journey timed out.
+  test('teams, who joins by domain and invite, members-only sessions, the access setting, the list, leaving and deleting', async () => {
     const alice = await signIn('alice@acme.com', 'Alice')
     const team = (await call('/api/teams', { method: 'POST', tok: alice, body: { name: 'Acme' } })).data.team
     ok(team?.role === 'owner' && team.access === 'members', 'Alice makes Acme, members only')
