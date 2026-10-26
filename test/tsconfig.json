@@ -1,0 +1,7 @@
+// The suites in test/, checked as the server is (server/tsconfig.json), with
+// Node's types: they run on Node, under Vitest (npm run typecheck:test).
+{
+  "extends": "../server/tsconfig.json",
+  "compilerOptions": { "types": ["node"] },
+  "include": ["**/*.ts", "../vitest.config.ts"]
+}

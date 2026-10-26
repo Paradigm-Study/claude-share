@@ -40,7 +40,7 @@ npm run typecheck:server                                # tsc over the server's 
 npm run lint                                            # oxlint over server/, type-aware: a promise nobody awaits or catches fails it (.oxlintrc.json)
 claude plugin validate --strict plugin                  # what the engine and the plugin directory check
 claude plugin test plugin                               # plugin/tests: the UI tests (band.test.tsx, desktop and terminal) and the pure modules' (window, preview, proxy, upstream)
-node test/setup.mjs                                     # setup.mjs against a fake CLI and a temporary home, the deploy order included
+npm run typecheck:test && npm test                      # the suites moved to Vitest (test/*.test.ts), strictly typed: setup.mjs against a fake CLI and a temporary home, the deploy order included
 node test/local-preview.mjs                             # TCP helpers through the real Workers under wrangler dev; real Chrome and Firefox preview windows and their WebRTC when installed
 node test/browser-proxy.mjs                             # the preview window's SOCKS5 helper, its DNS-over-HTTPS against a local TLS fixture (openssl for the test CA)
 node test/discover.mjs                                  # same-project service discovery, and who holds a port
