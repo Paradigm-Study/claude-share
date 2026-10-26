@@ -16,6 +16,7 @@ import { afterAll, beforeAll, describe, test } from 'vitest'
 import { Room, FILE_UPLOADS, LIMITS, PLUGIN_LATEST, ROOMS_PER_ADDRESS_DAY, SEAT_POLLS, SEAT_STREAMS, SERVE_LIMITS, landingPage, roomRequest, token } from '../server/core/index.ts'
 import worker, { DirectoryObject, GateObject, RoomObject } from '../server/worker.ts'
 import type { ServerEnv } from '../server/worker.ts'
+import { Storage, State, asState, installRuntime } from './support/durable.ts'
 
 const SAVE = fileURLToPath(new URL('../plugin/relay/save.sh', import.meta.url))
 const REAL = fileURLToPath(new URL('../plugin/relay/real.sh', import.meta.url))
@@ -204,59 +205,11 @@ test('uploads at once count against a room\'s 100 MB together, four read at a ti
 
 // On the Worker: the directory object tells a members-only team's room
 // objects whom it has now, and a room lets the others go and closes their
-// streams; nothing from outside can say it. Stubs as test/peer.mjs has them.
+// streams; nothing from outside can say it. The stubs are test/support/durable.ts's.
 describe('on the Worker', () => {
-  const NativeResponse = globalThis.Response
-  class Socket {
-    sent: unknown[] = []
-    closes: { code?: number, reason?: string }[] = []
-    tags: string[] = []
-    attachment: unknown = null
-    send(data: unknown) { if (this.closes.length) throw new Error('closed'); this.sent.push(structuredClone(data)) }
-    close(code?: number, reason?: string) { this.closes.push({ code, reason }) }
-    serializeAttachment(att: unknown) { this.attachment = structuredClone(att) }
-    deserializeAttachment() { return structuredClone(this.attachment) }
-  }
-  // What the Worker's code takes from workerd: a WebSocketPair, and a 101
-  // Response carrying its socket.
-  const runtime = globalThis as unknown as { WebSocketPair: unknown, Response: unknown }
-  beforeAll(() => {
-    runtime.WebSocketPair = class { 0 = new Socket(); 1 = new Socket() }
-    runtime.Response = class extends NativeResponse {
-      constructor(body?: BodyInit | null, options: ResponseInit & { webSocket?: unknown } = {}) {
-        super(body, options.status === 101 ? { ...options, status: 200 } : options)
-        if (options.status === 101) Object.defineProperty(this, 'status', { value: 101 })
-        if (options.webSocket) Object.defineProperty(this, 'webSocket', { value: options.webSocket })
-      }
-    }
-  })
-  afterAll(() => { runtime.Response = NativeResponse })
-  class Storage {
-    data = new Map<string, any>()
-    alarm: number | null = null
-    async get(key: string | string[]): Promise<unknown> {
-      if (Array.isArray(key)) return new Map(key.filter(k => this.data.has(k)).map(k => [k, structuredClone(this.data.get(k))]))
-      return structuredClone(this.data.get(key))
-    }
-    async put(key: string | Record<string, unknown>, value?: unknown) { for (const [k, v] of typeof key === 'string' ? [[key, value] as const] : Object.entries(key)) this.data.set(k, structuredClone(v)) }
-    async list({ prefix = '' } = {}) { return new Map([...this.data].filter(([k]) => k.startsWith(prefix)).sort(([a], [b]) => a.localeCompare(b)).map(([k, v]) => [k, structuredClone(v)])) }
-    async delete(keys: string | string[]) { for (const key of Array.isArray(keys) ? keys : [keys]) this.data.delete(key) }
-    async deleteAll() { this.data.clear() }
-    async setAlarm(at: number) { this.alarm = at }
-    async getAlarm() { return this.alarm }
-    async transaction<T>(fn: (txn: Storage) => T) { return fn(this) }
-  }
-  class State {
-    id = (hex => ({ toString: () => hex }))(randomBytes(32).toString('hex'))
-    storage = new Storage()
-    sockets: Socket[] = []
-    barrier: Promise<unknown> = Promise.resolve()
-    blockConcurrencyWhile<T>(fn: () => T) { const result = this.barrier.then(fn); this.barrier = result.catch(() => {}); return result }
-    acceptWebSocket(ws: Socket, tags: string[]) { ws.tags = tags; this.sockets.push(ws) }
-    getWebSockets(tag?: string) { return this.sockets.filter(ws => !tag || ws.tags.includes(tag)) }
-  }
-  // The stubs stand in for workerd's types where the server's code takes them.
-  const asState = (state: State | { storage: Storage }) => state as unknown as DurableObjectState
+  let restore = () => {}
+  beforeAll(() => { restore = installRuntime() })
+  afterAll(() => restore())
   const env = { AUTH_TEST: '1', PUBLIC_URL: 'https://share.test', JOIN_LIMIT: { limit: async () => ({ success: true }) } } as unknown as ServerEnv
   const objects = new Map<string, { state: State, obj: RoomObject }>()
   const roomObject = async (id: string) => {

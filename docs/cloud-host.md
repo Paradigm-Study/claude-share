@@ -58,7 +58,7 @@ The room's end, its expiry, and the approver leaving for good stop the runner.
   it hands the runner its configuration and the packed session over the
   container's own port, never a public address, and keeps nothing after.
 - **Tests**: `wrangler dev` builds the image from `cloud/Dockerfile` with
-  Docker (`CLOUD_DOCKER=1 node test/cloud.mjs`).
+  Docker (`CLOUD_DOCKER=1 npx vitest run test/cloud.test.ts`).
 - **The image** is built once and kept in this project's Cloudflare registry,
   so deploying needs no Docker (`scripts/push-image.ts` makes a new one after
   `cloud/` changes). It doesn't change with releases: the runner takes the
