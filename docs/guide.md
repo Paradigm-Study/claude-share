@@ -264,7 +264,6 @@ node test/peer.mjs
 node test/mailbox.mjs
 node test/tcp-worker.mjs
 node test/teams.mjs
-node test/security.mjs
 claude plugin test plugin
 ```
 ```bash
