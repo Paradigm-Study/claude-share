@@ -999,7 +999,15 @@ async function listenerChecks() {
     assert.deepEqual(knocks.filter(k => k.port === wanted).map(k => k.host).sort(), ['127.0.0.1', '::1'], 'both families are knocked on')
     assert.equal(run.port === wanted, free, `knock ${v4}/${v6}`)
     // A taken one moves to port 0, whose own number is knocked on ::1 alone.
-    assert.deepEqual(knocks.filter(k => k.port !== wanted), free ? [] : [{ host: '::1', port: run.port }])
+    // The number the system gives on 127.0.0.1 can be held on ::1 by another
+    // process (a busy CI runner): that attempt rolls back and asks again, so
+    // each such number is knocked on, and the last is the one it listens on.
+    const moved = knocks.filter(k => k.port !== wanted)
+    if (free) assert.deepEqual(moved, [])
+    else {
+      assert.ok(moved.length >= 1 && moved.every(k => k.host === '::1'), JSON.stringify(moved))
+      assert.equal(moved.at(-1).port, run.port)
+    }
     if (v4 === 'silent' || v6 === 'silent') assert.ok(Date.now() - began >= 280, 'an unanswered knock waits out its deadline')
     else assert.ok(Date.now() - began < 280, 'knocks run in parallel and answer at once')
     await run.close()
