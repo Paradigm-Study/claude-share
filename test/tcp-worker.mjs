@@ -12,7 +12,10 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Room, PLUGIN_LATEST, TCP_LIMITS, PUBLIC_LIMITS, LIMITS, NEED_LIMIT, SEAT_TIMEOUT_MS, limitOf, token, tcpAdmit, tcpState, tcpReserve, tcpRefund, chargeControl, tcpRelay, previewSocketTarget, previewRequest, bodyLimit, EVENT_BYTES } from '../server/core.mjs'
 import { BODY_CHARS } from '../server/teams.mjs'
-import worker, { RoomObject } from '../server/worker.mjs'
+import './support/cloudflare.mjs'
+
+// After the stand-in for `cloudflare:workers` is registered.
+const { default: worker, RoomObject } = await import('../server/worker.mjs')
 
 const NativeResponse = globalThis.Response, nativeNow = Date.now
 const NativePair = globalThis.WebSocketPair

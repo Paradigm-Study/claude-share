@@ -15,6 +15,7 @@ import { spawn } from 'node:child_process'
 import { once } from 'node:events'
 import { randomBytes } from 'node:crypto'
 import { PLUGIN_LATEST, PEER_LIMIT, PEER_HANDLE, PEER_STATUS, PEER_DROPS, streamedRoomBody, homePage, token } from '../server/core.mjs'
+import './support/cloudflare.mjs'
 
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms))
 const HANDLE = 'a1'.repeat(16)

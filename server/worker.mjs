@@ -16,7 +16,11 @@
 // Accounts and teams (server/teams.mjs) live in one more Durable Object, the
 // directory: sign-in, teams and their lists of sessions. Rooms ask it who may
 // share with a team and join one; it asks rooms how they are when listing.
+// They call each other's methods (Durable Object RPC), never a path: what
+// only the objects say to each other has no URL the Worker could forward.
+// The paths of the version before RPC stay for one release (__team, /rpc/).
 
+import { DurableObject } from 'cloudflare:workers'
 import {
   Room,
   ROOM_ID,
@@ -200,7 +204,7 @@ export default {
     if (!ROOM_ID.test(id)) return notFound()
     // Previews have a host name of their own: this origin serves none, page
     // or socket (only previewFetch makes these paths, by the room's key);
-    // nor does it take what the directory tells a room (__team).
+    // nor does it take what an older directory tells a room (__team).
     if (rest.startsWith('__')) return notFound()
     const limit = limitOf(req, id, rest, req.headers.get('cf-connecting-ip') ?? 'unknown')
     const limiter = limit && { create: env.CREATE_LIMIT, join: env.JOIN_LIMIT, events: env.EVENTS_LIMIT }[limit.kind]
@@ -283,8 +287,9 @@ async function bridge(stub, id, url, headers) {
   })
 }
 
-export class RoomObject {
+export class RoomObject extends DurableObject {
   constructor(state, env) {
+    super(state, env)
     this.state = state
     this.env = env
     this.room = null
@@ -395,6 +400,19 @@ export class RoomObject {
     return files
   }
 
+  // The directory: a members-only team's people now (DirectoryObject's keepTeam).
+  async keepTeam(team, allowed) {
+    if (this.room?.keepTeam(String(team ?? ''), Array.isArray(allowed) ? allowed.map(String) : [], Date.now())) await this.persist()
+  }
+
+  // The directory: how this room is, for a team's list (what GET /api/rooms/:id
+  // answers), or nothing once it's gone.
+  async info() {
+    if (!this.room) return null
+    const res = await this.fetch(new Request(`https://room.internal/${this.room.id}/`))
+    return res.ok ? res.json() : null
+  }
+
   async fetch(req) {
     const url = new URL(req.url)
     const origin = req.headers.get('x-share-origin') ?? url.origin
@@ -425,10 +443,11 @@ export class RoomObject {
 
     const room = this.room
     if (preview ? id !== room.previewKey : id !== room.id) return preview ? previewMissing() : notFound()
-    // The directory: a members-only team's people now (DirectoryObject's keepTeam).
+    // A directory of the version before RPC tells a room by this path: kept
+    // while a deploy runs both versions. Remove it in the release after.
     if (rest === '__team' && req.method === 'POST') {
       const body = await req.json().catch(() => ({}))
-      if (room.keepTeam(String(body.team ?? ''), Array.isArray(body.allowed) ? body.allowed.map(String) : [], now)) await this.persist()
+      await this.keepTeam(body.team, body.allowed)
       return json({ ok: true })
     }
     // What expired is swept by the alarm, and by roomRequest for ordinary
@@ -1164,22 +1183,17 @@ async function keyedHash(secret, text) {
 // The one directory of accounts and teams.
 const directoryStub = env => env.DIRECTORY.get(env.DIRECTORY.idFromName('directory'))
 
-// What a room asks the directory, over its stub (paths the Worker never
-// forwards from outside).
-const DIRECTORY_CALLS = ['shareCheck', 'joinCheck', 'register', 'unregister', 'roomEnded', 'teamAccess', 'sessionInvite', 'whoIs']
-function directoryClient(env) {
-  if (!env?.DIRECTORY) return null
-  const call = name => async (...args) => {
-    const res = await directoryStub(env).fetch(`https://directory.internal/rpc/${name}`, { method: 'POST', body: JSON.stringify(args) })
-    const data = await res.json()
-    if (!res.ok) throw new Error(data.error ?? `directory: HTTP ${res.status}`)
-    return data.result
-  }
-  return Object.fromEntries(DIRECTORY_CALLS.map(name => [name, call(name)]))
-}
+// What a room asks the directory: its stub, whose methods are the
+// DirectoryObject's below.
+const directoryClient = env => env?.DIRECTORY ? directoryStub(env) : null
 
-export class DirectoryObject {
+// What a room of the version before RPC asks, over /rpc/<name> on the stub
+// (paths the Worker never forwards from outside). Remove these with __team.
+const DIRECTORY_CALLS = ['shareCheck', 'joinCheck', 'register', 'unregister', 'roomEnded', 'teamAccess', 'sessionInvite', 'whoIs']
+
+export class DirectoryObject extends DurableObject {
   constructor(state, env) {
+    super(state, env)
     this.state = state
     const storage = state.storage
     const kv = {
@@ -1188,17 +1202,28 @@ export class DirectoryObject {
       delete: key => storage.delete(key),
       list: async prefix => [...(await storage.list({ prefix })).entries()],
     }
+    // A room of the version before RPC has neither method below, so each
+    // falls back to that version's path while a deploy runs both versions.
     // How a room is, for a team's list: its own info, or nothing once it's gone.
     const roomInfo = async id => {
       if (!ROOM_ID.test(id)) return null
-      const res = await env.ROOMS.get(env.ROOMS.idFromName(id)).fetch(`https://room.internal/${id}/`)
-      return res.ok ? res.json() : null
+      const room = env.ROOMS.get(env.ROOMS.idFromName(id))
+      try {
+        return await room.info()
+      } catch {
+        const res = await room.fetch(`https://room.internal/${id}/`)
+        return res.ok ? res.json() : null
+      }
     }
-    // A members-only team's people now, for its room to let the others go
-    // (a path the Worker never forwards from outside).
+    // A members-only team's people now, for its room to let the others go.
     const keepTeam = async (id, team, allowed) => {
       if (!ROOM_ID.test(id)) return
-      await env.ROOMS.get(env.ROOMS.idFromName(id)).fetch(`https://room.internal/${id}/__team`, { method: 'POST', body: JSON.stringify({ team, allowed }) })
+      const room = env.ROOMS.get(env.ROOMS.idFromName(id))
+      try {
+        await room.keepTeam(team, allowed)
+      } catch {
+        await room.fetch(`https://room.internal/${id}/__team`, { method: 'POST', body: JSON.stringify({ team, allowed }) })
+      }
     }
     // What's timed goes when it's due: the alarm is set for the soonest.
     const onDue = at => void this.wakeAt(at).catch(() => {})
@@ -1214,6 +1239,16 @@ export class DirectoryObject {
     const next = await this.directory.sweep(Date.now())
     if (next) await this.wakeAt(next)
   }
+
+  // What a room asks (Directory's own methods, the same names).
+  shareCheck(teamId, tokenText) { return this.directory.shareCheck(teamId, tokenText) }
+  joinCheck(teamId, tokenText) { return this.directory.joinCheck(teamId, tokenText) }
+  whoIs(tokenText) { return this.directory.whoIs(tokenText) }
+  teamAccess(teamId) { return this.directory.teamAccess(teamId) }
+  sessionInvite(tokenText, room, to) { return this.directory.sessionInvite(tokenText, room, to) }
+  roomEnded(roomId, teamId) { return this.directory.roomEnded(roomId, teamId) }
+  register(teamId, room) { return this.directory.register(teamId, room) }
+  unregister(teamId, roomId) { return this.directory.unregister(teamId, roomId) }
 
   async fetch(req) {
     const url = new URL(req.url)

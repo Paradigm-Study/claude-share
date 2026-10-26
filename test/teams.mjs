@@ -20,6 +20,7 @@ import { homedir, tmpdir } from 'node:os'
 import { basename, join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { PLUGIN_LATEST } from '../server/core.mjs'
+import './support/cloudflare.mjs'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const PORT = Number(process.env.TEAMS_PORT ?? 8899)
@@ -806,7 +807,7 @@ try {
   const storage = { get: async k => kept.get(k), put: async (k, v) => void kept.set(k, v), delete: async k => kept.delete(k), list: async ({ prefix }) => new Map([...kept].filter(([k]) => k.startsWith(prefix))) }
   const env = { AUTH_TEST: '1', PUBLIC_URL: 'https://share.test', JOIN_LIMIT: { limit: async () => ({ success: true }) } }
   const object = new DirectoryObject({ storage }, env)
-  env.DIRECTORY = { idFromName: name => name, get: () => ({ fetch: req => object.fetch(req) }) }
+  env.DIRECTORY = { idFromName: name => name, get: () => object }
   const at = (path, init) => worker.fetch(new Request(`https://share.test${path}`, init), env)
   const verifier = secret()
   const login = sha(verifier)
