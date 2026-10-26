@@ -3,6 +3,10 @@
 // WebSocket hibernation, the rate limit bindings simulated). Two processes,
 // since `wrangler dev` serves only its first Worker on a port; the preview
 // Worker reaches the main one's RoomObject through wrangler's dev registry.
+// That registry is this run's own (WRANGLER_REGISTRY_PATH, in its folder):
+// wrangler's default is one per machine, where Workers find each other by
+// name, so two runs at once (two suites, two sessions) would reach each
+// other's Workers, which have the same names.
 //
 // The configs are wrangler.toml and wrangler.preview.toml with what needs a
 // Cloudflare login left out (the cloud host's container image, kept in the
@@ -79,7 +83,7 @@ export async function startWorkerd({ vars = {}, quiet = true, containers = false
     const args = ['dev', '-c', config, '--ip', '127.0.0.1', '--port', String(p), '--inspector-port', '0',
       '--persist-to', join(dir, 'state'), '--show-interactive-dev-session=false', '--log-level', quiet ? 'warn' : 'log',
       ...Object.entries(all).flatMap(([k, v]) => ['--var', `${k}:${v}`])]
-    const child = spawn(process.execPath, [WRANGLER, ...args], { cwd: dir, env: { ...process.env, WRANGLER_SEND_METRICS: 'false', CI: '1' }, stdio: ['ignore', 'pipe', 'pipe'] })
+    const child = spawn(process.execPath, [WRANGLER, ...args], { cwd: dir, env: { ...process.env, WRANGLER_SEND_METRICS: 'false', CI: '1', WRANGLER_REGISTRY_PATH: join(dir, 'registry') }, stdio: ['ignore', 'pipe', 'pipe'] })
     child.stdout.on('data', b => { output += b })
     child.stderr.on('data', b => { output += b })
     return child

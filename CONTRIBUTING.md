@@ -8,7 +8,7 @@ Use Node.js 22.18 or later on macOS or Linux, and run `npm install` once: the su
 
 ```sh
 npm install
-node test/setup.mjs
+npm test
 node test/teams.mjs
 node test/tcp-worker.mjs
 node test/local-preview.mjs

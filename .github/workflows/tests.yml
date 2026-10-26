@@ -23,7 +23,7 @@ jobs:
       matrix:
         # The oldest Node the project supports (package.json engines), and the newest LTS.
         node: ['22.18', 24]
-        suite: [setup, teams, tcp-worker, local-preview, previews, peer, mailbox, browser-proxy, discover, security, cloud]
+        suite: [teams, tcp-worker, local-preview, previews, peer, mailbox, browser-proxy, discover, security, cloud]
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -45,6 +45,28 @@ jobs:
       # preview.test.ts, proxy.test.ts, upstream.test.ts) need Claude Code and
       # run with `claude plugin test plugin`, not here; see CONTRIBUTING.md.
       - run: node test/${{ matrix.suite }}.mjs
+
+  vitest:
+    name: vitest / Node ${{ matrix.node }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['22.18', 24]
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: ${{ matrix.node }}
+          package-manager-cache: false
+      - run: npm install --no-package-lock --ignore-scripts
+      # The suites moved to Vitest (test/*.test.ts, vitest.config.ts), checked
+      # strictly first; the others run above until they move.
+      - run: npm run typecheck:test
+      - run: npm test
 
   server-types:
     name: server types
