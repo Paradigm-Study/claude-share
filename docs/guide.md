@@ -246,7 +246,7 @@ Each person then adds the server once: `claude mcp add --transport http shared-s
 | `server/core/` | Room logic and the link page |
 | `server/worker/`, `wrangler.toml` | Cloudflare Workers and Durable Objects |
 | `plugin/relay/` | Helpers run under Node: TCP forwarding (`local-preview.cjs`, `tcp-worker.cjs`, `tcp-relay.mts`), the public preview's WebSockets (`ws-relay.cjs`, over the WebSocket client in `ws.mts`), the preview window's proxy (`browser-proxy.cjs`), same-project discovery (`discover.cjs`), messages between sessions (`mailbox.cjs`, `receipt.cjs`) |
-| `test/e2e.mjs` | End to end: a real host and guests through a server |
+| `test/e2e.ts` | End to end: a real host and guests through a server |
 
 ```bash
 npm install && npx wrangler dev
@@ -265,7 +265,7 @@ node test/tcp-worker.mjs
 claude plugin test plugin
 ```
 ```bash
-CLAUDE_BIN=$(which claude) node test/e2e.mjs
+CLAUDE_BIN=$(which claude) node test/e2e.ts
 ```
 
 Add `EXTERNAL_SERVER=1 SHARE_SERVER=https://your-server` to run it against a deployed server instead of a local one, or `SHARED_SESSION_TRANSPORT=poll` to test the polling fallback. The no-model TCP checks also accept an external server: with `wrangler dev --local` running, use `EXTERNAL_SERVER=1 SHARE_SERVER=http://127.0.0.1:8787 node test/local-preview.mjs` to exercise the actual Worker runtime.
