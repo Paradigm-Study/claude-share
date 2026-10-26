@@ -106,6 +106,10 @@ async function freePort() {
   }
   throw new Error('Could not reserve a dual-stack test port')
 }
+// Whether anything listens at host:port. A port the helpers released is
+// checked so, never by binding it again: an OS-assigned number can be held
+// meanwhile by another socket (a busy runner's, or one of this test's own
+// outgoing connections, whose source ports come from the same range).
 const answers = (host, port) => new Promise(resolve => {
   const socket = net.createConnection({ host, port })
   const done = value => { socket.destroy(); resolve(value) }
@@ -949,10 +953,10 @@ async function listenerChecks() {
   if (ipv6) {
     const busy6 = track(net.createServer(s => s.end('IPv6 listener'))), busy6Port = await listen(busy6, '::1')
     await startupError(dummy(busy6Port), 'EADDRINUSE')
-    const rolledBack = track(net.createServer()); await listen(rolledBack, '127.0.0.1', busy6Port); await close(rolledBack)
+    assert.equal(await answers('127.0.0.1', busy6Port), false, 'the IPv4 half was rolled back')
     const fallback = await ready({ ...dummy(busy6Port), strict: false })
     assert.notEqual(fallback.port, busy6Port)
-    const stillFree4 = track(net.createServer()); await listen(stillFree4, '127.0.0.1', busy6Port); await close(stillFree4)
+    assert.equal(await answers('127.0.0.1', busy6Port), false, 'the fallback left the IPv4 number free')
     await stop(fallback)
     const original = await wire(busy6Port, '::1'); await until(() => original.closed, 'unrelated IPv6 listener')
     assert.equal(original.bytes.toString(), 'IPv6 listener')
@@ -999,7 +1003,15 @@ async function listenerChecks() {
     assert.deepEqual(knocks.filter(k => k.port === wanted).map(k => k.host).sort(), ['127.0.0.1', '::1'], 'both families are knocked on')
     assert.equal(run.port === wanted, free, `knock ${v4}/${v6}`)
     // A taken one moves to port 0, whose own number is knocked on ::1 alone.
-    assert.deepEqual(knocks.filter(k => k.port !== wanted), free ? [] : [{ host: '::1', port: run.port }])
+    // The number the system gives on 127.0.0.1 can be held on ::1 by another
+    // process (a busy CI runner): that attempt rolls back and asks again, so
+    // each such number is knocked on, and the last is the one it listens on.
+    const moved = knocks.filter(k => k.port !== wanted)
+    if (free) assert.deepEqual(moved, [])
+    else {
+      assert.ok(moved.length >= 1 && moved.every(k => k.host === '::1'), JSON.stringify(moved))
+      assert.equal(moved.at(-1).port, run.port)
+    }
     if (v4 === 'silent' || v6 === 'silent') assert.ok(Date.now() - began >= 280, 'an unanswered knock waits out its deadline')
     else assert.ok(Date.now() - began < 280, 'knocks run in parallel and answer at once')
     await run.close()
@@ -1024,7 +1036,7 @@ async function listenerChecks() {
   assert.ok(knockedAt.length >= 2 && knockedAt.every(k => k.host === '::1'), `port 0 knocks ::1 alone, once a number: ${JSON.stringify(knockedAt)}`)
   assert.notEqual(passedOver.port, answering, 'a number answering on ::1 is passed over')
   assert.equal(knockedAt.at(-1).port, passedOver.port)
-  for (const host of ipv6 ? ['127.0.0.1', '::1'] : ['127.0.0.1']) { const rolled = track(net.createServer()); await listen(rolled, host, answering); await close(rolled) }
+  for (const host of ipv6 ? ['127.0.0.1', '::1'] : ['127.0.0.1']) assert.equal(await answers(host, answering), false, `the passed-over number was rolled back on ${host}`)
   await passedOver.close()
   // Port 0 (non-strict only) takes one OS-assigned port and binds both families on it.
   const ephemeral = await ready({ ...cfg, port: 0, strict: false })
@@ -1044,7 +1056,7 @@ async function listenerChecks() {
   assert.equal(made, 4)
   assert.ok(Number.isInteger(firstPort) && retried.port !== firstPort)
   assert.equal(retried.ipv6, ipv6)
-  const releasedFirst = track(net.createServer()); await listen(releasedFirst, '127.0.0.1', firstPort); await close(releasedFirst)
+  assert.equal(await answers('127.0.0.1', firstPort), false, 'the first number was released')
   await retried.close()
   const good = await ready(cfg)
   assert.equal(good.port, preferred)
@@ -1288,10 +1300,16 @@ async function realChain() {
   // the room's checks proving the host's helper read its acks. 800 frames a
   // second, under the room's 1024 a half (loopback answers far faster than
   // any room across a network, whose round trip bounds a four-frame window).
+  // The room counts in windows of a second, so the bound holds for any
+  // second, not on average: batches of 50, each starting 62.5 ms or more after
+  // the one before, put at most 16 batch starts and one batch's tail in a
+  // second (850). Batches of 400 every 500 ms let a stall bunch one batch's
+  // frames against the next two (about 1,200 in a second), and the room
+  // closed the channel, 1008 "TCP message rate exceeded.".
   {
     const FRAMES = 21_000, began = Date.now()
     let paced = Date.now()
-    const pace = async i => { if (i % 400 === 399) { await pause(Math.max(0, paced + 500 - Date.now())); paced = Date.now() } }
+    const pace = async i => { if (i % 50 === 49) { await pause(Math.max(0, paced + 62.5 - Date.now())); paced = Date.now() } }
     const ping = await wire(raw.port, '127.0.0.1', false)
     let echoed = 0, arrived
     ping.client.on('data', bytes => { echoed += bytes.length; arrived?.() })
