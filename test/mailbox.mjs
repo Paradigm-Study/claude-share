@@ -1,5 +1,5 @@
 // No model or product accounts. The host's mailboxes' helper
-// (plugin/relay/mailbox.cjs) and the receipt writer (receipt.cjs), against a
+// (plugin/relay/mailbox.mts) and the receipt writer (receipt.mts), against a
 // stand-in for the host session's own socket and a stand-in room: the frames
 // it writes into the session byte for byte (the teammate's session's hop
 // chain and message id, no auth line), what it posts for the session's
@@ -19,8 +19,8 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const require = createRequire(import.meta.url)
-const MAILBOX = fileURLToPath(new URL('../plugin/relay/mailbox.cjs', import.meta.url))
-const RECEIPT = fileURLToPath(new URL('../plugin/relay/receipt.cjs', import.meta.url))
+const MAILBOX = fileURLToPath(new URL('../plugin/relay/mailbox.mts', import.meta.url))
+const RECEIPT = fileURLToPath(new URL('../plugin/relay/receipt.mts', import.meta.url))
 const mb = require(MAILBOX)
 const rc = require(RECEIPT)
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms))

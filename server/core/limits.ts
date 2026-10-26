@@ -179,7 +179,7 @@ export const NEED_LIMIT = Object.freeze({ limit: 20, periodMs: 60_000, bodyBytes
 // Messages between a teammate's own sessions and the host's session. A
 // teammate's joined session passes on what one of their sessions wrote to it,
 // and receipts for what the host's session wrote back; the host's mailboxes'
-// helper (relay/mailbox.cjs) passes on what the host's session wrote to a
+// helper (relay/mailbox.mts) passes on what the host's session wrote to a
 // mailbox, and receipts for what was delivered into it. The room puts each on
 // the other side's streams alone. Nothing is kept or put in history, and no
 // one else hears it.

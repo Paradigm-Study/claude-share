@@ -295,7 +295,7 @@ function world(
   // The host's mailboxes' helpers (started detached: their launchers are
   // gone once they're ready): their settings, pids, the commands they took,
   // and whether they're still running. What a guest wrote into another
-  // session (receipt.cjs), and the helpers ended by their pid.
+  // session (receipt.mts), and the helpers ended by their pid.
   const mailboxes: { config: Record<string, unknown>; pid: number; commands: Record<string, unknown>[]; alive: boolean }[] = []
   const receipts: Record<string, unknown>[] = []
   const killed: number[] = []
@@ -323,7 +323,7 @@ function world(
   if (opts.surfaces) on('session.surfaces', () => ({ value: opts.surfaces as never }))
   on('process.spawn', async function* ($, e, next) {
     spawned.push({ argv: e.argv, input: e.input })
-    if (e.argv.at(-1)?.endsWith('/relay/mailbox.cjs')) {
+    if (e.argv.at(-1)?.endsWith('/relay/mailbox.mts')) {
       if (opts.mailbox === 'missing') return { value: { code: 127, signal: null } }
       if (opts.mailbox === 'unsupported') {
         yield { stream: 'stdout' as const, text: '{"state":"error","code":"UNSUPPORTED"}\n' }
@@ -334,7 +334,7 @@ function world(
       yield { stream: 'stdout' as const, text: `${JSON.stringify({ state: 'ready', port: 43555, pid: helper.pid })}\n` }
       return { value: { code: 0, signal: null } }
     }
-    if (e.argv.at(-1)?.endsWith('/relay/receipt.cjs')) {
+    if (e.argv.at(-1)?.endsWith('/relay/receipt.mts')) {
       receipts.push(JSON.parse(e.input!))
       yield { stream: 'stdout' as const, text: '{"state":"sent"}\n' }
       return { value: { code: 0, signal: null } }
@@ -1430,7 +1430,7 @@ test("its turn here plays the host's turn for it, the reply goes to its session 
     { path: '/tmp/cc-socks/13889.sock', status: 'held', from: `uds:${GUEST_SOCKET}`, ref: MSG },
     { path: '/tmp/cc-socks/13889.sock', status: 'delivered', from: `uds:${GUEST_SOCKET}`, ref: MSG },
   ])
-  const receipt = asked.spawned.find(s => s.argv.at(-1)?.endsWith('/relay/receipt.cjs'))
+  const receipt = asked.spawned.find(s => s.argv.at(-1)?.endsWith('/relay/receipt.mts'))
   expect(receipt?.argv.slice(0, 2)).toEqual(['/bin/sh', '-c'])
   await $.command.run({ command: 'stop-sharing', args: '' } as never)
 })
@@ -1650,7 +1650,7 @@ test("a teammate's session's message goes into the host's own session natively, 
   expect(asked.submitted).toEqual([])
   const [helper] = asked.mailboxes
   expect(helper?.config).toEqual({ room: 'http://localhost:8787/api/rooms/room0000000000000002', token: 't', controlToken: expect.stringMatching(/^[0-9a-f]{64}$/), version: expect.any(String), own: HOST_SOCKET, dir: '/tmp/cc-socks' })
-  expect(asked.spawned.find(s => s.argv.at(-1)?.endsWith('/relay/mailbox.cjs'))?.argv.slice(0, 2)).toEqual(['/bin/sh', '-c'])
+  expect(asked.spawned.find(s => s.argv.at(-1)?.endsWith('/relay/mailbox.mts'))?.argv.slice(0, 2)).toEqual(['/bin/sh', '-c'])
   expect(asked.state.mailboxHelper).toEqual({ room: 'http://localhost:8787/room0000000000000002', pid: helper!.pid, port: 43555 })
   const [box] = Object.keys(asked.state.peerRoutes ?? {})
   expect(box).toMatch(/^[0-9a-f]{32}$/)

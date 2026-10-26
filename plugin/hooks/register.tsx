@@ -3866,7 +3866,7 @@ async function acceptPrompt($: $, who: string, seat: string, text: string, pid: 
 //     Code gives a plugin's send the hop chain of the session's newest
 //     prompt (A's message, while its turn plays), so A's and G's Claude Code
 //     cut a loop between them as they would any.
-//   Host: one helper a room (relay/mailbox.cjs), started detached (no
+//   Host: one helper a room (relay/mailbox.mts), started detached (no
 //     descendant of this Claude Code, or a session in bypass mode would take
 //     its frames as its own), whose mailboxes are real Unix sockets beside
 //     this session's own: a mailbox stands for one of a teammate's sessions
@@ -3875,7 +3875,7 @@ async function acceptPrompt($: $, who: string, seat: string, text: string, pid: 
 //     Claude's SendMessage to it comes back to it and goes to that seat.
 // Receipts go both ways: where this session holds, releases or drops A's
 // message, Claude Code tells the mailbox, the helper posts it, and G writes
-// it into A (relay/receipt.cjs); where A holds or drops what G sent it,
+// it into A (relay/receipt.mts); where A holds or drops what G sent it,
 // Claude Code tells G (a delivery notice), G posts it, and the helper writes
 // it into this session from the mailbox. The room passes each on to the
 // other side's streams alone and keeps none (POST peer). A message from a
@@ -3990,7 +3990,7 @@ async function runMailbox($: $, run: MailboxRun) {
       $.ui.log("Shared session: the mailboxes' helper didn't start in 6 s", { to: 'debug' })
       return finishMailbox(run)
     }
-    await runHelper($, run, 'mailbox.cjs', settings, 6_000, late, () => true, async said => {
+    await runHelper($, run, 'mailbox.mts', settings, 6_000, late, () => true, async said => {
       if (said.state === 'error') return void (run.error = said.code === 'UNSUPPORTED' ? 'UNSUPPORTED' : 'STARTUP')
       if (said.state !== 'ready' || !validPort(said.port) || !Number.isSafeInteger(said.pid) || (said.pid as number) <= 1 || run.control !== undefined) return
       const pid = said.pid as number
@@ -4975,7 +4975,7 @@ function tellPeer($: $, to: string, text: string) {
 
 // What became of a session's message at the host's session: its turn here
 // ends where the host's Claude Code holds, drops or refuses it, and the
-// receipt goes into the session that wrote it (relay/receipt.cjs) as the
+// receipt goes into the session that wrote it (relay/receipt.mts) as the
 // host's Claude Code said it: only for the id that session gave it, and a
 // release only after a hold.
 const DROP_WORDS: Record<string, string> = {
@@ -4995,7 +4995,7 @@ async function guestReceipt($: $, room: ShareRoom, value: Record<string, unknown
   const own = await $.env.get('CLAUDE_CODE_MESSAGING_SOCKET')
   if (!own) return
   const input = { path: relay.to.slice(4), status: receipt.status, from: `uds:${own}`, ref: receipt.of, ...(receipt.reason ? { reason: receipt.reason } : {}) }
-  const child = $.process.spawn({ argv: ['/bin/sh', '-c', FIND_NODE, 'sh', `${$.plugin.root}/relay/receipt.cjs`], input: JSON.stringify(input) })
+  const child = $.process.spawn({ argv: ['/bin/sh', '-c', FIND_NODE, 'sh', `${$.plugin.root}/relay/receipt.mts`], input: JSON.stringify(input) })
   let out = ''
   for await (const chunk of child) if (chunk.stream === 'stdout') out += chunk.text
   if (!out.includes('"sent"')) $.ui.log(`Shared session: a receipt didn't reach the session it's for (${out.trim().slice(0, 80) || 'no Node'})`, { to: 'debug' })
