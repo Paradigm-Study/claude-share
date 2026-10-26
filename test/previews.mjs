@@ -13,7 +13,7 @@ import './support/cloudflare.mjs'
 const { Room, PLUGIN_LATEST, roomRequest, token, versionInfo, tcpSocketTarget, NEED_LIMIT, LIMITS, limitOf, streamedRoomBody, previewRequest, previewSocketTarget, publicPairValid, PUBLIC_LIMITS, TCP_LIMITS, SEAT_TIMEOUT_MS, EVENT_BYTES, HISTORY_BYTES, ROOM_FILES_COUNT, ROOM_PREVIEWS_MAX, ROOM_SEATS_MAX, SERVE_LIMITS, previewLabel, previewKeyOf, previewHostLabel, roomOrigins, hostHalfClose, tcpHalfClose, rejectReason, homePage } = await import('../server/core/index.ts')
 
 // After the stand-in for `cloudflare:workers` is registered.
-const { metaOf } = await import('../server/worker.ts')
+const { metaOf } = await import('../server/worker/index.ts')
 
 function world() {
   const room = Room.create({ id: token(16), name: 'Host', now: Date.now(), version: PLUGIN_LATEST })
@@ -1025,7 +1025,7 @@ async function workerdChecks() {
       big.req.write(Buffer.alloc(write, 32))
       assert.equal(await big.response, 413, path); big.req.destroy()
     }
-    const { default: worker } = await import('../server/worker.ts')
+    const { default: worker } = await import('../server/worker/index.ts')
     const allow = { limit: async () => ({ success: true }) }
     const unreached = { idFromName: name => name, get: () => ({ fetch: () => { throw new Error('the room was asked') } }) }
     for (const [rest, length] of [['events', 1_600_000], ['files', 11 * 1024 * 1024]]) {
@@ -1556,7 +1556,7 @@ async function ownOriginChecks() {
   // The preview Worker: a wildcard's host name names the room's object by
   // its own id; any other host name, nothing. The room hears it came on its
   // own host name only from there: a browser's own x-preview-own goes.
-  const { default: worker } = await import('../server/worker.ts')
+  const { default: worker } = await import('../server/worker/index.ts')
   const id = 'a'.repeat(64), seen = []
   const env = (PREVIEW_URL) => ({ ROLE: 'preview', PREVIEW_URL, ROOMS: { idFromString: hex => { if (!/^[0-9a-f]{64}$/.test(hex)) throw new Error('not an id'); return hex }, get: hex => ({ fetch: req => { seen.push({ hex, url: req.url, own: req.headers.get('x-preview-own') }); return new Response('room') } }) } })
   assert.equal(await (await worker.fetch(new Request(`https://${previewLabel(id)}.previews.test/app?x=1`, { headers: { 'x-preview-own': '0' } }), env('https://*.previews.test'))).text(), 'room')

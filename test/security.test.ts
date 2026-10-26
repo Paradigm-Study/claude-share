@@ -14,8 +14,8 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterAll, beforeAll, describe, test } from 'vitest'
 import { Room, FILE_UPLOADS, LIMITS, PLUGIN_LATEST, ROOMS_PER_ADDRESS_DAY, SEAT_POLLS, SEAT_STREAMS, SERVE_LIMITS, landingPage, roomRequest, token } from '../server/core/index.ts'
-import worker, { DirectoryObject, GateObject, RoomObject } from '../server/worker.ts'
-import type { ServerEnv } from '../server/worker.ts'
+import worker, { DirectoryObject, GateObject, RoomObject } from '../server/worker/index.ts'
+import type { ServerEnv } from '../server/worker/index.ts'
 import { Storage, State, asState, installRuntime } from './support/durable.ts'
 
 const SAVE = fileURLToPath(new URL('../plugin/relay/save.sh', import.meta.url))

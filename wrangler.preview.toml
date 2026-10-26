@@ -1,5 +1,5 @@
 # The preview host name: the same script as wrangler.toml, every path served
-# as the host's app (see server/worker.ts):
+# as the host's app (see server/worker/app.ts):
 #   npx wrangler deploy -c wrangler.preview.toml
 # On an update, deploy this before the main Worker: the main Worker's rooms
 # name themselves in preview links by a key only this version routes, and
@@ -7,7 +7,7 @@
 # after: its ROOMS binding needs the main Worker's rooms to exist.
 # scripts/setup.ts deploy does both in that order.
 name = "claude-share-preview"
-main = "server/worker.ts"
+main = "server/worker/index.ts"
 compatibility_date = "2026-04-01"
 # Session traces' Postgres driver (pg, through Hyperdrive) needs Node's APIs.
 compatibility_flags = ["nodejs_compat"]

@@ -11,7 +11,7 @@ const { Room, PLUGIN_LATEST, TCP_LIMITS, PUBLIC_LIMITS, LIMITS, NEED_LIMIT, SEAT
 const { BODY_CHARS } = await import('../server/teams.ts')
 
 // After the stand-in for `cloudflare:workers` is registered.
-const { default: worker, RoomObject } = await import('../server/worker.ts')
+const { default: worker, RoomObject } = await import('../server/worker/index.ts')
 
 const NativeResponse = globalThis.Response, nativeNow = Date.now
 const NativePair = globalThis.WebSocketPair
