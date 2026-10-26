@@ -170,7 +170,7 @@ describe('through the real Workers under wrangler dev', () => {
     assert.deepEqual(offline, { delivered: false, reason: 'offline' }, 'the host not connected')
   })
 
-  test('401, 404, 400 for each malformed body, 413 past its bound', async () => {
+  test('401, 404 and 400 for each malformed body; 32,000 characters go', async () => {
 
     // Who may, and what's well formed.
     assert.equal((await http(`${base}/peer`, '', 'POST', up)).status, 401)
@@ -187,7 +187,8 @@ describe('through the real Workers under wrangler dev', () => {
       { ...guestGood, pid: '' }, { ...guestGood, pid: 'a b' }, { ...guestGood, pid: 'p'.repeat(65) }]) {
       assert.equal((await fromGuest(scott, body)).status, 400, JSON.stringify(body).slice(0, 80))
     }
-    assert.equal((await fromHost({ ...good, body: '\u0001'.repeat(25_000) })).status, 413, 'past 128 KiB of body (each escaped in six bytes)')
+    // 413 past the bound is checked on the Worker below: wrangler dev's proxy
+    // loses a request whose answer comes before its body is read.
     assert.equal((await fromHost({ ...good, body: 'x'.repeat(32_000) })).status, 200, 'a message of 32,000 characters goes')
     assert.equal((await fromGuest(scott, { ...guestGood, body: 'x'.repeat(32_000), chain: Array(32).fill(CHAIN[0]) })).status, 200, 'and a chain of 32 with it')
   })
@@ -264,6 +265,8 @@ describe('on the Worker', () => {
     assert.deepEqual(await fromGuest(scott, up('Up again.')), { delivered: true })
     assert.deepEqual(peersOf(hostWs).filter(m => m.body).map(m => m.body), ['Up.', 'Up again.'])
     assert.equal(peersOf(rileyWs).length, 1, 'nothing more to another seat')
+    // Past 128 KiB of body (each character escaped in six bytes), refused before the rest is read.
+    assert.equal((await w.obj.fetch(req('peer', host, 'POST', { to: scott.seat, handle: HANDLE, body: '\u0001'.repeat(25_000), ref: REF }))).status, 413, 'past 128 KiB of body')
     // A stream closing (still listed while its close is handled) hears nothing.
     await w.obj.webSocketClose(asSocket(scottWs), 1000, 'gone')
     assert.deepEqual(await fromHost({ to: scott.seat, handle: HANDLE, body: 'x', ref: REF }), { delivered: false, reason: 'offline' })
