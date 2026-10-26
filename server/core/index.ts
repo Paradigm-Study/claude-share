@@ -34,7 +34,7 @@ export {
   NEED_LIMIT,
   PEER_LIMIT,
   SERVE_LIMITS,
-} from './limits.mjs'
+} from './limits.ts'
 export {
   token,
   json,
@@ -59,10 +59,10 @@ export {
   limitOf,
   notFound,
   badRequest,
-} from './http.mjs'
-export { ROOM_ID, Room } from './room.mjs'
-export { createRoom, roomRequest, ended, PEER_HANDLE, PEER_STATUS, PEER_DROPS } from './routes.mjs'
-export { PLUGIN_SOURCE, cloudSummary, isApprover } from './cloud.mjs'
+} from './http.ts'
+export { ROOM_ID, Room } from './room.ts'
+export { createRoom, roomRequest, ended, PEER_HANDLE, PEER_STATUS, PEER_DROPS } from './routes.ts'
+export { PLUGIN_SOURCE, cloudSummary, isApprover } from './cloud.ts'
 export {
   previewLabel,
   previewKeyOf,
@@ -79,7 +79,7 @@ export {
   hostSocketAllowed,
   relayRejectCode,
   rejectReason,
-} from './previews.mjs'
+} from './previews.ts'
 export {
   revokeMatches,
   hostHalfClose,
@@ -102,7 +102,7 @@ export {
   tcpStep,
   tcpRelay,
   sendableClose,
-} from './tcp.mjs'
+} from './tcp.ts'
 export {
   homePage,
   brandPage,
@@ -112,4 +112,4 @@ export {
   COPY_SCRIPT,
   missingPage,
   landingPage,
-} from './pages.mjs'
+} from './pages.ts'

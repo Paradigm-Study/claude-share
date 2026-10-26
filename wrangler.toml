@@ -19,7 +19,7 @@ MAX_ROOMS_PER_DAY = "3000"
 # Secret, for ending a room that's being abused (POST /api/admin/rooms/<id>/end):
 #   npx wrangler secret put ADMIN_TOKEN
 
-# What one network address or one room may do (server/core.mjs LIMITS says the same).
+# What one network address or one room may do (server/core/limits.ts LIMITS says the same).
 [[ratelimits]]
 name = "CREATE_LIMIT"
 namespace_id = "7101"

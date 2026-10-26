@@ -100,7 +100,7 @@ export const BOUNDED_BODY = 16 * 1024
 // can't flood it: rooms made and joins per network address, posts per room.
 // Cloudflare counts with its rate-limit bindings (wrangler.toml); the Node
 // server with an in-memory window of the same size.
-export const LIMITS = {
+export const LIMITS: Record<'create' | 'join' | 'events', { limit: number; periodMs: number; message: string }> = {
   create: { limit: 6, periodMs: 60_000, message: 'Too many new shared sessions from your network. Try again in a minute.' },
   join: { limit: 30, periodMs: 60_000, message: 'Too many joins from your network. Try again in a minute.' },
   events: { limit: 900, periodMs: 60_000, message: 'This session is sending too fast; slowing down.' },
@@ -111,11 +111,11 @@ export const ROOMS_PER_ADDRESS_DAY = 60
 export const ROOMS_PER_DAY = 3000
 
 // The Node server's counter: one window per key.
+export type LimitKind = keyof typeof LIMITS
+
 export class Windows {
-  constructor() {
-    this.windows = new Map()
-  }
-  hit(kind, key, now) {
+  windows = new Map<string, { start: number; count: number }>()
+  hit(kind: LimitKind, key: string, now: number) {
     const { limit, periodMs } = LIMITS[kind]
     const w = this.windows.get(key)
     if (!w || now - w.start >= periodMs) {

@@ -1,5 +1,7 @@
-import { json, readBody, clientVersion, token, shareUrl, PLUGIN_LATEST, bearerOf, sha256 } from './http.mjs'
-import { CLOUD_CONFIG_MAX, CLOUD_MAX_MS, CLOUD_CHANGES_MAX } from './limits.mjs'
+import { json, readBody, clientVersion, token, shareUrl, PLUGIN_LATEST, bearerOf, sha256, statusOf } from './http.ts'
+import { CLOUD_CONFIG_MAX, CLOUD_MAX_MS, CLOUD_CHANGES_MAX } from './limits.ts'
+import type { Room } from './room.ts'
+import type { Auth, CloudAuth, FileMeta, From, JsonObject, RoomContext, RouteResult } from './types.ts'
 
 // ---------------------------------------------------------------------------
 // The cloud host (docs/cloud-host.md). The host hands its session to a runner
@@ -18,13 +20,13 @@ import { CLOUD_CONFIG_MAX, CLOUD_MAX_MS, CLOUD_CHANGES_MAX } from './limits.mjs'
 export const PLUGIN_SOURCE = 'Paradigm-Study/claude-share'
 const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
-export function cloudSummary(room) {
+export function cloudSummary(room: Room) {
   const c = room.cloud
   return c ? { state: c.state, approver: c.approver.name, since: c.since, until: c.until } : undefined
 }
 
 // The approver: the seat the move made, or another seat of the same account.
-export function isApprover(room, auth) {
+export function isApprover(room: Room, auth: Auth | null | undefined) {
   const c = room.cloud
   if (!c || auth?.role !== 'guest') return false
   if (auth.seat === c.approver.seat) return true
@@ -34,7 +36,7 @@ export function isApprover(room, auth) {
 }
 
 // An answer as the room keeps it: the approver's, to a question asked, once.
-export function cloudAnswer(room, auth, body) {
+export function cloudAnswer(room: Room, auth: Auth, body: JsonObject | undefined) {
   if (!isApprover(room, auth)) return null
   const id = typeof body?.id === 'string' && /^[A-Za-z0-9_-]{1,32}$/.test(body.id) ? body.id : null
   const answer = typeof body?.answer === 'string' && body.answer.length <= 120 ? body.answer : null
@@ -49,9 +51,9 @@ export function cloudAnswer(room, auth, body) {
 // before, where what it shows goes), and Ask again for whom it always
 // allows. Nothing it doesn't name: "ask before nothing" isn't the cloud
 // host's, which holds its approver's Claude sign-in.
-export function cloudSet(room, auth, body) {
+export function cloudSet(room: Room, auth: Auth, body: JsonObject | undefined) {
   if (!isApprover(room, auth)) return null
-  const set = {}
+  const set: { prompts?: string; approvals?: string; files?: string; untrust?: true } = {}
   if (body?.prompts === 'everyone' || body?.prompts === 'watch') set.prompts = body.prompts
   if (body?.approvals === 'all' || body?.approvals === 'edits') set.approvals = body.approvals
   if (body?.files === 'on' || body?.files === 'off') set.files = body.files
@@ -60,29 +62,31 @@ export function cloudSet(room, auth, body) {
 }
 
 // What the runner is told to sign in with: one shape, nothing else.
-function cloudAuth(auth) {
-  const text = v => (typeof v === 'string' && v.length > 0 && v.length <= 512 ? v : null)
-  if (text(auth?.oauthToken)) return { oauthToken: auth.oauthToken }
-  if (text(auth?.apiKey)) return { apiKey: auth.apiKey }
-  if (text(auth?.baseUrl) && /^https?:\/\//.test(auth.baseUrl) && text(auth?.authToken)) return { baseUrl: auth.baseUrl, authToken: auth.authToken }
+function cloudAuth(auth: JsonObject | undefined): CloudAuth | null {
+  const text = (v: unknown) => (typeof v === 'string' && v.length > 0 && v.length <= 512 ? v : null)
+  if (!auth) return null
+  if (text(auth.oauthToken)) return { oauthToken: auth.oauthToken }
+  if (text(auth.apiKey)) return { apiKey: auth.apiKey }
+  if (text(auth.baseUrl) && /^https?:\/\//.test(auth.baseUrl) && text(auth.authToken)) return { baseUrl: auth.baseUrl, authToken: auth.authToken }
   return null
 }
 
-export async function cloudRoutes(room, req, rest, auth, now, ctx, origin) {
+export async function cloudRoutes(room: Room, req: Request, rest: string, auth: Auth, now: number, ctx: RoomContext, origin: string): Promise<RouteResult | null> {
   if (rest !== 'cloud' && !rest.startsWith('cloud/')) return null
   const method = req.method
   if (rest === 'cloud' && method === 'GET') return { response: json(cloudSummary(room) ?? { state: 'none' }) }
   if (room.endedAt) return { response: json({ error: 'This session is no longer shared.' }, 410) }
-  if (!ctx.cloud) return { response: json({ error: "This share server can't keep sessions running in the cloud." }, 501) }
+  const hosts = ctx.cloud
+  if (!hosts) return { response: json({ error: "This share server can't keep sessions running in the cloud." }, 501) }
 
   if (rest === 'cloud' && method === 'POST') {
     if (auth.role !== 'host') return { response: json({ error: 'Only the host moves the session to the cloud.' }, 403) }
     if (room.cloud) return { response: json({ error: 'This session is in the cloud already.' }, 409) }
-    let body
+    let body: JsonObject
     try {
       body = JSON.parse(new TextDecoder().decode(await readBody(req, CLOUD_CONFIG_MAX)))
     } catch (error) {
-      return error?.status === 413 ? { response: json({ error: error.message }, 413) } : { response: json({ error: 'Expected JSON.' }, 400) }
+      return statusOf(error) === 413 ? { response: json({ error: (error as Error).message }, 413) } : { response: json({ error: 'Expected JSON.' }, 400) }
     }
     const session = typeof body.session === 'string' && SESSION_ID.test(body.session) ? body.session : null
     const cwd = typeof body.cwd === 'string' && body.cwd.startsWith('/') && body.cwd.length <= 1024 && !body.cwd.split('/').includes('..') ? body.cwd : null
@@ -99,7 +103,7 @@ export async function cloudRoutes(room, req, rest, auth, now, ctx, origin) {
     room.host.token = runner
     room.cloud = { state: 'starting', approver: { seat: seat.id, account: room.host.account ?? null, name: room.host.name }, since: now, until: now + CLOUD_MAX_MS }
     try {
-      await ctx.cloud.start(room.id, {
+      await hosts.start(room.id, {
         ticket,
         config: { server: origin, room: room.id, token: runner, session, cwd, title: room.title, host: room.host.name, url: shareUrl(origin, room.id), seq: room.seq, model, state, auth: signIn, plugin: { version: PLUGIN_LATEST, source: ctx.pluginSource || PLUGIN_SOURCE } },
       })
@@ -108,7 +112,7 @@ export async function cloudRoutes(room, req, rest, auth, now, ctx, origin) {
       room.host.token = was
       room.seats.delete(seatToken)
       room.cloud = null
-      return { changed: true, response: json({ error: `The cloud host didn't start: ${String(error?.message ?? error).slice(0, 200)}` }, 502) }
+      return { changed: true, response: json({ error: `The cloud host didn't start: ${String((error as Error | null)?.message ?? error).slice(0, 200)}` }, 502) }
     }
     room.append(fromHost(room), 'cloud', { state: 'starting', by: room.host.name }, now)
     room.wake()
@@ -134,10 +138,10 @@ export async function cloudRoutes(room, req, rest, auth, now, ctx, origin) {
 
 // The runner stops and answers with its changes, kept as a room file for Bring
 // home; the room has no host meanwhile. Returns the changes' file, or null.
-export async function stopCloud(room, ctx, now, why) {
-  let changes = null
+export async function stopCloud(room: Room, ctx: RoomContext, now: number, why: string) {
+  let changes: FileMeta | null = null
   try {
-    const diff = await ctx.cloud.stop(room.id)
+    const diff = await ctx.cloud?.stop(room.id)
     if (diff?.byteLength && diff.byteLength <= CLOUD_CHANGES_MAX) {
       const bytes = diff instanceof Uint8Array ? diff : new Uint8Array(diff)
       const id = await sha256(bytes)
@@ -158,9 +162,9 @@ export async function stopCloud(room, ctx, now, why) {
 }
 
 // The room ended: its runner goes, its changes with it.
-export async function endCloud(room, ctx) {
+export async function endCloud(room: Room, ctx: RoomContext) {
   if (!room.cloud) return
   room.cloud = null
   await ctx.cloud?.stop(room.id).catch(() => {})
 }
-export const fromHost = room => ({ seat: 'host', name: room.host.name, role: 'host' })
+export const fromHost = (room: Room): From => ({ seat: 'host', name: room.host.name, role: 'host' })

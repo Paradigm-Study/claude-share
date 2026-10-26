@@ -32,7 +32,7 @@
 // tells a members-only team's rooms whom it has now (`keepTeam`), so someone
 // who leaves it or is removed leaves its sessions too.
 
-import { json, token, brandPage, commandBox, COPY_SCRIPT, INSTALL_COMMAND } from './core.mjs'
+import { json, token, brandPage, commandBox, COPY_SCRIPT, INSTALL_COMMAND } from './core.ts'
 
 const LOGIN_MS = 10 * 60 * 1000
 const INVITE_MS = 12 * 60 * 60 * 1000 // a session invite lasts half a day at most

@@ -19,7 +19,7 @@
 import { Hono } from 'hono'
 import { OAuthProvider } from '@cloudflare/workers-oauth-provider'
 import type { ConsentDescription } from '@cloudflare/workers-oauth-provider'
-import { brandPage, escapeHtml } from '../core/pages.mjs'
+import { brandPage, escapeHtml } from '../core/pages.ts'
 import { providersFrom } from '../teams.mjs'
 import { directory, whoIs } from './index.ts'
 import type { TracesEnv } from './index.ts'

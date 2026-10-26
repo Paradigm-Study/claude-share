@@ -5,10 +5,10 @@ import { createConnection } from 'node:net'
 import { request as httpRequest } from 'node:http'
 import { randomBytes } from 'node:crypto'
 import { once } from 'node:events'
-import { Room, PLUGIN_LATEST, TCP_LIMITS, PUBLIC_LIMITS, LIMITS, NEED_LIMIT, SEAT_TIMEOUT_MS, limitOf, token, tcpAdmit, tcpState, tcpReserve, tcpRefund, chargeControl, tcpRelay, previewSocketTarget, previewRequest, bodyLimit, EVENT_BYTES } from '../server/core.mjs'
-import { BODY_CHARS } from '../server/teams.mjs'
 import { startWorkerd } from './support/workerd.mjs'
 import './support/cloudflare.mjs'
+const { Room, PLUGIN_LATEST, TCP_LIMITS, PUBLIC_LIMITS, LIMITS, NEED_LIMIT, SEAT_TIMEOUT_MS, limitOf, token, tcpAdmit, tcpState, tcpReserve, tcpRefund, chargeControl, tcpRelay, previewSocketTarget, previewRequest, bodyLimit, EVENT_BYTES } = await import('../server/core.ts')
+const { BODY_CHARS } = await import('../server/teams.mjs')
 
 // After the stand-in for `cloudflare:workers` is registered.
 const { default: worker, RoomObject } = await import('../server/worker.mjs')

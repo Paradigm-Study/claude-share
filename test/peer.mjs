@@ -8,8 +8,8 @@
 import assert from 'node:assert/strict'
 import { randomBytes } from 'node:crypto'
 import { startWorkerd } from './support/workerd.mjs'
-import { PLUGIN_LATEST, PEER_LIMIT, PEER_HANDLE, PEER_STATUS, PEER_DROPS, streamedRoomBody, homePage, token } from '../server/core.mjs'
 import './support/cloudflare.mjs'
+const { PLUGIN_LATEST, PEER_LIMIT, PEER_HANDLE, PEER_STATUS, PEER_DROPS, streamedRoomBody, homePage, token } = await import('../server/core.ts')
 
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms))
 const HANDLE = 'a1'.repeat(16)
