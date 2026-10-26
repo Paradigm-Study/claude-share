@@ -554,7 +554,7 @@ try {
 
 // The directory itself, over a store this test can see into, on a clock it sets.
 {
-  const { Directory, mapStore } = await import('../server/teams.mjs')
+  const { Directory, mapStore } = await import('../server/teams.ts')
   const data = new Map()
   const lists = []
   const store = mapStore(data)
@@ -703,7 +703,7 @@ try {
 // account at the same provider with the address, or an index entry left
 // behind take nobody's account.
 {
-  const { Directory, mapStore } = await import('../server/teams.mjs')
+  const { Directory, mapStore } = await import('../server/teams.ts')
   const data = new Map()
   const dir = new Directory(mapStore(data), { providers: {} })
   const now = 1_000_000
@@ -764,7 +764,7 @@ try {
 // its place on its team's list; deleting an account takes the invites it
 // sent and its sessions' places on its teams' lists too.
 {
-  const { Directory, mapStore } = await import('../server/teams.mjs')
+  const { Directory, mapStore } = await import('../server/teams.ts')
   const data = new Map()
   const due = []
   const dir = new Directory(mapStore(data), { providers: { test: {} }, onDue: at => due.push(at), roomInfo: async () => ({ title: 't', people: [], ended: false }) })

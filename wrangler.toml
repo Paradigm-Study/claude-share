@@ -44,7 +44,7 @@ class_name = "RoomObject"
 name = "GATE"
 class_name = "GateObject"
 
-# Accounts and teams (server/teams.mjs). Sign-in needs secrets:
+# Accounts and teams (server/teams.ts). Sign-in needs secrets:
 #   npx wrangler secret put GITHUB_CLIENT_ID   (and GITHUB_CLIENT_SECRET)
 #   npx wrangler secret put GOOGLE_CLIENT_ID   (and GOOGLE_CLIENT_SECRET)
 [[durable_objects.bindings]]
