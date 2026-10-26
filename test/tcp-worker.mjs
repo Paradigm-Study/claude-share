@@ -1,17 +1,13 @@
 // No model, dependencies or Cloudflare account. Exercise the real RoomObject
 // with stdlib storage/hibernatable-socket stubs, including reconstruction.
 import assert from 'node:assert/strict'
-import { createServer, createConnection } from 'node:net'
+import { createConnection } from 'node:net'
 import { request as httpRequest } from 'node:http'
-import { spawn } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
 import { once } from 'node:events'
-import { fileURLToPath } from 'node:url'
-import { mkdtemp, rm } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
 import { Room, PLUGIN_LATEST, TCP_LIMITS, PUBLIC_LIMITS, LIMITS, NEED_LIMIT, SEAT_TIMEOUT_MS, limitOf, token, tcpAdmit, tcpState, tcpReserve, tcpRefund, chargeControl, tcpRelay, previewSocketTarget, previewRequest, bodyLimit, EVENT_BYTES } from '../server/core.mjs'
 import { BODY_CHARS } from '../server/teams.mjs'
+import { startWorkerd } from './support/workerd.mjs'
 import './support/cloudflare.mjs'
 
 // After the stand-in for `cloudflare:workers` is registered.
@@ -1461,17 +1457,8 @@ try {
   globalThis.WebSocketPair = NativePair
 }
 
-// The Node adapter's RFC parser is not exercised by hibernation stubs. Feed it
-// real masked/unmasked wire frames, including zero-byte fragments across its
-// per-second rate window (the aggregate fragment count must still be bounded).
-async function freePort() {
-  const server = createServer()
-  server.listen(0, '127.0.0.1'); await once(server, 'listening')
-  const port = server.address().port
-  await new Promise(resolve => server.close(resolve))
-  assert(![3000, 3009, 3610].includes(port))
-  return port
-}
+// A client's wire frame, masked as a browser's are (or not), for raw sockets
+// to the Workers under wrangler dev.
 function masked(op, payload = Buffer.alloc(0), fin = true) {
   const n = payload.length, h = Buffer.alloc(n < 126 ? 2 : n < 65536 ? 4 : 10)
   h[0] = (fin ? 128 : 0) | op; h[1] = 128 | (n < 126 ? n : n < 65536 ? 126 : 127)
@@ -1519,14 +1506,10 @@ async function rawSocket(port, path, bearer, cookie) {
     waiters.push(waiter)
   }) }
 }
-async function nodeFrames() {
-  const directory = await mkdtemp(join(tmpdir(), 'share-tcp-worker-'))
-  const port = await freePort(); let preview = await freePort()
-  while (preview === port) preview = await freePort()
-  const child = spawn(process.execPath, [fileURLToPath(new URL('../server/node.mjs', import.meta.url))], { cwd: directory, env: { PATH: process.env.PATH, HOME: directory, PORT: String(port), PREVIEW_PORT: String(preview), DATA_FILE: '' }, stdio: ['ignore', 'pipe', 'pipe'] })
-  let logs = '', reader
-  child.stdout.on('data', b => { logs += b }); child.stderr.on('data', b => { logs += b })
-  const origin = `http://127.0.0.1:${port}`
+async function workerdFrames() {
+  const server = await startWorkerd()
+  const { origin, port, previewPort: preview } = server
+  let reader
   const post = (path, bearer, body = {}) => fetch(`${origin}${path}`, { method: 'POST', headers: { authorization: bearer ? `Bearer ${bearer}` : '', 'x-shared-session-version': PLUGIN_LATEST }, body: typeof body === 'string' ? body : JSON.stringify(body) })
   const api = (path, bearer, body = {}) => post(path, bearer, body).then(async r => { assert.equal(r.status, 200, await r.clone().text()); return r.json() })
   const heldPost = (path, bearer, length) => {
@@ -1541,13 +1524,6 @@ async function nodeFrames() {
     return { request, answer }
   }
   try {
-    let ready = false
-    for (let i = 0; i < 100; i++) {
-      if (child.exitCode !== null) throw new Error(logs)
-      if (await fetch(`${origin}/api/health`).then(r => r.ok).catch(() => false)) { ready = true; break }
-      await new Promise(resolve => setTimeout(resolve, 20))
-    }
-    assert(ready, logs)
     const room = await api('/api/rooms', null, { name: 'Host' })
     const member = await api(`/api/rooms/${room.id}/join`, null, { name: 'Guest' })
     const p = await api(`/api/rooms/${room.id}/previews`, room.token, { port: 34567, tcp: true })
@@ -1606,7 +1582,7 @@ async function nodeFrames() {
     assert.equal((await rejection.guest.next()).data.readUInt16BE(), 1013)
     assert.equal((await post(rejectPath(rejection.id), room.token, { code: 'CONNECT' })).status, 404)
     const lateHost = await rawSocket(port, `/api/rooms/${room.id}/ws/${rejection.id}`, room.token)
-    assert.equal(lateHost.status, 404); lateHost.socket.destroy(); rejection.guest.socket.destroy()
+    assert.equal(lateHost.status, 410, 'that TCP channel has ended'); lateHost.socket.destroy(); rejection.guest.socket.destroy()
     const connectFailure = await pending()
     assert.equal((await post(rejectPath(connectFailure.id), room.token, JSON.stringify({ code: 'CONNECT' }).padStart(256, ' '))).status, 200)
     assert.equal((await connectFailure.guest.next()).data.readUInt16BE(), 1011); connectFailure.guest.socket.destroy()
@@ -1625,29 +1601,12 @@ async function nodeFrames() {
     const answers = await Promise.all(['BUSY', 'CONNECT'].map(code => post(rejectPath(duplicateReject.id), room.token, { code })))
     assert.deepEqual(answers.map(r => r.status).sort(), [200, 404])
     assert([1011, 1013].includes((await duplicateReject.guest.next()).data.readUInt16BE())); duplicateReject.guest.socket.destroy()
-    console.log('OK Node host-only rejection before body/EOF, bounded JSON, purpose/room checks and pairing races')
-    const lengthHeader = n => { const h = Buffer.alloc(14); h[0] = 0x82; h[1] = 0xff; h.writeBigUInt64BE(n, 2); return h }
-    const malformed = [
-      [Buffer.from([0x82, 1, 0]), 1002], // unmasked
-      [Buffer.from([0xc2, 0x80, 0, 0, 0, 0]), 1002], // RSV
-      [masked(0), 1002], // continuation without a fragmented message
-      [Buffer.from([0x09, 0x80, 0, 0, 0, 0]), 1002], // fragmented ping
-      [Buffer.from([0x82, 0xfe, 0, 1, 0, 0, 0, 0, 0]), 1002], // noncanonical length
-      [lengthHeader(1n << 53n), 1009], [lengthHeader(1n << 63n), 1002],
-      [lengthHeader(65_537n), 1009], [masked(1, Buffer.from([255])), 1007],
-      [masked(8, Buffer.from([3, 238])), 1002], // reserved close code 1006
-      [masked(1, Buffer.alloc(257, 32)), 1009],
-    ]
-    for (const [bytes, code] of malformed) {
-      const q = await pair()
-      q.guest.socket.write(bytes)
-      const close = await q.guest.next(); assert.equal(close.op, 8); assert.equal(close.data.readUInt16BE(), code)
-      const otherClose = await q.host.next(); assert.equal(otherClose.op, 8); assert.equal(otherClose.data.readUInt16BE(), code)
-      q.guest.socket.destroy(); q.host.socket.destroy()
-    }
+    console.log('OK workerd host-only rejection before body/EOF, bounded JSON, purpose/room checks and pairing races')
+    // How a malformed frame closes (RSV bits, lengths, masks, fragments) is
+    // the Workers runtime's own, as it parses frames: not tested here.
     const q = await pair()
     const cross = await rawSocket(port, `/api/rooms/${other.id}/ws/${q.id}`, other.token)
-    assert.equal(cross.status, 404); cross.socket.destroy()
+    assert.equal(cross.status, 410, 'no such socket in that room'); cross.socket.destroy()
     const duplicate = await rawSocket(port, `/api/rooms/${room.id}/ws/${q.id}`, room.token)
     assert.equal(duplicate.status, 409); duplicate.socket.destroy()
     q.guest.socket.write(Buffer.concat([masked(2, Buffer.from([11]), false), masked(9, Buffer.from([7])), masked(0, Buffer.from([22]))]))
@@ -1663,21 +1622,6 @@ async function nodeFrames() {
     assert.equal((await q.guest.next()).data.readUInt16BE(), 1000)
     assert.equal((await q.host.next()).data.readUInt16BE(), 1000)
     q.guest.socket.destroy(); q.host.socket.destroy()
-    const fragments = await pair()
-    fragments.guest.socket.write(Buffer.concat([masked(2, Buffer.alloc(0), false), ...Array.from({ length: 2048 }, () => masked(0, Buffer.alloc(0), false))]))
-    await new Promise(resolve => setTimeout(resolve, TCP_LIMITS.rateWindowMs + 30))
-    fragments.guest.socket.write(Buffer.concat(Array.from({ length: 2048 }, () => masked(0, Buffer.alloc(0), false))))
-    const fragmentClose = await fragments.guest.next()
-    assert.equal(fragmentClose.op, 8); assert.equal(fragmentClose.data.readUInt16BE(), 1009)
-    assert.equal((await fragments.host.next()).data.readUInt16BE(), 1009)
-    fragments.guest.socket.destroy(); fragments.host.socket.destroy()
-    const eof = await pair()
-    eof.guest.socket.write(masked(2, Buffer.from([7, 8])))
-    assert.deepEqual((await eof.host.next()).data, Buffer.from([7, 8]))
-    assert.equal(JSON.parse((await eof.host.next()).data).t, 'credit')
-    eof.guest.socket.end(masked(2, Buffer.from([3, 4])).subarray(0, 5)) // EOF in a partial frame, credit still outstanding
-    assert.equal((await eof.host.next()).data.readUInt16BE(), 1011)
-    eof.guest.socket.destroy(); eof.host.socket.destroy()
     assert.equal((await post(`/api/rooms/${room.id}/previews/${p.pid}/tunnel`, member.token)).status, 404, 'no grant to ask for')
     const otherPort = await api(`/api/rooms/${room.id}/previews`, room.token, { port: 34568, tcp: true })
     const lanes = [p.pid, p.pid, otherPort.pid], slots = []
@@ -1705,12 +1649,10 @@ async function nodeFrames() {
     const gone = await rawSocket(port, `/api/rooms/${room.id}/previews/${otherPort.pid}/tunnel`, second.token)
     assert.equal(gone.status, 401); gone.socket.destroy()
     for (const s of [...slots, theirs]) { s.guest.socket.destroy(); s.host?.socket.destroy() }
-    console.log("PASS Node raw RFC/partial EOF, binary/credit/FIN, synchronous seat32 admission across previews, release, and a seat's Leave closing its own")
+    console.log("PASS workerd binary/credit/FIN, synchronous seat32 admission across previews, release, and a seat's Leave closing its own")
   } finally {
     await reader?.cancel().catch(() => {})
-    child.kill()
-    if (child.exitCode === null) await once(child, 'exit')
-    await rm(directory, { recursive: true, force: true })
+    await server.stop()
   }
 }
-await nodeFrames()
+await workerdFrames()

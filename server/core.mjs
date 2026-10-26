@@ -1,2 +1,2 @@
-// Keep the adapters' and callers' existing imports as core moves into modules.
+// Keep worker.mjs's and the tests' imports as core moves into modules.
 export * from './core/index.mjs'

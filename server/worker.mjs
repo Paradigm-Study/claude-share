@@ -100,7 +100,7 @@ export function metaOf(room) {
   return { events, meta }
 }
 // The directory reads a body whole, so the Worker reads it first, bounded:
-// its characters at three bytes each, as node.mjs does.
+// its characters at three bytes each.
 const DIRECTORY_BODY_MAX = 3 * BODY_CHARS
 // A Durable Object's id as toString() writes it: a room's preview key here.
 const OBJECT_ID = /^[0-9a-f]{64}$/
@@ -147,7 +147,7 @@ async function previewFetch(req, env) {
 }
 
 export default {
-  async fetch(req, env) {
+  async fetch(req, env, ctx) {
     if (env.ROLE === 'preview') return previewFetch(req, env)
     const url = new URL(req.url)
     const origin = publicOrigin(req, env.PUBLIC_URL)
@@ -233,7 +233,7 @@ export default {
     if (rest === 'stream' && req.method === 'GET') return bridge(stub, id, url, headers)
     // Every body goes on as a stream, never buffered here: the room reads it
     // through readBody, bounded. A declared length past what the route takes
-    // (bodyLimit, as node.mjs bounds it) is refused first; the streamed
+    // (bodyLimit) is refused first; the streamed
     // routes authenticate before reading and bound themselves.
     const max = bodyLimit(url.pathname)
     if (bodied && !streamedRoomBody(req.method, rest) && Number(req.headers.get('content-length')) > max) return bodyTooLarge(max)

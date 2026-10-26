@@ -34,11 +34,6 @@ import {
   PAGE_BYTES_CAP,
   POLL_WAIT_MS,
   EVENT_BYTES,
-  STREAM_PAGE,
-  KEEPALIVE_MS,
-  STREAM_MAX_MS,
-  SEAT_STREAMS,
-  STREAM_UNREAD,
   FILE_UPLOADS,
   FILE_MAX,
   ROOM_FILES_MAX,
@@ -53,7 +48,10 @@ import { serveReserve, SERVED_ALL } from './tcp.mjs'
 // team's list, and the team's access setting says who may join; refused, no
 // room is made (`room` is absent).
 export async function createRoom(req, id, now, origin, ctx = {}) {
-  const body = await readJson(req)
+  // The body arrives as a stream: one past its bound, or not JSON, is said
+  // as such, never thrown out of the room as a 500.
+  let body
+  try { body = await readJson(req) } catch (error) { return bodyFailure(error.status ? error : { message: 'Expected a JSON body.' }) }
   const team = body.team ? await teamFor(req, body.team, ctx) : null
   if (team?.error) return { response: team.error }
   // Signed in, the host is known by account: their other sessions are them.
@@ -261,12 +259,6 @@ async function handleRoom(room, req, rest, now, origin, ctx) {
   const cloud = await cloudRoutes(room, req, rest, auth, now, ctx, origin)
   if (cloud) return cloud
 
-  if (rest === 'stream' && method === 'GET') {
-    if (room.endedAt) return { response: json({ error: 'This session is no longer shared.' }, 410) }
-    const after = Number(url.searchParams.get('after') ?? 0) || 0
-    room.touch(auth, now)
-    return { response: streamResponse(room, auth, after) }
-  }
 
   if (rest === 'events' && method === 'GET') {
     const after = Number(url.searchParams.get('after') ?? 0) || 0
@@ -398,88 +390,6 @@ async function unlist(room, ctx) {
 // The room ended or expired: off its team's list, and its invites gone.
 export async function ended(room, ctx) {
   if (ctx.directory) await ctx.directory.roomEnded(room.id, room.team?.id ?? null).catch(() => {})
-}
-
-// One open stream: a JSON line now (everything after `after`), another each
-// time the room changes, and a keepalive line between. When it ends (the
-// client went, the room ended, or STREAM_MAX_MS passed) the seat counts as
-// last seen then, and `onDisconnect` lets the host process settle who is still
-// here once the grace period is over. A host's stream takes its asks
-// (toHost), and either side's messages between sessions (toSeat).
-function streamResponse(room, auth, after) {
-  const enc = new TextEncoder()
-  let sub = null
-  let done = false
-  const finish = () => {
-    if (done) return false
-    done = true
-    room.subscribers.delete(sub)
-    clearInterval(sub.keepalive)
-    clearTimeout(sub.maxAge)
-    room.touch(auth, Date.now())
-    room.onDisconnect?.()
-    return true
-  }
-  // A page's worth of the events after the cursor at a time: one cut short
-  // waits for its reader (pull), and what changes meanwhile goes with the rest.
-  let behind = false
-  const body = new ReadableStream({
-    start(controller) {
-      let cursor = after
-      // Its reader holds back what this stream sent (unread past
-      // STREAM_UNREAD): it ends, and what it holds goes with it.
-      const fail = () => {
-        if (!finish()) return
-        try {
-          controller.error(new Error('Stream not read'))
-        } catch {}
-      }
-      const send = obj => {
-        if (controller.desiredSize !== null && controller.desiredSize < 0) return fail()
-        try {
-          controller.enqueue(enc.encode(`${JSON.stringify(obj)}\n`))
-        } catch {}
-      }
-      const close = () => {
-        if (!finish()) return
-        try {
-          controller.close()
-        } catch {}
-      }
-      sub = {
-        seat: auth.seat,
-        send,
-        close,
-        push: (pulled = false) => {
-          if (done || (behind && !pulled)) return
-          if (auth.role !== 'host' && !room.seated(auth.seat)) return close()
-          const page = room.page(cursor, Date.now())
-          const cut = pageOf(page.events, STREAM_PAGE)
-          behind = cut.more
-          cursor = cut.more ? cut.events.at(-1).seq : page.seq
-          send(cut.more ? { ...page, seq: cursor, events: cut.events, more: true } : page)
-          if (page.ended && !cut.more) close()
-        },
-        keepalive: setInterval(() => send({ t: Date.now() }), KEEPALIVE_MS),
-        maxAge: setTimeout(close, STREAM_MAX_MS),
-      }
-      // A seat's streams past SEAT_STREAMS: its oldest ends.
-      const mine = [...room.subscribers].filter(s => s.seat === auth.seat)
-      for (const old of mine.slice(0, Math.max(0, mine.length - SEAT_STREAMS + 1))) old.close()
-      room.subscribers.add(sub)
-      sub.push()
-      if (auth.role === 'host') room.notify() // the host is back: everyone sees it
-    },
-    pull() {
-      if (behind) sub.push(true)
-    },
-    cancel() {
-      finish()
-    },
-  }, { highWaterMark: STREAM_UNREAD, size: chunk => chunk.byteLength })
-  return new Response(body, {
-    headers: { 'content-type': 'application/x-ndjson; charset=utf-8', 'cache-control': 'no-store', 'x-accel-buffering': 'no' },
-  })
 }
 
 const fileName = raw => {

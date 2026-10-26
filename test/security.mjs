@@ -2,19 +2,18 @@
 // the server asked for, checked: where a room's files are saved on a
 // teammate's computer, where a guest's read really goes on the host's, the
 // names a room keeps, the room page, what a seat may hold open (streams,
-// long polls, a stream nobody reads, on a real Node server too), uploads
+// long polls, a stream nobody reads), uploads
 // against a room's quota, and on the Worker, a members-only team's rooms
 // letting go of whoever leaves it and a room's end clearing the directory.
 import assert from 'node:assert/strict'
-import { spawn, spawnSync } from 'node:child_process'
+import { spawnSync } from 'node:child_process'
 import { createHash, randomBytes } from 'node:crypto'
 import { once } from 'node:events'
-import { connect, createServer } from 'node:net'
 import { mkdtemp, mkdir, readFile, writeFile, symlink, lstat, readdir, rm, chmod } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { Room, FILE_UPLOADS, LIMITS, PLUGIN_LATEST, ROOMS_PER_ADDRESS_DAY, SEAT_POLLS, SEAT_STREAMS, SERVE_LIMITS, STREAM_PAGE, STREAM_UNREAD, landingPage, roomRequest, token } from '../server/core.mjs'
+import { Room, FILE_UPLOADS, LIMITS, PLUGIN_LATEST, ROOMS_PER_ADDRESS_DAY, SEAT_POLLS, SEAT_STREAMS, SERVE_LIMITS, landingPage, roomRequest, token } from '../server/core.mjs'
 import './support/cloudflare.mjs'
 
 const SAVE = fileURLToPath(new URL('../plugin/relay/save.sh', import.meta.url))
@@ -158,36 +157,13 @@ const ok = label => console.log(`ok ${label}`)
   ok('the room page escapes what it embeds, and its policy runs only its own script')
 }
 
-// What a seat holds open: SEAT_STREAMS streams and SEAT_POLLS long polls,
-// one more taking the oldest's place; a stream's events in pages of
-// STREAM_PAGE as its reader takes them; and a stream whose reader stopped
-// ends once it holds STREAM_UNREAD, with what it held.
+// What a seat holds open: SEAT_POLLS long polls, one more answering the
+// oldest at once. Its SEAT_STREAMS streams are the Worker's (below).
 {
   const wait = ms => new Promise(resolve => setTimeout(resolve, ms))
   const room = Room.create({ id: token(16), name: 'Host', now: Date.now(), version: PLUGIN_LATEST })
   const guest = room.join('Gia', Date.now(), PLUGIN_LATEST)
   const ask = (path, bearer = guest.token) => roomRequest(room, new Request(`https://share.test/api/rooms/${room.id}/${path}`, { headers: { authorization: `Bearer ${bearer}`, 'x-shared-session-version': PLUGIN_LATEST } }), path.split('?')[0], Date.now(), 'https://share.test')
-  const lines = async (reader, until) => {
-    const out = []
-    let text = ''
-    while (!until(out)) {
-      const { done, value } = await reader.read()
-      if (done) return { out, done: true }
-      text += new TextDecoder().decode(value)
-      for (let at = text.indexOf('\n'); at >= 0; at = text.indexOf('\n')) { out.push({ bytes: at, page: JSON.parse(text.slice(0, at)) }); text = text.slice(at + 1) }
-    }
-    return { out, done: false }
-  }
-  const streams = []
-  for (let i = 0; i <= SEAT_STREAMS; i++) streams.push((await ask(`stream?after=${room.seq}`)).response.body.getReader())
-  const first = await lines(streams[0], () => false)
-  assert.equal(first.done, true, 'a seat\'s stream past SEAT_STREAMS ends its oldest')
-  assert.equal([...room.subscribers].filter(s => s.seat === guest.seat.id).length, SEAT_STREAMS)
-  const host = (await ask(`stream?after=${room.seq}`, room.host.token)).response.body.getReader()
-  assert.equal(room.subscribers.size, SEAT_STREAMS + 1, "another seat's streams are its own")
-  for (const reader of [...streams, host]) await reader.cancel()
-  assert.equal(room.subscribers.size, 0)
-
   const polls = Array.from({ length: SEAT_POLLS + 1 }, () => ask(`events?after=${room.seq}&wait=20000`))
   const answered = await Promise.race([polls[0].then(() => true), wait(500).then(() => false)])
   assert.equal(answered, true, 'a seat\'s long poll past SEAT_POLLS answers its oldest at once')
@@ -196,29 +172,7 @@ const ok = label => console.log(`ok ${label}`)
   room.wake()
   await Promise.all(polls)
   assert.equal(room.waiters.size, 0)
-
-  // A long history in pages, as its reader takes them (an event's strings
-  // are cut at 32,000 characters).
-  for (let i = 0; i < 80; i++) room.append({ seat: 'host', name: 'Host', role: 'host' }, 'row', { kind: 'assistant', text: `${i} ${'x'.repeat(30_000)}` }, Date.now())
-  const paged = (await ask('stream?after=0')).response.body.getReader()
-  const read = await lines(paged, out => out.some(l => l.page.events && !l.page.more))
-  const pages = read.out.filter(l => l.page.events)
-  assert.ok(pages.length >= 4 && pages.slice(0, -1).every(l => l.page.more && l.bytes <= STREAM_PAGE + 64 * 1024), `pages of at most ${STREAM_PAGE} bytes of events: ${pages.map(l => l.bytes)}`)
-  assert.deepEqual(pages.flatMap(l => l.page.events.map(e => e.seq)), room.since(0).map(e => e.seq), 'every event once, in order')
-  await paged.cancel()
-
-  // A reader that stopped: the stream ends once it holds STREAM_UNREAD.
-  const stuck = (await ask(`stream?after=${room.seq}`)).response.body.getReader()
-  let posted = 0
-  while ([...room.subscribers].length && posted < 4 * STREAM_UNREAD) {
-    room.append({ seat: 'host', name: 'Host', role: 'host' }, 'row', { kind: 'assistant', text: 'y'.repeat(30_000) }, Date.now())
-    room.wake()
-    posted += 30_000
-  }
-  assert.equal(room.subscribers.size, 0, 'a stream nobody reads ends')
-  assert.ok(posted <= STREAM_UNREAD + 2 * STREAM_PAGE, `within what it may hold unread (${posted})`)
-  assert.equal(await stuck.read().then(() => 'read', () => 'failed'), 'failed', 'and what it held goes with it')
-  ok('a seat holds four streams and four long polls (one more takes the oldest\'s place), a stream pages its events as its reader takes them, and one nobody reads ends')
+  ok('a seat holds four long polls, one more answering the oldest at once')
 }
 
 // A room's files: uploads at once count against its 100 MB together (each
@@ -250,45 +204,6 @@ const ok = label => console.log(`ok ${label}`)
   assert.equal([...full.room.files.values()].reduce((n, f) => n + f.size, 0), 98 * MB)
   assert.equal(full.room.filesPending.size + full.room.uploading, 0)
   ok('uploads at once count against a room\'s 100 MB together, four read at a time')
-}
-
-// Node's server writes a stream at its client's pace: one that stops reading
-// is cut off once the room's stream holds what it may, never buffered whole.
-{
-  const freePort = () => new Promise(resolve => { const s = createServer().listen(0, '127.0.0.1', () => { const { port } = s.address(); s.close(() => resolve(port)) }) })
-  const port = await freePort(), previewPort = await freePort()
-  const dir = await mkdtemp(join(tmpdir(), 'shared-security-node-'))
-  const child = spawn(process.execPath, [fileURLToPath(new URL('../server/node.mjs', import.meta.url))], { cwd: dir, env: { PATH: process.env.PATH, HOME: dir, PORT: String(port), PREVIEW_PORT: String(previewPort), DATA_FILE: '' }, stdio: ['ignore', 'ignore', 'inherit'] })
-  try {
-    const origin = `http://127.0.0.1:${port}`
-    for (let i = 0; i < 150 && !(await fetch(`${origin}/api/health`).then(r => r.ok, () => false)); i++) await new Promise(r => setTimeout(r, 20))
-    const api = async (path, bearer, body) => (await fetch(`${origin}${path}`, { method: body === undefined ? 'GET' : 'POST', headers: { 'x-shared-session-version': PLUGIN_LATEST, 'content-type': 'application/json', ...(bearer ? { authorization: `Bearer ${bearer}` } : {}) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) })).json()
-    const room = await api('/api/rooms', null, { name: 'Host', title: 't' })
-    const guest = await api(`/api/rooms/${room.id}/join`, null, { name: 'Gia' })
-    // A client that asks for the stream and never reads.
-    const socket = connect(port, '127.0.0.1')
-    await once(socket, 'connect')
-    socket.write(`GET /api/rooms/${room.id}/stream?after=0 HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer ${guest.token}\r\nx-shared-session-version: ${PLUGIN_LATEST}\r\n\r\n`)
-    socket.pause()
-    let received = 0, ended = false
-    socket.on('data', b => { received += b.length })
-    socket.on('close', () => { ended = true })
-    const total = 32 * 1024 * 1024
-    // Posts of 450 KB (the events route takes 512 KB), each a page of its own.
-    for (let sent = 0; sent < total; sent += 15 * 30_000) {
-      const posted = await api(`/api/rooms/${room.id}/events`, room.token, { events: Array.from({ length: 15 }, () => ({ type: 'row', body: { kind: 'assistant', text: 'z'.repeat(30_000) } })) })
-      assert.equal(typeof posted.seq, 'number', JSON.stringify(posted))
-    }
-    socket.resume()
-    for (let i = 0; i < 250 && !ended; i++) await new Promise(r => setTimeout(r, 20))
-    assert.equal(ended, true, 'the stream ends')
-    assert.ok(received < total / 2, `long before it would have sent everything (${received} bytes)`)
-    ok("Node's server writes a stream at its client's pace, and ends one that stopped reading rather than buffering what it would send")
-  } finally {
-    child.kill()
-    if (child.exitCode === null) await once(child, 'exit')
-    await rm(dir, { recursive: true, force: true })
-  }
 }
 
 // On the Worker: the directory object tells a members-only team's room

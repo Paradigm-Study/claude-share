@@ -844,8 +844,8 @@ export class Directory {
   }
 }
 
-// The directory's bodies, in characters (node.mjs bounds their bytes at three
-// a character before buffering them): JSON, or a browser's form ('form').
+// The directory's bodies, in characters (the Worker bounds their bytes at
+// three a character before reading them): JSON, or a browser's form ('form').
 export const BODY_CHARS = 16_000
 async function readBody(req, as = 'json') {
   const text = await req.text()

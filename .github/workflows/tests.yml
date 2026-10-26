@@ -27,12 +27,21 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           persist-credentials: false
+      # The room server is the Workers under wrangler dev (test/support/workerd.mjs),
+      # which needs Node 22+: installed with Node 24 and run by it (WRANGLER_NODE),
+      # while the suite and the relay helpers it starts run on the matrix's Node.
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - run: echo "WRANGLER_NODE=$(command -v node)" >> "$GITHUB_ENV"
+      - run: npm install --no-package-lock --ignore-scripts
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
           node-version: ${{ matrix.node }}
           package-manager-cache: false
       # Each suite gets its own runner; servers and installer fixtures are local.
-      # These tests use Node's standard library; no install or secrets needed.
+      # No secrets needed.
       # teams (the sign-in page's Continue) and local-preview (preview windows,
       # WebRTC) drive a headless browser the runner image has, and print SKIP
       # for those checks where they find none. With both Chrome and Firefox,

@@ -20,16 +20,16 @@ import helper from '../plugin/relay/local-preview.cjs'
 import wsHelper from '../plugin/relay/ws-relay.cjs'
 import ws from '../plugin/relay/ws.cjs'
 import tcpRelay from '../plugin/relay/tcp-relay.cjs'
+import { startWorkerd } from './support/workerd.mjs'
 
 const ROOT = fileURLToPath(new URL('../', import.meta.url))
 const GUEST = fileURLToPath(new URL('../plugin/relay/local-preview.cjs', import.meta.url))
 const HOST = fileURLToPath(new URL('../plugin/relay/tcp-worker.cjs', import.meta.url))
 const PROXY = fileURLToPath(new URL('../plugin/relay/browser-proxy.cjs', import.meta.url))
 const PUBLIC = fileURLToPath(new URL('../plugin/relay/ws-relay.cjs', import.meta.url))
-const NODE = fileURLToPath(new URL('../server/node.mjs', import.meta.url))
 const VERSION = JSON.parse(await readFile(new URL('../plugin/.claude-plugin/plugin.json', import.meta.url))).version
 const scratch = await mkdtemp(`${tmpdir()}/shared-tcp-`)
-const children = new Set(), servers = new Set(), sockets = new Set(), running = new Set(), websockets = new Set(), requests = new Set()
+const workerd = new Set(), children = new Set(), servers = new Set(), sockets = new Set(), running = new Set(), websockets = new Set(), requests = new Set()
 const ROOM = 'R'.repeat(24), PID = 'P'.repeat(12), CAP = 'C'.repeat(32)
 const dummy = port => ({ port, strict: true, url: `http://127.0.0.1:1/api/rooms/${ROOM}/previews/${PID}/tunnel`, token: CAP })
 let ipv6 = true
@@ -112,7 +112,6 @@ function launch(file, cfg, env = {}) {
   let input = ''
   child.stdout.on('data', bytes => {
     log.stdout += bytes
-    if (file === NODE) return
     input += bytes
     let at
     while ((at = input.indexOf('\n')) !== -1) {
@@ -1122,11 +1121,9 @@ async function realChain() {
     assert.ok(process.env.SHARE_SERVER, 'SHARE_SERVER is required with EXTERNAL_SERVER=1')
     origin = new URL(process.env.SHARE_SERVER).origin
   } else {
-    const mainPort = await freePort(), previewPort = await freePort()
-    origin = `http://127.0.0.1:${mainPort}`
-    const node = launch(NODE, undefined, { PORT: String(mainPort), PREVIEW_PORT: String(previewPort), PUBLIC_URL: origin, DATA_FILE: '', AUTH_TEST: '' })
-    await until(() => node.stdout.includes('shared sessions on') || node.exit, 'Node room server', 10_000)
-    assert.equal(node.exit, null, node.stderr)
+    const server = await startWorkerd()
+    workerd.add(server)
+    origin = server.origin
   }
   async function api(path, token, body, expected = 200) {
     const res = await fetch(`${origin}${path}`, { method: 'POST', signal: AbortSignal.timeout(15_000), headers: { 'content-type': 'application/json', 'x-shared-session-version': VERSION, ...(token ? { authorization: `Bearer ${token}` } : {}) }, body: JSON.stringify(body ?? {}) })
@@ -1143,10 +1140,11 @@ async function realChain() {
   // write for the first's ACK, which Linux delays 40 ms, made every exchange
   // past it some 80 ms, and the 20,000-frame check below ran out of time on CI.
   async function faultGate() {
-    const active = new Set()
+    const active = new Set(), clients = new Set()
     let online = true, refused = 0
     const server = track(net.createServer({ allowHalfOpen: true, noDelay: true }, client => {
       if (!online) { refused++; client.destroy(); return }
+      clients.add(client); for (const done of ['end', 'close']) client.on(done, () => clients.delete(client))
       const upstream = net.createConnection({ host: target.hostname.replace(/^\[|\]$/g, ''), port: Number(target.port || 80), allowHalfOpen: true, noDelay: true })
       const destroy = () => { client.destroy(); upstream.destroy() }
       for (const socket of [client, upstream]) {
@@ -1157,7 +1155,7 @@ async function realChain() {
       client.pipe(upstream).pipe(client)
     }))
     const port = await listen(server)
-    return { server, port, origin: `http://127.0.0.1:${port}`, active, get refused() { return refused },
+    return { server, port, origin: `http://127.0.0.1:${port}`, active, clients, get refused() { return refused },
       down() { online = false; for (const socket of active) socket.destroy() },
       up() { online = true },
     }
@@ -1928,6 +1926,11 @@ async function realChain() {
     assert.equal(log.stderr, '')
   }
   for (const gate of [guestGate, hostGate].filter(Boolean)) {
+    // Every helper's leg closed. workerd keeps its side of an idle HTTP
+    // connection half-open after the helper's FIN, where Node closed it:
+    // what it still holds open ends here.
+    await until(() => gate.clients.size === 0, 'every helper ended its leg', 15_000)
+    for (const socket of gate.active) socket.destroy()
     await until(() => gate.active.size === 0, 'fault gate released both socket legs')
     await close(gate.server)
     const rebound = track(net.createServer()); await listen(rebound, '127.0.0.1', gate.port); await close(rebound)
@@ -2064,6 +2067,7 @@ try {
   await Promise.all([...running].map(helper => helper.close()))
   for (const socket of sockets) socket.destroy()
   for (const child of children) child.kill('SIGTERM')
+  await Promise.all([...workerd].map(server => server.stop()))
   await Promise.all([...servers].map(close))
   await Promise.all([...children].map(child => child.exitCode === null && child.signalCode === null ? once(child, 'exit') : Promise.resolve()))
   await rm(scratch, { recursive: true, force: true })

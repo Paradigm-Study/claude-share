@@ -72,7 +72,7 @@ export async function readJson(req) {
 // wasn't read closes its socket.
 export const streamedRoomBody = (method, rest) => (method === 'POST' &&
   (rest === 'previews' || rest === 'need' || rest === 'peer' || rest === 'cloud' || /^previews\/[^/]+\/(?:end|ticket)$/.test(rest) || /^ws\/[^/]+\/reject$/.test(rest) || /^proxy\/[^/]+$/.test(rest))) ||
-  // The cloud host's packed session goes on to it as it comes (cloud-docker.mjs, HostContainer).
+  // The cloud host's packed session goes on to it as it comes (HostContainer).
   (method === 'PUT' && rest === 'cloud/bundle')
 
 // What an adapter takes of a room route's body (past it, 413): a file's
