@@ -116,9 +116,7 @@ export type ServerEnv = Omit<TracesEnv, 'DIRECTORY'> & {
   DIRECTORY?: DurableObjectNamespace<DirectoryObject>
   HOSTS?: DurableObjectNamespace
 }
-// Session traces (server/traces, TypeScript): loaded only where a database
-// is bound, so the Worker's tests on Node 20, which can't load TypeScript,
-// never reach it.
+// Session traces (server/traces): loaded only where a database is bound.
 const tracesOn = (env: ServerEnv | undefined) => Boolean(env?.TRACES_DB && env?.OAUTH_KV)
 const traces = () => import('./traces/index.ts')
 

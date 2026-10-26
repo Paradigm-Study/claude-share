@@ -1,4 +1,4 @@
-// Standalone Node 20+ checks: no models, deps, OAuth or saved room data.
+// Standalone Node 22.18+ checks: no models, deps, OAuth or saved room data.
 //   node test/local-preview.mjs                 (real Room + Node + both helpers)
 //   node test/local-preview.mjs --helpers-only (parser/listener checks only)
 //   EXTERNAL_SERVER=1 SHARE_SERVER=http://127.0.0.1:8787 node test/local-preview.mjs

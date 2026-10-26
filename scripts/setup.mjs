@@ -564,6 +564,13 @@ const usage = `usage:
   node scripts/setup.mjs deploy
   node scripts/setup.mjs check [--server <url>] [--live]`
 
+// The project runs its TypeScript on Node itself, its types stripped: 22.18 or newer.
+const NODE_MIN = [22, 18, 0]
+if (command && !atLeast(versionOf(process.version), NODE_MIN)) {
+  fail(`Node ${process.version.slice(1)} is too old for this project; it needs ${NODE_MIN.slice(0, 2).join('.')} or newer. Install a newer Node (https://nodejs.org, or \`nvm install 22\`), then run this again.`)
+  process.exit(status)
+}
+
 switch (command) {
   case 'join': {
     installPlugin(needClaude(), null)
