@@ -172,7 +172,13 @@ async function connect(email, name, { redirect = REDIRECT, decision = 'allow', s
 let rpcId = 0
 const mcp = async (tok, method, params) => {
   const res = await fetch(`${S}/mcp`, { method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream', ...(tok ? { authorization: `Bearer ${tok}` } : {}) }, body: JSON.stringify({ jsonrpc: '2.0', id: ++rpcId, method, params }) })
-  return { status: res.status, headers: res.headers, data: await res.json().catch(() => null) }
+  // A 2025-era request is answered as a stream of events: its answer is the
+  // event that carries this request's id.
+  const text = await res.text()
+  const messages = (res.headers.get('content-type') ?? '').startsWith('text/event-stream')
+    ? text.split('\n').filter(l => l.startsWith('data:')).map(l => { try { return JSON.parse(l.slice(5)) } catch { return null } })
+    : [(() => { try { return JSON.parse(text) } catch { return null } })()]
+  return { status: res.status, headers: res.headers, data: messages.find(m => m?.id === rpcId) ?? messages.at(-1) ?? null }
 }
 const tool = async (tok, name, args) => (await mcp(tok, 'tools/call', { name, arguments: args })).data?.result
 const hits = async (tok, query, more = {}) => (await tool(tok, 'search', { query, ...more }))?.structuredContent?.hits ?? []
