@@ -50,16 +50,21 @@ const own = netServer(socket => {
 })
 own.listen(ownPath); await once(own, 'listening')
 const allLines = () => lines.flat()
-// The room: every POST peer, and its answer (the test's to choose).
+// The room: every POST peer, and its answer (the test's to choose), taken
+// after `slowFor` its body milliseconds (the test's to choose too).
 const posts = []
 let answer = () => [200, { delivered: true }]
+let slowFor = () => 0
 const room = httpServer((req, res) => {
   let body = ''
   req.on('data', c => { body += c })
   req.on('end', () => {
-    posts.push({ path: req.url, auth: req.headers.authorization, version: req.headers['x-shared-session-version'], body: JSON.parse(body) })
-    const [status, json] = answer()
-    res.writeHead(status, { 'content-type': 'application/json' }).end(JSON.stringify(json))
+    const parsed = JSON.parse(body)
+    setTimeout(() => {
+      posts.push({ path: req.url, auth: req.headers.authorization, version: req.headers['x-shared-session-version'], body: parsed })
+      const [status, json] = answer()
+      res.writeHead(status, { 'content-type': 'application/json' }).end(JSON.stringify(json))
+    }, slowFor(parsed))
   })
 })
 room.listen(0, '127.0.0.1'); await once(room, 'listening')
@@ -213,11 +218,14 @@ try {
     await wait(150)
     assert.equal(posts.length, 1, 'a frame or receipt from another session goes nowhere')
 
-    // This session's receipts for what came from the mailbox: to the seat.
+    // This session's receipts for what came from the mailbox: to the seat,
+    // in the order they were sent, though the room takes the first slowly.
+    slowFor = body => (body.status === 'held' ? 200 : 0)
     await write(file, JSON.stringify({ type: 'control', action: 'peer_message_status', status: 'held', reason: 'x', from: `uds:${ownPath}`, orig_msg_id: ID, msgV: 1, msg_id: REF }))
     await write(file, JSON.stringify({ type: 'control', action: 'peer_message_status', status: 'expired', status_detail: 'refused', from: `uds:${ownPath}`, orig_msg_id: ID, msgV: 1, msg_id: REF }))
     assert(await until(() => posts.length === 3))
     assert.deepEqual(posts.slice(1).map(p => p.body), [{ to: SEAT, handle: HANDLE, status: 'held', id: ID }, { to: SEAT, handle: HANDLE, status: 'refused', id: ID }])
+    slowFor = () => 0
 
     // The seat's receipts for what this session wrote, into it from the
     // mailbox: `delivered` only after a `held`.
@@ -259,7 +267,7 @@ try {
     assert(!existsSync(file))
     await helper.close()
     assert.equal(await control(port, { op: 'open', box: BOX, seat: SEAT, handle: HANDLE }), 0, 'closed: no control port')
-    console.log('OK mailbox helper: delivers with the chain and id, posts what the session writes and its receipts, writes the seat\'s receipts back, refuses strangers, swept, hardened')
+    console.log('OK mailbox helper: delivers with the chain and id, posts what the session writes and its receipts, in order though the room is slow, writes the seat\'s receipts back, refuses strangers, swept, hardened')
   }
   liveServer.close()
 
