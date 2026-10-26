@@ -144,7 +144,8 @@ const mailboxHelperA = atom({ plugin: 'shared-session', key: 'mailboxHelper' } a
 const autoOpenA = atom({ plugin: 'shared-session', key: 'autoOpen' } as const, true)
 // Share asked about: what teammates may do first (`teammates` unset), then,
 // with earlier prompts, whether they go too.
-type ShareAsking = { prompts: number; teammates?: SharePolicy['prompts'] }
+// `kept`: the server keeps the session's turns for search (server/traces).
+type ShareAsking = { prompts: number; teammates?: SharePolicy['prompts']; kept?: boolean }
 const askingA = atom({ plugin: 'shared-session', key: 'asking' } as const, null as ShareAsking | null)
 const connectionA = atom({ plugin: 'shared-session', key: 'connection' } as const, 'live' as 'live' | 'reconnecting')
 const confirmingA = atom({ plugin: 'shared-session', key: 'confirming' } as const, null as 'stop' | null)
@@ -494,6 +495,19 @@ async function catchUpFromInstalled($: $) {
     ].join('\n'),
   )
 }
+
+// Whether sharing here keeps the session's turns on the server for later
+// search: the server says so in /api/version (`traces`), and keeps them only
+// for a host who is signed in. Asked as Share asks; false when it can't be told.
+async function serverKeeps($: $): Promise<boolean> {
+  if (!(await read($, teamsA)).account) return false
+  try {
+    return (await api<{ traces?: boolean }>($, await serverOf($), '/api/version')).traces === true
+  } catch {
+    return false
+  }
+}
+const keptNote = (team: string | null) => `This server keeps its turns: ${team ? `everyone in ${team}` : 'you'} can search them later.`
 
 // What the server says is newest, asked now and then: a long-open session
 // learns of a release without sharing or joining anything.
@@ -2982,13 +2996,14 @@ function requestShare($: $, surface?: RenderSurface): Promise<void> {
       return
     }
     const prompts = await earlierPrompts($)
+    const kept = await serverKeeps($)
     // Its room back meanwhile, this session shares already: a look after
     // the wait, so a write.
     if ((await update($, modeA, v => v)) !== 'idle') {
       await share($, surface)
       return
     }
-    await update($, askingA, () => ({ prompts }))
+    await update($, askingA, () => ({ prompts, ...(kept ? { kept } : {}) }))
   })
 }
 
@@ -9467,7 +9482,8 @@ function describe(a: ShareActivity): string {
 // the link.
 function shareChoice($: $, el: UI, asking: ShareAsking, where: 'band' | 'room', surface: RenderSurface, team: string | null) {
   const { Box, Text, Button } = el
-  const { prompts, teammates } = asking
+  const { prompts, teammates, kept } = asking
+  const keeps = kept ? ` ${keptNote(team)}` : ''
   const go = (opts: ShareOpts, surface?: RenderSurface) =>
     void inShareTurn($, () => share($, surface, opts)).catch(error => {
       $.ui.toast("Couldn't share")
@@ -9479,7 +9495,7 @@ function shareChoice($: $, el: UI, asking: ShareAsking, where: 'band' | 'room', 
   const cancel = <Button key="share-cancel" label="Cancel" plain dimColor onPress={() => void update($, askingA, () => null)} />
   const [what, buttons] = !teammates
     ? [
-        `${who} will see it live. Teammates can:`,
+        `${who} will see it live.${keeps} Teammates can:`,
         <Box flexDirection="row" gap={1} flexShrink={0}>
           <Button key="share-prompt" label="Prompt Claude" variant="primary" onPress={press => pick('everyone', press.surface)} />
           <Button key="share-watch" label="Only watch and chat" onPress={press => pick('watch', press.surface)} />
@@ -9487,7 +9503,7 @@ function shareChoice($: $, el: UI, asking: ShareAsking, where: 'band' | 'room', 
         </Box>,
       ]
     : [
-        `${who} will see its ${prompts} earlier prompt${prompts === 1 ? '' : 's'} and Claude's replies.${teammates === 'watch' ? ' They can watch and chat, not prompt Claude.' : ''}`,
+        `${who} will see its ${prompts} earlier prompt${prompts === 1 ? '' : 's'} and Claude's replies.${keeps}${teammates === 'watch' ? ' They can watch and chat, not prompt Claude.' : ''}`,
         <Box flexDirection="row" gap={1} flexShrink={0}>
           <Button key="share-all" label="Share everything" variant="primary" onPress={press => go({ history: true, watch: teammates === 'watch' }, press.surface)} />
           <Button key="share-new" label="Only from now on" onPress={press => go({ history: false, watch: teammates === 'watch' }, press.surface)} />
@@ -10525,12 +10541,13 @@ async function shareAsked($: $, choice: string, byLink: boolean, watch: boolean)
       const prompts = await earlierPrompts($)
       if (prompts > 0) {
         const team = byLink ? null : await shareTeamName($)
+        const kept = await serverKeeps($)
         // The row above the prompt offers the same two, a press away (by keys in a terminal).
-        await update($, askingA, () => ({ prompts, teammates: watch ? 'watch' : 'everyone' }))
+        await update($, askingA, () => ({ prompts, teammates: watch ? 'watch' : 'everyone', ...(kept ? { kept } : {}) }))
         const rest = `${byLink ? ' link' : ''}${watch ? ' watch' : ''}`
         return {
           text: [
-            `This session has ${prompts} earlier prompt${prompts === 1 ? '' : 's'}. ${team ? `Everyone in ${team}` : 'Everyone with the link'} would see them, and Claude's replies.`,
+            `This session has ${prompts} earlier prompt${prompts === 1 ? '' : 's'}. ${team ? `Everyone in ${team}` : 'Everyone with the link'} would see them, and Claude's replies.${kept ? ` ${keptNote(team)}` : ''}`,
             '',
             `- \`/share-session all${rest}\` shares the session as it is`,
             `- \`/share-session new${rest}\` shares only what happens from now on`,
@@ -10540,7 +10557,8 @@ async function shareAsked($: $, choice: string, byLink: boolean, watch: boolean)
     }
     const room = await share($, undefined, { history: choice !== 'new', team: !byLink, watch })
     const team = room.team ? (await read($, teamsA)).teams.find(t => t.id === room.team?.id) ?? null : null
-    return { text: `Sharing this session${choice === 'new' ? ' from now on' : ''}${room.team ? ` with ${room.team.name}` : ''}${watch ? ', watch-only: teammates watch and chat, and only you prompt Claude' : ''}. ${whoJoins(room, team, watch)}: ${room.url}` }
+    const kept = (await serverKeeps($)) ? ` ${keptNote(room.team?.name ?? null)}` : ''
+    return { text: `Sharing this session${choice === 'new' ? ' from now on' : ''}${room.team ? ` with ${room.team.name}` : ''}${watch ? ', watch-only: teammates watch and chat, and only you prompt Claude' : ''}. ${whoJoins(room, team, watch)}: ${room.url}${kept}` }
   } catch (error) {
     return { text: `Couldn't share: ${String((error as Error)?.message ?? error)}` }
   }

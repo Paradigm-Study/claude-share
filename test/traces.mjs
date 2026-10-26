@@ -193,6 +193,7 @@ try {
     "MCP without a token: 401 naming the resource's metadata, which names this server's OAuth: registration, authorize, PKCE")
 
   const home = await (await fetch(`${S}/`)).text()
+  ok((await call('/api/version')).data?.traces === true, '/api/version says this server keeps turns, for Share to say')
   ok(home.includes('<b>Traces, kept on this server:</b>') && home.includes('there is no way yet to delete them'), "the home page says this server keeps turns, for how long, and that they can't be deleted yet")
 
   const alice = await signIn('alice@acme.com', 'Alice')
@@ -213,8 +214,13 @@ try {
   ok(Boolean(refreshed.access_token) && (await mcp(refreshed.access_token, 'tools/list', {})).status === 200, 'a refresh token gets a new access token that works')
 
   // -- a shared session, kept -------------------------------------------------
-  const team = (await call('/api/teams', { method: 'POST', tok: alice, body: { name: 'Acme' } })).data.team
-  const room = (await call('/api/rooms', { method: 'POST', acct: alice, body: { name: 'Alice', title: 'acme: deploys', team: team.id } })).data
+  const made = await call('/api/teams', { method: 'POST', tok: alice, body: { name: 'Acme' } })
+  const team = made.data?.team
+  const shared = await call('/api/rooms', { method: 'POST', acct: alice, body: { name: 'Alice', title: 'acme: deploys', team: team?.id } })
+  const room = shared.data
+  // A refusal says why: a sign-in or team the share check turned away (401,
+  // 403), or the room limit (429).
+  for (const [what, res, id] of [['team', made, team?.id], ['room', shared, room?.id]]) if (!id) console.log(`NOTE the ${what} was not made: ${res.status} ${JSON.stringify(res.data).slice(0, 500)}`)
   ok(Boolean(team?.id && room?.id), 'Alice makes Acme and shares a session with it')
 
   const row = (kind, text, extra = {}) => ({ type: 'row', body: { kind, text, ...extra } })

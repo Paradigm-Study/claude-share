@@ -178,7 +178,9 @@ export function clientVersion(req) {
   return /^\d{1,4}\.\d{1,4}\.\d{1,6}$/.test(v) ? v : null
 }
 
-export const versionInfo = () => json({ latest: PLUGIN_LATEST, min: PLUGIN_MIN, update: UPDATE_COMMAND })
+// `traces`: this server keeps shared sessions' turns (server/traces), which
+// the plugin says as Share asks.
+export const versionInfo = ({ traces = false } = {}) => json({ latest: PLUGIN_LATEST, min: PLUGIN_MIN, update: UPDATE_COMMAND, ...(traces ? { traces: true } : {}) })
 export const limitedResponse = kind => json({ error: LIMITS[kind].message }, 429)
 export const busyResponse = () =>
   json({ error: 'The public share server has made as many shared sessions as it will today. Joining links still works; to share now, run your own server (see the README).' }, 503)

@@ -158,7 +158,7 @@ export default {
     const parts = url.pathname.split('/').filter(Boolean)
 
     if (url.pathname === '/api/health') return json({ ok: true })
-    if (url.pathname === '/api/version') return versionInfo()
+    if (url.pathname === '/api/version') return versionInfo({ traces: tracesOn(env) })
     if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/privacy')) return homePage(origin, { traces: tracesOn(env) })
     // Session traces over MCP, and its OAuth (server/traces/oauth.ts).
     if (tracesOn(env) && env.DIRECTORY) {
