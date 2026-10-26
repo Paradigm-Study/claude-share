@@ -5,7 +5,7 @@ plugin/.claude/
 server/worker-configuration.d.ts
 rooms.json
 rooms.json.tcp
-# Written by scripts/setup.mjs deploy for another Cloudflare account.
+# Written by scripts/setup.ts deploy for another Cloudflare account.
 wrangler.selfhost.toml
 .DS_Store
 *.log

@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 // Sets up shared sessions on this machine, for a person or an agent.
 //
-//   node scripts/setup.mjs join                   install the plugin (joining needs nothing else)
-//   node scripts/setup.mjs host --server <url>    install, and share through an existing server
-//   node scripts/setup.mjs deploy                 deploy a server to Cloudflare, then use it here
-//   node scripts/setup.mjs check [--server <url>] [--live]
+//   node scripts/setup.ts join                   install the plugin (joining needs nothing else)
+//   node scripts/setup.ts host --server <url>    install, and share through an existing server
+//   node scripts/setup.ts deploy                 deploy a server to Cloudflare, then use it here
+//   node scripts/setup.ts check [--server <url>] [--live]
 //                                                 verify the plugin, the server and (--live) a real share
 //
 // Non-interactive and safe to re-run. Every step prints one line:
@@ -22,6 +22,20 @@ import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSy
 import { homedir, tmpdir, userInfo } from 'node:os'
 import { basename } from 'node:path'
 import { join } from 'node:path'
+
+// A server's JSON, and what the person's settings and Claude Code's plugin
+// list hold: each read checks what it uses.
+type Json = { [key: string]: any }
+type Settings = {
+  env?: Record<string, string>
+  extraKnownMarketplaces?: Record<string, { autoUpdate?: boolean; [key: string]: unknown }>
+  pluginConfigs?: Record<string, { options?: { server?: string } }>
+  [key: string]: unknown
+}
+type Plugin = { id: string; enabled?: boolean; version?: string; installPath?: unknown }
+// What a caught error may carry.
+type Failure = { cause?: { code?: unknown }; message?: unknown; name?: unknown; code?: unknown } | null | undefined
+type Version = number[]
 
 const MARKETPLACE = 'Paradigm-Study/claude-share'
 const PLUGIN = 'shared-session@claude-share'
@@ -42,38 +56,40 @@ const EARLY_VERSION = [2, 1, 285]
 const CONFIG_DIR = process.env.CLAUDE_CONFIG_DIR?.trim() || join(homedir(), '.claude')
 // The automatic-update folder, told by its path's end as the plugin's
 // runsLive tells it.
-const isLiveDir = path => path.replace(/\/+$/, '').endsWith('/.claude/shared-session/plugin')
+const isLiveDir = (path: string) => path.replace(/\/+$/, '').endsWith('/.claude/shared-session/plugin')
 const SETTINGS = join(CONFIG_DIR, 'settings.json')
 
 const [command, ...rest] = process.argv.slice(2)
-const flag = name => {
+const flag = (name: string): string | true | undefined => {
   const i = rest.indexOf(`--${name}`)
-  return i >= 0 ? (rest[i + 1] && !rest[i + 1].startsWith('--') ? rest[i + 1] : true) : undefined
+  const next = rest[i + 1]
+  return i >= 0 ? (next && !next.startsWith('--') ? next : true) : undefined
 }
 
 let status = 0
-const ok = line => console.log(`OK ${line}`)
-const note = line => console.log(`NOTE ${line}`)
-const human = line => {
+const ok = (line: string) => console.log(`OK ${line}`)
+const note = (line: string) => console.log(`NOTE ${line}`)
+const human = (line: string) => {
   console.log(`NEEDS HUMAN ${line}`)
   status = Math.max(status, 2)
 }
-const fail = line => {
+const fail = (line: string) => {
   console.log(`FAIL ${line}`)
   status = 1
 }
 
-function run(cmd, args, opts = {}) {
+type RunOptions = { timeout?: number; input?: string; cwd?: string; env?: NodeJS.ProcessEnv }
+function run(cmd: string, args: string[], opts: RunOptions = {}) {
   const r = spawnSync(cmd, args, { encoding: 'utf8', timeout: opts.timeout ?? 180_000, input: opts.input, cwd: opts.cwd, env: opts.env ?? process.env })
   return { code: r.status ?? 1, out: `${r.stdout ?? ''}${r.stderr ?? ''}`, error: r.error }
 }
 
-const versionOf = out => (/(\d+)\.(\d+)\.(\d+)/.exec(out) ?? []).slice(1).map(Number)
-const atLeast = (v, min) => {
-  for (let i = 0; i < 3; i++) if ((v[i] ?? 0) !== min[i]) return (v[i] ?? 0) > min[i]
+const versionOf = (out: string): Version => (/(\d+)\.(\d+)\.(\d+)/.exec(out) ?? []).slice(1).map(Number)
+const atLeast = (v: Version, min: Version) => {
+  for (let i = 0; i < 3; i++) if ((v[i] ?? 0) !== (min[i] ?? 0)) return (v[i] ?? 0) > (min[i] ?? 0)
   return true
 }
-const newestFirst = (a, b) => {
+const newestFirst = (a: string, b: string) => {
   const [x, y] = [versionOf(a), versionOf(b)]
   for (let i = 0; i < 3; i++) if ((x[i] ?? 0) !== (y[i] ?? 0)) return (y[i] ?? 0) - (x[i] ?? 0)
   return 0
@@ -82,7 +98,7 @@ const newestFirst = (a, b) => {
 // A Claude Code new enough for function-hook plugins: $CLAUDE_BIN, `claude` on
 // PATH, or the newest one Claude Desktop bundles (macOS).
 function findClaude() {
-  const candidates = []
+  const candidates: string[] = []
   if (process.env.CLAUDE_BIN) candidates.push(process.env.CLAUDE_BIN)
   candidates.push('claude')
   // The account's real home, even when HOME is overridden (a sandbox, CI).
@@ -95,8 +111,8 @@ function findClaude() {
       }
     }
   }
-  let newestSeen = null
-  let early = null
+  let newestSeen: string | null = null
+  let early: { bin: string; version: string } | null = null
   for (const bin of candidates) {
     const r = run(bin, ['--version'], { timeout: 20_000 })
     if (r.error || r.code !== 0) continue
@@ -115,8 +131,8 @@ function findClaude() {
 // Claude Code 2.1.285 loads function-hook plugins only with this switch on
 // (2.1.286 and newer have it on): set in the person's settings, nothing else
 // there touched.
-function enableFunctionHooks(version) {
-  let settings = {}
+function enableFunctionHooks(version: string) {
+  let settings: Settings = {}
   try {
     if (existsSync(SETTINGS)) settings = JSON.parse(readFileSync(SETTINGS, 'utf8'))
   } catch {
@@ -156,7 +172,7 @@ function needClaude() {
 // A share server address: https://, or plain http:// only on this computer.
 // Room tokens and sign-ins go with every request, so the plugin speaks to no
 // other plain http server.
-function validServer(url) {
+function validServer(url: unknown) {
   if (typeof url !== 'string') return null
   const value = url.trim().replace(/\/+$/, '')
   try {
@@ -169,7 +185,7 @@ function validServer(url) {
   }
 }
 
-function installedPlugins(claude) {
+function installedPlugins(claude: string): Plugin[] | null {
   const listed = run(claude, ['plugin', 'list', '--json'])
   if (listed.code !== 0) {
     fail(`listing plugins: ${listed.out.trim().split('\n').pop()}`)
@@ -183,7 +199,7 @@ function installedPlugins(claude) {
   return null
 }
 
-function installPlugin(claude, server) {
+function installPlugin(claude: string, server: string | null) {
   const added = run(claude, ['plugin', 'marketplace', 'add', MARKETPLACE])
   if (added.code !== 0 && !/already/i.test(added.out)) return fail(`adding the marketplace: ${added.out.trim().split('\n').pop()}`)
   const marketplace = run(claude, ['plugin', 'marketplace', 'update', 'claude-share'])
@@ -198,7 +214,7 @@ function installPlugin(claude, server) {
       const enabled = run(claude, ['plugin', 'enable', PLUGIN])
       if (enabled.code !== 0) return fail(`enabling the plugin: ${enabled.out.trim().split('\n').pop()}`)
     }
-    ok(`plugin installed (${(/updated from \S+ to (\S+)/.exec(updated.out) ?? [, 'already current'])[1]})`)
+    ok(`plugin installed (${/updated from \S+ to (\S+)/.exec(updated.out)?.[1] ?? 'already current'})`)
   } else {
     const args = ['plugin', 'install', PLUGIN]
     if (server) args.push('--config', `server=${server}`)
@@ -215,7 +231,7 @@ function installPlugin(claude, server) {
 // the marketplace has `autoUpdate` on (off by default): this turns it on in
 // the person's settings, leaving everything else there as it was.
 function enableAutoUpdate() {
-  let settings = {}
+  let settings: Settings = {}
   try {
     if (existsSync(SETTINGS)) settings = JSON.parse(readFileSync(SETTINGS, 'utf8'))
   } catch {
@@ -230,24 +246,25 @@ function enableAutoUpdate() {
   ok('updates now install by themselves (the marketplace\'s autoUpdate is on)')
 }
 
-function configureServer(claude, server) {
+function configureServer(claude: string, server: string) {
   const r = run(claude, ['plugin', 'configure', PLUGIN, '--values-stdin'], { input: JSON.stringify({ server }) })
   if (r.code !== 0) return fail(`setting the share server: ${r.out.trim().split('\n').pop()}`)
   ok(`share server set to ${server}`)
   return true
 }
 
-async function health(server, { waitMs = 0 } = {}) {
+async function health(server: string, { waitMs = 0 } = {}) {
   const end = Date.now() + waitMs
   let last = ''
   do {
     try {
       const res = await fetch(`${server}/api/health`, { signal: AbortSignal.timeout(8000) })
-      const body = await res.json().catch(() => ({}))
+      const body = (await res.json().catch(() => ({}))) as Json
       if (res.ok && body.ok) return true
       last = `HTTP ${res.status}`
     } catch (error) {
-      last = String(error?.cause?.code ?? error?.message ?? error)
+      const e = error as Failure
+      last = String(e?.cause?.code ?? e?.message ?? error)
     }
     if (Date.now() < end) await new Promise(r => setTimeout(r, 10_000))
   } while (Date.now() < end)
@@ -256,29 +273,31 @@ async function health(server, { waitMs = 0 } = {}) {
 
 // One request; never throws. A body that isn't JSON (a proxy's or Cloudflare's
 // error page) reads as {}, and the status says what happened.
-async function call(url, init = {}) {
+type Called = { ok: boolean; status: number; body: Json; error?: string }
+async function call(url: string, init: Omit<RequestInit, 'headers'> & { headers?: Record<string, string> } = {}): Promise<Called> {
   try {
     const headers = { 'content-type': 'application/json', 'x-shared-session-version': PLUGIN_VERSION, ...(init.headers ?? {}) }
     const res = await fetch(url, { ...init, headers, signal: AbortSignal.timeout(15_000) })
     const text = await res.text()
-    let body = {}
+    let body: Json = {}
     try {
       body = JSON.parse(text)
     } catch {}
     return { ok: res.ok, status: res.status, body }
   } catch (error) {
-    return { ok: false, status: 0, body: {}, error: String(error?.cause?.code ?? error?.message ?? error) }
+    const e = error as Failure
+    return { ok: false, status: 0, body: {}, error: String(e?.cause?.code ?? e?.message ?? error) }
   }
 }
 
-const why = r => (r.status ? `HTTP ${r.status}${r.body.error ? `: ${r.body.error}` : ''}` : r.error)
+const why = (r: Called) => (r.status ? `HTTP ${r.status}${r.body.error ? `: ${r.body.error}` : ''}` : r.error)
 
-const endRoom = (server, id, token) =>
+const endRoom = (server: string, id: string, token: string) =>
   call(`${server}/api/rooms/${encodeURIComponent(id)}/end`, { method: 'POST', headers: { authorization: `Bearer ${token}` } })
 
 // Create a room, seat a guest, open the guest's stream, serve the link page,
 // end the room. Returns { ok, stream } or { reason }.
-async function roomRoundTrip(server) {
+async function roomRoundTrip(server: string): Promise<{ ok: true; stream: true | string } | { ok?: undefined; reason: string }> {
   const created = await call(`${server}/api/rooms`, { method: 'POST', body: JSON.stringify({ name: 'setup-check', title: 'setup check' }) })
   if (!created.ok) return { reason: `creating a room: ${why(created)}` }
   const { id, url, token } = created.body
@@ -295,12 +314,12 @@ async function roomRoundTrip(server) {
 
 // The first line a room's stream sends: true when it is the room as it stands,
 // else why not (a server too old to stream answers "Not found").
-async function firstStreamLine(url, token) {
+async function firstStreamLine(url: string, token: string) {
   const ctl = new AbortController()
   const timer = setTimeout(() => ctl.abort(), 10_000)
   try {
     const res = await fetch(url, { headers: { authorization: `Bearer ${token}` }, signal: ctl.signal })
-    if (!res.ok) return `HTTP ${res.status}`
+    if (!res.ok || !res.body) return `HTTP ${res.status}`
     const reader = res.body.getReader()
     let text = ''
     while (!text.includes('\n')) {
@@ -308,22 +327,23 @@ async function firstStreamLine(url, token) {
       if (done) break
       text += new TextDecoder().decode(value)
     }
-    const line = JSON.parse(text.split('\n')[0])
-    return Array.isArray(line.events) && line.people?.some(p => p.name === 'setup-guest') ? true : 'an unexpected first line'
+    const line: Json = JSON.parse(text.split('\n')[0] ?? '')
+    return Array.isArray(line.events) && line.people?.some((p: Json) => p.name === 'setup-guest') ? true : 'an unexpected first line'
   } catch (error) {
-    return String(error?.name === 'AbortError' ? 'no line within 10 s' : error?.message ?? error)
+    const e = error as Failure
+    return String(e?.name === 'AbortError' ? 'no line within 10 s' : e?.message ?? error)
   } finally {
     clearTimeout(timer)
     ctl.abort()
   }
 }
 
-function configuredServer(claude, plugins) {
-  let settings = {}
+function configuredServer(claude: string, plugins: Plugin[]) {
+  let settings: Settings = {}
   try {
     settings = JSON.parse(readFileSync(SETTINGS, 'utf8'))
   } catch (error) {
-    if (error.code !== 'ENOENT') {
+    if ((error as Failure)?.code !== 'ENOENT') {
       fail(`could not read the saved server settings from ${SETTINGS}`)
       return null
     }
@@ -358,17 +378,18 @@ function configuredServer(claude, plugins) {
 
 function defaultServer() {
   // Read the same build default as the plugin, including forks changed by
-  // set-server.mjs, without needing a TypeScript loader for this Node script.
+  // set-server.ts. Read as text, not imported: setup runs from a copy of
+  // scripts/ alone in its tests.
   const source = readFileSync(new URL('../plugin/hooks/server.ts', import.meta.url), 'utf8')
   return /export const SERVER_URL = ['"]([^'"]*)['"]/.exec(source)?.[1]
 }
 
 // The cloud host's image (docs/cloud-host.md) is kept in this project's
-// Cloudflare account's registry (scripts/push-image.mjs), so deploying there
+// Cloudflare account's registry (scripts/push-image.ts), so deploying there
 // needs no Docker. Another account can't pull it: there the image is built
 // from cloud/Dockerfile, with Docker, through a config of its own. The extra
 // arguments for the main Worker's deploy, or null when a person must act.
-function cloudImageConfig(whoami) {
+function cloudImageConfig(whoami: string) {
   const file = new URL('../wrangler.toml', import.meta.url)
   if (!existsSync(file)) return []
   const toml = readFileSync(file, 'utf8')
@@ -376,7 +397,7 @@ function cloudImageConfig(whoami) {
   const accounts = [...whoami.matchAll(/\b([0-9a-f]{32})\b/g)].map(m => m[1])
   if (!owner || !accounts.length || accounts.includes(owner)) return []
   if (run('docker', ['buildx', 'version']).code !== 0) {
-    human("This Cloudflare account builds the cloud host's image from cloud/Dockerfile, which needs Docker with buildx: start Docker (or add buildx), then run `node scripts/setup.mjs deploy` again.")
+    human("This Cloudflare account builds the cloud host's image from cloud/Dockerfile, which needs Docker with buildx: start Docker (or add buildx), then run `node scripts/setup.ts deploy` again.")
     return null
   }
   writeFileSync(new URL('../wrangler.selfhost.toml', import.meta.url), toml.replace(/^image = ".*"$/m, 'image = "./cloud/Dockerfile"\nimage_build_context = "."'))
@@ -384,12 +405,12 @@ function cloudImageConfig(whoami) {
   return ['-c', 'wrangler.selfhost.toml']
 }
 
-async function deploy(claude) {
+async function deploy(claude: string) {
   const npx = process.platform === 'win32' ? 'npx.cmd' : 'npx'
   const env = { ...process.env, WRANGLER_SEND_METRICS: 'false' }
   const who = run(npx, ['-y', 'wrangler@4', 'whoami'], { env })
   if (/not authenticated/i.test(who.out)) {
-    human('Cloudflare sign-in: run `npx wrangler login` in this folder. It opens a browser where a person approves access; then run `node scripts/setup.mjs deploy` again.')
+    human('Cloudflare sign-in: run `npx wrangler login` in this folder. It opens a browser where a person approves access; then run `node scripts/setup.ts deploy` again.')
     return
   }
   if (who.code !== 0) return fail(`checking Cloudflare sign-in: ${who.out.trim().split('\n').pop()}`)
@@ -414,14 +435,14 @@ async function deploy(claude) {
   const update = run(npx, ['-y', 'wrangler@4', 'deployments', 'list'], { env }).code === 0
   if (update) {
     const preview = previews()
-    if (!preview.deployed) return fail(`the preview Worker didn't deploy (${preview.why}), so nothing was updated and previews of localhost work as they did; fix that, then run \`node scripts/setup.mjs deploy\` again`)
+    if (!preview.deployed) return fail(`the preview Worker didn't deploy (${preview.why}), so nothing was updated and previews of localhost work as they did; fix that, then run \`node scripts/setup.ts deploy\` again`)
     ok(preview.said)
   }
   const out = run(npx, ['-y', 'wrangler@4', 'deploy', ...config], { env, timeout: 600_000 }).out
   const account = /accounts\/([0-9a-f]{32})/.exec(out)?.[1]
   if (/code: 10063|workers\.dev subdomain/i.test(out)) {
     human(
-      `Cloudflare needs this account's workers.dev subdomain created once: open ${account ? `https://dash.cloudflare.com/${account}/workers-and-pages` : 'Workers & Pages in the Cloudflare dashboard'} (pick a subdomain if asked), then run \`node scripts/setup.mjs deploy\` again.`,
+      `Cloudflare needs this account's workers.dev subdomain created once: open ${account ? `https://dash.cloudflare.com/${account}/workers-and-pages` : 'Workers & Pages in the Cloudflare dashboard'} (pick a subdomain if asked), then run \`node scripts/setup.ts deploy\` again.`,
     )
     return
   }
@@ -434,10 +455,10 @@ async function deploy(claude) {
     else note(`previews didn't deploy (${preview.why}); sharing works, previews of localhost won't until \`npx wrangler deploy -c wrangler.preview.toml\` succeeds`)
   }
   const ready = await health(url, { waitMs: 300_000 }) // a new subdomain's certificate takes a minute or so
-  if (ready !== true) return fail(`the server is not answering yet (${ready}); a new workers.dev certificate can take a few minutes — run \`node scripts/setup.mjs check --server ${url}\` shortly`)
+  if (ready !== true) return fail(`the server is not answering yet (${ready}); a new workers.dev certificate can take a few minutes — run \`node scripts/setup.ts check --server ${url}\` shortly`)
   ok('server is up')
   // Teams need sign-in, which only a person can set up (OAuth apps, secrets).
-  const providers = await fetch(`${url}/api/auth/providers`).then(r => r.json()).then(d => d.providers ?? []).catch(() => [])
+  const providers: unknown[] = await fetch(`${url}/api/auth/providers`).then(r => r.json() as Promise<Json>).then(d => d.providers ?? []).catch(() => [])
   if (!providers.length) note(`teams are off on this server until it has sign-in: make a GitHub and/or Google OAuth app with callback ${url}/auth/github/callback (or /auth/google/callback), then \`npx wrangler secret put GITHUB_CLIENT_ID\` and the rest (README: "Teams on your own server"). Sharing and joining by link work without it`)
   installPlugin(claude, url)
   console.log(`\nTeammates install with one line:\n  claude plugin marketplace add ${MARKETPLACE} && claude plugin install ${PLUGIN} --config server=${url}`)
@@ -445,7 +466,7 @@ async function deploy(claude) {
 
 // The session transcripts a check's throwaway sessions leave, removed by the
 // throwaway folder's unique name.
-function forgetSessions(dir) {
+function forgetSessions(dir: string) {
   const projects = join(CONFIG_DIR, 'projects')
   if (!existsSync(projects)) return
   for (const entry of readdirSync(projects)) if (entry.includes(basename(dir))) rmSync(join(projects, entry), { recursive: true, force: true })
@@ -455,14 +476,14 @@ function forgetSessions(dir) {
 // (hosting:<session>, joined:<session>, in the config folder): a room still
 // hosted there is ended with its own token, so a check never leaves one open,
 // wherever the session shared it; then each file goes.
-async function forgetRooms(sessions) {
+async function forgetRooms(sessions: string[]) {
   const dir = join(CONFIG_DIR, 'shared-session/rooms')
   for (const session of sessions) {
     for (const prefix of ['hosting:', 'joined:']) {
       const path = join(dir, `${encodeURIComponent(prefix + session)}.json`)
       try {
         if (!existsSync(path)) continue
-        let room = null
+        let room: Json | null = null
         try { room = JSON.parse(readFileSync(path, 'utf8'))?.value?.room ?? null } catch {}
         if (prefix === 'hosting:' && room?.id && room.token) {
           // A room's token goes only where the plugin would send it.
@@ -477,17 +498,17 @@ async function forgetRooms(sessions) {
         }
         rmSync(path, { force: true })
       } catch (error) {
-        fail(`could not clear the check's saved room ${path}: ${error?.message ?? error}`)
+        fail(`could not clear the check's saved room ${path}: ${(error as Failure)?.message ?? error}`)
       }
     }
   }
 }
 
-async function check(claude) {
+async function check(claude: string) {
   const listed = installedPlugins(claude)
   if (!listed) return
   const plugin = listed.find(p => p.id === PLUGIN)
-  if (!plugin) return fail('the plugin is not installed: run `node scripts/setup.mjs join`')
+  if (!plugin) return fail('the plugin is not installed: run `node scripts/setup.ts join`')
   if (!plugin.enabled) return fail(`the plugin is disabled: run \`claude plugin enable ${PLUGIN}\`, then start a new session`)
   ok(`plugin installed (${plugin.version}), enabled`)
 
@@ -500,11 +521,11 @@ async function check(claude) {
   const effective = saved || environment || defaultServer()
   const server = validServer(supplied ?? effective)
   if (!server) {
-    return fail('the share server is not a valid https:// address (plain http:// only for a server on this computer); run `node scripts/setup.mjs host --server <url>`')
+    return fail('the share server is not a valid https:// address (plain http:// only for a server on this computer); run `node scripts/setup.ts host --server <url>`')
   }
   const savedSetting = saved || config.environment
   if (flag('live') && supplied && savedSetting && validServer(savedSetting) !== server) {
-    return fail('the saved server setting overrides --server in a real session; run `node scripts/setup.mjs check --live` to check the saved server, or configure the intended server first with `node scripts/setup.mjs host --server <url>`')
+    return fail('the saved server setting overrides --server in a real session; run `node scripts/setup.ts check --live` to check the saved server, or configure the intended server first with `node scripts/setup.ts host --server <url>`')
   }
   note(`checking ${server}${supplied ? ' as given' : saved ? ' from the saved plugin setting' : environment ? ' from SHARED_SESSION_SERVER' : ' (the plugin\'s default server)'}`)
   const up = await health(server)
@@ -548,7 +569,7 @@ async function check(claude) {
     run(claude, ['-p', '--session-id', guest, host.url], { cwd: dir, env, timeout: 120_000 })
     const page = (await call(`${server}/api/rooms/${host.id}/events?after=0&wait=0`, { headers: { authorization: `Bearer ${host.token}` } })).body
     await endRoom(server, host.id, host.token)
-    const joined = (page.events ?? []).find(e => e.type === 'join' && e.from?.role === 'guest')
+    const joined = (page.events ?? []).find((e: Json) => e.type === 'join' && e.from?.role === 'guest')
     if (joined) ok(`a real session joined a room from its link (as "${joined.from.name}")`)
     else fail('a real session given a share link did not join it')
   } finally {
@@ -559,17 +580,10 @@ async function check(claude) {
 }
 
 const usage = `usage:
-  node scripts/setup.mjs join
-  node scripts/setup.mjs host --server <url>
-  node scripts/setup.mjs deploy
-  node scripts/setup.mjs check [--server <url>] [--live]`
-
-// The project runs its TypeScript on Node itself, its types stripped: 22.18 or newer.
-const NODE_MIN = [22, 18, 0]
-if (command && !atLeast(versionOf(process.version), NODE_MIN)) {
-  fail(`Node ${process.version.slice(1)} is too old for this project; it needs ${NODE_MIN.slice(0, 2).join('.')} or newer. Install a newer Node (https://nodejs.org, or \`nvm install 22\`), then run this again.`)
-  process.exit(status)
-}
+  node scripts/setup.ts join
+  node scripts/setup.ts host --server <url>
+  node scripts/setup.ts deploy
+  node scripts/setup.ts check [--server <url>] [--live]`
 
 switch (command) {
   case 'join': {

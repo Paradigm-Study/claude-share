@@ -1,5 +1,5 @@
 // Bakes your team's share server into the plugin, so nobody configures it:
-//   node scripts/set-server.mjs https://claude-share.your-team.workers.dev
+//   node scripts/set-server.ts https://claude-share.your-team.workers.dev
 import { readFileSync, writeFileSync } from 'node:fs'
 
 const url = process.argv[2]?.replace(/\/+$/, '')
@@ -7,7 +7,7 @@ const url = process.argv[2]?.replace(/\/+$/, '')
 // takes it): plain http elsewhere would carry everyone's tokens unencrypted.
 const local = /^http:\/\/(?:(?:[a-z0-9-]+\.)*localhost|127(?:\.\d{1,3}){3}|\[::1\])(?::\d+)?$/i
 if (!url || !(/^https:\/\/[^\s/'"]+$/.test(url) || local.test(url))) {
-  console.error('usage: node scripts/set-server.mjs https://your-share-server (plain http:// only for a server on this computer)')
+  console.error('usage: node scripts/set-server.ts https://your-share-server (plain http:// only for a server on this computer)')
   process.exit(1)
 }
 const path = new URL('../plugin/hooks/server.ts', import.meta.url)

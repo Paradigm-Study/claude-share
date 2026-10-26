@@ -7,7 +7,7 @@
 // release doesn't need a new image). Needs Docker with buildx, and wrangler
 // signed in to the account the server deploys to.
 //
-//   node scripts/push-image.mjs
+//   node scripts/push-image.ts
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { readFileSync, writeFileSync } from 'node:fs'
@@ -20,7 +20,7 @@ export const imageTag = (root = ROOT) =>
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   const tag = `claude-share-host:${imageTag()}`
-  const run = (cmd, args) => execFileSync(cmd, args, { cwd: ROOT, stdio: ['ignore', 'pipe', 'inherit'], maxBuffer: 64 * 1024 * 1024 }).toString()
+  const run = (cmd: string, args: string[]) => execFileSync(cmd, args, { cwd: ROOT, stdio: ['ignore', 'pipe', 'inherit'], maxBuffer: 64 * 1024 * 1024 }).toString()
   console.log(`building ${tag} for linux/amd64`)
   run('docker', ['buildx', 'build', '--platform', 'linux/amd64', '-f', 'cloud/Dockerfile', '-t', tag, '--load', '.'])
   console.log('pushing it to the account’s registry')
