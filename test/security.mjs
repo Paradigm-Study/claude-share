@@ -14,7 +14,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import './support/cloudflare.mjs'
-const { Room, FILE_UPLOADS, LIMITS, PLUGIN_LATEST, ROOMS_PER_ADDRESS_DAY, SEAT_POLLS, SEAT_STREAMS, SERVE_LIMITS, landingPage, roomRequest, token } = await import('../server/core.ts')
+const { Room, FILE_UPLOADS, LIMITS, PLUGIN_LATEST, ROOMS_PER_ADDRESS_DAY, SEAT_POLLS, SEAT_STREAMS, SERVE_LIMITS, landingPage, roomRequest, token } = await import('../server/core/index.ts')
 
 const SAVE = fileURLToPath(new URL('../plugin/relay/save.sh', import.meta.url))
 const REAL = fileURLToPath(new URL('../plugin/relay/real.sh', import.meta.url))

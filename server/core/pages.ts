@@ -1,12 +1,12 @@
 import { token } from './http.ts'
-import { CLOVER_WEBP, LOGO_PATHS } from '../brand.mjs'
+import { CLOVER_WEBP, LOGO_PATHS } from '../brand.ts'
 import type { Room } from './room.ts'
 
 // The server's own front page: what this is, the one-line install, and what
 // the server sees and keeps (the disclosure a public server owes its users).
 // `traces`: whether this server keeps shared sessions' turns (server/traces),
 // which it then says.
-export function homePage(origin: string, { traces = false }: { traces?: boolean } = {}) {
+export function homePage({ traces = false }: { traces?: boolean } = {}) {
   const html = `<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">

@@ -18,7 +18,7 @@ import { fileURLToPath } from 'node:url'
 import { startWorkerd } from './support/workerd.mjs'
 import { randomUUID } from 'node:crypto'
 import './support/cloudflare.mjs'
-const { Room, roomRequest, CLOUD_MAX_MS } = await import('../server/core.ts')
+const { Room, roomRequest, CLOUD_MAX_MS } = await import('../server/core/index.ts')
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const ORIGIN = 'https://share.test'

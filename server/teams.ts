@@ -32,8 +32,8 @@
 // tells a members-only team's rooms whom it has now (`keepTeam`), so someone
 // who leaves it or is removed leaves its sessions too.
 
-import { json, token, brandPage, commandBox, COPY_SCRIPT, INSTALL_COMMAND } from './core.ts'
-import type { DirectoryClient, JsonObject } from './core.ts'
+import { json, token, brandPage, commandBox, COPY_SCRIPT, INSTALL_COMMAND } from './core/index.ts'
+import type { DirectoryClient, JsonObject } from './core/index.ts'
 
 // The records above, as the directory writes them.
 export type Account = {

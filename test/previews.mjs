@@ -10,7 +10,7 @@ import relay from '../plugin/relay/ws-relay.cjs'
 import ws from '../plugin/relay/ws.cjs'
 import { startWorkerd } from './support/workerd.mjs'
 import './support/cloudflare.mjs'
-const { Room, PLUGIN_LATEST, roomRequest, token, versionInfo, tcpSocketTarget, NEED_LIMIT, LIMITS, limitOf, streamedRoomBody, previewRequest, previewSocketTarget, publicPairValid, PUBLIC_LIMITS, TCP_LIMITS, SEAT_TIMEOUT_MS, EVENT_BYTES, HISTORY_BYTES, ROOM_FILES_COUNT, ROOM_PREVIEWS_MAX, ROOM_SEATS_MAX, SERVE_LIMITS, previewLabel, previewKeyOf, previewHostLabel, roomOrigins, hostHalfClose, tcpHalfClose, rejectReason, homePage } = await import('../server/core.ts')
+const { Room, PLUGIN_LATEST, roomRequest, token, versionInfo, tcpSocketTarget, NEED_LIMIT, LIMITS, limitOf, streamedRoomBody, previewRequest, previewSocketTarget, publicPairValid, PUBLIC_LIMITS, TCP_LIMITS, SEAT_TIMEOUT_MS, EVENT_BYTES, HISTORY_BYTES, ROOM_FILES_COUNT, ROOM_PREVIEWS_MAX, ROOM_SEATS_MAX, SERVE_LIMITS, previewLabel, previewKeyOf, previewHostLabel, roomOrigins, hostHalfClose, tcpHalfClose, rejectReason, homePage } = await import('../server/core/index.ts')
 
 // After the stand-in for `cloudflare:workers` is registered.
 const { metaOf } = await import('../server/worker.ts')
@@ -876,7 +876,7 @@ async function admit(w, url, cookie) {
 // (D2-1), TCP keeps counters alone and its connections end with their seat,
 // and the room's ceilings.
 {
-  const text = await homePage('https://share.example').text()
+  const text = await homePage().text()
   for (const said of ['A link or session that expired is removed at the room\'s next activity, or with the room', 'browsers clear them only over HTTPS (or on localhost)',
     'For TCP previews the room keeps only coarse connection and byte-budget counters', 'TCP previews instead allow 32 connections per seat across all previews, 64 per room, and 1200 new connections per minute (240 for any one seat)',
     'their connections close when they leave or the host stops that preview. Unpaired connections close after 10 seconds',

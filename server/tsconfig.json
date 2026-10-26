@@ -1,7 +1,16 @@
-// The server's TypeScript (server/traces has its own), checked strictly
-// against the Worker's types alone (npm run typecheck:server).
+// The server, one TypeScript project: checked strictly against the Worker's
+// types alone (wrangler writes worker-configuration.d.ts from wrangler.toml;
+// npm run typecheck:server). Nothing is emitted: wrangler bundles the .ts,
+// and Node runs it with its types stripped (test/support).
 {
-  "extends": "./tsconfig.base.json",
-  "compilerOptions": { "types": [], "strict": true, "checkJs": false },
-  "include": ["worker-configuration.d.ts", "worker.ts", "core.ts", "core/*.ts", "teams.ts"]
+  "compilerOptions": {
+    "target": "es2023", "lib": ["es2023"], "types": [],
+    "module": "esnext", "moduleResolution": "bundler", "resolveJsonModule": true,
+    "strict": true,
+    "noImplicitOverride": true, "noFallthroughCasesInSwitch": true,
+    "noUnusedLocals": true, "noUnusedParameters": true,
+    "noEmit": true, "skipLibCheck": true,
+    "allowImportingTsExtensions": true, "verbatimModuleSyntax": true, "erasableSyntaxOnly": true
+  },
+  "include": ["worker-configuration.d.ts", "**/*.ts"]
 }

@@ -9,7 +9,7 @@ import assert from 'node:assert/strict'
 import { randomBytes } from 'node:crypto'
 import { startWorkerd } from './support/workerd.mjs'
 import './support/cloudflare.mjs'
-const { PLUGIN_LATEST, PEER_LIMIT, PEER_HANDLE, PEER_STATUS, PEER_DROPS, streamedRoomBody, homePage, token } = await import('../server/core.ts')
+const { PLUGIN_LATEST, PEER_LIMIT, PEER_HANDLE, PEER_STATUS, PEER_DROPS, streamedRoomBody, homePage, token } = await import('../server/core/index.ts')
 
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms))
 const HANDLE = 'a1'.repeat(16)
@@ -24,7 +24,7 @@ const ID = '0f8fad5b-d9cb-469f-a165-70867728950e', REF = '7c9e6679-7425-40de-944
   assert.deepEqual([PEER_LIMIT.host, PEER_LIMIT.seat, PEER_LIMIT.periodMs, PEER_LIMIT.bodyBytes, PEER_LIMIT.bodyChars, PEER_LIMIT.chain, PEER_LIMIT.nameChars], [120, 60, 60_000, 128 * 1024, 32_000, 32, 80])
   assert.deepEqual([...PEER_STATUS], ['held', 'denied', 'delivered', 'expired', 'refused', 'dropped'], "Claude Code's receipts' statuses")
   assert.deepEqual([...PEER_DROPS], ['rate-limited', 'duplicate', 'hop-loop', 'hop-runaway', 'queue-full'], "and why it drops one")
-  const text = await homePage('https://share.example').text()
+  const text = await homePage().text()
   const said = "messages between a teammate's own other sessions and the host's session, which go to the other side alone (passed along, never kept)"
   assert(text.includes(said), said)
   console.log('OK peer: a streamed route, its bounds, and the home page says these messages pass through and are never kept')

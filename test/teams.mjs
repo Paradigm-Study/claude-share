@@ -20,7 +20,7 @@ import { homedir, tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 import { startWorkerd } from './support/workerd.mjs'
 import './support/cloudflare.mjs'
-const { PLUGIN_LATEST } = await import('../server/core.ts')
+const { PLUGIN_LATEST } = await import('../server/core/index.ts')
 
 const srv = process.env.TEAMS_SERVER ? { stop() {} } : await startWorkerd({ vars: { AUTH_TEST: '1' } })
 const S = (process.env.TEAMS_SERVER ?? srv.origin).replace(/\/+$/, '')
@@ -471,7 +471,7 @@ try {
   await call(`/api/rooms/${marks.id}/end`, { method: 'POST', tok: marks.token })
 
   // A guest away past the grace (asleep, offline): its token seats it again.
-  const { Room } = await import('../server/core.ts')
+  const { Room } = await import('../server/core/index.ts')
   const r0 = Room.create({ id: 'r0', name: 'Host', title: 't', now: 0 })
   const kyle = r0.join('Kyle', 0, '0.11.8')
   const lee = r0.join('Lee', 0)
@@ -497,7 +497,7 @@ try {
   // team gets no seat: the team is asked after the wait, and asked again
   // when it let someone go meanwhile. A member's join waiting through
   // someone else's removal is seated.
-  const { roomRequest } = await import('../server/core.ts')
+  const { roomRequest } = await import('../server/core/index.ts')
   const inTeam = new Set(['k', 'm'])
   let duringCheck = null // a removal landing while the room waits for the directory's word
   const directory = {

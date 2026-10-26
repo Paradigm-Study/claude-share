@@ -1,4 +1,5 @@
-// Room logic for the Cloudflare Durable Object (worker.ts). Everything
+// Room logic for the Cloudflare Durable Object (worker.ts), and all that
+// worker.ts, teams.ts, traces and the tests import of it. Everything
 // speaks the Fetch API: a Request in, a Response out, and the sockets,
 // timers and storage stay in worker.ts.
 //
@@ -113,8 +114,10 @@ export {
   COPY_SCRIPT,
   missingPage,
   landingPage,
+  escapeHtml,
 } from './pages.ts'
 export type { LimitKind } from './limits.ts'
 export type { Person } from './room.ts'
 export type { SocketTarget } from './previews.ts'
 export type { TCPFailure, TCPFrame, TCPHalf, TCPRelayed, TCPTarget } from './tcp.ts'
+export type * from './types.ts'

@@ -7,7 +7,7 @@ import { randomBytes } from 'node:crypto'
 import { once } from 'node:events'
 import { startWorkerd } from './support/workerd.mjs'
 import './support/cloudflare.mjs'
-const { Room, PLUGIN_LATEST, TCP_LIMITS, PUBLIC_LIMITS, LIMITS, NEED_LIMIT, SEAT_TIMEOUT_MS, limitOf, token, tcpAdmit, tcpState, tcpReserve, tcpRefund, chargeControl, tcpRelay, previewSocketTarget, previewRequest, bodyLimit, EVENT_BYTES } = await import('../server/core.ts')
+const { Room, PLUGIN_LATEST, TCP_LIMITS, PUBLIC_LIMITS, LIMITS, NEED_LIMIT, SEAT_TIMEOUT_MS, limitOf, token, tcpAdmit, tcpState, tcpReserve, tcpRefund, chargeControl, tcpRelay, previewSocketTarget, previewRequest, bodyLimit, EVENT_BYTES } = await import('../server/core/index.ts')
 const { BODY_CHARS } = await import('../server/teams.ts')
 
 // After the stand-in for `cloudflare:workers` is registered.
