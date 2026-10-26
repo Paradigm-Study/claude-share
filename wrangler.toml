@@ -10,6 +10,10 @@ compatibility_flags = ["nodejs_compat"]
 NEW_ROOMS = "on"
 # New rooms the whole server makes in a day (default 3000).
 MAX_ROOMS_PER_DAY = "3000"
+# Native subscription pool enrollment: actual members of this exact team.
+# Remove both variables to disable new grants and membership authorization.
+NATIVE_POOL_TEAM_ID = "B-pTJOWkq5wl"
+NATIVE_POOL_URL = "https://claude-desktop-pool.proud-limit-da0a.workers.dev"
 # Optional: pin the origin share links use (otherwise the request's own).
 # PUBLIC_URL = "https://share.example.com"
 # Optional: where previews are served (otherwise this Worker's workers.dev

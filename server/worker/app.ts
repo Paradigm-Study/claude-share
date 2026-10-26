@@ -33,6 +33,7 @@ import {
   statusOf,
 } from '../core/index.ts'
 import { Directory, BODY_CHARS } from '../teams.ts'
+import { NATIVE_POOL_BODY_MAX } from '../native-pool.ts'
 import type { TracesEnv } from '../traces/index.ts'
 import type { ServerEnv } from './env.ts'
 import { tracesOn, traces, hasDirectory, directoryStub } from './env.ts'
@@ -124,7 +125,8 @@ app.use(async (c, next) => {
   // the directory takes what it's given whole.
   let body: Uint8Array | undefined
   if (bodied(req)) {
-    try { body = await readBody(req, DIRECTORY_BODY_MAX) } catch (error) { return statusOf(error) === 413 ? bodyTooLarge(DIRECTORY_BODY_MAX) : badRequest('The request body did not arrive.') }
+    const max = url.pathname === '/api/native-pool/enrollment' ? NATIVE_POOL_BODY_MAX : DIRECTORY_BODY_MAX
+    try { body = await readBody(req, max) } catch (error) { return statusOf(error) === 413 ? bodyTooLarge(max) : badRequest('The request body did not arrive.') }
   }
   return directoryStub(env).fetch(
     new Request(`https://directory.internal${url.pathname}${url.search}`, {
