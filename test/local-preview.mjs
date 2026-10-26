@@ -106,6 +106,10 @@ async function freePort() {
   }
   throw new Error('Could not reserve a dual-stack test port')
 }
+// Whether anything listens at host:port. A port the helpers released is
+// checked so, never by binding it again: an OS-assigned number can be held
+// meanwhile by another socket (a busy runner's, or one of this test's own
+// outgoing connections, whose source ports come from the same range).
 const answers = (host, port) => new Promise(resolve => {
   const socket = net.createConnection({ host, port })
   const done = value => { socket.destroy(); resolve(value) }
@@ -949,10 +953,10 @@ async function listenerChecks() {
   if (ipv6) {
     const busy6 = track(net.createServer(s => s.end('IPv6 listener'))), busy6Port = await listen(busy6, '::1')
     await startupError(dummy(busy6Port), 'EADDRINUSE')
-    const rolledBack = track(net.createServer()); await listen(rolledBack, '127.0.0.1', busy6Port); await close(rolledBack)
+    assert.equal(await answers('127.0.0.1', busy6Port), false, 'the IPv4 half was rolled back')
     const fallback = await ready({ ...dummy(busy6Port), strict: false })
     assert.notEqual(fallback.port, busy6Port)
-    const stillFree4 = track(net.createServer()); await listen(stillFree4, '127.0.0.1', busy6Port); await close(stillFree4)
+    assert.equal(await answers('127.0.0.1', busy6Port), false, 'the fallback left the IPv4 number free')
     await stop(fallback)
     const original = await wire(busy6Port, '::1'); await until(() => original.closed, 'unrelated IPv6 listener')
     assert.equal(original.bytes.toString(), 'IPv6 listener')
@@ -1032,7 +1036,7 @@ async function listenerChecks() {
   assert.ok(knockedAt.length >= 2 && knockedAt.every(k => k.host === '::1'), `port 0 knocks ::1 alone, once a number: ${JSON.stringify(knockedAt)}`)
   assert.notEqual(passedOver.port, answering, 'a number answering on ::1 is passed over')
   assert.equal(knockedAt.at(-1).port, passedOver.port)
-  for (const host of ipv6 ? ['127.0.0.1', '::1'] : ['127.0.0.1']) { const rolled = track(net.createServer()); await listen(rolled, host, answering); await close(rolled) }
+  for (const host of ipv6 ? ['127.0.0.1', '::1'] : ['127.0.0.1']) assert.equal(await answers(host, answering), false, `the passed-over number was rolled back on ${host}`)
   await passedOver.close()
   // Port 0 (non-strict only) takes one OS-assigned port and binds both families on it.
   const ephemeral = await ready({ ...cfg, port: 0, strict: false })
@@ -1052,7 +1056,7 @@ async function listenerChecks() {
   assert.equal(made, 4)
   assert.ok(Number.isInteger(firstPort) && retried.port !== firstPort)
   assert.equal(retried.ipv6, ipv6)
-  const releasedFirst = track(net.createServer()); await listen(releasedFirst, '127.0.0.1', firstPort); await close(releasedFirst)
+  assert.equal(await answers('127.0.0.1', firstPort), false, 'the first number was released')
   await retried.close()
   const good = await ready(cfg)
   assert.equal(good.port, preferred)
