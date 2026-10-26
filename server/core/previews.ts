@@ -185,7 +185,7 @@ export async function previewRoutes(room: Room, req: Request, rest: string, auth
   }
   const match = /^previews\/([A-Za-z0-9_-]+)\/(end|ticket)$/.exec(rest)
   if (match && method === 'POST') {
-    const preview = room.previews.get(match[1])
+    const preview = room.previews.get(match[1]!)
     if (!preview) return { response: json({ error: 'No such preview.' }, 404) }
     if (match[2] === 'end') {
       if (auth.role !== 'host') return { response: json({ error: 'Only the host stops previews.' }, 403) }
@@ -357,7 +357,8 @@ const namesRoom = (room: Room, key: string | undefined) => Boolean(key) && key =
 // and its seat is still the room's, with its id (`sid`).
 function previewSession(room: Room, req: Request, now: number) {
   const [key, sid] = previewCookie(req)
-  const session = namesRoom(room, key) && sid ? room.previewSessions.get(sid) : null
+  if (!namesRoom(room, key) || !sid) return null
+  const session = room.previewSessions.get(sid)
   return session && session.exp > now && session.seat && seatKnown(room, session.seat) ? { ...session, sid } : null
 }
 

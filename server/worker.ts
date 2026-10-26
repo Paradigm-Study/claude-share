@@ -250,9 +250,9 @@ app.post('/api/rooms', async c => {
 app.all('*', c => {
   const parts = new URL(c.req.url).pathname.split('/').filter(Boolean)
   const method = c.req.raw.method
-  if (method === 'POST' && parts[0] === 'api' && parts[1] === 'admin' && parts[2] === 'rooms' && parts.length === 5 && parts[4] === 'end') return toRoom(c, parts[3], 'admin-end')
-  if (parts[0] === 's' && parts.length === 2) return toRoom(c, parts[1], 'page')
-  if (parts[0] === 'api' && parts[1] === 'rooms' && parts.length >= 3) return toRoom(c, parts[2], parts.slice(3).join('/'))
+  if (method === 'POST' && parts[0] === 'api' && parts[1] === 'admin' && parts[2] === 'rooms' && parts.length === 5 && parts[4] === 'end') return toRoom(c, parts[3]!, 'admin-end')
+  if (parts[0] === 's' && parts.length === 2) return toRoom(c, parts[1]!, 'page')
+  if (parts[0] === 'api' && parts[1] === 'rooms' && parts.length >= 3) return toRoom(c, parts[2]!, parts.slice(3).join('/'))
   return notFound()
 })
 
@@ -533,7 +533,7 @@ export class RoomObject extends DurableObject<ServerEnv> {
   override async fetch(req: Request): Promise<Response> {
     const url = new URL(req.url)
     const origin = req.headers.get('x-share-origin') ?? url.origin
-    const [id, ...restParts] = url.pathname.split('/').filter(Boolean)
+    const [id = '', ...restParts] = url.pathname.split('/').filter(Boolean)
     const rest = restParts.join('/')
     const now = Date.now()
 
@@ -564,13 +564,13 @@ export class RoomObject extends DurableObject<ServerEnv> {
     // requests; upgrades check what they need where they admit.
     if (req.method === 'POST') {
       const reject = /^ws\/([^/]+)\/reject$/.exec(rest)
-      if (reject) return this.rejectRelay(req, reject[1])
+      if (reject) return this.rejectRelay(req, reject[1]!)
     }
     if (rest === 'socket') return this.accept(req, url, now)
 
     const upgrade = req.headers.get('upgrade')?.toLowerCase() === 'websocket'
     const tunnel = /^previews\/([A-Za-z0-9_-]+)\/tunnel$/.exec(rest)
-    if (upgrade && tunnel) return this.tunnelSocket(req, tunnel[1], now)
+    if (upgrade && tunnel) return this.tunnelSocket(req, tunnel[1]!, now)
     if (upgrade && preview) return this.previewSocket(req, url, id, now)
     if (upgrade && rest.startsWith('ws/')) return this.relaySocket(req, rest.slice(3), now)
 
@@ -618,7 +618,7 @@ export class RoomObject extends DurableObject<ServerEnv> {
       this.closed.add(old)
       try { old.close(1008, 'Too many streams') } catch {}
     }
-    const [client, server] = Object.values(new WebSocketPair())
+    const { 0: client, 1: server } = new WebSocketPair()
     // Tagged as a stream, so a change goes to streams alone (broadcast), and
     // by seat, for who is connected.
     this.state.acceptWebSocket(server, ['stream', auth.seat])
@@ -645,7 +645,7 @@ export class RoomObject extends DurableObject<ServerEnv> {
     if (!target.ok) return new Response(target.error ?? 'This preview has ended', { status: target.status })
     const wsId = token(12)
     if (!announceSocket(room, wsId, target)) return new Response(`${room.host.name}'s Claude Code isn't connected right now.`, { status: 503 })
-    const [client, server] = Object.values(new WebSocketPair())
+    const { 0: client, 1: server } = new WebSocketPair()
     this.state.acceptWebSocket(server, ['public', `pb:${wsId}`])
     server.serializeAttachment({ pb: wsId, pid: target.pid, session: target.session, ownerSeat: target.ownerSeat, exp: target.exp, deadline: now + PUBLIC_LIMITS.pairMs })
     await this.schedule()
@@ -706,7 +706,7 @@ export class RoomObject extends DurableObject<ServerEnv> {
     const target = tcpSocketTarget(room, req, pid, now, active)
     if (!target.ok) return json({ error: target.error }, target.status)
     const id = token(12)
-    const [client, server] = Object.values(new WebSocketPair())
+    const { 0: client, 1: server } = new WebSocketPair()
     this.state.acceptWebSocket(server, ['tcp', `tg:${id}`])
     server.serializeAttachment({ tcp: tcpState(id, target, 'guest', now) })
     if (!announceTCP(room, id, target)) {
@@ -853,7 +853,7 @@ export class RoomObject extends DurableObject<ServerEnv> {
         this.closeTCP(wsId, 1008, 'TCP access revoked or relay timed out')
         return json({ error: 'That TCP channel has ended.' }, 410)
       }
-      const [client, server] = Object.values(new WebSocketPair())
+      const { 0: client, 1: server } = new WebSocketPair()
       this.state.acceptWebSocket(server, ['tcp', `th:${wsId}`])
       const host = tcpState(wsId, s, 'host', now)
       try {
@@ -881,7 +881,7 @@ export class RoomObject extends DurableObject<ServerEnv> {
       return json({ error: 'That socket has closed.' }, 410)
     }
     // No await between the current pid check and installing/draining its half.
-    const [client, server] = Object.values(new WebSocketPair())
+    const { 0: client, 1: server } = new WebSocketPair()
     this.state.acceptWebSocket(server, ['public', `ph:${wsId}`])
     const binding = { ph: wsId, pid: att.pid, session: att.session, ownerSeat: att.ownerSeat, exp: att.exp }
     server.serializeAttachment(binding)

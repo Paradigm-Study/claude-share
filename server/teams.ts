@@ -93,6 +93,10 @@ const PUBLIC_DOMAINS = new Set(
   'gmail.com googlemail.com outlook.com hotmail.com live.com msn.com yahoo.com ymail.com icloud.com me.com mac.com aol.com proton.me protonmail.com pm.me gmx.com gmx.net mail.com yandex.com yandex.ru zoho.com qq.com 163.com 126.com naver.com hey.com fastmail.com tutanota.com duck.com users.noreply.github.com'.split(' '),
 )
 
+// A store key's last part: the team in dom:<domain>:<team>, the account in
+// mem:<team>:<account>.
+const lastPart = (key: string) => key.slice(key.lastIndexOf(':') + 1)
+
 export const PROVIDERS: Record<string, { label: string; authorize: string; scope: string }> = {
   github: {
     label: 'GitHub',
@@ -294,8 +298,8 @@ export class Directory {
   async autoJoin(account: Account, now: number) {
     const teams = new Set<string>()
     const domain = account.emailVerified ? domainOf(account.email) : ''
-    if (domain) for (const [key] of await this.kv.list(`dom:${domain}:`)) teams.add(key.split(':')[2])
-    for (const org of account.githubOrgs ?? []) for (const [key] of await this.kv.list(`org:${org}:`)) teams.add(key.split(':')[2])
+    if (domain) for (const [key] of await this.kv.list(`dom:${domain}:`)) teams.add(lastPart(key))
+    for (const org of account.githubOrgs ?? []) for (const [key] of await this.kv.list(`org:${org}:`)) teams.add(lastPart(key))
     for (const team of teams) {
       if (await this.kv.get(`mem:${team}:${account.id}`)) continue
       if (await this.kv.get(`left:${team}:${account.id}`)) continue
@@ -331,7 +335,7 @@ export class Directory {
       return
     }
     if (!members.some(([, m]) => m.role === 'owner')) {
-      const [key, m] = members.sort((a, b) => a[1].at - b[1].at)[0]
+      const [key, m] = members.sort((a, b) => a[1].at - b[1].at)[0]!
       await this.kv.put(key, { ...m, role: 'owner' })
     }
   }
@@ -341,7 +345,7 @@ export class Directory {
   // lets go of the guests whose account isn't one, with what they hold open.
   async enforce(teamId: string, rooms: string[], access: string | undefined, members?: [string, Membership][]) {
     if (access !== 'members' || !rooms.length) return
-    const allowed = (members ?? (await this.kv.list(`mem:${teamId}:`))).map(([key]) => key.split(':')[2])
+    const allowed = (members ?? (await this.kv.list(`mem:${teamId}:`))).map(([key]) => lastPart(key))
     for (const id of rooms) await this.keepTeam(id, teamId, allowed).catch(() => {})
   }
 
@@ -406,7 +410,7 @@ export class Directory {
   async teammates(account: Account) {
     const seen = new Map<string, { id: string; name: string; login?: string }>()
     for (const [key] of await this.kv.list(`myteam:${account.id}:`)) {
-      for (const m of await this.members(key.split(':')[2])) if (m.id !== account.id && !seen.has(m.id)) seen.set(m.id, { id: m.id, name: m.name, login: m.login })
+      for (const m of await this.members(lastPart(key))) if (m.id !== account.id && !seen.has(m.id)) seen.set(m.id, { id: m.id, name: m.name, login: m.login })
     }
     return [...seen.values()].sort((a, b) => a.name.localeCompare(b.name))
   }
@@ -455,7 +459,7 @@ export class Directory {
     for (const prefix of ['sinv:', 'login:', 'state:']) {
       for (const [key, rec] of await this.kv.list(prefix)) {
         if (!(rec?.exp > now)) {
-          const [, accountId, roomId] = key.split(':')
+          const [, accountId = '', roomId = ''] = key.split(':')
           if (prefix === 'sinv:') await this.dropInvite(accountId, roomId)
           else await this.kv.delete(key)
         } else if (next === null || rec.exp < next) next = rec.exp
@@ -534,11 +538,11 @@ export class Directory {
       if (url.pathname === '/api/auth/providers') {
         return json({ providers: Object.keys(this.providers).map(id => ({ id, label: PROVIDERS[id]?.label ?? 'Test' })) })
       }
-      if (parts[0] === 'auth' && parts.length === 3 && parts[2] === 'start') return this.start(parts[1], url, origin, now)
-      if (parts[0] === 'auth' && parts.length === 3 && parts[2] === 'callback') return this.callback(parts[1], url, origin, now)
+      if (parts[0] === 'auth' && parts.length === 3 && parts[2] === 'start') return this.start(parts[1]!, url, origin, now)
+      if (parts[0] === 'auth' && parts.length === 3 && parts[2] === 'callback') return this.callback(parts[1]!, url, origin, now)
       if (url.pathname === '/auth/confirm') return method === 'POST' ? this.confirm(await readForm(req), now) : page('Sign-in', "This sign-in link isn't complete", startAgain)
       if (url.pathname === '/api/auth/poll' && method === 'POST') return this.poll(await readBody(req), now)
-      if (parts[0] === 'i' && parts.length === 2) return this.invitePage(parts[1], origin)
+      if (parts[0] === 'i' && parts.length === 2) return this.invitePage(parts[1]!, origin)
 
       const account = await this.accountOf(req.headers.get('authorization'))
       if (!account) return json({ error: 'Sign in first: /team in Claude Code.' }, 401)
@@ -554,13 +558,13 @@ export class Directory {
       if (url.pathname === '/api/me' && method === 'GET') return json({ account: this.accountView(account), teams: await this.teamsOf(account), teammates: await this.teammates(account) })
       if (url.pathname === '/api/me/invites' && method === 'GET') return json({ invites: await this.invitesOf(account, now) })
       if (parts[0] === 'api' && parts[1] === 'me' && parts[2] === 'invites' && parts.length === 4 && method === 'DELETE') {
-        await this.dropInvite(account.id, parts[3])
+        await this.dropInvite(account.id, parts[3]!)
         return json({ ok: true })
       }
       if (url.pathname === '/api/teams' && method === 'POST') return this.createTeam(account, await readBody(req), now)
-      if (parts[0] === 'api' && parts[1] === 'invites' && parts.length === 3 && method === 'POST') return this.acceptInvite(account, parts[2], now)
+      if (parts[0] === 'api' && parts[1] === 'invites' && parts.length === 3 && method === 'POST') return this.acceptInvite(account, parts[2]!, now)
       if (parts[0] === 'api' && parts[1] === 'teams' && parts.length >= 3) {
-        const team: Team | null = TEAM_ID.test(parts[2]) ? await this.kv.get(`team:${parts[2]}`) : null
+        const team: Team | null = TEAM_ID.test(parts[2]!) ? await this.kv.get(`team:${parts[2]}`) : null
         const mem: Membership | null = team ? await this.kv.get(`mem:${team.id}:${account.id}`) : null
         if (!team || !mem) return json({ error: "No such team, or you're not in it." }, 404)
         const owner = mem.role === 'owner'
@@ -583,7 +587,7 @@ export class Directory {
         }
         if (sub === 'sessions' && method === 'GET') return json({ sessions: await this.sessions(team.id) })
         if (parts[3] === 'members' && parts.length === 5 && method === 'DELETE') {
-          const who = parts[4] === 'me' ? account.id : parts[4]
+          const who = parts[4] === 'me' ? account.id : parts[4]!
           if (who !== account.id && !owner) return json({ error: 'Only an owner removes people.' }, 403)
           // Only someone in it: a `left:` mark for anyone else would only grow the store.
           if (await this.kv.get(`mem:${team.id}:${who}`)) await this.removeMember(team.id, who)
@@ -693,14 +697,14 @@ export class Directory {
   }
 
   async deleteAccount(account: Account) {
-    const teams = (await this.kv.list(`myteam:${account.id}:`)).map(([key]) => key.split(':')[2])
+    const teams = (await this.kv.list(`myteam:${account.id}:`)).map(([key]) => lastPart(key))
     // The sessions it shares, off its teams' lists (they go on, by link).
     for (const team of teams) for (const [key, entry] of await this.kv.list(`live:${team}:`)) if (entry?.hostAccount === account.id) await this.kv.delete(key)
     for (const team of teams) await this.removeMember(team, account.id, { remember: false })
     for (const [key, rec] of await this.kv.list('tok:')) if (rec.account === account.id) await this.kv.delete(key)
     // Invites to it, and those it sent, which carry its name.
     for (const [key, invite] of await this.kv.list('sinv:')) {
-      const [, to, roomId] = key.split(':')
+      const [, to = '', roomId = ''] = key.split(':')
       if (to === account.id || invite?.from?.id === account.id) await this.dropInvite(to, roomId)
     }
     for (const ident of new Set([...(account.idents ?? []), `ident:${account.provider}:${account.subject}`])) await this.kv.delete(ident)
@@ -737,8 +741,8 @@ export class Directory {
     }
     const state = token(18)
     await this.kv.put(`state:${state}`, { provider, login, invite, exp: now + LOGIN_MS })
-    const p = PROVIDERS[provider]
-    const q = new URLSearchParams({ client_id: this.providers[provider].id ?? '', redirect_uri: `${origin}/auth/${provider}/callback`, scope: p.scope, state })
+    const p = PROVIDERS[provider]!
+    const q = new URLSearchParams({ client_id: this.providers[provider]!.id ?? '', redirect_uri: `${origin}/auth/${provider}/callback`, scope: p.scope, state })
     if (provider === 'google') {
       q.set('response_type', 'code')
       q.set('prompt', 'select_account')
@@ -839,6 +843,7 @@ export class Directory {
 
   async identity(provider: string, code: string, redirect: string): Promise<Identity> {
     const cfg = this.providers[provider]
+    if (!cfg) throw new Error(`no sign-in with ${provider} here`)
     if (provider === 'github') {
       const tok = await this.fetch('https://github.com/login/oauth/access_token', {
         method: 'POST',

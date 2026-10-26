@@ -60,6 +60,6 @@ export function authorOf(room: RoomLike, name: string): Author {
   if (name && name === room.host?.name) return { name, account: room.host.account ?? null, role: 'host' }
   const seats = [...(room.seats?.values() ?? []), ...(room.away?.values() ?? [])].filter(s => s.name === name)
   const accounts = new Set(seats.map(s => s.account ?? null))
-  if (seats.length && accounts.size === 1) return { name, account: [...accounts][0], role: 'guest' }
+  if (seats.length && accounts.size === 1) return { name, account: [...accounts][0] ?? null, role: 'guest' }
   return { name, account: null, role: seats.length ? 'guest' : 'unknown' }
 }
