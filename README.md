@@ -63,13 +63,13 @@ Every session's previews share one preview host name, and their links name the s
 
 ## Host a server
 
-Sharing by link works with the public server. Teams that want their own infrastructure can use a Cloudflare Worker or the Node server:
+Sharing by link works with the public server. Teams that want their own infrastructure can run the same server on their own Cloudflare account:
 
 ```bash
 node scripts/setup.mjs deploy
 ```
 
-Run that from a clone with Node 20+; Cloudflare account setup and browser authorization need a person. For an existing server, use `node scripts/setup.mjs host --server https://your-server`. [Cloudflare, Node and team sign-in setup](docs/guide.md#host-a-server).
+Run that from a clone with Node 22+ (wrangler needs it); Cloudflare account setup and browser authorization need a person. For an existing server, use `node scripts/setup.mjs host --server https://your-server`. [Cloudflare and team sign-in setup](docs/guide.md#host-a-server).
 
 ## Troubleshooting
 

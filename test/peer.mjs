@@ -1,19 +1,13 @@
 // No model or product accounts. Messages between a teammate's own sessions
 // and the host's session (POST peer), and receipts for them, both ways:
-// through a real Node room, to the other side's streams alone, the guest's
+// through the real Workers under wrangler dev, to the other side's streams alone, the guest's
 // seat and name stamped by the room, never stored, never anyone else's; their
 // refusals and minute allowances; and the Worker's routing of the same by its
 // streams' tags and attachments, through a reconstruction, with stdlib
 // storage/hibernatable-socket stubs.
 import assert from 'node:assert/strict'
-import { mkdtemp, rm } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
-import { fileURLToPath } from 'node:url'
-import { createServer } from 'node:net'
-import { spawn } from 'node:child_process'
-import { once } from 'node:events'
 import { randomBytes } from 'node:crypto'
+import { startWorkerd } from './support/workerd.mjs'
 import { PLUGIN_LATEST, PEER_LIMIT, PEER_HANDLE, PEER_STATUS, PEER_DROPS, streamedRoomBody, homePage, token } from '../server/core.mjs'
 import './support/cloudflare.mjs'
 
@@ -21,14 +15,6 @@ const wait = ms => new Promise(resolve => setTimeout(resolve, ms))
 const HANDLE = 'a1'.repeat(16)
 const CHAIN = ['ab'.repeat(12), 'cd'.repeat(12)]
 const ID = '0f8fad5b-d9cb-469f-a165-70867728950e', REF = '7c9e6679-7425-40de-944b-e07fc1f90ae7'
-
-async function freePort() {
-  const server = createServer()
-  server.listen(0, '127.0.0.1'); await once(server, 'listening')
-  const port = server.address().port
-  await new Promise(resolve => server.close(resolve))
-  return port
-}
 
 {
   assert.equal(streamedRoomBody('POST', 'peer'), true, 'the peer route reads its own bounded body')
@@ -73,22 +59,11 @@ function reader(response) {
   }
 }
 
-async function nodeChecks() {
-  const dir = await mkdtemp(join(tmpdir(), 'share-peer-'))
-  const port = await freePort(); let preview = await freePort()
-  while (preview === port) preview = await freePort()
-  const origin = `http://127.0.0.1:${port}`
-  let logs = ''
-  const child = spawn(process.execPath, [fileURLToPath(new URL('../server/node.mjs', import.meta.url))], { cwd: dir,
-    env: { PATH: process.env.PATH, HOME: dir, PORT: String(port), PREVIEW_PORT: String(preview), DATA_FILE: join(dir, 'rooms.json') }, stdio: ['ignore', 'pipe', 'pipe'] })
-  child.stdout.on('data', b => { logs += b }); child.stderr.on('data', b => { logs += b })
+async function workerdChecks() {
+  const server = await startWorkerd()
+  const origin = server.origin
   const streams = []
   try {
-    for (let i = 0; ; i++) {
-      if (child.exitCode !== null || i > 150) throw new Error(`Node server did not start: ${logs}`)
-      if (await fetch(`${origin}/api/health`).then(r => r.ok).catch(() => false)) break
-      await wait(20)
-    }
     const http = (path, bearer, method = 'GET', body) => fetch(`${origin}${path}`, { method, headers: {
       authorization: bearer ? `Bearer ${bearer}` : '', 'x-shared-session-version': PLUGIN_LATEST,
     }, ...(body === undefined ? {} : { body: typeof body === 'string' ? body : JSON.stringify(body) }) })
@@ -158,7 +133,7 @@ async function nodeChecks() {
     }
     const later = await ok(`${base}/join`, null, 'POST', { name: 'Kim' })
     assert(!JSON.stringify(later).includes('Here are the traces.') && !JSON.stringify(later).includes('Can you check'), 'not in a joiner\'s history')
-    console.log('OK Node peer: a guest\'s message and receipts to the host\'s streams with its seat and name stamped, the host\'s to that seat\'s alone, never others, history or a later joiner')
+    console.log('OK workerd peer: a guest\'s message and receipts to the host\'s streams with its seat and name stamped, the host\'s to that seat\'s alone, never others, history or a later joiner')
 
     // A side with no stream open, a seat not the room's, one gone.
     const reply = { handle: HANDLE, body: 'x', ref: REF }
@@ -170,8 +145,12 @@ async function nodeChecks() {
     await wait(100)
     assert.deepEqual(alexStream.peers(), [])
     await hostStream.close()
-    assert.deepEqual(await (await fromGuest(scott, up)).json(), { delivered: false, reason: 'offline' }, 'the host not connected')
-    console.log('OK Node peer: offline, a seat not the room\'s, and a seat that left')
+    // The Worker that held the host's stream hears of its close, then tells
+    // the room: a moment, not at once.
+    let offline
+    for (const end = Date.now() + 15_000; Date.now() < end; await wait(100)) if ((offline = await (await fromGuest(scott, up)).json()).delivered === false) break
+    assert.deepEqual(offline, { delivered: false, reason: 'offline' }, 'the host not connected')
+    console.log('OK workerd peer: offline, a seat not the room\'s, and a seat that left')
 
     // Who may, and what's well formed.
     assert.equal((await http(`${base}/peer`, '', 'POST', up)).status, 401)
@@ -191,7 +170,7 @@ async function nodeChecks() {
     assert.equal((await fromHost({ ...good, body: '\u0001'.repeat(25_000) })).status, 413, 'past 128 KiB of body (each escaped in six bytes)')
     assert.equal((await fromHost({ ...good, body: 'x'.repeat(32_000) })).status, 200, 'a message of 32,000 characters goes')
     assert.equal((await fromGuest(scott, { ...guestGood, body: 'x'.repeat(32_000), chain: Array(32).fill(CHAIN[0]) })).status, 200, 'and a chain of 32 with it')
-    console.log('OK Node peer: 401, 404, 400 for each malformed body, 413 past its bound')
+    console.log('OK workerd peer: 401, 404, 400 for each malformed body, 413 past its bound')
 
     // The minute's allowance, counted before the body: refused ones count.
     // Each guest seat its own, apart from the host's.
@@ -205,15 +184,13 @@ async function nodeChecks() {
     assert(hostStatuses.includes(429), 'past the host\'s minute, 429')
     await ok(`${base}/end`, room.token, 'POST', {})
     assert.equal((await fromGuest(scott, up)).status, 410, 'an ended room')
-    console.log('OK Node peer: 429 past 60 a minute a seat and 120 the host, 410 once the room ends')
+    console.log('OK workerd peer: 429 past 60 a minute a seat and 120 the host, 410 once the room ends')
   } finally {
     for (const s of streams) await s.close()
-    child.kill()
-    if (child.exitCode === null) await once(child, 'exit')
-    await rm(dir, { recursive: true, force: true })
+    await server.stop()
   }
 }
-await nodeChecks()
+await workerdChecks()
 
 // The Worker: the room in a Durable Object, each stream a hibernatable
 // socket tagged with its seat, its attachment saying whether it takes

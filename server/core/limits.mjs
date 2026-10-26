@@ -17,12 +17,6 @@ export const STREAM_MAX_MS = 5 * 60_000
 // the oldest's place: the oldest stream ends, the oldest poll is answered.
 export const SEAT_STREAMS = 4
 export const SEAT_POLLS = 4
-// A stream (Node's) sends its events in pages of this many bytes at most, the
-// next as its reader takes the last, and holds at most STREAM_UNREAD it
-// hasn't taken: past that the reader isn't keeping up, and the stream ends
-// with what it holds. Its client reconnects from its cursor; nothing is lost.
-export const STREAM_PAGE = 512 * 1024
-export const STREAM_UNREAD = 1024 * 1024
 export const POLL_WAIT_MS = 20_000
 export const MAX_TEXT = 32_000 // chars; any string in an event, at any depth
 // One event's body, serialized. The plugin's largest is a row of 32,000

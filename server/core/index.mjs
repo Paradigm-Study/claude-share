@@ -1,6 +1,6 @@
-// Room logic shared by the Node server (node.mjs) and the Cloudflare Durable
-// Object (worker.mjs). Everything speaks the Fetch API: a Request in, a
-// Response out, so both hosts route into the same functions.
+// Room logic for the Cloudflare Durable Object (worker.mjs). Everything
+// speaks the Fetch API: a Request in, a Response out, and the sockets,
+// timers and storage stay in worker.mjs.
 //
 // A room is one shared Claude Code session. The host's session posts what its
 // transcript keeps (rows), live text (deltas) and turn state; guests post
@@ -16,8 +16,6 @@ export {
   STREAM_MAX_MS,
   SEAT_STREAMS,
   SEAT_POLLS,
-  STREAM_PAGE,
-  STREAM_UNREAD,
   EVENT_BYTES,
   FILE_UPLOADS,
   ROOM_FILES_COUNT,

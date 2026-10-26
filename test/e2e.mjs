@@ -15,6 +15,7 @@ import { createHash, randomBytes } from 'node:crypto'
 import { mkdirSync, existsSync, rmSync, writeFileSync, createWriteStream, readdirSync, readFileSync, statSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { startWorkerd } from './support/workerd.mjs'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const CLAUDE = process.env.CLAUDE_BIN ?? 'claude'
@@ -50,16 +51,11 @@ const check = (name, ok, detail = '') => {
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? `  (${detail})` : ''}`)
 }
 
-function startServer() {
-  const child = spawn(process.execPath, [join(ROOT, 'server/node.mjs')], {
-    // AUTH_TEST: a sign-in provider that asks for whoever its link names, for the team checks (they post its confirmation form).
-    env: { ...process.env, PORT: String(PORT), PREVIEW_PORT: String(PORT + 1), AUTH_TEST: '1', DATA_FILE: '' },
-    stdio: ['ignore', 'pipe', 'pipe'],
-  })
-  const log = createWriteStream(join(WORK, 'server.log'))
-  child.stdout.pipe(log)
-  child.stderr.pipe(log)
-  children.push(child)
+// The Workers under wrangler dev. AUTH_TEST: a sign-in provider that asks for
+// whoever its link names, for the team checks (they post its confirmation form).
+async function startServer() {
+  const server = await startWorkerd({ port: PORT, previewPort: PORT + 1, quiet: false, vars: { AUTH_TEST: '1' } })
+  children.push({ kill: () => { writeFileSync(join(WORK, 'server.log'), server.logs()); return server.stop() } })
 }
 
 function session(name, cwd, extraArgs = [], logName = name, extraEnv = {}) {
@@ -790,7 +786,7 @@ async function teams() {
 try {
   // A server already on the port (one an earlier run left) would be tested in place of this code.
   if (!process.env.EXTERNAL_SERVER && (await fetch(`${SERVER}/api/health`).catch(() => null))) throw new Error(`something already answers on ${SERVER}; stop it first`)
-  if (!process.env.EXTERNAL_SERVER) startServer()
+  if (!process.env.EXTERNAL_SERVER) await startServer()
   await until('server', async () => (await fetch(`${SERVER}/api/health`).catch(() => null))?.ok)
   // E2E_ONLY=teams (or long, or a list of them) runs just those checks.
   const only = new Set((process.env.E2E_ONLY ?? '').split(',').filter(Boolean))
@@ -801,7 +797,7 @@ try {
 } catch (error) {
   check('run', false, String(error?.message ?? error))
 } finally {
-  for (const child of children) child.kill('SIGTERM')
+  await Promise.all(children.map(child => child.kill('SIGTERM')))
   const failed = results.filter(r => !r.ok).length
   console.log(`\n${results.length - failed}/${results.length} passed · logs in ${WORK}`)
   process.exit(failed ? 1 : 0)

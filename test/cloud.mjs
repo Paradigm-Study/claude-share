@@ -5,15 +5,17 @@
 //
 //   node test/cloud.mjs
 //
-// With CLOUD_IMAGE (an image built from cloud/Dockerfile) and model access in
-// ANTHROPIC_BASE_URL/ANTHROPIC_AUTH_TOKEN, it also moves a session into a real
-// container through a Node server and has a teammate's prompt answered there.
+// With CLOUD_DOCKER=1 (Docker running: wrangler dev builds cloud/Dockerfile)
+// and model access in ANTHROPIC_BASE_URL/ANTHROPIC_AUTH_TOKEN, it also moves a
+// session into a real container through the Workers under wrangler dev and
+// has a teammate's prompt answered there.
 import assert from 'node:assert/strict'
-import { spawn, execFileSync } from 'node:child_process'
+import { execFileSync } from 'node:child_process'
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { startWorkerd } from './support/workerd.mjs'
 import { randomUUID } from 'node:crypto'
 import { Room, roomRequest, CLOUD_MAX_MS } from '../server/core.mjs'
 
@@ -282,15 +284,11 @@ await check('wrangler.toml names the image built from cloud/ as it is (node scri
 })
 
 // ---------------------------------------------------------------------------
-// The real thing: a Node server starting the image in Docker.
-const image = process.env.CLOUD_IMAGE
-if (image && process.env.ANTHROPIC_AUTH_TOKEN) {
-  const PORT = Number(process.env.CLOUD_TEST_PORT ?? 8795)
-  const S = `http://localhost:${PORT}`
-  const server = spawn(process.execPath, [join(ROOT, 'server/node.mjs')], {
-    env: { ...process.env, PORT: String(PORT), PREVIEW_PORT: String(PORT + 1), DATA_FILE: '', CLOUD_IMAGE: image, CLOUD_SERVER_URL: `http://host.docker.internal:${PORT}` },
-    stdio: ['ignore', 'ignore', 'inherit'],
-  })
+// The real thing: the Workers under wrangler dev starting the image in Docker.
+// The runner reaches the room at the address links name (PUBLIC_URL).
+if (process.env.CLOUD_DOCKER === '1' && process.env.ANTHROPIC_AUTH_TOKEN) {
+  const server = await startWorkerd({ containers: true, vars: ({ port }) => ({ PUBLIC_URL: `http://host.docker.internal:${port}` }) })
+  const S = server.origin
   const sleep = ms => new Promise(r => setTimeout(r, ms))
   const call = async (path, { token, body, method = body ? 'POST' : 'GET', raw } = {}) => {
     const r = await fetch(S + path, {
@@ -381,9 +379,9 @@ if (image && process.env.ANTHROPIC_AUTH_TOKEN) {
       assert.ok(!execFileSync('docker', ['ps', '-q', '--filter', `name=ss-host-${made.id}`]).toString().trim(), 'the container is gone')
     })
   } finally {
-    server.kill()
+    await server.stop()
   }
-} else console.log('skip in Docker (set CLOUD_IMAGE and model access)')
+} else console.log('skip in Docker (set CLOUD_DOCKER=1 and model access)')
 
 console.log(failed ? `\n${failed} failed` : '\nall passed')
 process.exit(failed ? 1 : 0)

@@ -2,18 +2,14 @@
 // host shares, who may connect, needs and their bounded bodies, public sockets ending
 // with their preview, and a real Node server across restarts.
 import assert from 'node:assert/strict'
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
-import { fileURLToPath } from 'node:url'
-import { createServer, createConnection } from 'node:net'
+import { createConnection } from 'node:net'
+import { once } from 'node:events'
 import { request as httpRequest, createServer as createHTTPServer } from 'node:http'
 import { createHash, randomBytes } from 'node:crypto'
 import relay from '../plugin/relay/ws-relay.cjs'
 import ws from '../plugin/relay/ws.cjs'
-import { spawn } from 'node:child_process'
-import { once } from 'node:events'
 import { Room, PLUGIN_LATEST, roomRequest, token, versionInfo, tcpSocketTarget, NEED_LIMIT, LIMITS, limitOf, streamedRoomBody, previewRequest, previewSocketTarget, publicPairValid, PUBLIC_LIMITS, TCP_LIMITS, SEAT_TIMEOUT_MS, EVENT_BYTES, HISTORY_BYTES, ROOM_FILES_COUNT, ROOM_PREVIEWS_MAX, ROOM_SEATS_MAX, SERVE_LIMITS, previewLabel, previewKeyOf, previewHostLabel, roomOrigins, hostHalfClose, tcpHalfClose, rejectReason, homePage } from '../server/core.mjs'
+import { startWorkerd } from './support/workerd.mjs'
 import './support/cloudflare.mjs'
 
 // After the stand-in for `cloudflare:workers` is registered.
@@ -296,14 +292,9 @@ function held(w, path, bearer = w.host, method = 'POST') {
   const shared = [{ pid: page, port: 43400, tcp: false, title: 'App' }, { pid: forwarded.pid, port: 43401, tcp: true, title: 'localhost:43401' }]
   assert.deepEqual(joined.previews, shared)
   assert.equal((await call(w, 'events?after=0&wait=0', 'invalid')).status, 401)
-  const streamLine = async bearer => {
-    const reader = (await call(w, 'stream?after=0', bearer)).body.getReader()
-    const { value } = await reader.read()
-    await reader.cancel()
-    return JSON.parse(new TextDecoder().decode(value).split('\n')[0])
-  }
+  // A stream's line is the room's page (RoomObject's send).
+  assert.deepEqual(w.room.page(0, Date.now()).previews, shared, 'a stream line')
   for (const bearer of [joined.token, w.host]) {
-    assert.deepEqual((await streamLine(bearer)).previews, shared, 'a stream line')
     assert.deepEqual((await api(w, 'events?after=0&wait=0', bearer)).previews, shared, 'an events answer')
   }
   // Forwarding moves the room's seq, so a poll waiting hears it, its answer the list now.
@@ -312,7 +303,7 @@ function held(w, path, bearer = w.host, method = 'POST') {
   assert.deepEqual((await waiting).previews.map(p => [p.pid, p.tcp]), [[page, true], [forwarded.pid, true]])
   assert.deepEqual(w.room.events.filter(e => e.type === 'preview').map(e => [e.body.state, e.body.pid, e.body.tcp]), [['open', page, true]], 'forwarding is said again')
   await api(w, `previews/${page}/end`, w.host, 'POST')
-  assert.deepEqual((await streamLine(w.guest)).previews.map(p => p.pid), [forwarded.pid], 'open previews only')
+  assert.deepEqual(w.room.page(0, Date.now()).previews.map(p => p.pid), [forwarded.pid], 'open previews only')
   assert.equal((await call(w, 'previews', w.guest)).status, 404, 'no GET previews: every page says it')
   await api(w, 'end', w.host, 'POST')
   assert.deepEqual((await api(w, 'events?after=0&wait=0', w.guest)).previews, [], 'an ended room shares nothing')
@@ -901,14 +892,6 @@ async function admit(w, url, cookie) {
   console.log('OK the home page says when expired links and sessions go, that a new link renews a session, that clearing needs HTTPS, how a sign-in finishes, what TCP keeps, and the limits as the server keeps them')
 }
 
-async function freePort() {
-  const server = createServer()
-  server.listen(0, '127.0.0.1'); await once(server, 'listening')
-  const port = server.address().port
-  await new Promise(resolve => server.close(resolve))
-  assert(![3000, 3009, 3610].includes(port))
-  return port
-}
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms))
 // A browser entering over HTTP: the clearing page first (D2-3), then, its
 // cookies cleared, the next link.
@@ -933,50 +916,10 @@ const statusOf = socket => new Promise(resolve => {
   socket.on('data', b => { text += b; if (text.includes('\r\n')) done() })
   socket.on('close', done)
 })
-// Upgrades the server turns away, never the process: a preview handshake with
-// a Host the URL parser refuses (server-1; only its path and cookie are read,
-// so it's a preview that isn't there), and a refused handshake whose client
-// resets at once, on either port (Node takes its own error listener off a
-// socket it hands over).
-async function upgradeChecks(origin, port, preview) {
-  for (const host of ['a b', 'x:abc', '[']) {
-    const socket = handshake(preview, '/live', { host })
-    assert.equal(await statusOf(socket), 404, `Host: ${host}`); socket.destroy()
-  }
-  for (let i = 0; i < 10; i++) {
-    for (const [at, path] of [[preview, '/live'], [port, '/api/rooms/none/ws/none']]) {
-      const socket = handshake(at, path)
-      await wait(5)
-      socket.resetAndDestroy()
-    }
-  }
-  await wait(200)
-  assert((await fetch(`${origin}/api/health`)).ok, 'the server is up')
-  console.log('OK real Node: a preview handshake with a Host no URL takes is refused; a reset refused handshake ends only its socket')
-}
-async function nodeChecks() {
-  const dir = await mkdtemp(join(tmpdir(), 'share-previews-'))
-  const port = await freePort(); let preview = await freePort()
-  while (preview === port) preview = await freePort()
-  const origin = `http://127.0.0.1:${port}`, database = join(dir, 'test-rooms.json')
-  let child, logs = '', stream
-  const start = async () => {
-    logs = ''
-    child = spawn(process.execPath, [fileURLToPath(new URL('../server/node.mjs', import.meta.url))], { cwd: dir,
-      env: { PATH: process.env.PATH, HOME: dir, PORT: String(port), PREVIEW_PORT: String(preview), DATA_FILE: database }, stdio: ['ignore', 'pipe', 'pipe'] })
-    child.stdout.on('data', b => { logs += b }); child.stderr.on('data', b => { logs += b })
-    for (let i = 0; i < 150; i++) {
-      if (child.exitCode !== null) throw new Error(logs)
-      if (await fetch(`${origin}/api/health`).then(r => r.ok).catch(() => false)) return
-      await wait(20)
-    }
-    throw new Error(`Node server did not start: ${logs}`)
-  }
-  const stop = async () => {
-    if (!child || child.exitCode !== null) return
-    child.kill()
-    await once(child, 'exit')
-  }
+async function workerdChecks() {
+  const server = await startWorkerd()
+  const { origin, port, previewPort: preview } = server
+  let stream
   const http = (path, bearer, method = 'GET', body) => fetch(`${origin}${path}`, { method, headers: {
     authorization: bearer ? `Bearer ${bearer}` : '', 'x-shared-session-version': PLUGIN_LATEST,
   }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) })
@@ -990,23 +933,20 @@ async function nodeChecks() {
         res.resume(); resolve(res.statusCode)
       })
       req.on('error', reject); req.flushHeaders()
-      timer = setTimeout(() => req.destroy(new Error('bounded ingress did not answer before EOF')), 5000)
+      timer = setTimeout(() => req.destroy(new Error(`bounded ingress did not answer before EOF: ${method} ${path}`)), 5000)
     })
     response.finally(() => clearTimeout(timer)).catch(() => {})
     return { req, response }
   }
   try {
-    await start()
     const room = await ok('/api/rooms', null, 'POST', { name: 'Host' }), base = `/api/rooms/${room.id}`
     const guest = await ok(`${base}/join`, null, 'POST', { name: 'Guest' })
     // One guest post nested past what JSON.stringify recurses: kept whole, it
-    // ended the process at the next save (server-3). Clamped, the room saves,
-    // and loads again at the restart below.
+    // couldn't be stored (server-3). Clamped, the room stores it, and loads
+    // again at the restart below.
     const deep = `{"events":[{"type":"chat","body":{"x":${'['.repeat(100_000)}${']'.repeat(100_000)}}}]}`
     assert.equal((await fetch(`${origin}${base}/events`, { method: 'POST', headers: { authorization: `Bearer ${guest.token}`, 'x-shared-session-version': PLUGIN_LATEST }, body: deep })).status, 200)
-    await wait(700) // past the snapshot's half-second debounce
-    assert((await fetch(`${origin}/api/health`)).ok, 'the room saved, the server up')
-    await upgradeChecks(origin, port, preview)
+    assert((await fetch(`${origin}/api/health`)).ok, 'the server up')
     const unauthorized = uploading(`${base}/previews`, guest.token, 'POST', 1_000_000)
     assert.equal(await unauthorized.response, 403); unauthorized.req.destroy()
     const oversized = uploading(`${base}/previews`, room.token, 'POST', 1_000_000)
@@ -1021,19 +961,12 @@ async function nodeChecks() {
     const first = JSON.parse(new TextDecoder().decode((await stream.read()).value).split('\n')[0])
     assert.ok(Array.isArray(first.events))
     assert.equal((await http(`${base}/previews/${forwarded.pid}/tunnel`, guest.token, 'POST', {})).status, 404, 'no grant to ask for')
-    // A TCP admission writes nothing: the room's minute of opens is memory's,
-    // so neither the counters' small file nor every room's snapshot (D6).
-    const stats = () => readFile(`${database}.tcp`, 'utf8').then(text => JSON.parse(text).rooms[room.id]).catch(() => null)
-    const snapshot = await readFile(database, 'utf8')
     const tunnel = ws.connect(`${origin.replace('http', 'ws')}${base}/previews/${forwarded.pid}/tunnel`, { authorization: `Bearer ${guest.token}` }, [], { message() {}, close() {} })
     for (let i = 0; i < 300 && !tunnel.isOpen(); i++) await wait(10)
     assert(tunnel.isOpen(), "the TCP tunnel opened with the guest's seat token")
-    assert.equal((await stats()) ?? null, null, 'no counters written for the open')
-    assert.equal(await readFile(database, 'utf8'), snapshot, 'the rooms snapshot was not rewritten')
     tunnel.close()
-    // A byte through a paired channel (the host's stream names it, the host's
-    // relay takes it up): the room reserves its byte budget, and the small
-    // file has it before the byte goes on.
+    // A byte through a paired channel: the host's stream names it, the host's
+    // relay takes it up.
     const carry = async () => {
       // The host's stream, on a connection of its own, open while the guest connects.
       const asks = [], live = { paged: false, text: '' }
@@ -1063,10 +996,8 @@ async function nodeChecks() {
       for (let i = 0; i < 300 && !delivered; i++) await wait(10)
       assert(delivered, 'the byte went through')
       guestWs.close(); hostWs.close(); hostStream.destroy()
-      await wait(700) // past the counters' half-second debounce for the refund
     }
     await carry()
-    assert.equal((await stats()).used, TCP_LIMITS.reserveBytes, 'its reservation, in the small file')
     // A link minted before a restart still opens after it (D2a).
     const kept = await ok(`${base}/previews/${page.pid}/ticket`, guest.token, 'POST', { path: '/kept' })
     // It names the room by its preview key, which joins nothing (D2-2), and the
@@ -1083,26 +1014,23 @@ async function nodeChecks() {
     assert.equal((await fetch(byId, { redirect: 'manual' })).status, 404)
     const byNone = new URL(byId); byNone.searchParams.set('room', token(16))
     assert.equal((await fetch(byNone, { redirect: 'manual' })).status, 404)
-    // Node bounds every body it buffers as the bytes arrive, per route (D7a):
-    // a JSON route, a file, the directory and the preview port answer 413
-    // before the body ends; a declared length past the bound, at once.
-    for (const [path, write, length] of [[`${base}/events`, 1_600_000], [`${base}/files`, 0, 11 * 1024 * 1024], ['/api/teams', 50_000], ['/api/rooms', 1_600_000]]) {
-      const big = uploading(path, room.token, 'POST', length)
-      if (write) big.req.write(Buffer.alloc(write, 32))
+    // Every body is bounded as the bytes arrive, per route (D7a): a JSON
+    // route and the directory answer 413 before the body ends (a preview's,
+    // the room as it reads it: tcp-worker.mjs). A declared length past the bound is refused by the outer Worker
+    // unread; wrangler dev's own proxy loses an answer given before the body
+    // is read, so that one is asked of the Worker's fetch directly.
+    for (const [path, write] of [[`${base}/events`, 1_600_000], ['/api/teams', 50_000], ['/api/rooms', 1_600_000]]) {
+      const big = uploading(path, room.token, 'POST')
+      big.req.write(Buffer.alloc(write, 32))
       assert.equal(await big.response, 413, path); big.req.destroy()
     }
-    const preview413 = await new Promise((resolve, reject) => {
-      const req = httpRequest(`http://127.0.0.1:${preview}/upload`, { method: 'POST' }, res => { let text = ''; res.on('data', b => { text += b }); res.on('end', () => resolve([res.statusCode, res.headers['content-type'], text])) })
-      req.on('error', reject); req.write(Buffer.alloc(1024 * 1024 + 1, 32))
-    })
-    assert.equal(preview413[0], 413); assert.match(preview413[1], /text\/html/); assert.match(preview413[2], /limited to 1 MB/)
-    // A bodyless POST to a streamed route keeps its connection; one whose body
-    // the route never reads closes it.
-    const connection = length => new Promise((resolve, reject) => {
-      const req = httpRequest(`${origin}${base}/previews/${forwarded.pid}/end`, { method: 'POST', headers: { authorization: 'Bearer invalid', 'content-length': String(length) } }, res => { res.resume(); resolve([res.statusCode, res.headers.connection]) })
-      req.on('error', reject); req.end(length ? 'x'.repeat(length) : undefined)
-    })
-    assert.deepEqual(await connection(0), [401, 'keep-alive']); assert.deepEqual(await connection(2), [401, 'close'])
+    const { default: worker } = await import('../server/worker.mjs')
+    const allow = { limit: async () => ({ success: true }) }
+    const unreached = { idFromName: name => name, get: () => ({ fetch: () => { throw new Error('the room was asked') } }) }
+    for (const [rest, length] of [['events', 1_600_000], ['files', 11 * 1024 * 1024]]) {
+      const r = await worker.fetch(new Request(`https://share.test${base}/${rest}`, { method: 'POST', duplex: 'half', body: new ReadableStream(), headers: { 'content-length': String(length), authorization: `Bearer ${room.token}`, 'x-shared-session-version': PLUGIN_LATEST } }), { ROOMS: unreached, CREATE_LIMIT: allow, JOIN_LIMIT: allow, EVENTS_LIMIT: allow })
+      assert.equal(r.status, 413, `${rest}, a declared length past its bound`)
+    }
     await stream.cancel(); stream = null
     // A TCP connection needs the host's stream: it's open while one connects.
     const connects = async pid => {
@@ -1111,35 +1039,26 @@ async function nodeChecks() {
       const socket = handshake(port, `${base}/previews/${pid}/tunnel`, { bearer: guest.token })
       try { return await statusOf(socket) } finally { socket.destroy(); await live.cancel() }
     }
-    const used = (await stats()).used
-    await wait(700) // past the snapshot's half-second debounce, for the links
-    await stop(); await start()
+    await server.restart()
     // Shares were saved before their answers, and the seat with the room.
     assert.equal(await connects(page.pid), 403)
     assert.equal(await connects(forwarded.pid), 101)
     await carry()
-    assert.equal((await stats()).used, used + TCP_LIMITS.reserveBytes, 'the byte budget went on from its own file')
     const reopened = await admitted(kept.url)
     assert.equal(reopened.status, 302); assert.equal(reopened.headers.get('location'), '/kept')
     await ok(`${base}/previews`, room.token, 'POST', { port: 43700, tcp: true })
     await ok(`${base}/previews/${forwarded.pid}/end`, room.token, 'POST', {})
-    // Only this test's private file is read. Credentials are compared by
-    // presence, never printed or copied from a real server's database.
-    const saved = JSON.parse(await readFile(database, 'utf8')).rooms.find(r => r.id === room.id)
-    assert.equal(saved.previews[page.pid].tcp, true); assert.equal(saved.previews[forwarded.pid], undefined)
-    assert(Object.values(saved.previewSessions).every(s => s.pid === page.pid), "only the link's browser session is kept: nothing TCP")
-    await stop(); await start()
+    await server.restart()
     assert.equal(await connects(page.pid), 101)
     assert.equal(await connects(forwarded.pid), 410)
-    console.log('OK real Node: streamed auth and UTF-8 bounds before EOF; per-route body caps; shares, forwarding, Stop, links and TCP counters saved, across two restarts')
+    console.log('OK workerd: streamed auth and UTF-8 bounds before EOF; per-route body caps; shares, forwarding, Stop and links kept across two restarts')
     await publicSocketChecks(http, ok, origin, preview)
     await publicLimitChecks(http, ok, origin, preview)
     await publicPendingChecks(http, ok, origin, port, preview)
     await needChecks(http, ok, uploading, origin)
   } finally {
     await stream?.cancel().catch(() => {})
-    await stop()
-    await rm(dir, { recursive: true, force: true })
+    await server.stop()
   }
 }
 // Real public browser sockets and the production Host public relay, on newly
@@ -1255,7 +1174,7 @@ async function publicSocketChecks(http, ok, origin, previewPort) {
     for (const p of [active[0], pending[0]]) {
       const late = connect(`${origin.replace('http', 'ws')}${base}/ws/${p.id}`, { authorization: `Bearer ${room.token}` })
       await until(() => late.closes.length, 'a late host relay is refused after the same port is shared again')
-      assert.equal(late.closes[0].status, 404)
+      assert.equal(late.closes[0].status, 410, 'that socket has closed')
     }
     assert.equal(active[1].closes.length, 0); assert.equal(pending[1].closes.length, 0)
     await traffic(active[1], 'the other preview goes on')
@@ -1536,49 +1455,14 @@ async function needChecks(http, ok, uploading, origin) {
     for (const reader of readers) await reader.cancel().catch(() => {})
   }
 }
-// A snapshot that can't be written (here its folder isn't there) is said in
-// the log: thrown from its timer, it ended the process and every room in it.
-async function saveFailureChecks() {
-  const dir = await mkdtemp(join(tmpdir(), 'share-previews-'))
-  const port = await freePort(); let preview = await freePort()
-  while (preview === port) preview = await freePort()
-  const origin = `http://127.0.0.1:${port}`
-  let logs = ''
-  const child = spawn(process.execPath, [fileURLToPath(new URL('../server/node.mjs', import.meta.url))], { cwd: dir,
-    env: { PATH: process.env.PATH, HOME: dir, PORT: String(port), PREVIEW_PORT: String(preview), DATA_FILE: join(dir, 'gone', 'rooms.json') }, stdio: ['ignore', 'pipe', 'pipe'] })
-  child.stdout.on('data', b => { logs += b }); child.stderr.on('data', b => { logs += b })
-  try {
-    for (let i = 0; i < 150 && !(await fetch(`${origin}/api/health`).then(r => r.ok).catch(() => false)); i++) {
-      if (child.exitCode !== null) throw new Error(logs)
-      await wait(20)
-    }
-    const created = await fetch(`${origin}/api/rooms`, { method: 'POST', headers: { 'x-shared-session-version': PLUGIN_LATEST }, body: JSON.stringify({ name: 'Host' }) })
-    assert.equal(created.status, 200)
-    const room = await created.json()
-    await wait(700) // past the snapshot's half-second debounce
-    assert.equal(child.exitCode, null, logs)
-    assert.match(logs, /Couldn't save .*gone.*rooms\.json/)
-    assert.equal((await fetch(`${origin}/api/rooms/${room.id}`, { headers: { authorization: `Bearer ${room.token}` } })).status, 200, 'the room goes on')
-    console.log('OK real Node: a snapshot that fails to save is logged, the server and its rooms go on')
-  } finally {
-    if (child.exitCode === null) { child.kill(); await once(child, 'exit') }
-    await rm(dir, { recursive: true, force: true })
-  }
-}
 // Per-room preview origins: with PREVIEW_URL a wildcard, each room's
 // previews have a host name of their own (<label>.<rest>), the room's key in
 // base32, so no room's page shares an origin, or a cookie, with another's.
 // On a real Node server: a link names its room's host name, entering there
 // needs no clearing hop, and only that host name serves the room.
 async function ownOriginChecks() {
-  const dir = await mkdtemp(join(tmpdir(), 'share-previews-'))
-  const port = await freePort(); let preview = await freePort()
-  while (preview === port) preview = await freePort()
-  const origin = `http://127.0.0.1:${port}`
-  let logs = ''
-  const child = spawn(process.execPath, [fileURLToPath(new URL('../server/node.mjs', import.meta.url))], { cwd: dir,
-    env: { PATH: process.env.PATH, HOME: dir, PORT: String(port), PREVIEW_PORT: String(preview), PREVIEW_URL: `http://*.previews.test:${preview}`, DATA_FILE: join(dir, 'rooms.json') }, stdio: ['ignore', 'pipe', 'pipe'] })
-  child.stdout.on('data', b => { logs += b }); child.stderr.on('data', b => { logs += b })
+  const server = await startWorkerd({ vars: ({ previewPort }) => ({ PREVIEW_URL: `http://*.previews.test:${previewPort}` }) })
+  const { origin, previewPort: preview } = server
   // A request to the preview port as a browser at that host name sends it.
   const at = (host, path, cookie) => new Promise((resolve, reject) => {
     const req = httpRequest({ host: '127.0.0.1', port: preview, path, headers: { host, ...(cookie ? { cookie } : {}) } }, res => {
@@ -1588,10 +1472,6 @@ async function ownOriginChecks() {
     req.on('error', reject); req.end()
   })
   try {
-    for (let i = 0; i < 150 && !(await fetch(`${origin}/api/health`).then(r => r.ok).catch(() => false)); i++) {
-      if (child.exitCode !== null) throw new Error(logs)
-      await wait(20)
-    }
     const post = async (path, bearer, body) => {
       const r = await fetch(`${origin}${path}`, { method: 'POST', headers: { ...(bearer ? { authorization: `Bearer ${bearer}` } : {}), 'x-shared-session-version': PLUGIN_LATEST }, body: JSON.stringify(body) })
       assert.equal(r.status, 200, await r.clone().text())
@@ -1609,14 +1489,15 @@ async function ownOriginChecks() {
     const labels = links.map(url => url.hostname.slice(0, -'.previews.test'.length))
     assert.ok(links.every(url => url.hostname.endsWith('.previews.test') && url.port === String(preview)), links.join(' '))
     assert.notEqual(labels[0], labels[1])
-    assert.ok(labels.every(label => /^[a-z2-7]{26}$/.test(label)), labels.join(' '))
+    // A Worker's room is keyed by its object's id, 64 hex: 52 base32 letters.
+    assert.ok(labels.every(label => /^[a-z2-7]{52}$/.test(label)), labels.join(' '))
     // Entered at its own host name: no clearing hop, whatever another room
     // left in the browser, and a cookie for that host name alone.
     const entered = await at(links[0].host, `${links[0].pathname}${links[0].search}`, 'cs_pv=someotherroom.x; app=1')
     assert.equal(entered.status, 302, entered.body)
     assert.equal(entered.headers['clear-site-data'], undefined)
     const cookie = entered.headers['set-cookie'][0]
-    assert.match(cookie, /^cs_pv=[^;]+; Path=\/; HttpOnly; SameSite=Lax$/)
+    assert.match(cookie, /^cs_pv=[^;]+; Path=\/; HttpOnly; SameSite=Lax; Secure$/, "the Worker's are always Secure")
     const jar = cookie.split(';')[0]
     // That cookie opens the room's preview on its own host name (the host
     // isn't connected here: a 503 page, so the room was found) and nowhere
@@ -1627,10 +1508,9 @@ async function ownOriginChecks() {
     assert.equal((await at(`x.${links[0].host}`, '/', jar)).status, 404, 'a host name deeper than the wildcard')
     // A link used at another room's host name opens nothing there.
     assert.equal((await at(links[0].host.replace(labels[0], labels[1]), `${links[1].pathname}${links[1].search}`.replace(links[1].searchParams.get('ticket'), links[0].searchParams.get('ticket')))).status, 403)
-    console.log("OK per-room preview origins on a real Node server: a link names its room's own host name, entered there with no clearing hop, and only that host name serves the room")
+    console.log("OK per-room preview origins on workerd: a link names its room's own host name, entered there with no clearing hop, and only that host name serves the room")
   } finally {
-    if (child.exitCode === null) { child.kill(); await once(child, 'exit') }
-    await rm(dir, { recursive: true, force: true })
+    await server.stop()
   }
 }
 
@@ -1688,7 +1568,6 @@ async function ownOriginChecks() {
   console.log("OK per-room preview origins: a room's key as one DNS label and back, a ticket naming the room's own host name, no clearing hop there, an app's cookies kept to it, and the preview Worker routing by host name alone")
 }
 
-await nodeChecks()
-await saveFailureChecks()
+await workerdChecks()
 await ownOriginChecks()
-console.log('PASS preview server and isolated Node tests')
+console.log('PASS preview server and workerd tests')

@@ -7,7 +7,7 @@
 // gone, how much one account may change a minute, and whom a team's new
 // rules look at.
 //
-//   node test/teams.mjs                                   # a local Node server it starts
+//   node test/teams.mjs                                   # the Workers under wrangler dev, started here
 //   TEAMS_SERVER=http://127.0.0.1:8787 node test/teams.mjs   # one already running with AUTH_TEST=1
 //                                                          # (npx wrangler dev --var AUTH_TEST:1)
 //   SHARED_SESSION_TEST_CHROME=/path/to/chrome node test/teams.mjs   # that browser for Continue (else SKIP without one)
@@ -17,24 +17,21 @@ import { createHash } from 'node:crypto'
 import { constants } from 'node:fs'
 import { access, mkdtemp, realpath, rm } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
-import { basename, join, dirname } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { basename, join } from 'node:path'
 import { PLUGIN_LATEST } from '../server/core.mjs'
+import { startWorkerd } from './support/workerd.mjs'
 import './support/cloudflare.mjs'
 
-const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
-const PORT = Number(process.env.TEAMS_PORT ?? 8899)
-const S = (process.env.TEAMS_SERVER ?? `http://127.0.0.1:${PORT}`).replace(/\/+$/, '')
-const srv = process.env.TEAMS_SERVER ? { kill() {} } : spawn(process.execPath, [join(ROOT, 'server/node.mjs')], { env: { ...process.env, PORT: String(PORT), PREVIEW_PORT: String(PORT + 1), AUTH_TEST: '1', DATA_FILE: '', TRUST_PROXY: '1' }, stdio: ['ignore', 'pipe', 'inherit'] })
-if (!process.env.TEAMS_SERVER) await new Promise(r => srv.stdout.once('data', r))
+const srv = process.env.TEAMS_SERVER ? { stop() {} } : await startWorkerd({ vars: { AUTH_TEST: '1' } })
+const S = (process.env.TEAMS_SERVER ?? srv.origin).replace(/\/+$/, '')
 
 const V = { 'x-shared-session-version': PLUGIN_LATEST, 'content-type': 'application/json' }
 // `tok`: a sign-in, as the team API takes it; `acct`: as a share or a join
 // sends it; `form`: fields a browser's form posts; `ip`: the network it
-// comes from, for the limits (the server trusts X-Forwarded-For here).
+// comes from, for the limits (wrangler dev passes a client's CF-Connecting-IP on).
 const call = async (path, { method = 'GET', body, tok, acct, form, ip } = {}) => {
   const headers = { ...V }
-  if (ip) headers['x-forwarded-for'] = ip
+  if (ip) headers['cf-connecting-ip'] = ip
   if (tok) headers.authorization = `Bearer ${tok}`
   if (acct) headers['x-shared-session-account'] = acct
   if (form) headers['content-type'] = 'application/x-www-form-urlencoded'
@@ -552,7 +549,7 @@ try {
   console.error(error)
   ok(false, 'the checks against the server stopped at the error above')
 } finally {
-  srv.kill()
+  await srv.stop()
 }
 
 // The directory itself, over a store this test can see into, on a clock it sets.
