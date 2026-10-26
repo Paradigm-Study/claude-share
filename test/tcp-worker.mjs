@@ -610,8 +610,14 @@ try {
     const q = await open(w)
     const s = tcp(q.guest); s.rate.data = TCP_LIMITS.dataPerWindow
     q.guest.serializeAttachment({ tcp: s })
-    await w.obj.webSocketMessage(q.guest, new Uint8Array([1]).buffer); closed(q, 1008)
-    console.log('OK premature data, frame/control size, nonce/FIFO/one-use, credit and DATA rate limits')
+    // A rate past its limit is a limit reached, 1013 (the helpers' BUSY), not a fault.
+    await w.obj.webSocketMessage(q.guest, new Uint8Array([1]).buffer); closed(q, 1013)
+    const r = await open(w)
+    await w.obj.webSocketMessage(r.guest, new Uint8Array([1]).buffer)
+    const h = tcp(r.host); h.rate.control = TCP_LIMITS.controlPerWindow
+    r.host.serializeAttachment({ tcp: h })
+    await w.obj.webSocketMessage(r.host, JSON.stringify(ackOf(h.credits[0]))); closed(r, 1013)
+    console.log('OK premature data, frame/control size, nonce/FIFO/one-use, credit, and DATA and control rate limits (1013)')
   }
 
   // Control output a half hasn't proven it read is bounded exactly, and the
@@ -1045,7 +1051,7 @@ try {
     for (let i = 4000; i < PUBLIC_LIMITS.framesPerWindow; i++) await w.obj.webSocketMessage(pair.guest, 'm')
     assert.equal(pair.host.sent.length, PUBLIC_LIMITS.framesPerWindow); assert.equal(pair.guest.closes.length, 0)
     await w.obj.webSocketMessage(pair.guest, 'one too many')
-    closed(pair, 1008); assert.equal(pair.host.sent.length, PUBLIC_LIMITS.framesPerWindow)
+    closed(pair, 1013); assert.equal(pair.host.sent.length, PUBLIC_LIMITS.framesPerWindow)
     now += PUBLIC_LIMITS.rateWindowMs
     // A peer that doesn't read: past a megabyte it hasn't taken, where the
     // runtime says how much, the pair closes rather than queue more.

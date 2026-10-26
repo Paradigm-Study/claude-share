@@ -651,7 +651,8 @@ export class RoomObject extends DurableObject<ServerEnv> {
     if (n > PUBLIC_LIMITS.bufferBytes) return this.unpair(ws, att, 1009, 'Preview message limit')
     const now = Date.now()
     const rate = att.rate && now - att.rate.start < PUBLIC_LIMITS.rateWindowMs ? { ...att.rate } : { start: now, count: 0, bytes: 0 }
-    if (++rate.count > PUBLIC_LIMITS.framesPerWindow) return this.unpair(ws, att, 1008, 'WebSocket frame rate exceeded')
+    // A limit reached, not a fault: 1013 (Try Again Later), as a TCP half's rate is.
+    if (++rate.count > PUBLIC_LIMITS.framesPerWindow) return this.unpair(ws, att, 1013, 'WebSocket frame rate exceeded')
     if ((rate.bytes = (rate.bytes ?? 0) + n) > PUBLIC_LIMITS.bytesPerWindow) return this.unpair(ws, att, 1009, 'WebSocket byte rate exceeded')
     ws.serializeAttachment({ ...att, rate })
     const peers = this.state.getWebSockets(att.pb ? `ph:${id}` : `pb:${id}`).filter(p => !this.closed.has(p) && !p.deserializeAttachment()?.closed)

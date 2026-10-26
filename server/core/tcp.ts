@@ -208,7 +208,8 @@ export function tcpCheck(from: TCPHalf, to: TCPHalf | null | undefined, frame: T
   if (!from.ready || !to?.ready || from.id !== to.id || from.room !== to.room || from.pid !== to.pid || from.ownerSeat !== to.ownerSeat || from.side === to.side) throw tcpFailure('TCP channel is not paired.')
   const rate = now - from.rate.start >= TCP_LIMITS.rateWindowMs ? { start: now, data: 0, control: 0 } : { ...from.rate }
   const kind = frame.t === 'data' ? 'data' : 'control'
-  if (++rate[kind] > (kind === 'data' ? TCP_LIMITS.dataPerWindow : TCP_LIMITS.controlPerWindow)) throw tcpFailure('TCP message rate exceeded.')
+  // A limit reached, not a fault: 1013 (Try Again Later), which the helpers say as BUSY.
+  if (++rate[kind] > (kind === 'data' ? TCP_LIMITS.dataPerWindow : TCP_LIMITS.controlPerWindow)) throw tcpFailure('TCP message rate exceeded.', 1013)
   if (frame.t === 'data') {
     if (from.fin) throw tcpFailure('TCP data after FIN.')
     if (to.credits.length >= TCP_LIMITS.creditFrames || to.credits.reduce((n, c) => n + c.n, frame.n) > TCP_LIMITS.creditBytes) throw tcpFailure('TCP credit window exceeded.')
