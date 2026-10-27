@@ -6060,10 +6060,10 @@ async function previewTicket($: $, room: ShareRoom, pid: string, path?: string):
 }
 
 // ---------------------------------------------------------------------------
-// Helpers: the plugin's own Node processes (relay/*.cjs, relay/*.mts). A guest's
-// listeners and the window's tunnels (local-preview.cjs), the window's proxy
+// Helpers: the plugin's own Node processes (relay/*.mts). A guest's
+// listeners and the window's tunnels (local-preview.mts), the window's proxy
 // (browser-proxy.mts), discovery (discover.mts), the host's TCP worker
-// (tcp-worker.cjs) and its public sockets' relays (ws-relay.cjs) each run
+// (tcp-worker.mts) and its public sockets' relays (ws-relay.mts) each run
 // under the Node a dev server would, 22.18 or later, which runs TypeScript as
 // it is (`FIND_NODE`, by its `--version`; exit 127: none here), take
 // their settings on stdin, never argv, and say what happens in JSON lines on
@@ -6328,7 +6328,7 @@ async function startLocalPreview($: $, room: ShareRoom, pid: string, run: LocalP
     if (!(await localRunCurrent($, pid, run)) || !sameRoom(room, run.scope)) return
     const url = `${room.server}/api/rooms/${room.id}/previews/${pid}/tunnel`
     // Where its caller asked (the window's tunnel: a port the system picks).
-    child = $.process.spawn({ argv: ['/bin/sh', '-c', FIND_NODE, 'sh', `${$.plugin.root}/relay/local-preview.cjs`], input: JSON.stringify({ port: run.bind.port, strict: run.bind.strict, url, token: room.token }) })
+    child = $.process.spawn({ argv: ['/bin/sh', '-c', FIND_NODE, 'sh', `${$.plugin.root}/relay/local-preview.mts`], input: JSON.stringify({ port: run.bind.port, strict: run.bind.strict, url, token: room.token }) })
     run.child = child
     // An unresponsive child doesn't hold an Open, a restore or the window's
     // page for long: eight seconds to say it's listening, then it's stopped.
@@ -6585,7 +6585,7 @@ async function openPublicPreview($: $, shown: ShareShown, surface?: RenderSurfac
 // browser or Firefox on a profile of its own, started with this plugin's
 // SOCKS proxy for everything, localhost included (`<-loopback>`). The proxy
 // (relay/browser-proxy.mts) sends a localhost connection only to a tunnel of
-// what the host shares: a run of local-preview.cjs on a port the system
+// what the host shares: a run of local-preview.mts on a port the system
 // picks, so no host port is taken here and the guest's own servers on those
 // ports never see the window. Anything else on localhost is refused (and the
 // host asked, once), and so is this computer's own network (private
@@ -8820,7 +8820,7 @@ async function relaySocket($: $, room: ShareRoom, ask: Record<string, unknown>) 
       version: await ownVersion($),
     }
     if (relay.stopped || !s.live) return
-    const child = $.process.spawn({ argv: ['/bin/sh', '-c', FIND_NODE, 'sh', `${$.plugin.root}/relay/ws-relay.cjs`], input: JSON.stringify(config) })
+    const child = $.process.spawn({ argv: ['/bin/sh', '-c', FIND_NODE, 'sh', `${$.plugin.root}/relay/ws-relay.mts`], input: JSON.stringify(config) })
     relay.child = child
     for await (const chunk of child) if (chunk.stream === 'stderr') $.ui.log(chunk.text.trim(), { to: 'debug' })
     exit = (await child.result.catch(() => null))?.code ?? null
@@ -8898,7 +8898,7 @@ async function runTcpWorker($: $, worker: TcpWorkerRun) {
     const version = await ownVersion($)
     if (!tcpWorking(worker)) return
     const settings = { room: `${worker.room.server}/api/rooms/${worker.room.id}`, token: worker.room.token, controlToken: worker.controlToken, version }
-    await runHelper($, worker, 'tcp-worker.cjs', settings, 5_000, () => finishTcpWorker(worker), () => tcpWorking(worker), said => {
+    await runHelper($, worker, 'tcp-worker.mts', settings, 5_000, () => finishTcpWorker(worker), () => tcpWorking(worker), said => {
       if (said.state === 'closed' && typeof said.id === 'string' && /^[A-Za-z0-9_-]{8,40}$/.test(said.id)) {
         const key = tcpKey(worker.room, said.id), { connections } = worker.scope.children
         if (connections.get(key)?.worker === worker) connections.delete(key)

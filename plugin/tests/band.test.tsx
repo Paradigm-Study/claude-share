@@ -205,7 +205,7 @@ function world(
     /** The host's fetch for the public link (answerProxy's first step): how it ended, the status and headers curl got, a hold before it ends. */
     proxyFetch?: { exit?: number; status?: number; headers?: string; hold?: Promise<void> }
     /**
-     * The public link's WebSocket relays (relay/ws-relay.cjs) stay up until
+     * The public link's WebSocket relays (relay/ws-relay.mts) stay up until
      * stopped; `missing`: no Node to run them. As the relay fails: `connect`,
      * its dev server never took the socket (exit 1); `invalid`, settings it
      * refused (exit 1); `ended`, the socket came and went (exit 0).
@@ -399,13 +399,13 @@ function world(
         needLooks.push(config)
         const found = (opts.discover?.[config.port] as { target?: { label: string; web: string; devtools: boolean } | null } | undefined)?.target
         const held = opts.holders?.[config.port]
-        const target = found ? { port: config.port, label: found.label, relay: held ?? false, web: found.web, devtools: found.devtools } : held === undefined ? null : { port: config.port, label: held ? 'local-preview.cjs' : 'next-server', relay: held, web: 'no', devtools: false }
+        const target = found ? { port: config.port, label: found.label, relay: held ?? false, web: found.web, devtools: found.devtools } : held === undefined ? null : { port: config.port, label: held ? 'local-preview.mts' : 'next-server', relay: held, web: 'no', devtools: false }
         yield { stream: 'stdout' as const, text: `${JSON.stringify({ state: 'done', platform: 'darwin', target, related: [] })}\n` }
         return { value: { code: 0, signal: null } }
       }
       if (!opts.holders) return { value: { code: 0, signal: null } }
       const held = opts.holders[config.port]
-      const target = held === undefined ? null : { port: config.port, label: held ? 'local-preview.cjs' : 'next-server', relay: held }
+      const target = held === undefined ? null : { port: config.port, label: held ? 'local-preview.mts' : 'next-server', relay: held }
       yield { stream: 'stdout' as const, text: `${JSON.stringify({ state: 'done', platform: 'darwin', target, related: [] })}\n` }
       return { value: { code: 0, signal: null } }
     }
@@ -481,8 +481,8 @@ function world(
       if (opts.scutil) yield { stream: 'stdout' as const, text: opts.scutil }
       return { value: { code: 0, signal: null } }
     }
-    const local = e.argv.at(-1)?.endsWith('/relay/local-preview.cjs')
-    if (local || (opts.tcpRelays && e.argv.at(-1)?.endsWith('/relay/tcp-worker.cjs'))) {
+    const local = e.argv.at(-1)?.endsWith('/relay/local-preview.mts')
+    if (local || (opts.tcpRelays && e.argv.at(-1)?.endsWith('/relay/tcp-worker.mts'))) {
       const config = JSON.parse(e.input!)
       const pid = /\/previews\/([^/]+)\/tunnel/.exec(config.url ?? '')?.[1]
       const choice = pid ? opts.localPreviewByPid?.[pid] : undefined
@@ -544,7 +544,7 @@ function world(
       return { value: { code: 0, signal: null } }
     }
     // A public socket's relay: up for the socket's life, until stopped.
-    if (opts.wsRelays && e.argv.at(-1)?.endsWith('/relay/ws-relay.cjs')) {
+    if (opts.wsRelays && e.argv.at(-1)?.endsWith('/relay/ws-relay.mts')) {
       if (opts.wsRelays === 'missing') return { value: { code: 127, signal: null } }
       const relay = { config: JSON.parse(e.input!) as Record<string, unknown>, stopped: false }
       wsRelays.push(relay)
@@ -2094,7 +2094,7 @@ test("a guest opens localhost in Claude's browser only after the helper is ready
   expect(urls).toEqual(['http://localhost:3340/login?next=%2Faccount'])
   expect(asked.externals).toHaveLength(0)
   expect(tunnels(asked)).toHaveLength(1)
-  const spawn = asked.spawned.find(s => s.argv.at(-1)?.endsWith('/relay/local-preview.cjs'))!
+  const spawn = asked.spawned.find(s => s.argv.at(-1)?.endsWith('/relay/local-preview.mts'))!
   expect(JSON.parse(spawn.input!).port).toBe(3340)
   // The seat's token, on stdin alone: no grant is asked for, and argv carries none.
   expect(JSON.parse(spawn.input!).token).toBe('g')
@@ -2407,7 +2407,7 @@ test('the host advertises TCP, rejects mismatched targets, deduplicates connecti
   await asked.clock.advance(5000)
   expect(asked.tcpHelpers).toHaveLength(1)
   expect(asked.spawned.some(s => s.argv[0] === 'curl' && s.input?.includes('/stream?after='))).toBe(true)
-  const spawn = asked.spawned.find(s => s.argv.at(-1)?.endsWith('/relay/tcp-worker.cjs'))!
+  const spawn = asked.spawned.find(s => s.argv.at(-1)?.endsWith('/relay/tcp-worker.mts'))!
   const config = JSON.parse(spawn.input!)
   expect(config).toMatchObject({ room: 'http://localhost:8787/api/rooms/room0000000000000002', token: 't', version: '0.7.1' })
   expect(config.controlToken).toMatch(/^[a-f0-9]{64}$/)
@@ -2443,7 +2443,7 @@ test('the host automatically retries an ordinary curl stream exit in the same ro
   expect(streams[1]!.input).toBe(first[0]!.input) // same room, token and TCP advertisement
   expect(asked.filter(a => a === 'POST /api/rooms' || /\/(join|tunnel|ticket)$/.test(a))).toEqual(['POST /api/rooms'])
   expect(asked.tcpHelpers).toHaveLength(1)
-  const relay = asked.spawned.find(s => s.argv.at(-1)?.endsWith('/relay/tcp-worker.cjs'))!
+  const relay = asked.spawned.find(s => s.argv.at(-1)?.endsWith('/relay/tcp-worker.mts'))!
   expect(JSON.parse(relay.input!)).toMatchObject({ room: 'http://localhost:8787/api/rooms/room0000000000000002', token: 't' })
   expect(asked.sent.filter(x => x.body.op === 'open').map(x => x.body)).toEqual([{ op: 'open', id: 'connection0003', pid: 'pv1', port: 3340 }])
   await $.command.run({ command: 'stop-sharing', args: '' } as never)
@@ -2556,7 +2556,7 @@ for (const failure of ['startup', 'control', 'exit'] as const) {
     await asked.clock.advance(5000)
     await eventually(asked.clock, () => asked.tcpHelpers.length === 2)
     expect(asked.tcpHelpers).toHaveLength(2)
-    const workers = asked.spawned.filter(s => s.argv.at(-1)?.endsWith('/relay/tcp-worker.cjs'))
+    const workers = asked.spawned.filter(s => s.argv.at(-1)?.endsWith('/relay/tcp-worker.mts'))
     const before = JSON.parse(workers[0]!.input!)
     const after = JSON.parse(workers[1]!.input!)
     expect(after.controlToken).not.toBe(before.controlToken)
@@ -2642,7 +2642,7 @@ test("no Node to run the TCP worker: each connection is refused at once, the hos
   await ui.press({ key: 'share' })
   await ui.press({ key: 'share-prompt' })
   await $.command.run({ command: 'share-preview', args: '3340 App' } as never)
-  const workers = () => asked.spawned.filter(s => s.argv.at(-1)?.endsWith('/relay/tcp-worker.cjs')).length
+  const workers = () => asked.spawned.filter(s => s.argv.at(-1)?.endsWith('/relay/tcp-worker.mts')).length
   const refused = (id: string) => asked.spawned.filter(s => s.argv[0] === 'curl' && s.input?.includes(`/ws/${id}/reject"`))
   const said = () => asked.toasted.filter(t => t.includes('needs Node 22.18 or later on this computer'))
   stream.push({ tcp: { id: 'connection0001', pid: 'pv1', port: 3340 } })
@@ -6340,7 +6340,7 @@ const roomPane = (surface: 'desktop' | 'terminal' = 'desktop') => ({ plugin: 'sh
 const routesOf = (asked: ReturnType<typeof world>) => asked.proxies[0]?.routes.at(-1)
 // What the guest takes the host to forward: Shown's open previews the room says are forwarded.
 const forwardedPids = (asked: ReturnType<typeof world>) => (asked.state.shown ?? []).filter(s => s.kind === 'preview' && s.tcp && !s.closed).map(s => s.pid)
-const tunnels = (asked: ReturnType<typeof world>) => asked.spawned.filter(s => s.argv.at(-1)?.endsWith('/relay/local-preview.cjs')).map(s => JSON.parse(s.input!))
+const tunnels = (asked: ReturnType<typeof world>) => asked.spawned.filter(s => s.argv.at(-1)?.endsWith('/relay/local-preview.mts')).map(s => JSON.parse(s.input!))
 // What a window Open says when its tunnel didn't start here.
 const tunnelUnstarted = (port: number) => `Couldn't reach Sam's localhost:${port} for the preview window. Press Open preview to try again.`
 

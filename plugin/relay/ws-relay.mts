@@ -1,10 +1,14 @@
 // The public preview's WebSocket relay: a browser's socket on a shared
 // preview, opened on this computer's localhost and paired with one back to
-// the room. Credentials arrive on stdin, never in argv or addresses. Node 20+, no deps.
-'use strict'
+// the room. Credentials arrive on stdin, never in argv or addresses. Node
+// 22.18+ (its types are stripped as it loads), no deps.
 
-const { connect } = require('./ws.mts')
-const { failure, tokenOK, loopback, run } = require('./tcp-relay.mts')
+import { connect } from './ws.mts'
+import type { Ws } from './ws.mts'
+import { failure, tokenOK, loopback, run } from './tcp-relay.mts'
+import type { RunOptions } from './tcp-relay.mts'
+
+type Settings = { local: string; insecureLocal: boolean; origin: string; protocols: string[]; room: string; token: string; version: string }
 
 // The public preview relay's settings, from the plugin on stdin. The
 // browser's socket goes to `local`, on this computer's loopback alone: ws://,
@@ -14,8 +18,8 @@ const { failure, tokenOK, loopback, run } = require('./tcp-relay.mts')
 // `origin` is the plugin's (the server's own local origin). Its pair in the
 // room, `room`, always verifies.
 const KEYS = new Set(['local', 'insecureLocal', 'origin', 'protocols', 'room', 'token', 'version'])
-function configOf(cfg) {
-  const url = (value, schemes, max = 4096) => {
+function configOf(cfg: any): Settings {
+  const url = (value: unknown, schemes: string[], max = 4096) => {
     if (typeof value !== 'string' || value.length > max) return null
     try { const u = new URL(value); return schemes.includes(u.protocol) && !u.username && !u.password && !u.hash ? u : null } catch { return null }
   }
@@ -36,16 +40,16 @@ function configOf(cfg) {
 // clean close: only a dropped connection would match localhost, and the room
 // can't drop a browser's on the Worker. A room leg that vanishes closes the
 // dev server's with 1000, as a browser leaving would.
-function start(cfg, options = {}) {
+export function start(cfg: unknown, options: Partial<RunOptions> = {}) {
   const settings = configOf(cfg)
-  let local, room, stopped = false, done = false, up
-  const connected = new Promise((resolve, reject) => (up = { resolve, reject }))
+  let local: Ws | undefined, room: Ws | undefined, stopped = false, done = false, up!: { resolve: () => void; reject: (error: Error) => void }
+  const connected = new Promise<void>((resolve, reject) => (up = { resolve, reject }))
   connected.catch(() => {}) // For whoever asks; never an unhandled rejection.
-  const finish = code => { if (done) return; done = true; local?.close(code); room?.close(code) }
+  const finish = (code: number) => { if (done) return; done = true; local?.close(code); room?.close(code) }
   try {
     local = connect(settings.local, { origin: settings.origin }, settings.protocols, {
       open: () => {
-        room = connect(settings.room, { authorization: `Bearer ${settings.token}`, 'x-shared-session-version': settings.version }, [], { message: (data, binary) => local.send(data, binary), close: finish }, { timeoutMs: 30_000 })
+        room = connect(settings.room, { authorization: `Bearer ${settings.token}`, 'x-shared-session-version': settings.version }, [], { message: (data, binary) => local!.send(data, binary), close: finish }, { timeoutMs: 30_000 })
         up.resolve()
       },
       message: (data, binary) => room?.send(data, binary),
@@ -61,9 +65,8 @@ function start(cfg, options = {}) {
   return { close: abort, connected }
 }
 
-module.exports = { start }
 // The executable waits for its local leg: CONNECT is its error row, and exit 1.
-if (require.main === module) run((cfg, options) => {
+if (import.meta.main) run((cfg, options) => {
   const relay = start(cfg, options)
   return relay.connected.then(() => relay)
 })
