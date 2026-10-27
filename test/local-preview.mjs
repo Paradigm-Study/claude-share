@@ -2015,12 +2015,15 @@ async function webrtcChecks() {
     }
     const tcp = key => listen(track(net.createServer(socket => { counts[key]++; setTimeout(() => socket.destroy(), 500) })), lan)
     const STUN = await udp('stun'), PEER = await udp('peer'), TURN = await tcp('turn'), PEER_TCP = await tcp('peerTcp')
-    let report
+    // launched, served, firstTurn: when the browser started, the page went out and the proxy began its first TURN connection.
+    let report, launched = 0, served = 0, firstTurn = 0
     const page = `<!doctype html><meta charset="utf-8"><title>WebRTC</title><script>
 (async () => {
-  const out = { candidates: [], errors: [] }
+  // gathering: each ICE gathering state with its ms since the page began, for a failure's report.
+  const out = { candidates: [], errors: [], gathering: [] }
   try {
     const pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:${lan}:${STUN}' }, { urls: 'turn:${lan}:${TURN}?transport=tcp', username: 'u', credential: 'p' }] })
+    pc.onicegatheringstatechange = () => out.gathering.push(pc.iceGatheringState + '@' + Math.round(performance.now()))
     pc.createDataChannel('x')
     pc.onicecandidate = e => { if (e.candidate && e.candidate.candidate) out.candidates.push(e.candidate.candidate) }
     const offer = await pc.createOffer()
@@ -2037,6 +2040,7 @@ async function webrtcChecks() {
 </script>`
     const app = track(http.createServer((req, res) => {
       if (req.url === '/report') { const parts = []; req.on('data', bytes => parts.push(bytes)); req.on('end', () => { report = JSON.parse(Buffer.concat(parts)); res.end('ok') }); return }
+      if (req.url === '/') served ||= Date.now()
       res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })
       res.end(page)
     }))
@@ -2059,7 +2063,7 @@ async function webrtcChecks() {
         const host = atyp === 1 ? [...buffer.subarray(4, 8)].join('.') : atyp === 3 ? buffer.toString('latin1', 5, 5 + buffer[4]) : 'IPv6', port = buffer.readUInt16BE(size - 2)
         const to = port === APP && ['localhost', '127.0.0.1'].includes(host) ? { host: '127.0.0.1', port } : port === TURN && host === lan ? { host: lan, port } : null
         if (!to) return client.end(Buffer.from([5, 2, 0, 1, 0, 0, 0, 0, 0, 0]))
-        if (to.port === TURN) counts.turnViaProxy++
+        if (to.port === TURN) { counts.turnViaProxy++; firstTurn ||= Date.now() }
         const upstream = net.connect(to, () => { if (to.port === TURN) counts.turnProxied++; client.write(Buffer.from([5, 0, 0, 1, 0, 0, 0, 0, 0, 0])); client.pipe(upstream).pipe(client) })
         sockets.add(upstream)
         upstream.on('error', () => client.destroy())
@@ -2070,6 +2074,7 @@ async function webrtcChecks() {
     }))
     const socksPort = await listen(standIn), profile = await mkdtemp(`${scratch}/webrtc-${name.toLowerCase()}-`)
     let early, browserLog = ''
+    launched = Date.now()
     const browser = await start({ socksPort, profile, url: `http://localhost:${APP}/` })
     const exited = new Promise(resolve => browser.once('exit', (code, signal) => { early = { code, signal }; resolve() }))
     browser.once('error', error => { early = { error: error.message } })
@@ -2078,8 +2083,10 @@ async function webrtcChecks() {
       await until(() => report || early, `the ${name} WebRTC page reports`, 60_000)
       assert.ok(report, `${name} stopped early ${JSON.stringify(early)}: ${browserLog}`)
       await pause(1000) // A late retransmit still counts.
-      assert.deepEqual({ stun: counts.stun, peer: counts.peer, peerTcp: counts.peerTcp, turn: counts.turn - counts.turnProxied }, { stun: 0, peer: 0, peerTcp: 0, turn: 0 }, `${name} (${version}): WebRTC reaches this machine's address directly`)
-      assert.ok(counts.turnViaProxy >= 1, `${name} (${version}): TURN over TCP must come through the proxy (${JSON.stringify(report.errors)})`)
+      // What a failure reports, to tell a browser that never tried TURN from one that tried too late or elsewhere.
+      const seen = () => `\n${JSON.stringify({ launchToPageMs: served ? served - launched : null, pageToTurnMs: firstTurn ? firstTurn - served : null, counts, candidates: report.candidates, gathering: report.gathering, errors: report.errors }, null, 1)}\n${name}'s output, its end:\n${browserLog.slice(-3000)}`
+      assert.deepEqual({ stun: counts.stun, peer: counts.peer, peerTcp: counts.peerTcp, turn: counts.turn - counts.turnProxied }, { stun: 0, peer: 0, peerTcp: 0, turn: 0 }, `${name} (${version}): WebRTC reaches this machine's address directly${seen()}`)
+      assert.ok(counts.turnViaProxy >= 1, `${name} (${version}): TURN over TCP must come through the proxy${seen()}`)
     } finally {
       await endBrowser(browser, exited, profile)
       for (const socket of datagrams) socket.close()
