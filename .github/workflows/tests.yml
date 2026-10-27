@@ -18,14 +18,14 @@ jobs:
     name: ${{ matrix.suite }} / Node ${{ matrix.node }}
     runs-on: ubuntu-latest
     # local-preview runs 3 to 5 minutes on a runner (its 20,000-frame step
-    # alone took 148 s on a slow one): it gets 10, the others 5.
-    timeout-minutes: ${{ matrix.suite == 'local-preview' && 10 || 5 }}
+    # alone took 148 s on a slow one): it gets 10.
+    timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
         # The oldest Node the project supports (package.json engines), and the newest LTS.
         node: ['22.18', 24]
-        suite: [local-preview, previews]
+        suite: [local-preview]
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
