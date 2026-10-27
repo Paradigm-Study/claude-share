@@ -15247,7 +15247,7 @@ const SETUP_TOKEN = `sk-ant-oat01-${'x'.repeat(40)}`
 // What every page of a room says while its host is in the cloud.
 const IN_CLOUD = { state: 'running', approver: 'scott', since: 900 }
 
-// A cloud host (cloud/runner.mjs starts it with SHARED_SESSION_RUNNER=1) has
+// A cloud host (cloud/runner.mts starts it with SHARED_SESSION_RUNNER=1) has
 // nobody at its screen: a teammate's call goes to the room's approver as a
 // question, never a dialog, and their answer settles it. A room set to ask
 // nothing still asks there: the runner holds its approver's sign-in.
@@ -15623,7 +15623,7 @@ test('a cloud host puts every question its row would ask to its approver, one at
 // A teammate's window reaching a port nobody shared: the approver's to
 // share. The container's own control port (8080) is never asked about.
 test("a cloud host asks its approver about a teammate's window needing a port, and never about its runner's own", async ($, on) => {
-  const CONTROL = { state: 'done', platform: 'linux', target: { port: 8080, label: 'runner.mjs', web: 'yes', devtools: false }, related: [] }
+  const CONTROL = { state: 'done', platform: 'linux', target: { port: 8080, label: 'runner.mts', web: 'yes', devtools: false }, related: [] }
   const lines = liveLines(cloudPage(1, []))
   const asked = world(on, {
     live: lines,

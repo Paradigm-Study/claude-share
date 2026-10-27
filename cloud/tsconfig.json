@@ -1,0 +1,24 @@
+// The cloud host's runner: TypeScript the image's Node runs as it is, its
+// types stripped (Node 22.18+), so only syntax that erases is allowed
+// (erasableSyntaxOnly: no enums, namespaces or parameter properties).
+// Checked by npm run typecheck:cloud.
+{
+  "compilerOptions": {
+    "target": "es2023",
+    "lib": ["es2023"],
+    "types": ["node"],
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "verbatimModuleSyntax": true,
+    "erasableSyntaxOnly": true
+  },
+  "include": ["*.mts"]
+}

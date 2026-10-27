@@ -362,7 +362,7 @@ type EventsPage = {
 // What a room's pages say of its host in the cloud.
 type CloudSummary = { state: ShareCloud['state']; approver: string; since: number; until?: number }
 
-// This session is a cloud host's (cloud/runner.mjs starts it so): nobody is
+// This session is a cloud host's (cloud/runner.mts starts it so): nobody is
 // at its screen, so a teammate's call goes to the room's approver.
 let runnerMode: boolean | null = null
 async function isRunner($: $): Promise<boolean> {
@@ -8682,7 +8682,7 @@ async function canAskHost($: $): Promise<boolean> {
   return (await $.session.surfaces().catch(() => [] as readonly RenderSurface[])).length > 0
 }
 
-// A cloud host's container holds its runner's control port (cloud/runner.mjs,
+// A cloud host's container holds its runner's control port (cloud/runner.mts,
 // HOST_PORT in server/worker/host-container.ts): never asked about or shared from there.
 const RUNNER_PORT = 8080
 const runnerOwn = async ($: $, port: number) => port === RUNNER_PORT && (await isRunner($))

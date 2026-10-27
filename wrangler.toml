@@ -81,7 +81,7 @@ new_sqlite_classes = ["DirectoryObject"]
 # running Claude Code with the plugin. The image (cloud/Dockerfile) is built
 # once and kept in this account's registry, so deploying needs no Docker:
 # `node scripts/push-image.ts` builds, pushes and names a new one after
-# cloud/ changes. Deploying to another account, scripts/setup.ts builds it
+# cloud/ changes: its tag is a hash of cloud/Dockerfile and cloud/runner.mts. Deploying to another account, scripts/setup.ts builds it
 # from cloud/Dockerfile instead (Docker with buildx). Needs Workers Paid.
 [[containers]]
 class_name = "HostContainer"
