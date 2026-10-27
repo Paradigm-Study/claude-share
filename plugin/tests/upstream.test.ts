@@ -1,7 +1,7 @@
 // The person's own proxy, which a preview window's other traffic goes on
 // through: from the environment, else macOS's settings, split into a kind, a
 // host and a port. Whether the window's proxy can take the host is its own
-// to say (test/browser-proxy.mjs). Run with `claude plugin test plugin`.
+// to say (test/browser-proxy.test.ts). Run with `claude plugin test plugin`.
 
 import { expect, test } from 'claude-code/testing'
 import { upstreamFromEnv, upstreamFromScutil } from '../hooks/upstream'
@@ -61,7 +61,7 @@ test("the person's exceptions stay small: 64 at most, none over 253 characters, 
 
 // The window's proxy takes an upstream's host only as an IP literal or a
 // plain host name (relay/browser-proxy.mts, `address` and `hostname`), and
-// leaves out one it can't take, saying so (test/browser-proxy.mjs). Here
+// leaves out one it can't take, saying so (test/browser-proxy.test.ts). Here
 // it's only split from its URL: its brackets, case and trailing dot go, and
 // one the URL parser takes no host from isn't used, so the next one is.
 test("an upstream's address is split by the URL parser alone: one it takes no host from isn't used, and the next one is", () => {
