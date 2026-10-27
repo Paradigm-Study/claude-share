@@ -105,17 +105,7 @@ export {
   tcpRelay,
   sendableClose,
 } from './tcp.ts'
-export {
-  homePage,
-  brandPage,
-  INSTALL_COMMAND,
-  COPY_ICON,
-  commandBox,
-  COPY_SCRIPT,
-  missingPage,
-  landingPage,
-  escapeHtml,
-} from './pages.ts'
+export { homePage, brandPage, INSTALL_COMMAND, COPY_ICON, commandBox, COPY_SCRIPT, missingPage, landingPage, escapeHtml } from './pages.ts'
 export type { LimitKind } from './limits.ts'
 export type { Person } from './room.ts'
 export type { SocketTarget } from './previews.ts'

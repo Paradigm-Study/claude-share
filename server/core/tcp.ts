@@ -33,8 +33,7 @@ export type TCPFrame =
 // TCP halves name their `pid` and `ownerSeat`; public pairs and browser
 // sessions their cookie `session` and `ownerSeat` too.
 export function revokeMatches(filter: RevokeFilter, s: Revocable) {
-  return (!filter.pid || s.pid === filter.pid) &&
-    (!filter.seat || s.ownerSeat === filter.seat) && (!filter.session || s.session === filter.session)
+  return (!filter.pid || s.pid === filter.pid) && (!filter.seat || s.ownerSeat === filter.seat) && (!filter.session || s.session === filter.session)
 }
 
 // How a public pair's browser half closes when its host half closed with
@@ -79,9 +78,15 @@ export function seatKnown(room: Room, seat: string) {
 // A guest's TCP half comes with its seat's own token: a seat here, or away
 // within its grace. It's looked up without seating anyone again, so
 // admission writes nothing.
-export function tcpSocketTarget(room: Room, req: Request, pid: string, now: number, active: { ownerSeat?: string }[] = []): ({ ok: true } & TCPTarget) | { ok: false; status: number; error: string } {
+export function tcpSocketTarget(
+  room: Room,
+  req: Request,
+  pid: string,
+  now: number,
+  active: { ownerSeat?: string }[] = [],
+): ({ ok: true } & TCPTarget) | { ok: false; status: number; error: string } {
   const bearer = /^Bearer\s+([A-Za-z0-9_-]+)$/i.exec(req.headers.get('authorization') ?? '')?.[1]
-  const seat = bearer ? room.seats.get(bearer) ?? room.away.get(bearer) : null
+  const seat = bearer ? (room.seats.get(bearer) ?? room.away.get(bearer)) : null
   if (!seat) return { ok: false, status: 401, error: 'Not a guest of this session.' }
   const preview = room.previews.get(pid)
   if (!preview || room.endedAt) return { ok: false, status: 410, error: 'This TCP preview has ended.' }
@@ -89,7 +94,8 @@ export function tcpSocketTarget(room: Room, req: Request, pid: string, now: numb
   if (!room.connected('host')) return { ok: false, status: 503, error: 'The host is not connected.' }
   // Both adapters supply one live guest half per pending or paired channel.
   // A seat's ceiling covers all its previews.
-  if (active.length >= TCP_LIMITS.roomPairs || active.filter(s => s.ownerSeat === seat.id).length >= TCP_LIMITS.seatPairs) return { ok: false, status: 429, error: 'Too many active TCP preview connections.' }
+  if (active.length >= TCP_LIMITS.roomPairs || active.filter(s => s.ownerSeat === seat.id).length >= TCP_LIMITS.seatPairs)
+    return { ok: false, status: 429, error: 'Too many active TCP preview connections.' }
   if (!tcpAdmit(room, now, seat.id)) return { ok: false, status: 429, error: 'Too many TCP preview connections. Try again in a minute.' }
   return { ok: true, room: room.id, pid, port: preview.port, ownerSeat: seat.id }
 }
@@ -101,9 +107,23 @@ export function announceTCP(room: Room, id: string, target: TCPTarget) {
 // `out`: the control bytes sent to this half; `read`: how far it has proven
 // it read them (chargeControl); `check`: the room's check it hasn't answered.
 export function tcpState(id: string, target: TCPTarget, side: string, now: number): TCPHalf {
-  return { id, room: target.room, pid: target.pid, port: target.port, ownerSeat: target.ownerSeat,
-    side, deadline: now + TCP_LIMITS.pairMs, ready: false, fin: false, credits: [], remaining: 0, out: 0, read: 0, check: null,
-    rate: { start: now, data: 0, control: 0 } }
+  return {
+    id,
+    room: target.room,
+    pid: target.pid,
+    port: target.port,
+    ownerSeat: target.ownerSeat,
+    side,
+    deadline: now + TCP_LIMITS.pairMs,
+    ready: false,
+    fin: false,
+    credits: [],
+    remaining: 0,
+    out: 0,
+    read: 0,
+    check: null,
+    rate: { start: now, data: 0, control: 0 },
+  }
 }
 
 // A pid's port never changes (a port shared again is a new preview), so the
@@ -136,7 +156,8 @@ export function tcpRefund(room: Room, s: TCPHalf | null | undefined) {
 // what its files and public link reserved today (`serveReserve`). Its minute
 // of opens is memory's, as every other minute's is (a restart can let one
 // minute count twice, no more), so no TCP connection waits on a write.
-export const tcpCounted = (stats: Pick<TCPStats, 'used' | 'refunded' | 'served'>) => `${stats.used}/${stats.refunded ?? 0}/${stats.served ? `${stats.served.day}:${stats.served.reserved}` : ''}`
+export const tcpCounted = (stats: Pick<TCPStats, 'used' | 'refunded' | 'served'>) =>
+  `${stats.used}/${stats.refunded ?? 0}/${stats.served ? `${stats.served.day}:${stats.served.reserved}` : ''}`
 
 // Two copies of a room's TCP counters as one, whichever was saved later
 // (overlapping writes, a separate file or key beside the room's snapshot):
@@ -144,11 +165,19 @@ export const tcpCounted = (stats: Pick<TCPStats, 'used' | 'refunded' | 'served'>
 // minute: the larger count), as does the later day served (the same day:
 // the larger reservation).
 export function mergeTCPStats(saved: TCPStats | null | undefined, current: TCPStats): TCPStats {
-  const older = saved?.opens, opens = current.opens
-  const minute = older && older.start > opens.start ? older : older?.start === opens.start ? { start: opens.start, count: Math.max(older.count, opens.count) } : opens
-  const was = saved?.served, now = current.served
+  const older = saved?.opens,
+    opens = current.opens
+  const minute =
+    older && older.start > opens.start ? older : older?.start === opens.start ? { start: opens.start, count: Math.max(older.count, opens.count) } : opens
+  const was = saved?.served,
+    now = current.served
   const served = !was || (now && now.day > was.day) ? now : !now || was.day > now.day ? was : { day: now.day, reserved: Math.max(was.reserved, now.reserved) }
-  return { used: Math.max(saved?.used ?? 0, current.used), refunded: Math.max(saved?.refunded ?? 0, current.refunded ?? 0), opens: minute, ...(served ? { served } : {}) }
+  return {
+    used: Math.max(saved?.used ?? 0, current.used),
+    refunded: Math.max(saved?.refunded ?? 0, current.refunded ?? 0),
+    opens: minute,
+    ...(served ? { served } : {}),
+  }
 }
 const utcDay = (now: number) => new Date(now).toISOString().slice(0, 10)
 
@@ -168,13 +197,18 @@ export function serveReserve(room: Room, seat: string, n: number, now: number) {
   if (minute.bytes + n > SERVE_LIMITS.seatBytesPerMinute) return false
   minute.bytes += n
   room.serving.bytes += n
-  if (room.serving.bytes > reserved) room.tcpStats.served = { day, reserved: Math.min(SERVE_LIMITS.roomBytesPerDay, Math.ceil(room.serving.bytes / SERVE_LIMITS.reserveBytes) * SERVE_LIMITS.reserveBytes) }
+  if (room.serving.bytes > reserved)
+    room.tcpStats.served = {
+      day,
+      reserved: Math.min(SERVE_LIMITS.roomBytesPerDay, Math.ceil(room.serving.bytes / SERVE_LIMITS.reserveBytes) * SERVE_LIMITS.reserveBytes),
+    }
   return true
 }
 
 // Whether anything may still be sent to `seat` now (before asking the host).
 export function serveLeft(room: Room, seat: string, now: number) {
-  const day = utcDay(now), minute = room.serveMinutes.get(seat)
+  const day = utcDay(now),
+    minute = room.serveMinutes.get(seat)
   const spent = room.serving.day === day ? room.serving.bytes : room.tcpStats.served?.day === day ? room.tcpStats.served.reserved : 0
   return spent < SERVE_LIMITS.roomBytesPerDay && !(minute && now - minute.start < SERVE_LIMITS.periodMs && minute.bytes >= SERVE_LIMITS.seatBytesPerMinute)
 }
@@ -195,23 +229,46 @@ export function tcpFrame(message: unknown): TCPFrame {
   }
   if (utf8Length(message) > TCP_LIMITS.controlBytes) throw tcpFailure('TCP control is too large.', 1009)
   let frame
-  try { frame = JSON.parse(message) } catch { throw tcpFailure('Invalid TCP control JSON.') }
+  try {
+    frame = JSON.parse(message)
+  } catch {
+    throw tcpFailure('Invalid TCP control JSON.')
+  }
   if (!frame || typeof frame !== 'object' || Array.isArray(frame)) throw tcpFailure('Invalid TCP control.')
   const keys = Object.keys(frame).sort().join(',')
   if (frame.t === 'fin' && keys === 't') return frame
-  if (frame.t === 'ack' && keys === 'n,nonce,t' && Number.isSafeInteger(frame.n) && frame.n > 0 && frame.n <= TCP_LIMITS.dataBytes && typeof frame.nonce === 'string' && /^[A-Za-z0-9_-]{16,64}$/.test(frame.nonce)) return frame
+  if (
+    frame.t === 'ack' &&
+    keys === 'n,nonce,t' &&
+    Number.isSafeInteger(frame.n) &&
+    frame.n > 0 &&
+    frame.n <= TCP_LIMITS.dataBytes &&
+    typeof frame.nonce === 'string' &&
+    /^[A-Za-z0-9_-]{16,64}$/.test(frame.nonce)
+  )
+    return frame
   if (frame.t === 'seen' && keys === 'nonce,t' && typeof frame.nonce === 'string' && /^[A-Za-z0-9_-]{16,64}$/.test(frame.nonce)) return frame
   throw tcpFailure('Invalid TCP control type or fields.')
 }
 
 export function tcpCheck(from: TCPHalf, to: TCPHalf | null | undefined, frame: TCPFrame, now: number) {
-  if (!from.ready || !to?.ready || from.id !== to.id || from.room !== to.room || from.pid !== to.pid || from.ownerSeat !== to.ownerSeat || from.side === to.side) throw tcpFailure('TCP channel is not paired.')
+  if (
+    !from.ready ||
+    !to?.ready ||
+    from.id !== to.id ||
+    from.room !== to.room ||
+    from.pid !== to.pid ||
+    from.ownerSeat !== to.ownerSeat ||
+    from.side === to.side
+  )
+    throw tcpFailure('TCP channel is not paired.')
   const rate = now - from.rate.start >= TCP_LIMITS.rateWindowMs ? { start: now, data: 0, control: 0 } : { ...from.rate }
   const kind = frame.t === 'data' ? 'data' : 'control'
   if (++rate[kind] > (kind === 'data' ? TCP_LIMITS.dataPerWindow : TCP_LIMITS.controlPerWindow)) throw tcpFailure('TCP message rate exceeded.')
   if (frame.t === 'data') {
     if (from.fin) throw tcpFailure('TCP data after FIN.')
-    if (to.credits.length >= TCP_LIMITS.creditFrames || to.credits.reduce((n, c) => n + c.n, frame.n) > TCP_LIMITS.creditBytes) throw tcpFailure('TCP credit window exceeded.')
+    if (to.credits.length >= TCP_LIMITS.creditFrames || to.credits.reduce((n, c) => n + c.n, frame.n) > TCP_LIMITS.creditBytes)
+      throw tcpFailure('TCP credit window exceeded.')
   } else if (frame.t === 'ack') {
     // The challenge belongs to this receiver, not the other direction. FIFO
     // also keeps the helpers' application writes and returned credit ordered.
@@ -245,7 +302,8 @@ export function chargeControl(s: TCPHalf, control: unknown) {
 // TCP_LIMITS.checkBytes: one out at a time, its nonce the proof.
 function checkOf(s: TCPHalf) {
   if (s.check || s.out - s.read < TCP_LIMITS.checkBytes) return []
-  const nonce = token(16), text = chargeControl(s, { t: 'check', nonce })
+  const nonce = token(16),
+    text = chargeControl(s, { t: 'check', nonce })
   s.check = { nonce, at: s.out }
   return [text]
 }
@@ -255,7 +313,13 @@ function checkOf(s: TCPHalf) {
 // first. Then the adapter reserves (tcpReserve), makes that durable, checks
 // the half again where it can have changed meanwhile, and steps the same frame
 // again: nothing was charged or counted the first time.
-export function tcpStep(room: Room, from: TCPHalf, to: TCPHalf | null | undefined, frame: TCPFrame, now: number): { reserve: true } | (TCPRelayed & { reserve?: undefined }) {
+export function tcpStep(
+  room: Room,
+  from: TCPHalf,
+  to: TCPHalf | null | undefined,
+  frame: TCPFrame,
+  now: number,
+): { reserve: true } | (TCPRelayed & { reserve?: undefined }) {
   if (!tcpValid(room, from)) throw tcpFailure('TCP access revoked.')
   tcpCheck(from, to, frame, now)
   // tcpCheck refuses a half without its peer.
@@ -299,4 +363,5 @@ export function tcpRelay(from: TCPHalf, to: TCPHalf, frame: TCPFrame, now: numbe
 }
 
 // A close code a socket may send on (the reserved ones become a plain close).
-export const sendableClose = (code: unknown) => (typeof code === 'number' && Number.isInteger(code) && code >= 1000 && code < 5000 && ![1004, 1005, 1006, 1015].includes(code) ? code : 1000)
+export const sendableClose = (code: unknown) =>
+  typeof code === 'number' && Number.isInteger(code) && code >= 1000 && code < 5000 && ![1004, 1005, 1006, 1015].includes(code) ? code : 1000

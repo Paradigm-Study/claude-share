@@ -54,7 +54,10 @@ export async function embed(env: TracesEnv, texts: string[]): Promise<(number[] 
 // database can't take them: the room keeps them and tries again.
 export async function keepTurns(env: TracesEnv, session: Session, turns: Turn[]) {
   if (!turns.length) return
-  const vectors = await embed(env, turns.map(t => `${t.prompt}\n\n${t.reply}`)).catch(() => turns.map(() => null))
+  const vectors = await embed(
+    env,
+    turns.map(t => `${t.prompt}\n\n${t.reply}`),
+  ).catch(() => turns.map(() => null))
   const embedded = turns.map((t, i) => ({ ...t, embedding: vectors[i] }))
   await withDb(env, async db => putTurns(db, session, embedded, await hasCjk(db)))
 }

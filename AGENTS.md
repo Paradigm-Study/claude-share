@@ -36,11 +36,12 @@ Facts that matter:
 ## Changing it
 
 ```bash
-npm run check                                           # every type check below but the plugin's (server, scripts, relay, test), then the lint: what CI's server types job runs
+npm run check                                           # every type check below but the plugin's (server, scripts, relay, test), the lint, then the format check: what CI's server types job runs
 npm run typecheck:plugin                                # type-check the plugin against the engine's API (needs plugin/.claude/types, below)
 npm install                                             # wrangler: the suites that need a room server run the Workers under wrangler dev (test/support/workerd.mjs)
 npm run typecheck:server                                # tsc over the server's TypeScript, strictly (server/tsconfig.json, one project), against the Worker's types alone (wrangler writes them)
 npm run lint                                            # oxlint over server/ and scripts/, type-aware: a promise nobody awaits or catches fails it (.oxlintrc.json)
+npm run format                                          # oxfmt over server/ and scripts/ (.oxfmtrc.json); test/ and plugin/ join once the sessions moving them are done
 npm run typecheck:scripts                               # tsc over scripts/*.ts, which Node runs as they are, types stripped: only erasable syntax (no enums, namespaces or parameter properties)
 npm run typecheck:relay                                 # tsc over plugin/relay/*.mts, which Node runs as they are: strictly, against Node's types, erasable syntax alone
 claude plugin validate --strict plugin                  # what the engine and the plugin directory check

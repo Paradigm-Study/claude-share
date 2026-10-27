@@ -125,7 +125,10 @@ export class RoomObject extends DurableObject<ServerEnv> {
     void state.blockConcurrencyWhile(async () => {
       this.alarmAt = (await state.storage.getAlarm()) ?? null
       const meta = await state.storage.get<Omit<RoomData, 'events' | 'files'>>('meta')
-      if (!meta) { this.cleanupPublic(Date.now()); return }
+      if (!meta) {
+        this.cleanupPublic(Date.now())
+        return
+      }
       const stored = await state.storage.list<RoomEvent>({ prefix: 'e:' })
       const tcpStats = (await state.storage.get<TCPStats>('tcp:stats')) ?? meta.tcpStats
       this.tcpSaved = tcpCounted(tcpStats ?? { used: 0 })
@@ -257,9 +260,7 @@ export class RoomObject extends DurableObject<ServerEnv> {
     // Worker's only way here); everything else, by its id.
     const preview = rest === '__preview' || rest.startsWith('__preview/')
     if (!this.room) {
-      return preview ? previewMissing() : rest === 'page'
-        ? missingPage()
-        : json({ error: 'This shared session does not exist.' }, 404)
+      return preview ? previewMissing() : rest === 'page' ? missingPage() : json({ error: 'This shared session does not exist.' }, 404)
     }
 
     const room = this.room
@@ -287,7 +288,14 @@ export class RoomObject extends DurableObject<ServerEnv> {
     }
 
     const admin = Boolean(this.env?.ADMIN_TOKEN) && req.headers.get('authorization') === `Bearer ${this.env.ADMIN_TOKEN}`
-    const ctx: RoomContext = { previewOrigin: req.headers.get('x-preview-origin') ?? '', admin, directory: directoryClient(this.env), isCurrent: () => this.room === room, cloud: hostsClient(this.env), pluginSource: this.env.PLUGIN_SOURCE }
+    const ctx: RoomContext = {
+      previewOrigin: req.headers.get('x-preview-origin') ?? '',
+      admin,
+      directory: directoryClient(this.env),
+      isCurrent: () => this.room === room,
+      cloud: hostsClient(this.env),
+      pluginSource: this.env.PLUGIN_SOURCE,
+    }
     const counters = tcpCounted(room.tcpStats)
     const { response, changed } = await roomRequest(room, req, rest, now, origin, ctx)
     if (changed) await this.persist()
@@ -316,11 +324,15 @@ export class RoomObject extends DurableObject<ServerEnv> {
     if (room.endedAt) return json({ error: 'This session is no longer shared.' }, 410)
     // A seat's streams past SEAT_STREAMS: its oldest ends (a reconnect's old
     // one, likely, not noticed gone yet).
-    const mine = this.state.getWebSockets(auth.seat).filter(ws => !this.closed.has(ws) && ws.deserializeAttachment()?.seat === auth.seat)
+    const mine = this.state
+      .getWebSockets(auth.seat)
+      .filter(ws => !this.closed.has(ws) && ws.deserializeAttachment()?.seat === auth.seat)
       .sort((a, b) => (a.deserializeAttachment().at ?? 0) - (b.deserializeAttachment().at ?? 0))
     for (const old of mine.slice(0, Math.max(0, mine.length - SEAT_STREAMS + 1))) {
       this.closed.add(old)
-      try { old.close(1008, 'Too many streams') } catch {}
+      try {
+        old.close(1008, 'Too many streams')
+      } catch {}
     }
     const { 0: client, 1: server } = new WebSocketPair()
     // Tagged as a stream, so a change goes to streams alone (broadcast), and
@@ -344,20 +356,36 @@ export class RoomObject extends DurableObject<ServerEnv> {
     // Halves past their deadline hold no place: checked right before admission.
     this.cleanupPublic(now)
     const path = url.pathname.slice(`/${id}/__preview`.length) || '/'
-    const active = this.publicSockets().map(attachmentOf).filter(att => att?.pb).map(att => ({ ownerSeat: att?.ownerSeat }))
+    const active = this.publicSockets()
+      .map(attachmentOf)
+      .filter(att => att?.pb)
+      .map(att => ({ ownerSeat: att?.ownerSeat }))
     const target = previewSocketTarget(room, new Request(new URL(`${path}${url.search}`, 'https://preview.local'), { headers: req.headers }), now, active)
     if (!target.ok) return new Response(target.error ?? 'This preview has ended', { status: target.status })
     const wsId = token(12)
     if (!announceSocket(room, wsId, target)) return new Response(`${room.host.name}'s Claude Code isn't connected right now.`, { status: 503 })
     const { 0: client, 1: server } = new WebSocketPair()
     this.state.acceptWebSocket(server, ['public', `pb:${wsId}`])
-    server.serializeAttachment({ pb: wsId, pid: target.pid, session: target.session, ownerSeat: target.ownerSeat, exp: target.exp, deadline: now + PUBLIC_LIMITS.pairMs })
+    server.serializeAttachment({
+      pb: wsId,
+      pid: target.pid,
+      session: target.session,
+      ownerSeat: target.ownerSeat,
+      exp: target.exp,
+      deadline: now + PUBLIC_LIMITS.pairMs,
+    })
     await this.schedule()
     return new Response(null, { status: 101, webSocket: client, headers: target.protocols[0] ? { 'sec-websocket-protocol': target.protocols[0] } : undefined })
   }
 
   publicValid(att: Attachment | null) {
-    return publicPairValid(this.room, att && att.pid !== undefined && att.session !== undefined && att.exp !== undefined ? { pid: att.pid, session: att.session, exp: att.exp, closed: att.closed } : null, Date.now())
+    return publicPairValid(
+      this.room,
+      att && att.pid !== undefined && att.session !== undefined && att.exp !== undefined
+        ? { pid: att.pid, session: att.session, exp: att.exp, closed: att.closed }
+        : null,
+      Date.now(),
+    )
   }
 
   publicSockets() {
@@ -406,7 +434,9 @@ export class RoomObject extends DurableObject<ServerEnv> {
     // admission, the one check outside the alarm.
     this.closeStaleTCP(now)
     const room = this.live()
-    const active = this.tcpSockets().map(tcpOf).filter(s => s.side === 'guest')
+    const active = this.tcpSockets()
+      .map(tcpOf)
+      .filter(s => s.side === 'guest')
     const target = tcpSocketTarget(room, req, pid, now, active)
     if (!target.ok) return json({ error: target.error }, target.status)
     const id = token(12)
@@ -438,7 +468,14 @@ export class RoomObject extends DurableObject<ServerEnv> {
       if (this.room && tcpRefund(this.room, att.tcp)) refunded = true
       // A close event can itself hibernate before its peer's close is handled.
       ws.serializeAttachment({ tcp: { ...att.tcp, closed: true } })
-      try { ws.close(sendableClose(code), String(reason).replace(/[^\x20-\x7e]/g, '?').slice(0, 100)) } catch {}
+      try {
+        ws.close(
+          sendableClose(code),
+          String(reason)
+            .replace(/[^\x20-\x7e]/g, '?')
+            .slice(0, 100),
+        )
+      } catch {}
     }
     if (refunded) void this.persistTCPStats().catch(() => {})
   }
@@ -450,10 +487,12 @@ export class RoomObject extends DurableObject<ServerEnv> {
   async rejectRelay(req: Request, id: string) {
     const room = this.live()
     const live = (ws: WebSocket) => !this.closed.has(ws) && !ws.deserializeAttachment()?.closed && !ws.deserializeAttachment()?.tcp?.closed
-    const guest = SOCKET_ID.test(id) ? this.tcpSockets().find(ws => {
-      const s = tcpOf(ws)
-      return s.id === id && s.room === room.id && s.side === 'guest'
-    }) : null
+    const guest = SOCKET_ID.test(id)
+      ? this.tcpSockets().find(ws => {
+          const s = tcpOf(ws)
+          return s.id === id && s.room === room.id && s.side === 'guest'
+        })
+      : null
     const browser = SOCKET_ID.test(id) && !guest ? this.publicSockets().find(ws => ws.deserializeAttachment().pb === id) : null
     const check = () => {
       if (this.room !== room) return notFound()
@@ -466,7 +505,8 @@ export class RoomObject extends DurableObject<ServerEnv> {
         return null
       }
       if (!browser || !this.publicSockets().includes(browser)) return notFound()
-      if (browser.deserializeAttachment().paired || this.state.getWebSockets(`ph:${id}`).some(live)) return json({ error: 'That socket already has a host relay.' }, 409)
+      if (browser.deserializeAttachment().paired || this.state.getWebSockets(`ph:${id}`).some(live))
+        return json({ error: 'That socket already has a host relay.' }, 409)
       return null
     }
     const before = check()
@@ -498,7 +538,8 @@ export class RoomObject extends DurableObject<ServerEnv> {
   // it is sent on: 'reserve' when the sender's budget must grow first, 'done'
   // when it finished the channel, else 'sent'.
   forwardTCP(ws: WebSocket, peer: WebSocket | undefined, frame: TCPFrame, now: number) {
-    const from = tcpOf(ws), to: TCPAttachment['tcp'] | undefined = peer?.deserializeAttachment()?.tcp
+    const from = tcpOf(ws),
+      to: TCPAttachment['tcp'] | undefined = peer?.deserializeAttachment()?.tcp
     if (this.closed.has(ws) || (peer && this.closed.has(peer)) || from.closed || to?.closed) throw tcpFailure('TCP channel closed.')
     const step = tcpStep(this.live(), from, to, frame, now)
     // A half without its peer was refused above (tcpCheck: not paired).
@@ -516,7 +557,8 @@ export class RoomObject extends DurableObject<ServerEnv> {
     const s: TCPAttachment['tcp'] | undefined = attachmentOf(ws)?.tcp
     if (!s || s.closed || this.closed.has(ws)) return
     try {
-      const frame = tcpFrame(message), peer = this.tcpPeer(s)
+      const frame = tcpFrame(message),
+        peer = this.tcpPeer(s)
       const step = this.forwardTCP(ws, peer, frame, Date.now())
       if (step === 'done') await this.schedule()
       if (step !== 'reserve') return
@@ -526,7 +568,8 @@ export class RoomObject extends DurableObject<ServerEnv> {
         // Throwing out of blockConcurrencyWhile resets the entire object.
         // Protocol/budget failures close just this pair, not everyone's room.
         try {
-          const from = tcpOf(ws), room = this.live()
+          const from = tcpOf(ws),
+            room = this.live()
           if (from.closed || !tcpValid(room, from)) throw tcpFailure('TCP access revoked.')
           tcpCheck(from, peer?.deserializeAttachment()?.tcp, frame, Date.now())
           if (!tcpReserve(room, from)) throw tcpFailure('TCP room byte budget exhausted.')
@@ -535,7 +578,9 @@ export class RoomObject extends DurableObject<ServerEnv> {
           // A reservation is larger than any frame: the step now relays.
           if (this.forwardTCP(ws, peer, frame, Date.now()) === 'reserve') throw tcpFailure('TCP room byte budget exhausted.')
           return null
-        } catch (error) { return error }
+        } catch (error) {
+          return error
+        }
       })
       if (failure) throw failure
     } catch (error) {
@@ -562,12 +607,15 @@ export class RoomObject extends DurableObject<ServerEnv> {
       const host = tcpState(wsId, s, 'host', now)
       try {
         s.ready = host.ready = true
-        const guestReady = chargeControl(s, { t: 'ready' }), hostReady = chargeControl(host, { t: 'ready' })
+        const guestReady = chargeControl(s, { t: 'ready' }),
+          hostReady = chargeControl(host, { t: 'ready' })
         guest.serializeAttachment({ tcp: s })
         server.serializeAttachment({ tcp: host })
         this.sendTCP(guest, guestReady)
         this.sendTCP(server, hostReady)
-      } catch (error) { this.closeTCP(wsId, (error as { code?: number }).code ?? 1011, (error as Error).message) }
+      } catch (error) {
+        this.closeTCP(wsId, (error as { code?: number }).code ?? 1011, (error as Error).message)
+      }
       await this.schedule()
       return new Response(null, { status: 101, webSocket: client })
     }
@@ -578,7 +626,8 @@ export class RoomObject extends DurableObject<ServerEnv> {
       this.unpair(browser, att, 1008, 'Preview ended')
       return json({ error: 'That preview has ended.' }, 410)
     }
-    if (this.state.getWebSockets(`ph:${wsId}`).some(ws => !this.closed.has(ws) && !ws.deserializeAttachment()?.closed)) return json({ error: 'That socket already has a host relay.' }, 409)
+    if (this.state.getWebSockets(`ph:${wsId}`).some(ws => !this.closed.has(ws) && !ws.deserializeAttachment()?.closed))
+      return json({ error: 'That socket already has a host relay.' }, 409)
     // Taken up too late: the alarm closes it at its deadline, this before.
     if (!((att.deadline ?? 0) > now)) {
       this.unpair(browser, att, 1011, 'Preview relay timeout')
@@ -591,7 +640,12 @@ export class RoomObject extends DurableObject<ServerEnv> {
     server.serializeAttachment(binding)
     browser.serializeAttachment({ ...att, paired: true })
     for (const message of this.takePending(wsId)?.messages ?? []) {
-      try { server.send(message) } catch { this.unpair(server, binding, 1011, ''); break }
+      try {
+        server.send(message)
+      } catch {
+        this.unpair(server, binding, 1011, '')
+        break
+      }
     }
     await this.schedule()
     return new Response(null, { status: 101, webSocket: client })
@@ -611,7 +665,9 @@ export class RoomObject extends DurableObject<ServerEnv> {
     if (!att?.seat || !this.room) return
     // Its seat let go for good (removed from the room's team): it hears no more.
     if (att.role !== 'host' && !this.room.seated(att.seat)) {
-      try { ws.close(1008, 'left') } catch {}
+      try {
+        ws.close(1008, 'left')
+      } catch {}
       return
     }
     const page = this.room.page(att.after ?? 0, now)
@@ -658,7 +714,12 @@ export class RoomObject extends DurableObject<ServerEnv> {
     if (peers.some(p => p.deserializeAttachment()?.pid !== att.pid)) return this.unpair(ws, att, 1008, 'Preview identity changed')
     if (!peers.length && att.pb) {
       const queue = this.pending.get(id) ?? { messages: [], bytes: 0 }
-      if (queue.messages.length >= PUBLIC_LIMITS.queueMessages || queue.bytes + n > PUBLIC_LIMITS.queueBytes || this.pendingBytes + n > PUBLIC_LIMITS.pendingBytes) return this.unpair(ws, att, 1009, 'Preview queue limit')
+      if (
+        queue.messages.length >= PUBLIC_LIMITS.queueMessages ||
+        queue.bytes + n > PUBLIC_LIMITS.queueBytes ||
+        this.pendingBytes + n > PUBLIC_LIMITS.pendingBytes
+      )
+        return this.unpair(ws, att, 1009, 'Preview queue limit')
       queue.messages.push(message)
       queue.bytes += n
       this.pendingBytes += n
@@ -668,7 +729,11 @@ export class RoomObject extends DurableObject<ServerEnv> {
     for (const peer of peers) {
       const buffered = (peer as WebSocket & { bufferedAmount?: number }).bufferedAmount
       if (typeof buffered === 'number' && buffered + n > PUBLIC_LIMITS.bufferBytes) return this.unpair(ws, att, 1009, 'WebSocket output limit')
-      try { peer.send(message) } catch { this.unpair(ws, att, 1011, '') }
+      try {
+        peer.send(message)
+      } catch {
+        this.unpair(ws, att, 1011, '')
+      }
     }
   }
 
@@ -777,7 +842,11 @@ export class RoomObject extends DurableObject<ServerEnv> {
     if (!scope) return
     const storage = this.state.storage
     const [seen, open, waiting] = await Promise.all([storage.get<number>('traces:seq'), storage.get<Turn>('traces:open'), storage.get<Turn[]>('traces:out')])
-    const { closed, open: still } = takeTurns(room.events.filter(e => e.seq > (seen ?? 0)), open ?? null, name => authorOf(room, name))
+    const { closed, open: still } = takeTurns(
+      room.events.filter(e => e.seq > (seen ?? 0)),
+      open ?? null,
+      name => authorOf(room, name),
+    )
     if (final && still) closed.push(still)
     // A database down for long holds the newest 500 turns.
     const out = [...(waiting ?? []), ...closed].slice(-500)
@@ -788,7 +857,11 @@ export class RoomObject extends DurableObject<ServerEnv> {
     }
     if (!out.length) return
     try {
-      await keepTurns(this.env as unknown as TracesEnv, { id: room.id, scope, team: room.team?.id ?? null, owner: { name: room.host.name, account: room.host.account ?? null }, title: room.title ?? null }, out)
+      await keepTurns(
+        this.env as unknown as TracesEnv,
+        { id: room.id, scope, team: room.team?.id ?? null, owner: { name: room.host.name, account: room.host.account ?? null }, title: room.title ?? null },
+        out,
+      )
       await storage.put('traces:out', [])
       this.keepPending = false
     } catch (error) {
@@ -827,7 +900,12 @@ export class RoomObject extends DurableObject<ServerEnv> {
     if (this.alarmAt !== null && this.alarmAt > now && this.alarmAt <= at) return
     // Noted before the write: setAlarm calls land in the order made.
     this.alarmAt = at
-    try { await this.state.storage.setAlarm(at) } catch (error) { this.alarmAt = null; throw error }
+    try {
+      await this.state.storage.setAlarm(at)
+    } catch (error) {
+      this.alarmAt = null
+      throw error
+    }
   }
 
   // A host with a stream open is active now, however long ago it last spoke.

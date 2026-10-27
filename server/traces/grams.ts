@@ -15,7 +15,11 @@ const pairs = (run: string): string => {
   return [...chars.slice(0, -1).map((c, i) => c + chars[i + 1]), chars.at(-1)].join(' ')
 }
 
-export const grams = (text: string): string => text.replace(CJK, run => ` ${pairs(run)} `).replace(/\s+/g, ' ').trim()
+export const grams = (text: string): string =>
+  text
+    .replace(CJK, run => ` ${pairs(run)} `)
+    .replace(/\s+/g, ' ')
+    .trim()
 
 // A query's words, each one required, as what Postgres turns into a tsquery:
 // a phrase of the word's pairs (without the run's last character alone, which

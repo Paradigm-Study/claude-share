@@ -61,11 +61,25 @@ export const PROXY_HEAD_MAX = 64 * 1024 // a proxied answer's first line: its st
 // TCP previews use raw binary messages and a receiver-proven credit window.
 // All resource ceilings live here; both transports enforce the same protocol.
 export const TCP_LIMITS = Object.freeze({
-  seatPairs: 32, roomPairs: 64, opensPerMinute: 1200, seatOpensPerMinute: 240, openWindowMs: 60_000,
-  pairMs: 10_000, roomBytes: 1024 ** 3, reserveBytes: 1024 ** 2,
-  dataBytes: 65_536, creditFrames: 4, creditBytes: 256 * 1024,
-  controlBytes: 256, bufferBytes: 1024 ** 2, checkBytes: 16 * 1024, messageFragments: 4096,
-  rateWindowMs: 1000, dataPerWindow: 1024, controlPerWindow: 2048, wireFramesPerWindow: 4096,
+  seatPairs: 32,
+  roomPairs: 64,
+  opensPerMinute: 1200,
+  seatOpensPerMinute: 240,
+  openWindowMs: 60_000,
+  pairMs: 10_000,
+  roomBytes: 1024 ** 3,
+  reserveBytes: 1024 ** 2,
+  dataBytes: 65_536,
+  creditFrames: 4,
+  creditBytes: 256 * 1024,
+  controlBytes: 256,
+  bufferBytes: 1024 ** 2,
+  checkBytes: 16 * 1024,
+  messageFragments: 4096,
+  rateWindowMs: 1000,
+  dataPerWindow: 1024,
+  controlPerWindow: 2048,
+  wireFramesPerWindow: 4096,
   closeMs: 1000,
 })
 
@@ -82,10 +96,25 @@ export const TCP_LIMITS = Object.freeze({
 // minted at a rate of a seat's own and the room's (in memory, like needs: not
 // one of LIMITS).
 export const PUBLIC_LIMITS = Object.freeze({
-  seatPairs: 32, roomPairs: 128, pairMs: 10_000, queueMessages: 500, queueBytes: 1024 ** 2, pendingBytes: 8 * 1024 ** 2,
-  bufferBytes: 1024 ** 2, framesPerWindow: 4096, bytesPerWindow: 4 * 1024 ** 2, rateWindowMs: 1000, proxied: 512,
-  seatSessions: 4, roomSessions: 256, seatTickets: 16, roomTickets: 128, pathBytes: 2048,
-  seatMints: 30, roomMints: 120, mintWindowMs: 60_000,
+  seatPairs: 32,
+  roomPairs: 128,
+  pairMs: 10_000,
+  queueMessages: 500,
+  queueBytes: 1024 ** 2,
+  pendingBytes: 8 * 1024 ** 2,
+  bufferBytes: 1024 ** 2,
+  framesPerWindow: 4096,
+  bytesPerWindow: 4 * 1024 ** 2,
+  rateWindowMs: 1000,
+  proxied: 512,
+  seatSessions: 4,
+  roomSessions: 256,
+  seatTickets: 16,
+  roomTickets: 128,
+  pathBytes: 2048,
+  seatMints: 30,
+  roomMints: 120,
+  mintWindowMs: 60_000,
 })
 
 // The JSON routes (create, join, events, invite, team) take MAX_BODY
@@ -185,4 +214,9 @@ export const PEER_LIMIT = Object.freeze({ host: 120, seat: 60, periodMs: 60_000,
 // the day, and misses one reservation at most. A seat's minute is memory's,
 // as every other minute is. TCP previews have a budget of their own
 // (TCP_LIMITS).
-export const SERVE_LIMITS = Object.freeze({ roomBytesPerDay: 8 * 1024 ** 3, seatBytesPerMinute: 256 * 1024 ** 2, reserveBytes: 64 * 1024 ** 2, periodMs: 60_000 })
+export const SERVE_LIMITS = Object.freeze({
+  roomBytesPerDay: 8 * 1024 ** 3,
+  seatBytesPerMinute: 256 * 1024 ** 2,
+  reserveBytes: 64 * 1024 ** 2,
+  periodMs: 60_000,
+})

@@ -71,7 +71,15 @@ function cloudAuth(auth: JsonObject | undefined): CloudAuth | null {
   return null
 }
 
-export async function cloudRoutes(room: Room, req: Request, rest: string, auth: Auth, now: number, ctx: RoomContext, origin: string): Promise<RouteResult | null> {
+export async function cloudRoutes(
+  room: Room,
+  req: Request,
+  rest: string,
+  auth: Auth,
+  now: number,
+  ctx: RoomContext,
+  origin: string,
+): Promise<RouteResult | null> {
   if (rest !== 'cloud' && !rest.startsWith('cloud/')) return null
   const method = req.method
   if (rest === 'cloud' && method === 'GET') return { response: json(cloudSummary(room) ?? { state: 'none' }) }
@@ -101,18 +109,40 @@ export async function cloudRoutes(room: Room, req: Request, rest: string, auth: 
     const runner = token(24)
     const ticket = token(32)
     room.host.token = runner
-    room.cloud = { state: 'starting', approver: { seat: seat.id, account: room.host.account ?? null, name: room.host.name }, since: now, until: now + CLOUD_MAX_MS }
+    room.cloud = {
+      state: 'starting',
+      approver: { seat: seat.id, account: room.host.account ?? null, name: room.host.name },
+      since: now,
+      until: now + CLOUD_MAX_MS,
+    }
     try {
       await hosts.start(room.id, {
         ticket,
-        config: { server: origin, room: room.id, token: runner, session, cwd, title: room.title, host: room.host.name, url: shareUrl(origin, room.id), seq: room.seq, model, state, auth: signIn, plugin: { version: PLUGIN_LATEST, source: ctx.pluginSource || PLUGIN_SOURCE } },
+        config: {
+          server: origin,
+          room: room.id,
+          token: runner,
+          session,
+          cwd,
+          title: room.title,
+          host: room.host.name,
+          url: shareUrl(origin, room.id),
+          seq: room.seq,
+          model,
+          state,
+          auth: signIn,
+          plugin: { version: PLUGIN_LATEST, source: ctx.pluginSource || PLUGIN_SOURCE },
+        },
       })
     } catch (error) {
       // Nothing moved: the host keeps its room as it was.
       room.host.token = was
       room.seats.delete(seatToken)
       room.cloud = null
-      return { changed: true, response: json({ error: `The cloud host didn't start: ${String((error as Error | null)?.message ?? error).slice(0, 200)}` }, 502) }
+      return {
+        changed: true,
+        response: json({ error: `The cloud host didn't start: ${String((error as Error | null)?.message ?? error).slice(0, 200)}` }, 502),
+      }
     }
     room.append(fromHost(room), 'cloud', { state: 'starting', by: room.host.name }, now)
     room.wake()
@@ -122,7 +152,7 @@ export async function cloudRoutes(room: Room, req: Request, rest: string, auth: 
   if (rest === 'cloud/home' && method === 'POST') {
     if (!room.cloud) return { response: json({ error: "This session isn't in the cloud." }, 409) }
     if (!isApprover(room, auth)) return { response: json({ error: `Only ${room.cloud.approver.name} brings this session home.` }, 403) }
-    const changes = room.cloud.state === 'stopped' ? room.cloud.changes ?? null : await stopCloud(room, ctx, now, 'home')
+    const changes = room.cloud.state === 'stopped' ? (room.cloud.changes ?? null) : await stopCloud(room, ctx, now, 'home')
     // Their seat is the host again, with a token of its own.
     const host = token(24)
     room.host.token = host

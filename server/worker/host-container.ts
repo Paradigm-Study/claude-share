@@ -51,7 +51,10 @@ export class HostContainer {
       const until = Date.now() + HOST_START_MS
       let up = false
       while (!up && Date.now() < until) {
-        up = await this.control('/health', key).then(r => r.ok, () => false)
+        up = await this.control('/health', key).then(
+          r => r.ok,
+          () => false,
+        )
         if (!up) await new Promise(r => setTimeout(r, 1_000))
       }
       if (!up) {
@@ -73,7 +76,12 @@ export class HostContainer {
       if (!saved?.ticket || !container.running || !safeEqual(given, `Bearer ${saved.ticket}`)) return json({ error: 'Not a member of this session.' }, 401)
       // Once: the ticket goes as the bundle starts.
       await this.state.storage.put('runner', { ...saved, ticket: null })
-      const res = await this.control('/bundle', saved.key, { method: 'PUT', headers: { 'content-length': req.headers.get('content-length') ?? '' }, body: req.body, duplex: 'half' })
+      const res = await this.control('/bundle', saved.key, {
+        method: 'PUT',
+        headers: { 'content-length': req.headers.get('content-length') ?? '' },
+        body: req.body,
+        duplex: 'half',
+      })
       return new Response(res.body, { status: res.status, headers: { 'content-type': 'application/json' } })
     }
 

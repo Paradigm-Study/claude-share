@@ -36,7 +36,11 @@ const allowedRedirect = (c: ConsentDescription) => c.redirectIsLoopback || CLAUD
 
 const hex = (bytes: ArrayBuffer | Uint8Array) => [...new Uint8Array(bytes)].map(b => b.toString(16).padStart(2, '0')).join('')
 const sha256 = async (text: string) => hex(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text)))
-const secret = () => btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32)))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+const secret = () =>
+  btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32))))
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/, '')
 const codeOf = (login: string) => `${login.slice(0, 4)}-${login.slice(4, 8)}`.toUpperCase()
 const signInKey = (id: string) => `traces-signin:${id}`
 type SignIn = { verifier: string; handle: string; token?: string; account?: string; name?: string }
@@ -57,13 +61,19 @@ const PAGE_SCRIPT = `(function () {
   look()
 })()`
 let scriptHash: Promise<string> | undefined
-const scriptSource = () => (scriptHash ??= crypto.subtle.digest('SHA-256', new TextEncoder().encode(PAGE_SCRIPT)).then(d => `'sha256-${btoa(String.fromCharCode(...new Uint8Array(d)))}'`))
+const scriptSource = () =>
+  (scriptHash ??= crypto.subtle
+    .digest('SHA-256', new TextEncoder().encode(PAGE_SCRIPT))
+    .then(d => `'sha256-${btoa(String.fromCharCode(...new Uint8Array(d)))}'`))
 
 async function page(heading: string, body: string, { status = 200, script = false, headers }: { status?: number; script?: boolean; headers?: Headers } = {}) {
   const res: Response = brandPage({ title: heading, eyebrow: 'Session traces', heading, body, status, script: script ? PAGE_SCRIPT : '' })
   const out = new Headers(headers)
   res.headers.forEach((v, k) => out.set(k, v))
-  out.set('content-security-policy', `default-src 'none'; script-src ${script ? await scriptSource() : "'none'"}; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src 'self'; img-src 'self' data:; base-uri 'none'; frame-ancestors 'none'`)
+  out.set(
+    'content-security-policy',
+    `default-src 'none'; script-src ${script ? await scriptSource() : "'none'"}; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src 'self'; img-src 'self' data:; base-uri 'none'; frame-ancestors 'none'`,
+  )
   out.set('referrer-policy', 'no-referrer')
   out.set('x-frame-options', 'DENY')
   return new Response(res.body, { status, headers: out })
@@ -81,11 +91,23 @@ app.get('/oauth/authorize', async c => {
   } catch {
     return sorry("This sign-in link isn't valid", 'Connect again from Claude Code.')
   }
-  if (!allowedRedirect(consent)) return sorry("This app can't sign in here", `It would send your sign-in to ${consent.redirectHost}. Only Claude Code on this computer, or Claude's own site, can sign in to session traces.`, 403)
+  if (!allowedRedirect(consent))
+    return sorry(
+      "This app can't sign in here",
+      `It would send your sign-in to ${consent.redirectHost}. Only Claude Code on this computer, or Claude's own site, can sign in to session traces.`,
+      403,
+    )
   const { handle, headers } = await helpers.beginConsent(request)
-  const verifier = secret(), login = await sha256(verifier), id = secret()
+  const verifier = secret(),
+    login = await sha256(verifier),
+    id = secret()
   await c.env.OAUTH_KV!.put(signInKey(id), JSON.stringify({ verifier, handle: await sha256(handle) } satisfies SignIn), { expirationTtl: SIGN_IN_TTL })
-  const links = Object.keys(providersFrom(c.env)).map(p => `<a class="btn-primary" href="/auth/${p}/start?login=${login}" target="_blank" rel="noopener">Sign in with ${escapeHtml(PROVIDER_NAMES[p] ?? p)}</a>`).join(' ')
+  const links = Object.keys(providersFrom(c.env))
+    .map(
+      p =>
+        `<a class="btn-primary" href="/auth/${p}/start?login=${login}" target="_blank" rel="noopener">Sign in with ${escapeHtml(PROVIDER_NAMES[p] ?? p)}</a>`,
+    )
+    .join(' ')
   const where = consent.redirectIsLoopback ? `${escapeHtml(consent.redirectHost)}, an app on this computer` : escapeHtml(consent.redirectHost)
   const body = `
     <p class="sub-copy"><b>${escapeHtml(consent.clientName || 'An app')}</b> asks to search the traces of the shared sessions you can read: your teams' and your own. It can't change anything.</p>
@@ -112,7 +134,11 @@ app.post('/oauth/poll', async c => {
   const entry = await kv.get<SignIn>(signInKey(id), 'json')
   if (!entry) return c.json({ status: 'expired' })
   if (entry.token) return c.json({ status: 'done', name: entry.name })
-  const res = await directory(c.env).fetch('https://directory.internal/api/auth/poll', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ verifier: entry.verifier }) })
+  const res = await directory(c.env).fetch('https://directory.internal/api/auth/poll', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ verifier: entry.verifier }),
+  })
   const polled = (await res.json().catch(() => ({}))) as { status?: string; token?: string }
   // The directory knows a sign-in only once its link is opened, and says
   // `expired` before that: this page's own record (SIGN_IN_TTL) says when
@@ -120,14 +146,17 @@ app.post('/oauth/poll', async c => {
   if (polled.status !== 'done' || !polled.token) return c.json({ status: 'waiting' })
   const who = await whoIs(c.env, polled.token)
   if (!who) return c.json({ status: 'expired' })
-  await kv.put(signInKey(id), JSON.stringify({ ...entry, token: polled.token, account: who.account.id, name: who.account.name } satisfies SignIn), { expirationTtl: SIGN_IN_TTL })
+  await kv.put(signInKey(id), JSON.stringify({ ...entry, token: polled.token, account: who.account.id, name: who.account.name } satisfies SignIn), {
+    expirationTtl: SIGN_IN_TTL,
+  })
   return c.json({ status: 'done', name: who.account.name })
 })
 
 app.post('/oauth/authorize', async c => {
   const helpers = c.env.OAUTH_PROVIDER!
   const form = await c.req.parseBody()
-  const handle = String(form.handle ?? ''), id = String(form.id ?? '')
+  const handle = String(form.handle ?? ''),
+    id = String(form.id ?? '')
   try {
     if (form.decision !== 'allow') {
       const denied = await helpers.denyConsent(c.req.raw, handle)
@@ -135,11 +164,18 @@ app.post('/oauth/authorize', async c => {
     }
     const entry = /^[A-Za-z0-9_-]{40,64}$/.test(id) ? await c.env.OAUTH_KV!.get<SignIn>(signInKey(id), 'json') : null
     // The sign-in must be the one this page started, for this consent.
-    if (!entry?.token || !entry.account || entry.handle !== (await sha256(handle))) return sorry('Sign in first', 'Sign in on the previous page, then press Allow. Or connect again from Claude Code.')
+    if (!entry?.token || !entry.account || entry.handle !== (await sha256(handle)))
+      return sorry('Sign in first', 'Sign in on the previous page, then press Allow. Or connect again from Claude Code.')
     const approved = await helpers.approveConsent(c.req.raw, handle, { scope: [SCOPE] })
     await c.env.OAUTH_KV!.delete(signInKey(id))
     const props: GrantProps = { token: entry.token, account: entry.account }
-    const { redirectTo } = await helpers.completeAuthorization({ request: approved.request, userId: entry.account, metadata: { name: entry.name }, scope: [SCOPE], props })
+    const { redirectTo } = await helpers.completeAuthorization({
+      request: approved.request,
+      userId: entry.account,
+      metadata: { name: entry.name },
+      scope: [SCOPE],
+      props,
+    })
     const headers = new Headers(approved.headers)
     headers.set('location', redirectTo)
     return new Response(null, { status: 302, headers })

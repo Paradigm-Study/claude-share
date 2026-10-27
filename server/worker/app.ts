@@ -68,7 +68,9 @@ async function previewFetch(req: Request, env: ServerEnv): Promise<Response> {
   const own = roomOrigins(env.PREVIEW_URL)
   const key = own ? (previewKeyOf(previewHostLabel(env.PREVIEW_URL, url.host))?.hex ?? '') : (previewRoomOf(req) ?? '')
   let stub: DurableObjectStub<RoomObject> | null = null
-  try { stub = OBJECT_ID.test(key) ? env.ROOMS.get(env.ROOMS.idFromString(key)) : null } catch {}
+  try {
+    stub = OBJECT_ID.test(key) ? env.ROOMS.get(env.ROOMS.idFromString(key)) : null
+  } catch {}
   if (!stub) return previewMissing()
   const headers = new Headers(req.headers)
   headers.delete('x-preview-own')
@@ -115,7 +117,8 @@ app.use(async (c, next) => {
 
 // Accounts and teams: the directory's own paths, passed on to it.
 app.use(async (c, next) => {
-  const env = c.env, req = c.req.raw
+  const env = c.env,
+    req = c.req.raw
   const url = new URL(req.url)
   if (!hasDirectory(env) || !Directory.owns(url.pathname)) return next()
   if (Directory.limited(url.pathname, req.method) && !(await env.JOIN_LIMIT.limit({ key: `auth:${addressOf(req)}` })).success) return limitedResponse('join')
@@ -126,7 +129,11 @@ app.use(async (c, next) => {
   let body: Uint8Array | undefined
   if (bodied(req)) {
     const max = url.pathname === '/api/native-pool/enrollment' ? NATIVE_POOL_BODY_MAX : DIRECTORY_BODY_MAX
-    try { body = await readBody(req, max) } catch (error) { return statusOf(error) === 413 ? bodyTooLarge(max) : badRequest('The request body did not arrive.') }
+    try {
+      body = await readBody(req, max)
+    } catch (error) {
+      return statusOf(error) === 413 ? bodyTooLarge(max) : badRequest('The request body did not arrive.')
+    }
   }
   return directoryStub(env).fetch(
     new Request(`https://directory.internal${url.pathname}${url.search}`, {
@@ -140,14 +147,18 @@ app.use(async (c, next) => {
 
 // A Share: a new room.
 app.post('/api/rooms', async c => {
-  const env = c.env, req = c.req.raw
+  const env = c.env,
+    req = c.req.raw
   const outdated = outdatedClient(req)
   if (outdated) return outdated
   if (env.NEW_ROOMS === 'off') return closedResponse()
   // The rate-limit binding below is loose (cached counts let a burst
   // through); the gate counts new rooms exactly, per address and per day.
   const gate: { ok: boolean; reason?: string } = env.GATE
-    ? await env.GATE.get(env.GATE.idFromName('gate')).fetch('https://gate.internal/', { method: 'POST', body: JSON.stringify({ ip: addressOf(req), max: Number(env.MAX_ROOMS_PER_DAY) || ROOMS_PER_DAY }) }).then(r => r.json<{ ok: boolean; reason?: string }>()).catch(() => ({ ok: true }))
+    ? await env.GATE.get(env.GATE.idFromName('gate'))
+        .fetch('https://gate.internal/', { method: 'POST', body: JSON.stringify({ ip: addressOf(req), max: Number(env.MAX_ROOMS_PER_DAY) || ROOMS_PER_DAY }) })
+        .then(r => r.json<{ ok: boolean; reason?: string }>())
+        .catch(() => ({ ok: true }))
     : { ok: true }
   if (!gate.ok) return gate.reason === 'day' ? busyResponse() : limitedResponse('create')
   return toRoom(c, token(16), 'create')
@@ -160,7 +171,8 @@ app.post('/api/rooms', async c => {
 app.all('*', c => {
   const parts = new URL(c.req.url).pathname.split('/').filter(Boolean)
   const method = c.req.raw.method
-  if (method === 'POST' && parts[0] === 'api' && parts[1] === 'admin' && parts[2] === 'rooms' && parts.length === 5 && parts[4] === 'end') return toRoom(c, parts[3]!, 'admin-end')
+  if (method === 'POST' && parts[0] === 'api' && parts[1] === 'admin' && parts[2] === 'rooms' && parts.length === 5 && parts[4] === 'end')
+    return toRoom(c, parts[3]!, 'admin-end')
   if (parts[0] === 's' && parts.length === 2) return toRoom(c, parts[1]!, 'page')
   if (parts[0] === 'api' && parts[1] === 'rooms' && parts.length >= 3) return toRoom(c, parts[2]!, parts.slice(3).join('/'))
   return notFound()
@@ -168,7 +180,9 @@ app.all('*', c => {
 
 app.notFound(() => notFound())
 // What throws goes to the runtime as it did before Hono: a 500 of its own.
-app.onError(error => { throw error })
+app.onError(error => {
+  throw error
+})
 
 export default {
   async fetch(req: Request, env: ServerEnv, ctx: ExecutionContext): Promise<Response> {
@@ -181,7 +195,8 @@ const bodied = (req: Request) => req.method !== 'GET' && req.method !== 'HEAD'
 // One request for a room, to its Durable Object: limited first, its body
 // passed on as a stream.
 async function toRoom(c: Context<App>, id: string, rest: string): Promise<Response> {
-  const env = c.env, req = c.req.raw
+  const env = c.env,
+    req = c.req.raw
   const url = new URL(req.url)
   if (!ROOM_ID.test(id)) return notFound()
   // Previews have a host name of their own: this origin serves none, page
