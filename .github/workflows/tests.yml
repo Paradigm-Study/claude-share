@@ -1,9 +1,15 @@
 name: Tests
 
+# A change to docs alone runs nothing: no test reads Markdown, docs/ or an
+# SVG (the .md files the suites touch are fixtures they write themselves, and
+# the previews suite checks the home page from server/core, not a document).
+# main has no required checks, so a skipped run blocks nothing.
 on:
   push:
     branches: [main]
+    paths-ignore: ['**/*.md', 'docs/**', '*.svg']
   pull_request:
+    paths-ignore: ['**/*.md', 'docs/**', '*.svg']
   workflow_dispatch:
 
 permissions:
@@ -15,17 +21,28 @@ concurrency:
 
 jobs:
   no-model:
-    name: ${{ matrix.suite }} / Node ${{ matrix.node }}
+    name: ${{ matrix.suite }} ${{ matrix.group }} / Node ${{ matrix.node }}
     runs-on: ubuntu-latest
-    # local-preview runs 3 to 5 minutes on a runner (its 20,000-frame step
-    # alone took 148 s on a slow one): it gets 10.
-    timeout-minutes: 10
+    # local-preview runs as three jobs at once (test/local-preview.ts --only):
+    # the one connection past 20,000 frames, the real browser windows and
+    # their WebRTC, and the rest. Each starts the real room first. The frames
+    # group took 148 s on a slow runner: it keeps 10 minutes; the others get
+    # their CI time and a margin.
+    timeout-minutes: ${{ matrix.minutes }}
     strategy:
       fail-fast: false
       matrix:
         # The oldest Node the project supports (package.json engines), and the newest LTS.
         node: ['22.18', 24]
         suite: [local-preview]
+        group: [frames, browsers, rest]
+        include:
+          - group: frames
+            minutes: 10
+          - group: browsers
+            minutes: 6
+          - group: rest
+            minutes: 6
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -42,11 +59,11 @@ jobs:
       # teams (the sign-in page's Continue) and local-preview (preview windows,
       # WebRTC) drive a headless browser the runner image has, and print SKIP
       # for those checks where they find none. With both Chrome and Firefox,
-      # local-preview takes 3 to 5 minutes, inside its own timeout above.
+      # local-preview takes 3 to 5 minutes whole; split, each group is shorter.
       # The plugin's own tests (plugin/tests: band.test.tsx, window.test.ts,
       # preview.test.ts, proxy.test.ts, upstream.test.ts) need Claude Code and
       # run with `claude plugin test plugin`, not here; see CONTRIBUTING.md.
-      - run: node test/${{ matrix.suite }}.ts
+      - run: node test/${{ matrix.suite }}.ts --only ${{ matrix.group }}
 
   vitest:
     name: vitest / Node ${{ matrix.node }}

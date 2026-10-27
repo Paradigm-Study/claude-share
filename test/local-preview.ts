@@ -26,6 +26,15 @@ const GUEST = fileURLToPath(new URL('../plugin/relay/local-preview.mts', import.
 const HOST = fileURLToPath(new URL('../plugin/relay/tcp-worker.mts', import.meta.url))
 const PROXY = fileURLToPath(new URL('../plugin/relay/browser-proxy.mts', import.meta.url))
 const PUBLIC = fileURLToPath(new URL('../plugin/relay/ws-relay.mts', import.meta.url))
+// `--only <group>` runs one part of the suite, as CI runs it in three
+// parallel jobs: `frames`, the one connection past 20,000 frames; `browsers`,
+// the real Chrome and Firefox windows and their WebRTC; `rest`, everything
+// else. Each needs the real room's setup at realChain's start, which each runs.
+// Without it, everything runs, in one process.
+const GROUPS = ['frames', 'browsers', 'rest'] as const
+const ONLY = process.argv.includes('--only') ? process.argv[process.argv.indexOf('--only') + 1] : undefined
+if (ONLY !== undefined && !GROUPS.includes(ONLY as (typeof GROUPS)[number])) throw new Error(`--only takes one of ${GROUPS.join(', ')}`)
+const runs = (group: (typeof GROUPS)[number]) => ONLY === undefined || ONLY === group
 const VERSION = JSON.parse(await readFile(new URL('../plugin/.claude-plugin/plugin.json', import.meta.url), 'utf8')).version
 const scratch = await mkdtemp(`${tmpdir()}/shared-tcp-`)
 const workerd = new Set<any>(),
@@ -2058,7 +2067,7 @@ async function realChain() {
   // second (850). Batches of 400 every 500 ms let a stall bunch one batch's
   // frames against the next two (about 1,200 in a second), and the room
   // closed the channel for its rate, 1013 "TCP message rate exceeded.".
-  {
+  if (runs('frames')) {
     const FRAMES = 21_000,
       began = Date.now()
     let paced = Date.now()
@@ -2133,6 +2142,263 @@ async function realChain() {
       `ok one connection past 20,000 frames: ${FRAMES} request/response exchanges and ${FRAMES} one-way frames (${((Date.now() - began) / 1000).toFixed(1)} s)`,
     )
   }
+
+  // The browsers group (--only browsers) runs these and WebRTC alone, on the setup above.
+  if (runs('browsers')) {
+    // The isolated preview window, for real: Chrome with the production flags,
+    // and Firefox with the production settings, talk only to the SOCKS proxy,
+    // which routes the Host's port numbers to Guest helpers on OS-assigned
+    // ports. Guest-owned servers hold the same numbers on [::1] and an unshared
+    // port on 127.0.0.1; none of them may see a connection.
+    const probed: any[] = []
+    const realWindow = async (name: string, binary: string, start: any) => {
+      const version = await promisify(execFile)(binary, ['--version'], { timeout: 15_000 }).then(
+        ({ stdout }) => stdout.trim(),
+        () => 'unknown version',
+      )
+      const E = await freePort(),
+        D = await freePort(),
+        U = await freePort(),
+        marker = randomBytes(8).toString('hex')
+      const counts: Record<string, number> = { hostE: 0, hostD: 0, ownE: 0, ownD: 0, ownU: 0 },
+        reports: any[] = [],
+        dependency: any[] = [],
+        upstreamTargets: any[] = []
+      const bodyOf = (req: http.IncomingMessage) =>
+        new Promise<string>(resolve => {
+          const parts: any[] = []
+          req.on('data', (bytes: Buffer) => parts.push(bytes))
+          req.on('end', () => resolve(Buffer.concat(parts).toString()))
+        })
+      const page = `<!doctype html><meta charset="utf-8"><title>Shared preview</title><script>
+  (async () => {
+    const dep = 'http://127.0.0.1:${D}', result = { origin: location.origin, secure: isSecureContext }
+    document.cookie = 'pagejs=J1; Path=/; SameSite=Lax'
+    try { result.api = await (await fetch(dep + '/api')).json() } catch (error) { result.api = 'failed: ' + error }
+    result.ws = await new Promise(resolve => {
+      const timer = setTimeout(() => resolve('timeout'), 10000), ws = new WebSocket('ws://127.0.0.1:${D}/ws')
+      ws.onopen = () => ws.send('ws-ping')
+      ws.onmessage = event => { clearTimeout(timer); resolve('echo:' + event.data); ws.close() }
+      ws.onerror = () => { clearTimeout(timer); resolve('error') }
+    })
+    result.sse = await new Promise(resolve => {
+      const got = [], source = new EventSource(dep + '/events')
+      const timer = setTimeout(() => { source.close(); resolve(got) }, 10000)
+      source.onmessage = event => { got.push(event.data); if (got.length === 2) { clearTimeout(timer); source.close(); resolve(got) } }
+    })
+    result.visible = document.cookie
+    try { result.cookies = (await (await fetch('/cookies')).json()).cookie } catch (error) { result.cookies = 'failed: ' + error }
+    await fetch('/report', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(result) })
+    let unshared = 'reached'
+    try { await fetch('http://127.0.0.1:${U}/', { mode: 'no-cors', cache: 'no-store' }) } catch { unshared = 'refused' }
+    await fetch('/report-final', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ unshared }) })
+  })()
+  </script>`
+      const app = track(
+        http.createServer(async (req, res) => {
+          const text = await bodyOf(req)
+          if (req.url === '/') {
+            res.writeHead(200, {
+              'content-type': 'text/html; charset=utf-8',
+              'cache-control': 'no-store',
+              'set-cookie': 'hostonly=H1; HttpOnly; Path=/; SameSite=Lax',
+            })
+            return res.end(page)
+          }
+          if (req.url === '/cookies') {
+            res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' })
+            return res.end(JSON.stringify({ cookie: req.headers.cookie ?? '' }))
+          }
+          if (req.method === 'POST' && req.url!.startsWith('/report')) {
+            reports.push({ path: req.url, cookie: req.headers.cookie ?? '', body: JSON.parse(text) })
+            res.writeHead(204)
+            return res.end()
+          }
+          res.writeHead(404)
+          res.end()
+        }),
+      )
+      app.on('connection', () => counts.hostE!++)
+      const cors = { 'access-control-allow-origin': `http://localhost:${E}`, vary: 'origin' }
+      const dependencyServer = track(
+        http.createServer((req, res) => {
+          res.on('error', () => {})
+          dependency.push({ url: req.url, origin: req.headers.origin })
+          if (req.url === '/api') {
+            res.writeHead(200, { ...cors, 'content-type': 'application/json' })
+            return res.end(JSON.stringify({ service: 'dependency', marker }))
+          }
+          if (req.url === '/events') {
+            res.writeHead(200, { ...cors, 'content-type': 'text/event-stream', 'cache-control': 'no-store' })
+            res.write('data: one\n\n')
+            return setTimeout(() => {
+              if (!res.destroyed && !res.writableEnded) res.write('data: two\n\n')
+            }, 50)
+          }
+          res.writeHead(404, cors)
+          res.end()
+        }),
+      )
+      dependencyServer.on('connection', () => counts.hostD!++)
+      dependencyServer.on('upgrade', (req: http.IncomingMessage, socket: any, head: any) => {
+        dependency.push({ url: req.url, origin: req.headers.origin, upgrade: true })
+        handshake(req, socket)
+        readFrames(socket, head, (op: any, payload: any) => (op === 8 ? socket.end(frame(8, payload)) : socket.write(frame(op, payload))))
+      })
+      await listen(app, '127.0.0.1', E)
+      await listen(dependencyServer, '127.0.0.1', D)
+      const own = (key: string) => {
+        const server = track(http.createServer((_req, res) => res.end("the Guest's own service")))
+        server.on('connection', () => counts[key]!++)
+        return server
+      }
+      if (ipv6) {
+        await listen(own('ownE'), '::1', E)
+        await listen(own('ownD'), '::1', D)
+      }
+      await listen(own('ownU'), '127.0.0.1', U)
+      // The browser's own background traffic goes to a refusing upstream, not the internet.
+      const refuser = track(
+        net.createServer(socket => {
+          let head = '',
+            answered = false
+          socket.on('data', bytes => {
+            head += bytes.toString('latin1')
+            if (answered || !head.includes('\r\n\r\n')) return
+            answered = true
+            upstreamTargets.push(/^CONNECT (\S+) /.exec(head)?.[1] ?? '?')
+            socket.end('HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n')
+          })
+        }),
+      )
+      const upstreamPort = await listen(refuser)
+      const seat = await api(`${base}/join`, null, { name: `${name} guest` })
+      const pidE = await share(E),
+        pidD = await share(D)
+      const helperE = await ready({ ...forwarding(pidE, seat.token), port: 0, strict: false })
+      const helperD = await ready({ ...forwarding(pidD, seat.token), port: 0, strict: false })
+      assert.ok(
+        [helperE.port, helperD.port].every(port => ![E, D, U].includes(port)),
+        'Guest helpers take OS-assigned ports, never the Host numbers',
+      )
+      const controlToken = randomBytes(32).toString('base64url')
+      const socks = launch(PROXY, { port: 0, controlToken, upstream: { kind: 'http', host: '127.0.0.1', port: upstreamPort, bypass: [] } })
+      await until(() => socks.rows.length || socks.exit, 'browser proxy ready')
+      assert.equal(socks.rows[0]?.state, 'ready', JSON.stringify(socks.rows) + socks.stderr)
+      const [{ port: socksPort, control: controlPort }] = socks.rows
+      assert.equal(
+        (await ipc({ port: controlPort, controlToken }, { op: 'routes', routes: { [E]: helperE.port, [D]: helperD.port }, startable: [] })).status,
+        200,
+      )
+      const profile = await mkdtemp(`${scratch}/${name.toLowerCase()}-`)
+      let browserLog = '',
+        early: any
+      const browser = await start({ socksPort, profile, url: `http://localhost:${E}/` })
+      const exited = new Promise<void>(resolve =>
+        browser.once('exit', (code: any, signal: any) => {
+          early = { code, signal }
+          resolve()
+        }),
+      )
+      browser.once('error', (error: any) => {
+        early = { error: error.message }
+      })
+      for (const stream of [browser.stdout, browser.stderr])
+        stream.on('data', (bytes: Buffer) => {
+          browserLog = (browserLog + bytes).slice(-6000)
+        })
+      try {
+        await until(() => reports.some(r => r.path === '/report-final') || early, 'the page reports through the proxy', 90_000)
+        assert.ok(!early, `${name} stopped early ${JSON.stringify(early)}: ${browserLog}`)
+        const first = reports.find(r => r.path === '/report'),
+          final = reports.find(r => r.path === '/report-final'),
+          result = first.body
+        assert.equal(result.origin, `http://localhost:${E}`, 'the page keeps the Host address as its origin')
+        assert.equal(result.secure, true, 'http://localhost stays a secure context through the proxy')
+        assert.deepEqual(result.api, { service: 'dependency', marker }, 'fetch to 127.0.0.1:D')
+        assert.equal(result.ws, 'echo:ws-ping', 'WebSocket to 127.0.0.1:D')
+        assert.deepEqual(result.sse, ['one', 'two'], 'EventSource to 127.0.0.1:D')
+        assert.equal(result.visible, 'pagejs=J1', 'the HttpOnly cookie stays hidden from the page')
+        for (const cookies of [result.cookies, first.cookie, final.cookie]) {
+          assert.match(cookies, /(^|; )hostonly=H1(;|$)/, 'the HttpOnly cookie round-trips')
+          assert.match(cookies, /(^|; )pagejs=J1(;|$)/, 'the page cookie round-trips')
+        }
+        assert.equal(final.body.unshared, 'refused', 'an unshared loopback port is refused')
+        await until(() => socks.rows.some((r: any) => r.state === 'blocked' && r.port === U), 'blocked reported for the unshared port')
+        for (const port of [E, D, U]) assert.equal(socks.rows.filter((r: any) => r.state === 'seen' && r.port === port).length, 1, `seen once for ${port}`)
+        assert.deepEqual(
+          socks.rows.filter((r: any) => r.state === 'blocked' || r.state === 'want'),
+          [{ state: 'blocked', port: U }],
+        )
+        assert.ok(['/api', '/events'].every(url => dependency.some(hit => hit.url === url)) && dependency.some(hit => hit.upgrade && hit.url === '/ws'))
+        assert.ok(
+          dependency.every(hit => hit.origin === `http://localhost:${E}`),
+          'the dependency sees the page origin unchanged',
+        )
+        // Every Host-side connection is one the worker opened for a tunnel channel.
+        await until(
+          () => counts.hostE === seenTCP.filter(t => t.pid === pidE).length && counts.hostD === seenTCP.filter(t => t.pid === pidD).length,
+          'Host apps see only tunnel connections',
+        )
+        assert.ok(
+          [helperE, helperD].every(log => log.rows.some((r: any) => r.state === 'channel-ready')),
+          'both helpers carried channels',
+        )
+        assert.deepEqual([counts.ownE, counts.ownD, counts.ownU], [0, 0, 0], "the Guest's own servers got zero connections")
+        assert.ok(
+          upstreamTargets.every(target => !/^(localhost|127\.|\[::1\]|\[::ffff:|\[::\]|0\.0\.0\.0)/i.test(target)),
+          'loopback never goes upstream',
+        )
+        for (const target of upstreamTargets) assert.ok(!socks.stdout.includes(target.replace(/:[0-9]+$/, '')), 'proxy stdout carries no outbound names')
+        assert.ok(!socks.stdout.includes(controlToken))
+        // The plugin's own probe finds the window as this one process, its proxy port with it, and its close ends it.
+        if (windowScripts) {
+          const seen = windowScripts.windowOf(await shOut(windowScripts.lockScript(profile)), profile)
+          assert.deepEqual(
+            seen,
+            { pid: browser.pid, port: socksPort, family: name === 'Firefox' ? 'firefox' : 'chromium' },
+            `the plugin finds the ${name} window by its profile`,
+          )
+          // A close for another proxy port (another session's, on a host's profile) leaves it alone.
+          assert.equal((await shOut(windowScripts.killScript(profile, true, socksPort === 65535 ? socksPort - 1 : socksPort + 1))).trim(), '')
+          assert.equal(
+            windowScripts.windowOf(await shOut(windowScripts.lockScript(profile)), profile)?.pid,
+            browser.pid,
+            `the ${name} window on another port is left open`,
+          )
+          assert.equal((await shOut(windowScripts.killScript(profile, true, socksPort))).trim(), 'killed')
+          await Promise.race([exited, pause(10_000)])
+          assert.ok(early, `the ${name} window ended`)
+          assert.equal(await shOut(windowScripts.lockScript(profile)), '', 'nothing holds the profile then')
+          probed.push(name)
+        }
+      } finally {
+        await endBrowser(browser, exited, profile)
+      }
+      for (const log of [helperE, helperD, socks]) await stop(log)
+      await api(`${base}/previews/${pidE}/end`, room.token)
+      await api(`${base}/previews/${pidD}/end`, room.token)
+      await api(`${base}/leave`, seat.token)
+      sharedPorts.delete(E)
+      sharedPorts.delete(D)
+      await until(() => activeHost() === 0, `${name} channels released`, 15_000)
+      console.log(
+        `ok real ${name} window (${version}, production ${name === 'Firefox' ? 'settings' : 'flags'}, headless): origin localhost:${E} + secure context, fetch/WS/SSE to 127.0.0.1 dependency and HttpOnly/page cookies through the tunnel; unshared port refused + blocked; Guest-own ${ipv6 ? '[::1]:E/[::1]:D/' : ''}127.0.0.1:U servers untouched; helpers on OS ports; ${upstreamTargets.length} background requests refused upstream; ${probed.includes(name) ? "the plugin's probe found it by its profile and its close ended it" : "the plugin's probe not run (this Node can't load TypeScript)"}`,
+      )
+    }
+    {
+      const chrome = await findChrome()
+      if (!chrome.path) console.log(`SKIP real browser preview window (${chrome.reason})`)
+      else await realWindow('browser', chrome.path, launchChrome(chrome.path))
+    }
+    {
+      const firefox = await findFirefox()
+      if (!firefox.path) console.log(`SKIP real Firefox preview window (${firefox.reason})`)
+      else await realWindow('Firefox', firefox.path, launchFirefox(firefox.path))
+    }
+  }
+  // The other groups end here; what follows is the rest group's.
+  if (!runs('rest')) return
 
   const appRequests: any[] = [],
     upgrades: any[] = [],
@@ -2452,258 +2718,6 @@ async function realChain() {
     console.log(
       "ok page + fixed-port HTTP/WS/SSE dependency + raw TCP backend; fixed-port conflict leaves its owner and retries exactly, another guest independent, a Stop ends that preview's streams alone, one Host worker",
     )
-  }
-
-  // The isolated preview window, for real: Chrome with the production flags,
-  // and Firefox with the production settings, talk only to the SOCKS proxy,
-  // which routes the Host's port numbers to Guest helpers on OS-assigned
-  // ports. Guest-owned servers hold the same numbers on [::1] and an unshared
-  // port on 127.0.0.1; none of them may see a connection.
-  const probed: any[] = []
-  const realWindow = async (name: string, binary: string, start: any) => {
-    const version = await promisify(execFile)(binary, ['--version'], { timeout: 15_000 }).then(
-      ({ stdout }) => stdout.trim(),
-      () => 'unknown version',
-    )
-    const E = await freePort(),
-      D = await freePort(),
-      U = await freePort(),
-      marker = randomBytes(8).toString('hex')
-    const counts: Record<string, number> = { hostE: 0, hostD: 0, ownE: 0, ownD: 0, ownU: 0 },
-      reports: any[] = [],
-      dependency: any[] = [],
-      upstreamTargets: any[] = []
-    const bodyOf = (req: http.IncomingMessage) =>
-      new Promise<string>(resolve => {
-        const parts: any[] = []
-        req.on('data', (bytes: Buffer) => parts.push(bytes))
-        req.on('end', () => resolve(Buffer.concat(parts).toString()))
-      })
-    const page = `<!doctype html><meta charset="utf-8"><title>Shared preview</title><script>
-(async () => {
-  const dep = 'http://127.0.0.1:${D}', result = { origin: location.origin, secure: isSecureContext }
-  document.cookie = 'pagejs=J1; Path=/; SameSite=Lax'
-  try { result.api = await (await fetch(dep + '/api')).json() } catch (error) { result.api = 'failed: ' + error }
-  result.ws = await new Promise(resolve => {
-    const timer = setTimeout(() => resolve('timeout'), 10000), ws = new WebSocket('ws://127.0.0.1:${D}/ws')
-    ws.onopen = () => ws.send('ws-ping')
-    ws.onmessage = event => { clearTimeout(timer); resolve('echo:' + event.data); ws.close() }
-    ws.onerror = () => { clearTimeout(timer); resolve('error') }
-  })
-  result.sse = await new Promise(resolve => {
-    const got = [], source = new EventSource(dep + '/events')
-    const timer = setTimeout(() => { source.close(); resolve(got) }, 10000)
-    source.onmessage = event => { got.push(event.data); if (got.length === 2) { clearTimeout(timer); source.close(); resolve(got) } }
-  })
-  result.visible = document.cookie
-  try { result.cookies = (await (await fetch('/cookies')).json()).cookie } catch (error) { result.cookies = 'failed: ' + error }
-  await fetch('/report', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(result) })
-  let unshared = 'reached'
-  try { await fetch('http://127.0.0.1:${U}/', { mode: 'no-cors', cache: 'no-store' }) } catch { unshared = 'refused' }
-  await fetch('/report-final', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ unshared }) })
-})()
-</script>`
-    const app = track(
-      http.createServer(async (req, res) => {
-        const text = await bodyOf(req)
-        if (req.url === '/') {
-          res.writeHead(200, {
-            'content-type': 'text/html; charset=utf-8',
-            'cache-control': 'no-store',
-            'set-cookie': 'hostonly=H1; HttpOnly; Path=/; SameSite=Lax',
-          })
-          return res.end(page)
-        }
-        if (req.url === '/cookies') {
-          res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' })
-          return res.end(JSON.stringify({ cookie: req.headers.cookie ?? '' }))
-        }
-        if (req.method === 'POST' && req.url!.startsWith('/report')) {
-          reports.push({ path: req.url, cookie: req.headers.cookie ?? '', body: JSON.parse(text) })
-          res.writeHead(204)
-          return res.end()
-        }
-        res.writeHead(404)
-        res.end()
-      }),
-    )
-    app.on('connection', () => counts.hostE!++)
-    const cors = { 'access-control-allow-origin': `http://localhost:${E}`, vary: 'origin' }
-    const dependencyServer = track(
-      http.createServer((req, res) => {
-        res.on('error', () => {})
-        dependency.push({ url: req.url, origin: req.headers.origin })
-        if (req.url === '/api') {
-          res.writeHead(200, { ...cors, 'content-type': 'application/json' })
-          return res.end(JSON.stringify({ service: 'dependency', marker }))
-        }
-        if (req.url === '/events') {
-          res.writeHead(200, { ...cors, 'content-type': 'text/event-stream', 'cache-control': 'no-store' })
-          res.write('data: one\n\n')
-          return setTimeout(() => {
-            if (!res.destroyed && !res.writableEnded) res.write('data: two\n\n')
-          }, 50)
-        }
-        res.writeHead(404, cors)
-        res.end()
-      }),
-    )
-    dependencyServer.on('connection', () => counts.hostD!++)
-    dependencyServer.on('upgrade', (req: http.IncomingMessage, socket: any, head: any) => {
-      dependency.push({ url: req.url, origin: req.headers.origin, upgrade: true })
-      handshake(req, socket)
-      readFrames(socket, head, (op: any, payload: any) => (op === 8 ? socket.end(frame(8, payload)) : socket.write(frame(op, payload))))
-    })
-    await listen(app, '127.0.0.1', E)
-    await listen(dependencyServer, '127.0.0.1', D)
-    const own = (key: string) => {
-      const server = track(http.createServer((_req, res) => res.end("the Guest's own service")))
-      server.on('connection', () => counts[key]!++)
-      return server
-    }
-    if (ipv6) {
-      await listen(own('ownE'), '::1', E)
-      await listen(own('ownD'), '::1', D)
-    }
-    await listen(own('ownU'), '127.0.0.1', U)
-    // The browser's own background traffic goes to a refusing upstream, not the internet.
-    const refuser = track(
-      net.createServer(socket => {
-        let head = '',
-          answered = false
-        socket.on('data', bytes => {
-          head += bytes.toString('latin1')
-          if (answered || !head.includes('\r\n\r\n')) return
-          answered = true
-          upstreamTargets.push(/^CONNECT (\S+) /.exec(head)?.[1] ?? '?')
-          socket.end('HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n')
-        })
-      }),
-    )
-    const upstreamPort = await listen(refuser)
-    const seat = await api(`${base}/join`, null, { name: `${name} guest` })
-    const pidE = await share(E),
-      pidD = await share(D)
-    const helperE = await ready({ ...forwarding(pidE, seat.token), port: 0, strict: false })
-    const helperD = await ready({ ...forwarding(pidD, seat.token), port: 0, strict: false })
-    assert.ok(
-      [helperE.port, helperD.port].every(port => ![E, D, U].includes(port)),
-      'Guest helpers take OS-assigned ports, never the Host numbers',
-    )
-    const controlToken = randomBytes(32).toString('base64url')
-    const socks = launch(PROXY, { port: 0, controlToken, upstream: { kind: 'http', host: '127.0.0.1', port: upstreamPort, bypass: [] } })
-    await until(() => socks.rows.length || socks.exit, 'browser proxy ready')
-    assert.equal(socks.rows[0]?.state, 'ready', JSON.stringify(socks.rows) + socks.stderr)
-    const [{ port: socksPort, control: controlPort }] = socks.rows
-    assert.equal(
-      (await ipc({ port: controlPort, controlToken }, { op: 'routes', routes: { [E]: helperE.port, [D]: helperD.port }, startable: [] })).status,
-      200,
-    )
-    const profile = await mkdtemp(`${scratch}/${name.toLowerCase()}-`)
-    let browserLog = '',
-      early: any
-    const browser = await start({ socksPort, profile, url: `http://localhost:${E}/` })
-    const exited = new Promise<void>(resolve =>
-      browser.once('exit', (code: any, signal: any) => {
-        early = { code, signal }
-        resolve()
-      }),
-    )
-    browser.once('error', (error: any) => {
-      early = { error: error.message }
-    })
-    for (const stream of [browser.stdout, browser.stderr])
-      stream.on('data', (bytes: Buffer) => {
-        browserLog = (browserLog + bytes).slice(-6000)
-      })
-    try {
-      await until(() => reports.some(r => r.path === '/report-final') || early, 'the page reports through the proxy', 90_000)
-      assert.ok(!early, `${name} stopped early ${JSON.stringify(early)}: ${browserLog}`)
-      const first = reports.find(r => r.path === '/report'),
-        final = reports.find(r => r.path === '/report-final'),
-        result = first.body
-      assert.equal(result.origin, `http://localhost:${E}`, 'the page keeps the Host address as its origin')
-      assert.equal(result.secure, true, 'http://localhost stays a secure context through the proxy')
-      assert.deepEqual(result.api, { service: 'dependency', marker }, 'fetch to 127.0.0.1:D')
-      assert.equal(result.ws, 'echo:ws-ping', 'WebSocket to 127.0.0.1:D')
-      assert.deepEqual(result.sse, ['one', 'two'], 'EventSource to 127.0.0.1:D')
-      assert.equal(result.visible, 'pagejs=J1', 'the HttpOnly cookie stays hidden from the page')
-      for (const cookies of [result.cookies, first.cookie, final.cookie]) {
-        assert.match(cookies, /(^|; )hostonly=H1(;|$)/, 'the HttpOnly cookie round-trips')
-        assert.match(cookies, /(^|; )pagejs=J1(;|$)/, 'the page cookie round-trips')
-      }
-      assert.equal(final.body.unshared, 'refused', 'an unshared loopback port is refused')
-      await until(() => socks.rows.some((r: any) => r.state === 'blocked' && r.port === U), 'blocked reported for the unshared port')
-      for (const port of [E, D, U]) assert.equal(socks.rows.filter((r: any) => r.state === 'seen' && r.port === port).length, 1, `seen once for ${port}`)
-      assert.deepEqual(
-        socks.rows.filter((r: any) => r.state === 'blocked' || r.state === 'want'),
-        [{ state: 'blocked', port: U }],
-      )
-      assert.ok(['/api', '/events'].every(url => dependency.some(hit => hit.url === url)) && dependency.some(hit => hit.upgrade && hit.url === '/ws'))
-      assert.ok(
-        dependency.every(hit => hit.origin === `http://localhost:${E}`),
-        'the dependency sees the page origin unchanged',
-      )
-      // Every Host-side connection is one the worker opened for a tunnel channel.
-      await until(
-        () => counts.hostE === seenTCP.filter(t => t.pid === pidE).length && counts.hostD === seenTCP.filter(t => t.pid === pidD).length,
-        'Host apps see only tunnel connections',
-      )
-      assert.ok(
-        [helperE, helperD].every(log => log.rows.some((r: any) => r.state === 'channel-ready')),
-        'both helpers carried channels',
-      )
-      assert.deepEqual([counts.ownE, counts.ownD, counts.ownU], [0, 0, 0], "the Guest's own servers got zero connections")
-      assert.ok(
-        upstreamTargets.every(target => !/^(localhost|127\.|\[::1\]|\[::ffff:|\[::\]|0\.0\.0\.0)/i.test(target)),
-        'loopback never goes upstream',
-      )
-      for (const target of upstreamTargets) assert.ok(!socks.stdout.includes(target.replace(/:[0-9]+$/, '')), 'proxy stdout carries no outbound names')
-      assert.ok(!socks.stdout.includes(controlToken))
-      // The plugin's own probe finds the window as this one process, its proxy port with it, and its close ends it.
-      if (windowScripts) {
-        const seen = windowScripts.windowOf(await shOut(windowScripts.lockScript(profile)), profile)
-        assert.deepEqual(
-          seen,
-          { pid: browser.pid, port: socksPort, family: name === 'Firefox' ? 'firefox' : 'chromium' },
-          `the plugin finds the ${name} window by its profile`,
-        )
-        // A close for another proxy port (another session's, on a host's profile) leaves it alone.
-        assert.equal((await shOut(windowScripts.killScript(profile, true, socksPort === 65535 ? socksPort - 1 : socksPort + 1))).trim(), '')
-        assert.equal(
-          windowScripts.windowOf(await shOut(windowScripts.lockScript(profile)), profile)?.pid,
-          browser.pid,
-          `the ${name} window on another port is left open`,
-        )
-        assert.equal((await shOut(windowScripts.killScript(profile, true, socksPort))).trim(), 'killed')
-        await Promise.race([exited, pause(10_000)])
-        assert.ok(early, `the ${name} window ended`)
-        assert.equal(await shOut(windowScripts.lockScript(profile)), '', 'nothing holds the profile then')
-        probed.push(name)
-      }
-    } finally {
-      await endBrowser(browser, exited, profile)
-    }
-    for (const log of [helperE, helperD, socks]) await stop(log)
-    await api(`${base}/previews/${pidE}/end`, room.token)
-    await api(`${base}/previews/${pidD}/end`, room.token)
-    await api(`${base}/leave`, seat.token)
-    sharedPorts.delete(E)
-    sharedPorts.delete(D)
-    await until(() => activeHost() === 0, `${name} channels released`, 15_000)
-    console.log(
-      `ok real ${name} window (${version}, production ${name === 'Firefox' ? 'settings' : 'flags'}, headless): origin localhost:${E} + secure context, fetch/WS/SSE to 127.0.0.1 dependency and HttpOnly/page cookies through the tunnel; unshared port refused + blocked; Guest-own ${ipv6 ? '[::1]:E/[::1]:D/' : ''}127.0.0.1:U servers untouched; helpers on OS ports; ${upstreamTargets.length} background requests refused upstream; ${probed.includes(name) ? "the plugin's probe found it by its profile and its close ended it" : "the plugin's probe not run (this Node can't load TypeScript)"}`,
-    )
-  }
-  {
-    const chrome = await findChrome()
-    if (!chrome.path) console.log(`SKIP real browser preview window (${chrome.reason})`)
-    else await realWindow('browser', chrome.path, launchChrome(chrome.path))
-  }
-  {
-    const firefox = await findFirefox()
-    if (!firefox.path) console.log(`SKIP real Firefox preview window (${firefox.reason})`)
-    else await realWindow('Firefox', firefox.path, launchFirefox(firefox.path))
   }
 
   const unavailablePort = await freePort(),
@@ -3253,21 +3267,25 @@ async function webrtcChecks() {
 }
 
 try {
-  await parserChecks()
-  await probeChecks()
-  await detectChecks()
-  await publicRelayChecks()
-  await publicRelayFailures()
-  await bridgeChecks()
-  await listenerChecks()
-  await listenerCapacity()
-  await workerChecks()
+  if (runs('rest')) {
+    await parserChecks()
+    await probeChecks()
+    await detectChecks()
+    await publicRelayChecks()
+    await publicRelayFailures()
+    await bridgeChecks()
+    await listenerChecks()
+    await listenerCapacity()
+    await workerChecks()
+  }
   if (!process.argv.includes('--helpers-only')) {
     await realChain()
-    await webrtcChecks()
+    if (runs('browsers')) await webrtcChecks()
   }
   console.log(
-    process.argv.includes('--helpers-only') ? 'Helper-only tests passed (real server deliberately not exercised).' : 'All local preview TCP tests passed.',
+    process.argv.includes('--helpers-only')
+      ? 'Helper-only tests passed (real server deliberately not exercised).'
+      : `All local preview TCP tests passed${ONLY ? ` (--only ${ONLY})` : ''}.`,
   )
 } finally {
   for (const request of requests) request.destroy()
