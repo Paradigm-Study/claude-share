@@ -6,3 +6,6 @@
 
 # style: format the plugin's TypeScript with oxfmt
 2184e220b6e2ad1fffd3fbca206734c25b3aff0e
+
+# style: format test/ and vitest.config.ts with oxfmt
+e2a1a31d5c8fa789428524e8cd02fb6f12c0423c
