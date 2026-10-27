@@ -16,17 +16,17 @@ import { constants as fsConstants } from 'node:fs'
 import { tmpdir, homedir, networkInterfaces } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { setTimeout as pause } from 'node:timers/promises'
-import helper from '../plugin/relay/local-preview.cjs'
-import wsHelper from '../plugin/relay/ws-relay.cjs'
+import * as helper from '../plugin/relay/local-preview.mts'
+import * as wsHelper from '../plugin/relay/ws-relay.mts'
 import * as ws from '../plugin/relay/ws.mts'
 import * as tcpRelay from '../plugin/relay/tcp-relay.mts'
 import { startWorkerd } from './support/workerd.mjs'
 
 const ROOT = fileURLToPath(new URL('../', import.meta.url))
-const GUEST = fileURLToPath(new URL('../plugin/relay/local-preview.cjs', import.meta.url))
-const HOST = fileURLToPath(new URL('../plugin/relay/tcp-worker.cjs', import.meta.url))
+const GUEST = fileURLToPath(new URL('../plugin/relay/local-preview.mts', import.meta.url))
+const HOST = fileURLToPath(new URL('../plugin/relay/tcp-worker.mts', import.meta.url))
 const PROXY = fileURLToPath(new URL('../plugin/relay/browser-proxy.mts', import.meta.url))
-const PUBLIC = fileURLToPath(new URL('../plugin/relay/ws-relay.cjs', import.meta.url))
+const PUBLIC = fileURLToPath(new URL('../plugin/relay/ws-relay.mts', import.meta.url))
 const VERSION = JSON.parse(await readFile(new URL('../plugin/.claude-plugin/plugin.json', import.meta.url))).version
 const scratch = await mkdtemp(`${tmpdir()}/shared-tcp-`)
 const workerd = new Set(), children = new Set(), servers = new Set(), sockets = new Set(), running = new Set(), websockets = new Set(), requests = new Set()

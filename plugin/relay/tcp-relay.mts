@@ -196,7 +196,7 @@ export function bridge(socket: net.Socket, url: string, headers: Record<string, 
   return { close: () => { finish(1001); ws?.close(1001) }, closed }
 }
 
-// The Host's half of one stream (tcp-worker.cjs runs one per channel): its
+// The Host's half of one stream (tcp-worker.mts runs one per channel): its
 // loopback port, dialled before the room pairs it.
 export function startHost(cfg: any, { emit = notify, signal, timeoutMs = 10_000, onReady = () => {} }: { emit?: Emit; signal?: AbortSignal; timeoutMs?: number; onReady?: () => void } = {}): Bridge {
   if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg) || Object.keys(cfg).some(k => !['port', 'room', 'token', 'version'].includes(k)) || !portOK(cfg.port) || !tokenOK(cfg.token) || typeof cfg.version !== 'string' || !/^[\w.-]{0,64}$/.test(cfg.version)) throw failure('INVALID_CONFIG')

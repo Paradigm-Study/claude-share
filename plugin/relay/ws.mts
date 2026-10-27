@@ -1,5 +1,5 @@
 // Stdlib WebSocket client, shared by the public preview's relay
-// (ws-relay.cjs) and every raw TCP stream (tcp-relay.mts's bridge).
+// (ws-relay.mts) and every raw TCP stream (tcp-relay.mts's bridge).
 // Credentials come from its callers, never argv or addresses. Node 22.18+
 // (its types are stripped as it loads), no deps.
 
