@@ -653,7 +653,7 @@ test("the directory itself, over a store this test can see into, on a clock it s
   const done = data.get(`login:${ada.login}`)
   ok(asked?.status === 'confirm' && done?.status === 'done' && done.account && !('token' in done) && !stored().includes('ssa_'), 'a finished sign-in keeps its account, not a token, until Claude Code collects it')
   const got = (await collect(ada)).data
-  ok(got.status === 'done' && /^ssa_/.test(got.token) && Boolean(got.account?.id) && data.get(`tok:${sha(got.token)}`)?.account === got.account.id && !stored().includes('ssa_') && !data.has(`login:${ada.login}`), "its token is made as it's collected: only the hash is kept, and the sign-in is gone")
+  ok(got.status === 'done' && String(got.token).startsWith('ssa_') && Boolean(got.account?.id) && data.get(`tok:${sha(got.token)}`)?.account === got.account.id && !stored().includes('ssa_') && !data.has(`login:${ada.login}`), "its token is made as it's collected: only the hash is kept, and the sign-in is gone")
   ok((await dir.accountOf(got.token))?.name === 'Ada', 'and it signs Ada in')
   // A provider's own answer (GitHub's, made up here), which may come back
   // without a word from someone who authorized the app before, only asks too.
@@ -678,7 +678,7 @@ test("the directory itself, over a store this test can see into, on a clock it s
   await ghAt('/auth/confirm', { method: 'POST', body: new URLSearchParams({ login: vicLogin, nonce: formOf(backPage).nonce ?? '' }) })
   const second = await (await ghAt(`/auth/github/callback?state=${s2}&code=c2`)).text()
   const vicGot = await ghPoll(vic)
-  ok(says(second, "You're already signed in") && vicGot.status === 'done' && /^ssa_/.test(vicGot.token) && vicGot.account?.name === 'Vic', "another answer for a sign-in already continued leaves it for Claude Code to collect")
+  ok(says(second, "You're already signed in") && vicGot.status === 'done' && String(vicGot.token).startsWith('ssa_') && vicGot.account?.name === 'Vic', "another answer for a sign-in already continued leaves it for Claude Code to collect")
   // The provider's answer shows the code, and so does a second answer before Continue.
   const wyn = sha(secret())
   const [w1, w2] = [await stateOf(wyn), await stateOf(wyn)]
@@ -872,6 +872,6 @@ test("the Worker sends the same sign-in, its Continue included, to its directory
   const done = await at('/auth/confirm', { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ login, nonce: form.nonce ?? '' }) })
   const page = await done.text()
   const got = await poll()
-  ok(early.status === 'confirm' && done.status === 200 && says(page, "You're signed in, Wes") && got.status === 'done' && /^ssa_/.test(got.token) && !JSON.stringify([...kept.values()]).includes('ssa_'), "on the Worker too, the sign-in waits for its Continue, and only the token's hash is stored")
+  ok(early.status === 'confirm' && done.status === 200 && says(page, "You're signed in, Wes") && got.status === 'done' && String(got.token).startsWith('ssa_') && !JSON.stringify([...kept.values()]).includes('ssa_'), "on the Worker too, the sign-in waits for its Continue, and only the token's hash is stored")
   ok(form.code === codeOf(login) && /^frame-ancestors 'none'; script-src 'sha256-[A-Za-z0-9+/]{43}='$/.test(started.headers.get('content-security-policy') ?? ''), 'and its page shows the code, under the same script policy')
 })

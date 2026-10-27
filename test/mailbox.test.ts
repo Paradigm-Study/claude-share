@@ -351,7 +351,7 @@ describe.skipIf(!unix)('the mailbox helper and the receipt writer', () => {
       const [code] = await once(child, 'exit')
       assert.deepEqual([code, out.trim()], [1, '{"state":"error","code":"INVALID_CONFIG"}'])
     }
-    assert.deepEqual((await readdir(dir)).filter(n => /^ss-/.test(n)), [`ss-${'f0'.repeat(16)}.sock`], 'only the fresh leftover the sweep spared remains')
+    assert.deepEqual((await readdir(dir)).filter(n => n.startsWith('ss-')), [`ss-${'f0'.repeat(16)}.sock`], 'only the fresh leftover the sweep spared remains')
   })
   afterAll(async () => {
     own.close(); room.close()

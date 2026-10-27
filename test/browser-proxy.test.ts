@@ -678,7 +678,8 @@ async function outboundChecks() {
     lookupCalls.push(name)
     if (name === 'slow.test') return // Never answers: the proxy's own deadline decides.
     const answer = () => names[name] ? callback(null, [{ address: names[name], family: 4 }]) : callback(Object.assign(new Error('not found'), { code: 'ENOTFOUND' }))
-    name === 'same.test' ? setTimeout(answer, 100) : setImmediate(answer)
+    if (name === 'same.test') setTimeout(answer, 100)
+    else setImmediate(answer)
   }
   const interfaces = () => ({ en0: [{ address: '203.0.113.7', family: 'IPv4', internal: false }] })
   const failing = (code: string) => { const socket = new net.Socket(); setImmediate(() => socket.destroy(Object.assign(new Error('fixture'), { code }))); return socket }
@@ -1214,7 +1215,8 @@ async function dohFixtures() {
     res.setHeader('content-type', 'application/dns-json')
     const send = () => res.end(JSON.stringify({ Status: answer.Status ?? 0, Answer: [{ name: `${name}.`, type: 5, TTL: 60, data: 'cname.test.' }, ...data.map((address: any) => ({ name: `${name}.`, type: type === 'A' ? 1 : 28, TTL: answer.TTL ?? 0, data: address }))] }))
     // A slow name: its authoritative servers take their time; TLS and the request are long done.
-    answer.delay ? setTimeout(send, answer.delay) : send()
+    if (answer.delay) setTimeout(send, answer.delay)
+    else send()
   }))
   ctx.dohPort = await listen(doh)
   // A gate in front of the DoH server: open, it passes through; shut, it holds

@@ -151,7 +151,7 @@ test('bounded bodies before buffering or EOF, host-only shares and post-body roo
   const big = new ReadableStream({ pull(controller) { reads++; assert.equal(reads, 1, 'refused before another chunk or EOF'); controller.enqueue(new TextEncoder().encode('界'.repeat(200_000))) } }, { highWaterMark: 0 })
   assert.equal((await send(w, new Request(request(w, 'previews', w.host, 'POST'), { body: big, duplex: 'half' } as RequestInit))).status, 413)
   for (const text of ['{', '[]', 'null', '"x"']) assert.equal((await call(w, 'previews', w.host, 'POST', text)).status, 400)
-  assert.equal((await send(w, new Request(request(w, 'previews', w.host, 'POST'), { body: new Uint8Array([123, 255, 125]) }))).status, 400)
+  assert.equal((await send(w, new Request(request(w, 'previews', w.host, 'POST'), { method: 'POST', body: new Uint8Array([123, 255, 125]) }))).status, 400)
   for (const port of [0, 65536, 1.5, '43700x']) assert.equal((await call(w, 'previews', w.host, 'POST', { port })).status, 400)
   assert.equal(w.room.previews.size, 0, 'nothing refused was shared')
   // The room changing while a body arrives: nothing is shared.
@@ -223,7 +223,7 @@ test('need: host stream only, never stored or broadcast; 403/401/400/413/410/429
     assert.equal(r.status, 400, JSON.stringify(bad)); assert.equal(r.changed, undefined)
   }
   assert.equal((await answer({ port: 1 }, prober.token)).status, 200)
-  const invalid = await send(w, new Request(request(w, 'need', prober.token, 'POST'), { body: new Uint8Array([123, 255, 125]) }))
+  const invalid = await send(w, new Request(request(w, 'need', prober.token, 'POST'), { method: 'POST', body: new Uint8Array([123, 255, 125]) }))
   assert.equal(invalid.status, 400)
   const declared = held(w, 'need', prober.token)
   declared.req.headers.set('content-length', String(NEED_LIMIT.bodyBytes + 1))
@@ -681,7 +681,7 @@ test("a connection refused for the seat's minute spends nothing of the room's; J
   const flood = new ReadableStream({ pull(controller) { reads++; controller.enqueue(new Uint8Array(1024 * 1024)) } }, { highWaterMark: 0 })
   assert.equal((await send(w, new Request(request(w, 'events', w.host, 'POST'), { body: flood, duplex: 'half' } as RequestInit))).status, 413)
   assert.equal(reads, 2, 'refused once past the bound, read no further')
-  assert.equal((await send(w, new Request(request(w, 'files', w.host, 'POST'), { body: new Uint8Array(10 * 1024 * 1024 + 1) }))).status, 413)
+  assert.equal((await send(w, new Request(request(w, 'files', w.host, 'POST'), { method: 'POST', body: new Uint8Array(10 * 1024 * 1024 + 1) }))).status, 413)
 })
 
 // Events are bounded by their bytes, nested values too (D2-5, server-3): a

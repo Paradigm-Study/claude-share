@@ -40,10 +40,10 @@ function forTest(text: string, containers = false) {
   const lines = []
   let skipping = false
   for (const line of text.split('\n')) {
-    if (/^\[\[containers\]\]/.test(line)) skipping = !containers
-    else if (skipping && /^\[/.test(line)) skipping = false
+    if (line.startsWith('[[containers]]')) skipping = !containers
+    else if (skipping && line.startsWith('[')) skipping = false
     if (skipping) continue
-    if (/^image = /.test(line)) { lines.push(`image = ${JSON.stringify(join(ROOT, 'cloud/Dockerfile'))}`, `image_build_context = ${JSON.stringify(ROOT)}`); continue }
+    if (line.startsWith('image = ')) { lines.push(`image = ${JSON.stringify(join(ROOT, 'cloud/Dockerfile'))}`, `image_build_context = ${JSON.stringify(ROOT)}`); continue }
     lines.push(line.replace(/^main = "(.+)"$/, (_: string, path: string) => `main = ${JSON.stringify(join(ROOT, path))}`))
   }
   return lines.join('\n')
@@ -113,7 +113,7 @@ export async function startWorkerd({ vars = {}, quiet = true, containers = false
     await ready(previewOrigin, preview, logs, 30_000)
   }
   const halt = async () => {
-    await Promise.all(children.map(child => child.exitCode !== null ? null : new Promise(resolve => {
+    await Promise.all(children.map(child => child.exitCode !== null ? Promise.resolve() : new Promise(resolve => {
       child.once('exit', resolve)
       child.kill('SIGTERM')
       setTimeout(() => child.kill('SIGKILL'), 5000).unref()
