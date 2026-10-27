@@ -20,7 +20,7 @@ prompt. So the room server runs the host itself.
    (`POST rooms/:id/cloud`). The room starts the runner and makes the mover
    the room's **approver**. The laptop's session stays in the room as a guest:
    it follows every turn, and its prompts go to the cloud host like anyone's.
-2. **The runner** (`cloud/runner.mjs`, image `cloud/Dockerfile`) lays the
+2. **The runner** (`cloud/runner.mts`, image `cloud/Dockerfile`) lays the
    project out at the path it had on the laptop (so the conversation's paths
    still hold) as a git repository whose first commit is what was moved,
    writes the room into the plugin's own checkpoint, and runs Claude Code

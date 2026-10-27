@@ -1,4 +1,4 @@
-// oxlint (npm run lint), on server/, scripts/, plugin/relay/ and test/ (with
+// oxlint (npm run lint), on server/, scripts/, cloud/, plugin/relay/ and test/ (with
 // vitest.config.ts): its default correctness rules, and, with --type-aware
 // (oxlint-tsgolint, the TypeScript the tsconfigs name), the rules about
 // promises a Durable Object, or a helper's socket, can't afford to drop. Not plugin/hooks: their types are

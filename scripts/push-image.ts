@@ -18,7 +18,7 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 export const imageTag = (root = ROOT) =>
   `r-${createHash('sha256')
     .update(readFileSync(join(root, 'cloud/Dockerfile')))
-    .update(readFileSync(join(root, 'cloud/runner.mjs')))
+    .update(readFileSync(join(root, 'cloud/runner.mts')))
     .digest('hex')
     .slice(0, 10)}`
 

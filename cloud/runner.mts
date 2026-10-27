@@ -18,10 +18,44 @@
 // person's machine (so the conversation's paths still hold) and hand it to
 // the `runner` user; Claude Code runs as that user. Nothing here logs a token.
 import { spawn, execFileSync } from 'node:child_process'
+import type { ChildProcessWithoutNullStreams, ExecFileSyncOptions } from 'node:child_process'
 import { createServer } from 'node:http'
-import { mkdirSync, writeFileSync, chmodSync, chownSync, existsSync, createWriteStream, statSync, renameSync, rmSync, readdirSync, cpSync, readFileSync } from 'node:fs'
+import type { IncomingMessage, ServerResponse } from 'node:http'
+import { mkdirSync, writeFileSync, chmodSync, chownSync, existsSync, createWriteStream, statSync, renameSync, rmSync, cpSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { timingSafeEqual } from 'node:crypto'
+
+// What /start gives (takeConfig checks each), the Claude sign-in among it.
+type Auth = { oauthToken?: string; apiKey?: string; baseUrl?: string; authToken?: string }
+type Config = {
+  server: string
+  room: string
+  token: string
+  session: string
+  cwd: string
+  title: string
+  host: string
+  url: string
+  seq: number
+  model: string
+  // The host's Room as it was: each part checked as it's read (saveCheckpoint).
+  state: { policy?: unknown; trusted?: unknown; shown?: unknown; activity?: unknown; chat?: unknown }
+  auth: Auth
+  plugin: { version: string; source: string } | null
+}
+type Status = {
+  stage: 'waiting' | 'configured' | 'unpacking' | 'running' | 'stopped' | 'failed'
+  claude: 'none' | 'running' | 'exited'
+  ready: boolean
+  started: number
+  restarts: number
+  exitCode: number | string | null
+  // The commit the moved project was laid out as.
+  base?: string
+  plugin?: string
+}
+// What a thrown value says, whatever was thrown.
+const why = (error: unknown) => String((error as { message?: unknown } | null)?.message ?? error)
 
 // The plugin built into the image: what runs when the room's own version
 // can't be had (GitHub unreachable, or older there than the room server).
@@ -38,38 +72,44 @@ if (KEY.length < 32) {
   console.error('runner: SS_CONTROL_KEY must be set (32+ characters)')
   process.exit(2)
 }
-const say = line => console.log(`runner: ${line}`)
+const say = (line: string) => console.log(`runner: ${line}`)
 
 // As root (in the image), the session runs as `runner`; anywhere else (a test
 // on someone's machine), as whoever runs this.
 const asRoot = typeof process.getuid === 'function' && process.getuid() === 0
-const home = asRoot ? USER.home : (process.env.SS_HOME ?? process.env.HOME)
+const home = asRoot ? USER.home : (process.env.SS_HOME ?? process.env.HOME ?? '')
 const configDir = join(home, '.claude')
 const asUser = asRoot ? { uid: USER.uid, gid: USER.gid } : {}
-const own = path => {
+const own = (path: string) => {
   if (asRoot) chownSync(path, USER.uid, USER.gid)
 }
-const makeDir = (path, mode = 0o755) => {
+const makeDir = (path: string, mode = 0o755) => {
   if (!existsSync(path)) mkdirSync(path, { recursive: true, mode })
   chmodSync(path, mode)
   own(path)
 }
-const git = (args, opts = {}) =>
+const git = (args: string[], opts: ExecFileSyncOptions = {}) =>
   execFileSync('git', ['-c', 'user.name=Shared Sessions', '-c', 'user.email=cloud@shared-sessions.invalid', '-c', 'core.quotepath=off', ...args], {
-    cwd: config.cwd,
+    cwd: need().cwd,
     env: { PATH: process.env.PATH, HOME: home },
     maxBuffer: BUNDLE_MAX,
     ...asUser,
     ...opts,
   })
 
-let config = null
-const status = { stage: 'waiting', claude: 'none', ready: false, started: 0, restarts: 0, exitCode: null }
+let config: Config | null = null
+// The room, once /start gave it: what runs after that needs it.
+const need = () => {
+  if (!config) throw new Error('not configured')
+  return config
+}
+const status: Status = { stage: 'waiting', claude: 'none', ready: false, started: 0, restarts: 0, exitCode: null }
 
 // What /start may say. Everything else is ignored.
-function takeConfig(body) {
-  const c = body && typeof body === 'object' ? body : {}
-  const text = (v, max = 4096) => (typeof v === 'string' && v.length <= max ? v : null)
+function takeConfig(body: unknown) {
+  // A sender's JSON: every field is checked as it's read.
+  const c: Record<string, any> = body && typeof body === 'object' ? body : {}
+  const text = (v: unknown, max = 4096) => (typeof v === 'string' && v.length <= max ? v : null)
   const out = {
     server: text(c.server)?.replace(/\/+$/, ''),
     room: text(c.room, 64),
@@ -84,7 +124,10 @@ function takeConfig(body) {
     state: c.state && typeof c.state === 'object' ? c.state : {},
     auth: c.auth && typeof c.auth === 'object' ? c.auth : {},
     // The plugin the room server runs with: its version, and the repository it's released from.
-    plugin: c.plugin && typeof c.plugin === 'object' && /^\d+(\.\d+)*$/.test(String(c.plugin.version)) && /^[\w.-]+\/[\w.-]+$/.test(String(c.plugin.source)) ? { version: String(c.plugin.version), source: String(c.plugin.source) } : null,
+    plugin:
+      c.plugin && typeof c.plugin === 'object' && /^\d+(\.\d+)*$/.test(String(c.plugin.version)) && /^[\w.-]+\/[\w.-]+$/.test(String(c.plugin.source))
+        ? { version: String(c.plugin.version), source: String(c.plugin.source) }
+        : null,
   }
   if (!out.server || !/^https?:\/\//.test(out.server)) return 'server'
   if (!out.room || !/^[A-Za-z0-9_-]{16,64}$/.test(out.room)) return 'room'
@@ -93,13 +136,15 @@ function takeConfig(body) {
   if (!out.cwd || !out.cwd.startsWith('/') || out.cwd.split('/').includes('..') || out.cwd.includes('\0')) return 'cwd'
   const { oauthToken, apiKey, baseUrl, authToken } = out.auth
   if (!(text(oauthToken, 512) || text(apiKey, 512) || (text(baseUrl) && text(authToken, 512)))) return 'auth'
-  config = out
+  // Each field checked above.
+  config = out as Config
   return null
 }
 
 // The project at the path it had, a git repository whose first commit is
 // what was moved, and the conversation where Claude Code keeps it.
 function layOut() {
+  const config = need()
   if (asRoot) {
     // Each level made and handed over, so `runner` can work in the leaf.
     let path = ''
@@ -137,6 +182,7 @@ function layOut() {
 
 // The room, saved where the plugin takes a host's room back from.
 function saveCheckpoint() {
+  const config = need()
   makeDir(configDir, 0o700)
   const dir = join(configDir, 'shared-session')
   makeDir(dir, 0o700)
@@ -146,7 +192,17 @@ function saveCheckpoint() {
   const s = config.state
   const hosting = {
     at: now,
-    room: { server: config.server, id: config.room, url: config.url, title: config.title, host: config.host, token: config.token, seat: 'host', seq: config.seq, since: now },
+    room: {
+      server: config.server,
+      id: config.room,
+      url: config.url,
+      title: config.title,
+      host: config.host,
+      token: config.token,
+      seat: 'host',
+      seq: config.seq,
+      since: now,
+    },
     policy: s.policy && typeof s.policy === 'object' ? s.policy : { prompts: 'everyone', approvals: 'edits', files: 'on' },
     trusted: Array.isArray(s.trusted) ? s.trusted : [],
     shares: {},
@@ -165,12 +221,13 @@ function saveCheckpoint() {
 // The plugin the room server runs with, so the image needn't be rebuilt for
 // each release: its repository's main, as the plugin's own updates take it,
 // used when it's at least the server's version; else the built-in one.
-const newer = (a, b) => {
-  const x = a.split('.').map(Number), y = b.split('.').map(Number)
+const newer = (a: string, b: string) => {
+  const x = a.split('.').map(Number),
+    y = b.split('.').map(Number)
   for (let i = 0; i < Math.max(x.length, y.length); i++) if ((x[i] ?? 0) !== (y[i] ?? 0)) return (x[i] ?? 0) > (y[i] ?? 0)
   return false
 }
-const versionOf = dir => {
+const versionOf = (dir: string) => {
   try {
     return String(JSON.parse(readFileSync(join(dir, '.claude-plugin', 'plugin.json'), 'utf8')).version ?? '')
   } catch {
@@ -178,7 +235,7 @@ const versionOf = dir => {
   }
 }
 async function takePlugin() {
-  const want = config.plugin
+  const want = need().plugin
   const built = versionOf(BUILT_IN)
   status.plugin = built
   if (!want || !newer(want.version, built)) return
@@ -196,17 +253,17 @@ async function takePlugin() {
     plugin = join(dir, 'plugin')
     status.plugin = got
   } catch (error) {
-    say(`the room runs ${want.version}; using the built-in ${built} (${String(error?.message ?? error).slice(0, 120)})`)
+    say(`the room runs ${want.version}; using the built-in ${built} (${why(error).slice(0, 120)})`)
   }
 }
 
 // Claude Code keeps a session's conversation under its folder's name.
-const projectDir = () => join(configDir, 'projects', config.cwd.replace(/[^a-zA-Z0-9]/g, '-'))
-const hasConversation = () => existsSync(join(projectDir(), `${config.session}.jsonl`))
+const projectDir = () => join(configDir, 'projects', need().cwd.replace(/[^a-zA-Z0-9]/g, '-'))
+const hasConversation = () => existsSync(join(projectDir(), `${need().session}.jsonl`))
 
 // What the session sees: Claude Code's own access, never the control key.
 function sessionEnv() {
-  const env = {
+  const env: NodeJS.ProcessEnv = {
     PATH: process.env.PATH,
     HOME: home,
     CLAUDE_CONFIG_DIR: configDir,
@@ -215,7 +272,7 @@ function sessionEnv() {
     SHARED_SESSION_RUNNER: '1',
     LANG: 'C.UTF-8',
   }
-  const a = config.auth
+  const a = need().auth
   if (a.oauthToken) env.CLAUDE_CODE_OAUTH_TOKEN = a.oauthToken
   else if (a.apiKey) env.ANTHROPIC_API_KEY = a.apiKey
   else {
@@ -233,27 +290,33 @@ function logStream() {
   return createWriteStream(LOG, { flags: 'a', mode: 0o600 })
 }
 
-let child = null
+let child: ChildProcessWithoutNullStreams | null = null
 let stopping = false
 
 function startClaude() {
+  const config = need()
   const args = [
     '-p',
-    '--input-format', 'stream-json',
-    '--output-format', 'stream-json',
+    '--input-format',
+    'stream-json',
+    '--output-format',
+    'stream-json',
     '--verbose',
     ...(hasConversation() ? ['--resume', config.session] : ['--session-id', config.session]),
-    '--plugin-dir', plugin,
-    '--permission-mode', 'bypassPermissions',
+    '--plugin-dir',
+    plugin,
+    '--permission-mode',
+    'bypassPermissions',
     '--allow-dangerously-skip-permissions',
     ...(config.model ? ['--model', config.model] : []),
   ]
   const out = logStream()
-  child = spawn('claude', args, { cwd: config.cwd, env: sessionEnv(), stdio: ['pipe', 'pipe', 'pipe'], ...asUser })
+  const claude = spawn('claude', args, { cwd: config.cwd, env: sessionEnv(), stdio: ['pipe', 'pipe', 'pipe'], ...asUser })
+  child = claude
   status.claude = 'running'
   status.started = Date.now()
   let tail = ''
-  child.stdout.on('data', chunk => {
+  claude.stdout.on('data', (chunk: Buffer) => {
     out.write(chunk)
     // The plugin says it has the room once its takeover has read it.
     if (!status.ready) {
@@ -261,10 +324,10 @@ function startClaude() {
       if (/Still sharing this session/.test(tail)) status.ready = true
     }
   })
-  child.stderr.pipe(out, { end: false })
+  claude.stderr.pipe(out, { end: false })
   // Its stdin stays open: a headless session lives while it can read.
-  child.stdin.on('error', () => {})
-  child.on('exit', (code, signal) => {
+  claude.stdin.on('error', () => {})
+  claude.on('exit', (code, signal) => {
     status.claude = 'exited'
     status.exitCode = code ?? signal
     status.ready = false
@@ -287,27 +350,28 @@ function changes() {
 
 async function stopClaude() {
   stopping = true
-  if (!child) return
-  const gone = new Promise(resolve => child.once('exit', resolve))
-  child.kill('SIGTERM')
+  const running = child
+  if (!running) return
+  const gone = new Promise(resolve => running.once('exit', resolve))
+  running.kill('SIGTERM')
   await Promise.race([gone, new Promise(r => setTimeout(r, 5_000))])
   child?.kill('SIGKILL')
 }
 
-const authorized = req => {
+const authorized = (req: IncomingMessage) => {
   const given = Buffer.from(String(req.headers.authorization ?? ''))
   const want = Buffer.from(`Bearer ${KEY}`)
   return given.length === want.length && timingSafeEqual(given, want)
 }
-const reply = (res, code, body) => {
+const reply = (res: ServerResponse, code: number, body: unknown) => {
   res.writeHead(code, { 'content-type': 'application/json' })
   res.end(JSON.stringify(body))
 }
-const readAll = (req, max) =>
-  new Promise((resolve, reject) => {
-    const parts = []
+const readAll = (req: IncomingMessage, max: number) =>
+  new Promise<Buffer>((resolve, reject) => {
+    const parts: Buffer[] = []
     let size = 0
-    req.on('data', c => {
+    req.on('data', (c: Buffer) => {
       size += c.length
       if (size > max) {
         reject(new Error('too large'))
@@ -318,13 +382,13 @@ const readAll = (req, max) =>
     req.on('error', reject)
   })
 
-const control = createServer(async (req, res) => {
+async function handle(req: IncomingMessage, res: ServerResponse) {
   if (!authorized(req)) return reply(res, 401, { error: 'unauthorized' })
   try {
     if (req.method === 'GET' && req.url === '/health') return reply(res, 200, { ...status, base: undefined })
     if (req.method === 'POST' && req.url === '/start') {
       if (status.stage !== 'waiting') return reply(res, 409, { error: 'already started' })
-      let body
+      let body: unknown
       try {
         body = JSON.parse((await readAll(req, CONFIG_MAX)).toString())
       } catch {
@@ -341,12 +405,14 @@ const control = createServer(async (req, res) => {
       rmSync(STAGE, { recursive: true, force: true })
       mkdirSync(STAGE, { recursive: true, mode: 0o700 })
       // Unpacked as it arrives, bounded; members outside the stage are refused by tar.
-      await new Promise((resolve, reject) => {
+      await new Promise<void>((resolve, reject) => {
         const tar = spawn('tar', ['-xzf', '-', '--no-same-owner', '--no-same-permissions', '-C', STAGE], { stdio: ['pipe', 'ignore', 'pipe'] })
         let size = 0
         let err = ''
-        tar.stderr.on('data', c => { err = (err + c).slice(-2000) })
-        req.on('data', c => {
+        tar.stderr.on('data', c => {
+          err = (err + c).slice(-2000)
+        })
+        req.on('data', (c: Buffer) => {
           size += c.length
           if (size > BUNDLE_MAX) {
             tar.kill()
@@ -382,15 +448,14 @@ const control = createServer(async (req, res) => {
     reply(res, 404, { error: 'not found' })
   } catch (error) {
     status.stage = status.stage === 'unpacking' ? 'failed' : status.stage
-    reply(res, 500, { error: String(error?.message ?? error).slice(0, 300) })
+    reply(res, 500, { error: why(error).slice(0, 300) })
   }
-})
+}
+// Each request's promise is its own: handle answers every failure itself.
+const control = createServer((req, res) => void handle(req, res))
 
 for (const signal of ['SIGTERM', 'SIGINT']) {
-  process.on(signal, async () => {
-    await stopClaude()
-    process.exit(0)
-  })
+  process.on(signal, () => void stopClaude().then(() => process.exit(0)))
 }
 
 control.listen(Number(process.env.SS_PORT ?? 8080), () => say('waiting for the room'))

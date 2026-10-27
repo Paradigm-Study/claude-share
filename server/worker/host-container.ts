@@ -3,7 +3,7 @@
 import { json, token } from '../core/index.ts'
 import type { ServerEnv } from './env.ts'
 
-// One room's cloud host: a container running cloud/runner.mjs. It starts the
+// One room's cloud host: a container running cloud/runner.mts. It starts the
 // container with a control key of its own, hands the runner the room and the
 // session over the container's port (never a public address), streams it the
 // packed session against the ticket the room minted, and stops it, answering
