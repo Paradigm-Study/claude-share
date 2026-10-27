@@ -3,6 +3,7 @@ node_modules/
 plugin/.claude/
 # Written by `npm run typecheck:server` (wrangler types) from wrangler.toml.
 server/worker-configuration.d.ts
+test/worker-runtime.d.ts
 rooms.json
 rooms.json.tcp
 # Written by scripts/setup.ts deploy for another Cloudflare account.

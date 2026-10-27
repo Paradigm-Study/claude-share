@@ -22,8 +22,7 @@ const env: Record<string, string | undefined> = { HOME: process.env.HOME, PATH: 
 for (const key of ['ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY']) if (process.env[key]) env[key] = process.env[key]
 const args = ['-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--model', process.env.MODEL ?? 'claude-haiku-4-5-20251001', '--debug-file', join(dir, `${name}.debug.log`)]
 if (process.env.PLUGIN_DIR) args.push('--plugin-dir', process.env.PLUGIN_DIR)
-// A cast: the Worker's types (server/worker-configuration.d.ts) say process.env holds its vars.
-const child = spawn(process.env.CLAUDE_BIN ?? 'claude', args, { cwd, env: env as NodeJS.ProcessEnv })
+const child = spawn(process.env.CLAUDE_BIN ?? 'claude', args, { cwd, env })
 const note = (line: string) => appendFileSync(log, `${new Date().toISOString().slice(11, 19)} ${line}\n`)
 
 let buffer = ''

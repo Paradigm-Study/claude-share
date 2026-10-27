@@ -103,8 +103,7 @@ function session(name: string, cwd: string, extraArgs: string[] = [], logName = 
       join(WORK, `${logName}.debug.log`),
       ...extraArgs,
     ],
-    // A cast: the Worker's types (server/worker-configuration.d.ts) say process.env holds its vars.
-    { cwd, env: env as NodeJS.ProcessEnv, stdio: ['pipe', 'pipe', 'pipe'] },
+    { cwd, env, stdio: ['pipe', 'pipe', 'pipe'] },
   )
   children.push(child)
   const out = createWriteStream(join(WORK, `${logName}.stream.jsonl`))
