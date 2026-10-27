@@ -1,10 +1,12 @@
 // The suites in test/, checked as the server is (server/tsconfig.json), with
 // Node's types: they run on Node, under Vitest (npm run typecheck:test), and
-// the Worker's, for the server they load (wrangler writes them).
+// workerd's runtime types, for the server they load. Those are written
+// without the Worker's Env (wrangler types --include-env=false): its vars
+// would be required keys of Node's process.env here.
 {
   "extends": "../server/tsconfig.json",
   // noUncheckedIndexedAccess is the server's alone until the suites' move to
   // Vitest is done: then they take it too.
   "compilerOptions": { "types": ["node"], "noUncheckedIndexedAccess": false },
-  "include": ["../server/worker-configuration.d.ts", "**/*.ts", "../vitest.config.ts"]
+  "include": ["worker-runtime.d.ts", "**/*.ts", "../vitest.config.ts"]
 }

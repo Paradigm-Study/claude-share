@@ -1,5 +1,5 @@
-// Standalone Node 22.18+ checks for plugin/relay/discover.mts: no model, deps or network.
-//   node test/discover.mjs
+// Checks for plugin/relay/discover.mts: no model, deps or network.
+//   npx vitest run test/discover.test.ts
 // Parser fixtures first, then real listeners started here: a temp git project
 // with web services, a silent one, raw TCP, a fake debugger, Node's inspector
 // and fake plugin relays, plus a server outside the project. Only the project's
@@ -9,6 +9,8 @@
 // here is removed.
 import assert from 'node:assert/strict'
 import net from 'node:net'
+import type { AddressInfo } from 'node:net'
+import type { ChildProcess } from 'node:child_process'
 import os from 'node:os'
 import path from 'node:path'
 import { spawn, execFileSync } from 'node:child_process'
@@ -16,20 +18,23 @@ import { once } from 'node:events'
 import { mkdtemp, mkdir, writeFile, copyFile, rm, realpath } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 import { setTimeout as pause } from 'node:timers/promises'
+import { afterAll, beforeAll, test } from 'vitest'
 import * as discover from '../plugin/relay/discover.mts'
 
 const HELPER = fileURLToPath(new URL('../plugin/relay/discover.mts', import.meta.url))
-const children = new Set()
+const children = new Set<ChildProcess>()
 const SECRET = `argv-secret-${process.pid}-${Date.now()}`
-let scratch
+let scratch = ''
 
-async function until(check, label, ms = 5000) {
+async function until(check: () => unknown, label: string, ms = 5000) {
   const end = Date.now() + ms
   while (Date.now() < end) { if (check()) return; await pause(10) }
   throw new Error(`Timed out: ${label}`)
 }
-function helper(input, env = process.env) {
-  return new Promise((resolve, reject) => {
+// The helper run once: what it printed, how it ended, and how long it took.
+type Run = { code: number | null, signal: NodeJS.Signals | null, stdout: string, stderr: string, ms: number }
+function helper(input: unknown, env = process.env) {
+  return new Promise<Run>((resolve, reject) => {
     const began = Date.now()
     const child = spawn(process.execPath, [HELPER], { env, stdio: ['pipe', 'pipe', 'pipe'] })
     children.add(child)
@@ -42,13 +47,15 @@ function helper(input, env = process.env) {
     child.stdin.end(typeof input === 'string' ? input : JSON.stringify(input))
   })
 }
-const labelOK = label => assert.ok(typeof label === 'string' && label.length > 0 && Array.from(label).length <= 40 && !label.includes('/') && !/[\0-\x1f]/.test(label), `label ${JSON.stringify(label)}`)
+// Stand-ins for discover.mts's adapters: only what each check reaches.
+const asAdapters = (adapters: object) => adapters as unknown as Record<string, discover.Adapter>
+const labelOK = (label: unknown) => assert.ok(typeof label === 'string' && label.length > 0 && Array.from(label).length <= 40 && !label.includes('/') && !/[\0-\x1f]/.test(label), `label ${JSON.stringify(label)}`)
 // One JSON row of the contract's fields and nothing else: no paths, argv or user names.
-function answer(result, secrets = []) {
+function answer(result: Run, secrets: (string | undefined)[] = []) {
   assert.equal(result.stderr, '', 'nothing on stderr')
   assert.equal(result.code, 0, result.stdout)
   assert.match(result.stdout, /^[^\n]+\n$/, 'exactly one line')
-  for (const secret of secrets.filter(secret => secret && secret.length >= 3)) assert.ok(!result.stdout.includes(secret), `stdout leaks ${secret}`)
+  for (const secret of secrets.filter((secret): secret is string => Boolean(secret && secret.length >= 3))) assert.ok(!result.stdout.includes(secret), `stdout leaks ${secret}`)
   const row = JSON.parse(result.stdout)
   assert.deepEqual(Object.keys(row), ['state', 'platform', 'target', 'related'])
   assert.equal(row.state, 'done')
@@ -66,17 +73,17 @@ function answer(result, secrets = []) {
     assert.ok(['yes', 'slow'].includes(item.web))
     labelOK(item.label)
   }
-  assert.deepEqual(row.related.map(item => item.port), row.related.map(item => item.port).sort((a, b) => a - b), 'related sorted by port')
+  assert.deepEqual(row.related.map((item: any) => item.port), row.related.map((item: any) => item.port).sort((a: number, b: number) => a - b), 'related sorted by port')
   return row
 }
 
 // Owner mode's one row: who holds the port, never paths, argv or user names;
 // with `web` (a need's look), what the port answers too.
-function ownerAnswer(result, secrets = [], web = false) {
+function ownerAnswer(result: Run, secrets: (string | undefined)[] = [], web = false) {
   assert.equal(result.stderr, '', 'nothing on stderr')
   assert.equal(result.code, 0, result.stdout)
   assert.match(result.stdout, /^[^\n]+\n$/, 'exactly one line')
-  for (const secret of secrets.filter(secret => secret && secret.length >= 3)) assert.ok(!result.stdout.includes(secret), `stdout leaks ${secret}`)
+  for (const secret of secrets.filter((secret): secret is string => Boolean(secret && secret.length >= 3))) assert.ok(!result.stdout.includes(secret), `stdout leaks ${secret}`)
   const row = JSON.parse(result.stdout)
   assert.deepEqual(Object.keys(row), ['state', 'platform', 'target', 'related'])
   assert.equal(row.state, 'done')
@@ -140,13 +147,13 @@ function parserChecks() {
   assert.deepEqual(discover.parseProcNet(tcp6, true, 'LE').map(row => [row.address, row.port, row.inode]), [
     ['::1', 3000, '52001'], ['::', 3610, '52002'], ['::ffff:127.0.0.1', 8080, '52003'], ['fe80::5254:ff:fed1:a201', 22, '52004'],
   ], 'IPv6 rows only, v4-mapped readable')
-  for (const [address, open] of [['*', true], ['0.0.0.0', true], ['::', true], ['::1', true], ['127.0.0.1', true], ['127.9.8.7', true], ['::ffff:127.0.0.1', true], ['192.168.1.5', false], ['10.0.0.1', false], ['fe80::1%lo0', false], ['::ffff:10.0.0.1', false], ['fe80::5254:ff:fed1:a201', false]]) assert.equal(discover.exposed(address), open, address)
+  for (const [address, open] of [['*', true], ['0.0.0.0', true], ['::', true], ['::1', true], ['127.0.0.1', true], ['127.9.8.7', true], ['::ffff:127.0.0.1', true], ['192.168.1.5', false], ['10.0.0.1', false], ['fe80::1%lo0', false], ['::ffff:10.0.0.1', false], ['fe80::5254:ff:fed1:a201', false]] as [string, boolean][]) assert.equal(discover.exposed(address), open, address)
   const ports = discover.byPort([{ pid: 20, port: 4000, address: '::1' }, { pid: 30, port: 4000, address: '127.0.0.1' }, { pid: 10, port: 4000, address: '127.0.0.2' }, { pid: 5, port: 5000, address: '*' }, { pid: 3, port: 5000, address: '*' }, { pid: 9, port: 6000, address: '::1' }, { pid: 8, port: 6000, address: '::' }])
   assert.deepEqual([...ports].map(([port, row]) => [port, row.pid]), [[4000, 30], [5000, 3], [6000, 8]], 'the listener the relay reaches first, then the lowest pid')
   console.log('ok lsof -F (u/L ownership, *, [::1], IPv4, v4-mapped, connected/LAN skipped), cwd/ps parsing, /proc/net/tcp{,6} both byte orders, loopback/wildcard and per-port choice')
 
-  const text = (value, name, exists) => discover.labelOf(name, discover.commandOf({ text: value }, name), exists)
-  const argv = (value, name) => discover.labelOf(name, discover.commandOf({ argv: value }, name))
+  const text = (value: string, name: string, exists?: (file: string) => boolean) => discover.labelOf(name, discover.commandOf({ text: value }, name), exists)
+  const argv = (value: string[], name: string) => discover.labelOf(name, discover.commandOf({ argv: value }, name))
   assert.equal(text('next-server (v16.3.8) ', 'node'), 'next-server')
   assert.equal(text('/Users/x/.cache/convex/binaries/p/convex-local-backend --port 3610 --instance-secret abc', 'convex-local-backend'), 'convex-local-backend')
   assert.equal(text('/opt/homebrew/bin/node /Users/x/proj/scripts/dev-frontend.mjs --port 3001', 'node'), 'dev-frontend.mjs')
@@ -212,8 +219,8 @@ function parserChecks() {
   assert.equal(discover.usableRoot('/home', '/home/u'), false)
   assert.equal(discover.usableRoot('proj', '/home/u'), false)
   assert.equal(discover.usableRoot('/home/u/proj', '/home/u'), true)
-  for (const [body, yes] of [['{"webSocketDebuggerUrl":"ws://127.0.0.1/devtools/browser/x"}', true], ['{"Browser":"node.js/v24.0.0","Protocol-Version":"1.1"}', true], ['{"Browser":"x"}', false], ['{"ok":false}', false], ['[]', false], ['not json', false], [undefined, false]]) assert.equal(discover.devtoolsBody(body), yes, body)
-  const many = [9, 3, 7, 1, 5, 2, 8].map(port => ({ port, label: 'x', web: port === 1 || port === 2 ? 'slow' : 'yes' }))
+  for (const [body, yes] of [['{"webSocketDebuggerUrl":"ws://127.0.0.1/devtools/browser/x"}', true], ['{"Browser":"node.js/v24.0.0","Protocol-Version":"1.1"}', true], ['{"Browser":"x"}', false], ['{"ok":false}', false], ['[]', false], ['not json', false], [undefined, false]] as [string | undefined, boolean][]) assert.equal(discover.devtoolsBody(body), yes, body)
+  const many = [9, 3, 7, 1, 5, 2, 8].map(port => ({ port, label: 'x', web: port === 1 || port === 2 ? 'slow' : 'yes' })) as Parameters<typeof discover.pick>[0]
   assert.deepEqual(discover.pick(many).map(row => `${row.port}${row.web[0]}`), ['1s', '3y', '5y', '7y', '8y', '9y'], 'answering first, then the lowest slow one; six, by port')
   assert.deepEqual(discover.pick([{ port: 4, label: 'x', web: 'yes', pid: 42 }, { port: 3, label: 'x', web: 'slow', pid: 42 }]), [{ port: 3, label: 'x', web: 'slow', pid: 42 }, { port: 4, label: 'x', web: 'yes', pid: 42 }], "each keeps its listener's pid")
   console.log('ok project root bounds (/, home, its parents, relative), DevTools bodies (Chrome, Node inspector) and the six-row pick, pids kept')
@@ -239,27 +246,27 @@ async function configChecks() {
     assert.equal(result.stderr, '')
   }
 
-  const rows = []
+  const rows: unknown[] = []
   await discover.start(good, { emit: row => rows.push(row), platform: 'win32' })
   assert.deepEqual(rows, [{ state: 'done', platform: 'unsupported', target: null, related: [] }], 'other platforms answer, not fail')
   const owner = { port: 3000, pluginRoot: '/opt/plug', owner: true }
   for (const cfg of [owner, { ...owner, exclude: [] }, { ...owner, deadlineMs: 1000 }, { ...owner, web: true }]) assert.doesNotThrow(() => discover.configOf(cfg))
   assert.equal(discover.configOf(owner).deadlineMs, 2000, "owner mode's own deadline")
   assert.equal(discover.configOf(good).deadlineMs, 8000)
-  const ownerRows = []
+  const ownerRows: unknown[] = []
   await discover.start(owner, { emit: row => ownerRows.push(row), platform: 'win32' })
   assert.deepEqual(ownerRows, [{ state: 'done', platform: 'unsupported', target: null, related: [] }], 'owner mode on other platforms: unsupported, not fail')
 
   // Owner mode through an adapter as Linux's answers (argv from /proc/<pid>/cmdline): the port is
   // asked for, every holder's command read, and null when one couldn't be.
-  const asked = []
-  const fake = (listeners, commands) => ({ fake: {
-    listeners: async (_ctx, port) => { asked.push(port); return listeners },
-    commands: async pids => new Map(pids.filter(pid => commands[pid]).map(pid => [pid, { argv: commands[pid] }])),
+  const asked: number[] = []
+  const fake = (listeners: discover.Listener[] | null, commands: Record<number, string[]>) => asAdapters({ fake: {
+    listeners: async (_ctx: discover.Ctx, port: number) => { asked.push(port); return listeners },
+    commands: async (pids: number[]) => new Map(pids.filter(pid => commands[pid]).map(pid => [pid, { argv: commands[pid] }])),
     cwds: async () => { throw new Error('owner mode reads no cwd') },
   } })
   const holding = [{ pid: 41, port: 3000, address: '127.0.0.1', name: 'node', names: ['node'] }, { pid: 42, port: 3000, address: '::1', name: 'node', names: ['node'] }, { pid: 43, port: 4000, address: '127.0.0.1', name: 'next-server', names: ['next-server'] }]
-  const ownerOf = async (listeners, commands, cfg = owner) => { const out = []; await discover.start(cfg, { emit: row => out.push(row), platform: 'fake', adapters: fake(listeners, commands) }); return out }
+  const ownerOf = async (listeners: discover.Listener[] | null, commands: Record<number, string[]>, cfg = owner) => { const out: unknown[] = []; await discover.start(cfg, { emit: row => out.push(row), platform: 'fake', adapters: fake(listeners, commands) }); return out }
   assert.deepEqual(await ownerOf(holding, { 41: ['/usr/bin/node', '/srv/app/server.js'], 42: ['/usr/bin/node', '/home/u/.claude/shared-session/plugin/relay/local-preview.cjs'] }), [{ state: 'done', platform: 'fake', target: { port: 3000, label: 'server.js', relay: true }, related: [] }], 'any holder a helper, on either family')
   assert.deepEqual(await ownerOf(holding.slice(0, 1), { 41: ['/usr/bin/node', '/opt/plug/relay/anything.cjs'] }), [{ state: 'done', platform: 'fake', target: { port: 3000, label: 'anything.cjs', relay: true }, related: [] }], "under the caller's own relay/")
   assert.deepEqual(await ownerOf(holding, { 41: ['/usr/bin/node', '/srv/app/server.js'], 42: ['/usr/bin/node', '/srv/app/server.js'] }), [{ state: 'done', platform: 'fake', target: { port: 3000, label: 'server.js', relay: false }, related: [] }])
@@ -268,11 +275,11 @@ async function configChecks() {
   assert.deepEqual(await ownerOf(null, {}), [{ state: 'done', platform: 'fake', target: { port: 3000, label: 'unknown', relay: null }, related: [] }], "a listing that failed or ran out of time: can't tell, never nobody")
   assert.deepEqual(asked, [3000, 3000, 3000, 3000, 3000, 3000])
   // A listing still running at the deadline (the backstop answers) is can't tell too.
-  const lateRows = []
-  await discover.start({ ...owner, deadlineMs: 1000 }, { emit: row => lateRows.push(row), platform: 'fake', adapters: { fake: { listeners: () => new Promise(resolve => setTimeout(() => resolve([]), 1200)), commands: async () => new Map() } } })
+  const lateRows: unknown[] = []
+  await discover.start({ ...owner, deadlineMs: 1000 }, { emit: row => lateRows.push(row), platform: 'fake', adapters: asAdapters({ fake: { listeners: () => new Promise(resolve => setTimeout(() => resolve([]), 1200)), commands: async () => new Map() } }) })
   assert.deepEqual(lateRows, [{ state: 'done', platform: 'fake', target: { port: 3000, label: 'unknown', relay: null }, related: [] }], 'the backstop says can\'t tell')
   // Whether a command ran to its end: exit 0 or 1 (lsof's nothing matched) answers; anything else doesn't.
-  const ctx = () => ({ end: Date.now() + 5000, closed: false, pending: new Set() })
+  const ctx = (): discover.Ctx => ({ end: Date.now() + 5000, closed: false, pending: new Set() })
   assert.deepEqual(await discover.execAnswer('/bin/sh', ['-c', 'echo hi'], ctx(), 2000), { out: 'hi\n', ok: true })
   assert.deepEqual(await discover.execAnswer('/bin/sh', ['-c', 'exit 1'], ctx(), 2000), { out: '', ok: true })
   assert.deepEqual(await discover.execAnswer('/bin/sh', ['-c', 'exit 2'], ctx(), 2000), { out: '', ok: false })
@@ -280,8 +287,8 @@ async function configChecks() {
   assert.deepEqual(await discover.execAnswer('/nonexistent/lsof', [], ctx(), 2000), { out: '', ok: false }, 'never started')
   console.log("ok owner mode's stdin (owner true or absent, no exclude but [], its own 2 s deadline), unsupported platform, holders through an adapter (a helper on either family, under its own root, none, unreadable, another port's), a listing failed or late is can't tell, exit status read")
   // A listing that never returns still answers by the deadline; an abort prints nothing.
-  const stuck = { stuck: { listeners: () => new Promise(() => {}) } }
-  const late = [], aborted = [], controller = new AbortController(), began = Date.now()
+  const stuck = asAdapters({ stuck: { listeners: () => new Promise(() => {}) } })
+  const late: { row: any, ms: number }[] = [], aborted: unknown[] = [], controller = new AbortController(), began = Date.now()
   void discover.start({ ...good, deadlineMs: 1000 }, { emit: row => late.push({ row, ms: Date.now() - began }), platform: 'stuck', adapters: stuck })
   void discover.start({ ...good, deadlineMs: 1000 }, { emit: row => aborted.push(row), platform: 'stuck', adapters: stuck, signal: controller.signal })
   controller.abort()
@@ -315,7 +322,9 @@ Promise.all(hosts.map(host => new Promise((resolve, reject) => {
 }))).then(ports => process.stdout.write(JSON.stringify({ ports }) + '\\n'), error => { process.stdout.write(JSON.stringify({ error: error.code }) + '\\n'); process.exit(1) })
 `
 
-async function serve(file, cwd, args = [], nodeArgs = []) {
+// A fixture listening: its process, its ports, and what it printed on stderr.
+type Served = { child: ChildProcess, ports: number[], stderr: () => string }
+async function serve(file: string, cwd: string, args: string[] = [], nodeArgs: string[] = []): Promise<Served> {
   const child = spawn(process.execPath, [...nodeArgs, file, ...args], { cwd, stdio: ['ignore', 'pipe', 'pipe'] })
   children.add(child)
   child.once('exit', () => children.delete(child))
@@ -327,7 +336,7 @@ async function serve(file, cwd, args = [], nodeArgs = []) {
   if (!Array.isArray(row.ports)) throw new Error(`${path.basename(file)} did not start: ${row.error ?? stderr}`)
   return { child, ports: row.ports, stderr: () => stderr }
 }
-async function stopChild(child) {
+async function stopChild(child: ChildProcess) {
   if (child.exitCode !== null || child.signalCode !== null) return
   child.kill('SIGTERM')
   const exited = once(child, 'exit')
@@ -338,9 +347,9 @@ async function stopChild(child) {
 async function ipv6Loopback() {
   const server = net.createServer()
   try {
-    await new Promise((resolve, reject) => { server.once('error', reject); server.listen({ host: '::1', port: 0, ipv6Only: true }, resolve) })
+    await new Promise((resolve, reject) => { server.once('error', reject); server.listen({ host: '::1', port: 0, ipv6Only: true }, () => resolve(undefined)) })
     return true
-  } catch { return false } finally { await new Promise(resolve => server.listening ? server.close(resolve) : resolve()) }
+  } catch { return false } finally { await new Promise<void>(resolve => server.listening ? server.close(() => resolve()) : resolve()) }
 }
 // A listener on 127.0.0.1 and, where there is IPv6, ::1 at the same port, as a guest's listener binds.
 const BOTH = `'use strict'
@@ -359,7 +368,7 @@ function wildcardQuiet() {
   if (process.platform !== 'darwin') return true
   try { return /disabled/i.test(execFileSync('/usr/libexec/ApplicationFirewall/socketfilterfw', ['--getglobalstate'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 3000 })) } catch { return false }
 }
-function hasGit(project) {
+function hasGit(project: string) {
   try { execFileSync('git', ['-c', 'init.defaultBranch=main', 'init', '-q', project], { stdio: 'ignore', timeout: 10_000 }); return true } catch { return false }
 }
 
@@ -370,7 +379,7 @@ async function liveChecks() {
   const git = hasGit(project)
   const source = path.join(scripts, 'fixture.txt')
   await writeFile(source, FIXTURE)
-  const script = async (name, dir = scripts) => { const file = path.join(dir, `${name}.cjs`); await copyFile(source, file); return file }
+  const script = async (name: string, dir = scripts) => { const file = path.join(dir, `${name}.cjs`); await copyFile(source, file); return file }
   const v6 = await ipv6Loopback(), wildcard = wildcardQuiet()
 
   // IPv4 and wildcard listeners first; the IPv6-only one last, on a port number none of them use.
@@ -387,12 +396,12 @@ async function liveChecks() {
     serve(await script('idle'), project, [], ['--inspect=127.0.0.1:0']),
   ])
   await until(() => /Debugger listening on ws:\/\/127\.0\.0\.1:(\d+)\//.test(idle.stderr()), 'inspector port')
-  const inspector = Number(/Debugger listening on ws:\/\/127\.0\.0\.1:(\d+)\//.exec(idle.stderr())[1])
+  const inspector = Number(/Debugger listening on ws:\/\/127\.0\.0\.1:(\d+)\//.exec(idle.stderr())![1])
   const taken = new Set([...[apiRun, docs, slow, garbage, reset, devtools, worker, otherWorker, outside].flatMap(run => run.ports), inspector])
   let web
   for (let attempt = 0; attempt < 8 && !web; attempt++) {
     const run = await serve(await script('web'), project, [v6 ? '::1' : '127.0.0.1', '127.0.0.1'])
-    if (run.ports.some(port => taken.has(port))) await stopChild(run.child)
+    if (run.ports.some((port: any) => taken.has(port))) await stopChild(run.child)
     else web = run
   }
   assert.ok(web, 'web fixture on unused port numbers')
@@ -400,39 +409,39 @@ async function liveChecks() {
   const relayDir = path.join(project, 'guest-copy', 'relay'), both = path.join(scripts, 'both.txt')
   await mkdir(relayDir, { recursive: true })
   await writeFile(both, BOTH)
-  const bothScript = async (name, dir) => { const file = path.join(dir, `${name}.cjs`); await copyFile(both, file); return file }
+  const bothScript = async (name: string, dir: string) => { const file = path.join(dir, `${name}.cjs`); await copyFile(both, file); return file }
   let guest
   for (let attempt = 0; attempt < 8 && !guest; attempt++) {
     const run = await serve(await bothScript('local-preview', relayDir), project, v6 ? ['v6'] : [])
-    if (run.ports.some(port => taken.has(port) || web.ports.includes(port))) await stopChild(run.child)
+    if (run.ports.some((port: any) => taken.has(port) || web.ports.includes(port))) await stopChild(run.child)
     else guest = run
   }
   assert.ok(guest, 'guest listener fixture on an unused port number')
-  const [main, hmr] = web.ports, [apiPort, apiPort2] = apiRun.ports, [d1, d2, d3, d4, d5] = docs.ports.slice().sort((a, b) => a - b)
+  const [main, hmr] = web.ports, [apiPort, apiPort2] = apiRun.ports, [d1, d2, d3, d4, d5] = docs.ports.slice().sort((a: number, b: number) => a - b)
   const forbidden = new Set([garbage.ports[0], reset.ports[0], devtools.ports[0], worker.ports[0], otherWorker.ports[0], outside.ports[0], inspector, guest.ports[0]])
   let closed
   for (let attempt = 0; attempt < 8 && !closed; attempt++) {
     const probe = net.createServer()
-    await new Promise(resolve => probe.listen({ host: '127.0.0.1', port: 0 }, resolve))
-    const port = probe.address().port
+    await new Promise<void>(resolve => probe.listen({ host: '127.0.0.1', port: 0 }, () => resolve()))
+    const port = (probe.address() as AddressInfo).port
     await new Promise(resolve => probe.close(resolve))
     if (!taken.has(port) && !web.ports.includes(port) && !guest.ports.includes(port)) closed = port
   }
 
   assert.ok(closed, 'a port number nobody here listens on')
   const secrets = [scratch, await realpath(scratch), pluginRoot, SECRET, os.userInfo().username]
-  const run = (port, extra = {}, env) => helper({ port, pluginRoot, exclude: [], ...extra }, env).then(result => ({ result, row: answer(result, secrets) }))
+  const run = (port: number, extra = {}, env?: NodeJS.ProcessEnv) => helper({ port, pluginRoot, exclude: [], ...extra }, env).then(result => ({ result, row: answer(result, secrets) }))
   const noGit = { ...process.env, PATH: path.join(scratch, 'no-git-on-this-path') }, repoHome = { ...process.env, HOME: project }
   const [all, excluded, fromApi, fromApiNoGit, fromApiRepoHome, nothing, debuggerTarget, inspectorTarget, slowTarget] = await Promise.all([
     run(main), run(main, { exclude: [d1, d2, d3] }), run(apiPort, { exclude: docs.ports }), run(apiPort, { exclude: docs.ports }, noGit), run(apiPort, { exclude: docs.ports }, repoHome),
     run(closed), run(devtools.ports[0]), run(inspector), run(slow.ports[0]),
   ])
   // Each with its listener's pid: one process's ports (api's two, docs' five) share it.
-  const yes = (port, label, pid) => ({ port, label, web: 'yes', pid })
+  const yes = (port: number, label: string, pid: number | undefined) => ({ port, label, web: 'yes', pid })
   const slowOne = { port: slow.ports[0], label: 'slow.cjs', web: 'slow', pid: slow.child.pid }
   const answering = [yes(hmr, 'web.cjs', web.child.pid), yes(apiPort, 'api.cjs', apiRun.child.pid), yes(apiPort2, 'api.cjs', apiRun.child.pid), ...[d1, d2, d3, d4, d5].map(port => yes(port, 'docs.cjs', docs.child.pid))].sort((a, b) => a.port - b.port)
   for (const { row } of [all, excluded, fromApi, fromApiNoGit, fromApiRepoHome, debuggerTarget, inspectorTarget, slowTarget]) {
-    assert.deepEqual(row.related.filter(item => forbidden.has(item.port)), [], 'raw TCP, resets, debuggers, plugin relays and outside servers are never suggested')
+    assert.deepEqual(row.related.filter((item: any) => forbidden.has(item.port)), [], 'raw TCP, resets, debuggers, plugin relays and outside servers are never suggested')
   }
   assert.deepEqual(all.row.target, { port: main, label: 'web.cjs', web: 'yes', devtools: false })
   assert.deepEqual(all.row.related, answering.slice(0, 6), 'six answering services beat the slow one')
@@ -450,7 +459,7 @@ async function liveChecks() {
   console.log(`ok live ${process.platform}: ${v6 ? '[::1]-only' : 'IPv4'} target, ${wildcard ? 'wildcard' : 'loopback'} sibling, six-row cap, each with its listener's pid, exclude, slow; garbage/reset/DevTools/inspector/relay/outside never suggested; ${git ? 'git top level vs ' : ''}cwd root (no git, repo at home); closed port; slowest ${slowest} ms`)
 
   // Owner mode: who holds one port, on both families, by the holders' commands alone.
-  const ownerRun = (port, extra = {}) => helper({ port, pluginRoot, owner: true, ...extra }).then(result => ({ result, row: ownerAnswer(result, secrets) }))
+  const ownerRun = (port: number, extra = {}) => helper({ port, pluginRoot, owner: true, ...extra }).then(result => ({ result, row: ownerAnswer(result, secrets) }))
   const [guestOwner, workerOwner, otherCopyOwner, webOwner, apiOwner, nobody] = await Promise.all([ownerRun(guest.ports[0]), ownerRun(worker.ports[0], { exclude: [] }), ownerRun(otherWorker.ports[0]), ownerRun(main), ownerRun(apiPort), ownerRun(closed)])
   assert.deepEqual(guestOwner.row.target, { port: guest.ports[0], label: 'local-preview.cjs', relay: true }, `a guest's listener on ${v6 ? '127.0.0.1 and ::1' : '127.0.0.1'}`)
   assert.deepEqual(workerOwner.row.target, { port: worker.ports[0], label: 'worker.cjs', relay: true }, "under the caller's own relay/")
@@ -463,7 +472,7 @@ async function liveChecks() {
   console.log(`ok owner mode ${process.platform}: a guest's listener (${v6 ? 'both loopbacks' : 'IPv4'}), the caller's own and another copy's helpers are relays; ordinary servers aren't; nobody holds a closed port; slowest ${ownerSlowest} ms`)
 
   // A need's look (`web`): who holds it, as above, and what the port answers, within the same 2 s.
-  const webRun = port => helper({ port, pluginRoot, owner: true, web: true }).then(result => ({ result, row: ownerAnswer(result, secrets, true) }))
+  const webRun = (port: number) => helper({ port, pluginRoot, owner: true, web: true }).then(result => ({ result, row: ownerAnswer(result, secrets, true) }))
   const [webPage, webDebugger, webInspector, webSlow, webGuest, webNobody] = await Promise.all([webRun(main), webRun(devtools.ports[0]), webRun(inspector), webRun(slow.ports[0]), webRun(guest.ports[0]), webRun(closed)])
   assert.deepEqual(webPage.row.target, { port: main, label: 'web.cjs', relay: false, web: 'yes', devtools: false })
   assert.deepEqual(webDebugger.row.target, { port: devtools.ports[0], label: 'devtools.cjs', relay: false, web: 'yes', devtools: true })
@@ -480,18 +489,17 @@ async function liveChecks() {
   assert.ok(quick.result.ms < 1000 + 400, `deadline 1000 answered after ${quick.result.ms} ms (process start included)`)
   assert.ok(quick.row.target?.port === main)
   const allowed = new Set([hmr, ...apiRun.ports, ...docs.ports, slow.ports[0]])
-  assert.ok(quick.row.related.every(item => allowed.has(item.port)))
+  assert.ok(quick.row.related.every((item: any) => allowed.has(item.port)))
   console.log(`ok deadlineMs 1000: one answer in ${Date.now() - began} ms with ${quick.row.related.length} related`)
 }
 
-try {
-  scratch = await mkdtemp(path.join(os.tmpdir(), 'shared-discover-'))
-  parserChecks()
-  await configChecks()
-  if (process.platform === 'darwin' || process.platform === 'linux') await liveChecks()
-  else console.log(`SKIP live listeners: ${process.platform} is not supported by discover.mts yet`)
-  console.log('All discover tests passed.')
-} finally {
+beforeAll(async () => { scratch = await mkdtemp(path.join(os.tmpdir(), 'shared-discover-')) })
+afterAll(async () => {
   await Promise.all([...children].map(stopChild))
   if (scratch) await rm(scratch, { recursive: true, force: true })
-}
+})
+
+test('parsers: lsof, ps, /proc/net, the project root, DevTools bodies and the pick', () => parserChecks())
+test('config: strict stdin, an unsupported platform, a stuck listing answers by its deadline, abort is silent', () => configChecks())
+// discover.mts reads listeners on macOS and Linux alone.
+test.skipIf(process.platform !== 'darwin' && process.platform !== 'linux')("live listeners: only the project's web services are suggested, and owner mode tells who holds a port", () => liveChecks())

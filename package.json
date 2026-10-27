@@ -11,7 +11,7 @@
     "typecheck:server": "wrangler types server/worker-configuration.d.ts && tsc -p server/tsconfig.json",
     "typecheck:scripts": "tsc -p scripts/tsconfig.json",
     "typecheck:relay": "tsc -p plugin/relay/tsconfig.json",
-    "typecheck:test": "wrangler types server/worker-configuration.d.ts >/dev/null && tsc -p test/tsconfig.json",
+    "typecheck:test": "wrangler types test/worker-runtime.d.ts --include-env=false >/dev/null && tsc -p test/tsconfig.json",
     "typecheck:plugin": "cd plugin && tsc -p .",
     "lint": "wrangler types server/worker-configuration.d.ts >/dev/null && oxlint --type-aware server/ scripts/",
     "format": "oxfmt server/ scripts/",
