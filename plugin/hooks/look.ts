@@ -11,8 +11,7 @@
 
 import { CLOVER_WEBP } from './brand'
 
-const esc = (s: string) =>
-  s.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c] ?? c)
+const esc = (s: string) => s.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c] ?? c)
 
 export const GOOD = '#3ca146' // allowed, on both themes
 export const BAD = '#d95b56' // declined, on both themes
@@ -64,7 +63,10 @@ const FONT = `-apple-system,"SF Pro Text","Segoe UI",Inter,sans-serif`
 
 /** One letter for one word, two for two: "Sam" → S, "Alex Chen" → AC. */
 export function initials(name: string): string {
-  const parts = name.trim().split(/[\s._-]+/).filter(Boolean)
+  const parts = name
+    .trim()
+    .split(/[\s._-]+/)
+    .filter(Boolean)
   const letters = parts.length >= 2 ? `${parts[0]![0]}${parts[1]![0]}` : (parts[0] ?? '?').slice(0, 1)
   return letters.toUpperCase()
 }
@@ -79,7 +81,10 @@ export function labelsFor(names: readonly string[]): Map<string, string> {
   for (const n of new Set(names)) counts.set(first(n), (counts.get(first(n)) ?? 0) + 1)
   const out = new Map<string, string>()
   for (const n of names) {
-    const words = n.trim().split(/[\s._-]+/).filter(Boolean)
+    const words = n
+      .trim()
+      .split(/[\s._-]+/)
+      .filter(Boolean)
     if (words.length >= 2) out.set(n, `${words[0]![0]}${words[1]![0]}`.toUpperCase())
     else if ((counts.get(first(n)) ?? 0) > 1) out.set(n, `${first(n)}${(words[0] ?? '').slice(1, 2).toLowerCase()}`)
     else out.set(n, first(n))

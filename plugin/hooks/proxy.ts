@@ -30,7 +30,10 @@ export function proxyHead(status: number, dump: string): string | null {
   } catch {
     return null
   }
-  const last = raw.split(/\r?\n\r?\n/).filter(b => /^HTTP\/\S+ \d{3}/.test(b.trimStart())).at(-1)
+  const last = raw
+    .split(/\r?\n\r?\n/)
+    .filter(b => /^HTTP\/\S+ \d{3}/.test(b.trimStart()))
+    .at(-1)
   if (last === undefined || !Number.isInteger(status) || status < 200 || status > 599) return null
   const headers: [string, string][] = []
   for (const line of last.trimStart().split(/\r?\n/).slice(1)) {
@@ -68,7 +71,8 @@ export function localHeaders(headers: readonly unknown[], local: string): [strin
   const out: [string, string][] = []
   for (const h of headers) {
     if (!Array.isArray(h) || typeof h[0] !== 'string' || typeof h[1] !== 'string') continue
-    const name: string = h[0], value: string = h[1]
+    const name: string = h[0],
+      value: string = h[1]
     const n = name.toLowerCase()
     if (n === 'origin' && value !== 'null') out.push([name, local])
     else if (n === 'referer') out.push([name, localReferer(value, local)])

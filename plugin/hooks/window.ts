@@ -5,7 +5,7 @@
 // (OAuth callbacks match) and the guest's own servers on the same ports are
 // never touched. These are the pure parts: the flags, settings and command
 // that start the window, the shell probes and what they print, and what the
-// window's proxy says. It imports nothing: test/local-preview.mjs loads this
+// window's proxy says. It imports nothing: test/local-preview.ts loads this
 // file under Node as it is, to start real browsers with these same flags and
 // run these same probes (the person's own proxy is ./upstream.ts's; a
 // preview's address, ./preview.ts's).
@@ -28,7 +28,12 @@ export const FIREFOX_MIN = 140
  * after `ready`, that it left the person's own proxy out (`reason`,
  * INVALID_UPSTREAM: an address it can't take) and goes on without it.
  */
-export type ProxyLine = { state: 'ready'; port: number; control: number } | { state: 'want' | 'blocked' | 'seen'; port: number } | { state: 'lan' } | { state: 'upstream'; reason: string } | { state: 'error'; code: string }
+export type ProxyLine =
+  | { state: 'ready'; port: number; control: number }
+  | { state: 'want' | 'blocked' | 'seen'; port: number }
+  | { state: 'lan' }
+  | { state: 'upstream'; reason: string }
+  | { state: 'error'; code: string }
 
 // Its own (this file imports nothing), as ./preview.ts's `isPort`.
 const isPort = (value: unknown): value is number => typeof value === 'number' && Number.isInteger(value) && value > 0 && value <= 65535
@@ -121,8 +126,16 @@ export const FIREFOX_PREFS: readonly (readonly [string, string | number | boolea
 
 /** The profile's user.js: the proxy on this port, then `FIREFOX_PREFS`. Firefox reads it at every start. */
 export function firefoxUserJs(proxyPort: number): string {
-  const prefs: (readonly [string, string | number | boolean])[] = [['network.proxy.socks', '127.0.0.1'], ['network.proxy.socks_port', proxyPort], ...FIREFOX_PREFS]
-  return ['// shared-session: a preview window (written before every start)', ...prefs.map(([name, value]) => `user_pref(${JSON.stringify(name)}, ${JSON.stringify(value)});`), ''].join('\n')
+  const prefs: (readonly [string, string | number | boolean])[] = [
+    ['network.proxy.socks', '127.0.0.1'],
+    ['network.proxy.socks_port', proxyPort],
+    ...FIREFOX_PREFS,
+  ]
+  return [
+    '// shared-session: a preview window (written before every start)',
+    ...prefs.map(([name, value]) => `user_pref(${JSON.stringify(name)}, ${JSON.stringify(value)});`),
+    '',
+  ].join('\n')
 }
 
 // A window's settings file, privately and in place at once: its folder
@@ -191,9 +204,14 @@ export function launchArgv(platform: WindowPlatform, browser: string, flags: rea
 /** The browser's name as people say it: "Google Chrome", "Microsoft Edge", "Brave Browser", "Firefox"… */
 export function browserName(path: string): string {
   const app = appBundle(path)
-  if (app) return app.split('/').pop()!.replace(/\.app$/, '')
+  if (app)
+    return app
+      .split('/')
+      .pop()!
+      .replace(/\.app$/, '')
   const base = path.replace(/\/+$/, '').split('/').pop() ?? ''
-  const channel = (name: string, rest: string) => `${name}${rest === 'beta' ? ' Beta' : rest === 'dev' || rest === 'unstable' ? ' Dev' : rest === 'nightly' ? ' Nightly' : rest === 'canary' ? ' Canary' : ''}`
+  const channel = (name: string, rest: string) =>
+    `${name}${rest === 'beta' ? ' Beta' : rest === 'dev' || rest === 'unstable' ? ' Dev' : rest === 'nightly' ? ' Nightly' : rest === 'canary' ? ' Canary' : ''}`
   let m: RegExpExecArray | null
   if ((m = /^google-chrome(?:-(\w+))?$/.exec(base)) || /^chrome$/.test(base)) return channel('Google Chrome', m?.[1] ?? '')
   if ((m = /^microsoft-edge(?:-(\w+))?$/.exec(base))) return channel('Microsoft Edge', m[1] ?? '')
@@ -229,20 +247,46 @@ export function browserFamily(path: string, found: Pick<BrowserFound, 'family' |
 // it (Firefox's is lowercase); Linux: names on PATH.
 const MAC_APPS: readonly (readonly [app: string, binary: string])[] = [
   ...['Google Chrome', 'Microsoft Edge', 'Brave Browser', 'Chromium'].map(a => [a, a] as const),
-  ...['Google Chrome Beta', 'Google Chrome Dev', 'Google Chrome Canary', 'Microsoft Edge Beta', 'Microsoft Edge Dev', 'Microsoft Edge Canary', 'Brave Browser Beta', 'Brave Browser Nightly'].map(a => [a, a] as const),
+  ...[
+    'Google Chrome Beta',
+    'Google Chrome Dev',
+    'Google Chrome Canary',
+    'Microsoft Edge Beta',
+    'Microsoft Edge Dev',
+    'Microsoft Edge Canary',
+    'Brave Browser Beta',
+    'Brave Browser Nightly',
+  ].map(a => [a, a] as const),
   ...['Firefox', 'Firefox Developer Edition', 'Firefox Nightly'].map(a => [a, 'firefox'] as const),
   ...['Vivaldi', 'Opera'].map(a => [a, a] as const),
 ]
 const LINUX_BINARIES = [
-  'google-chrome', 'google-chrome-stable', 'chromium', 'chromium-browser', 'microsoft-edge', 'microsoft-edge-stable', 'brave-browser',
-  'google-chrome-beta', 'google-chrome-unstable', 'microsoft-edge-beta', 'microsoft-edge-dev', 'brave-browser-beta', 'brave-browser-nightly',
-  'firefox', 'firefox-esr', 'firefox-developer-edition', 'firefox-nightly',
-  'vivaldi', 'vivaldi-stable', 'opera',
+  'google-chrome',
+  'google-chrome-stable',
+  'chromium',
+  'chromium-browser',
+  'microsoft-edge',
+  'microsoft-edge-stable',
+  'brave-browser',
+  'google-chrome-beta',
+  'google-chrome-unstable',
+  'microsoft-edge-beta',
+  'microsoft-edge-dev',
+  'brave-browser-beta',
+  'brave-browser-nightly',
+  'firefox',
+  'firefox-esr',
+  'firefox-developer-edition',
+  'firefox-nightly',
+  'vivaldi',
+  'vivaldi-stable',
+  'opera',
 ]
 
 // The bundle id of the app macOS opens a web link with, as NSWorkspace says
 // (no Apple Event, so no permission asked).
-const DEFAULT_BROWSER_JXA = 'ObjC.import("AppKit"); var u = $.NSWorkspace.sharedWorkspace.URLForApplicationToOpenURL($.NSURL.URLWithString("https://example.com")); var b = u.isNil() ? null : $.NSBundle.bundleWithURL(u); b && !b.isNil() && !b.bundleIdentifier.isNil() ? b.bundleIdentifier.js : ""'
+const DEFAULT_BROWSER_JXA =
+  'ObjC.import("AppKit"); var u = $.NSWorkspace.sharedWorkspace.URLForApplicationToOpenURL($.NSURL.URLWithString("https://example.com")); var b = u.isNil() ? null : $.NSBundle.bundleWithURL(u); b && !b.isNil() && !b.bundleIdentifier.isNil() ? b.bundleIdentifier.js : ""'
 
 /**
  * One script that says the platform and the browsers there: the person's
@@ -370,13 +414,19 @@ export function parseDetect(out: string, firefoxFits = true): BrowserFound {
  */
 export async function profileName(server: string, roomId: string, owner: string): Promise<string> {
   const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(`${server}/${roomId}/${owner}`)))
-  return [...digest].map(b => b.toString(16).padStart(2, '0')).join('').slice(0, 16)
+  return [...digest]
+    .map(b => b.toString(16).padStart(2, '0'))
+    .join('')
+    .slice(0, 16)
 }
 
 /** A signed-in host's profile: the same for every room of theirs on that server, kept between them. */
 export async function hostProfileName(server: string, account: string): Promise<string> {
   const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(`${server}/host/${account}`)))
-  return `h-${[...digest].map(b => b.toString(16).padStart(2, '0')).join('').slice(0, 16)}`
+  return `h-${[...digest]
+    .map(b => b.toString(16).padStart(2, '0'))
+    .join('')
+    .slice(0, 16)}`
 }
 
 // The lock probe: the process holding the profile, whose command line must
@@ -452,14 +502,23 @@ export function windowOf(out: string, profile: string): { pid: number; port: num
     const port = Number(/--proxy-server=socks5:\/\/127\.0\.0\.1:(\d{1,5})(?:\s|$)/.exec(command)?.[1])
     return { pid: Number(m[1]), port: isPort(port) ? port : null, family: 'chromium' }
   }
-  if (/(?:^|\s)-(?:contentproc|parentBuildID)(?:\s|$)|\/plugin-container/.test(command) || !new RegExp(`(?:^|\\s)-profile ${escape(`${profile}/firefox`)}(?:\\s|$)`).test(command)) return null
+  if (
+    /(?:^|\s)-(?:contentproc|parentBuildID)(?:\s|$)|\/plugin-container/.test(command) ||
+    !new RegExp(`(?:^|\\s)-profile ${escape(`${profile}/firefox`)}(?:\\s|$)`).test(command)
+  )
+    return null
   const port = Number(m[2])
   return { pid: Number(m[1]), port: isPort(port) ? port : null, family: 'firefox' }
 }
 
 /** The profile's folder, made private (0700, as checkpoints are), touched so a cleanup sees it in use. */
 export function profileScript(browserDir: string, profile: string): string {
-  return [`umask 077`, `b=${shellQuote(browserDir)}; p=${shellQuote(profile)}`, 'mkdir -p "$b" && chmod 700 "$b" && mkdir -p "$p" && chmod 700 "$p" && touch "$p"', ''].join('\n')
+  return [
+    `umask 077`,
+    `b=${shellQuote(browserDir)}; p=${shellQuote(profile)}`,
+    'mkdir -p "$b" && chmod 700 "$b" && mkdir -p "$p" && chmod 700 "$p" && touch "$p"',
+    '',
+  ].join('\n')
 }
 
 /**
@@ -495,7 +554,7 @@ export function launchLockScript(browserDir: string, profile: string, token: str
 /** Lets the profile go again, if this session's secret is still the lock's: never another session's. */
 export function launchUnlockScript(profile: string, token: string): string {
   return [
-    '# shared-session: done starting a preview profile\'s window',
+    "# shared-session: done starting a preview profile's window",
     `p=${shellQuote(profile)}; l="$p/.launching"`,
     `[ "$(cat "$l/owner" 2>/dev/null)" = ${shellQuote(token)} ] && rm -rf "$l"`,
     'exit 0',

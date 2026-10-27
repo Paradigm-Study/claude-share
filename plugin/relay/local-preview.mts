@@ -8,71 +8,122 @@ import { bridge, run, vacant, endpoint, portOK, tokenOK, notify, failure, safeCo
 import type { Bridge } from './tcp-relay.mts'
 
 type Settings = { port: number; strict: boolean; url: string; token: string }
-type StartOptions = { emit?: (row: Record<string, unknown>) => void; signal?: AbortSignal; createServer?: (options: any, listener: (socket: net.Socket) => void) => net.Server; connect?: (options: net.NetConnectOpts) => net.Socket }
+type StartOptions = {
+  emit?: (row: Record<string, unknown>) => void
+  signal?: AbortSignal
+  createServer?: (options: any, listener: (socket: net.Socket) => void) => net.Server
+  connect?: (options: net.NetConnectOpts) => net.Socket
+}
 // A bind the system refuses this user: a port below 1024 on Linux, a sandbox.
 const REFUSED = new Set(['EACCES', 'EPERM'])
-const BIND_TRIES = 8, SOCKETS_MAX = 32
+const BIND_TRIES = 8,
+  SOCKETS_MAX = 32
 
 // `token`: the guest's seat token, which each connection's room socket
 // carries; it lasts as long as the seat does.
 function configOf(cfg: any): Settings {
   // Port 0 asks the OS for any free port, so it only makes sense when not strict.
-  if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg) || Object.keys(cfg).some(k => !['port', 'strict', 'url', 'token'].includes(k)) || !(portOK(cfg.port) || (cfg.port === 0 && cfg.strict === false)) || typeof cfg.strict !== 'boolean' || !tokenOK(cfg.token)) throw failure('INVALID_CONFIG')
+  if (
+    !cfg ||
+    typeof cfg !== 'object' ||
+    Array.isArray(cfg) ||
+    Object.keys(cfg).some(k => !['port', 'strict', 'url', 'token'].includes(k)) ||
+    !(portOK(cfg.port) || (cfg.port === 0 && cfg.strict === false)) ||
+    typeof cfg.strict !== 'boolean' ||
+    !tokenOK(cfg.token)
+  )
+    throw failure('INVALID_CONFIG')
   return { port: cfg.port, strict: cfg.strict, url: endpoint(cfg.url), token: cfg.token }
 }
 
 // testoptions are internal, never accepted from stdin.
 export async function start(cfg: any, { emit = notify, signal, createServer = net.createServer, connect = net.connect }: StartOptions = {}) {
-  const servers = new Set<net.Server>(), sockets = new Set<net.Socket>(), relays = new Set<Bridge>()
-  let settings!: Settings, port: number | undefined, ipv6 = false, ready = false, stopped = false, closing: Promise<void> | undefined
+  const servers = new Set<net.Server>(),
+    sockets = new Set<net.Socket>(),
+    relays = new Set<Bridge>()
+  let settings!: Settings,
+    port: number | undefined,
+    ipv6 = false,
+    ready = false,
+    stopped = false,
+    closing: Promise<void> | undefined
   const close = () => {
     if (closing) return closing
     stopped = true
     ready = false
-    signal?.removeEventListener('abort', close)
+    signal?.removeEventListener('abort', onAbort)
     for (const relay of relays) relay.close()
     for (const socket of sockets) socket.destroy()
     closing = Promise.all([...servers].map(unbind)).then(() => {})
     return closing
   }
+  // The signal's listener: close() is a promise nobody waits for there.
+  const onAbort = () => void close()
   function unbind(server: net.Server) {
     return new Promise<void>(resolve => {
       if (!server.listening) return resolve()
-      server.close(() => { servers.delete(server); resolve() })
+      server.close(() => {
+        servers.delete(server)
+        resolve()
+      })
     })
   }
   async function bind(host: string, askedPort: number): Promise<number> {
     const server = createServer({ allowHalfOpen: true, highWaterMark: DATA_MAX }, (socket: net.Socket) => {
       socket.on('error', () => {})
       socket.pause()
-      if (!ready || stopped) { socket.destroy(); return }
-      if (sockets.size >= SOCKETS_MAX) { emit({ state: 'channel-error', code: 'BUSY' }); socket.destroy(); return }
+      if (!ready || stopped) {
+        socket.destroy()
+        return
+      }
+      if (sockets.size >= SOCKETS_MAX) {
+        emit({ state: 'channel-error', code: 'BUSY' })
+        socket.destroy()
+        return
+      }
       sockets.add(socket)
       socket.on('close', () => sockets.delete(socket))
-      const relay = bridge(socket, settings.url, { authorization: `Bearer ${settings.token}` }, {
-        emit: row => emit({ state: 'channel-error', code: safeCode(row) }),
-        onReady: () => emit({ state: 'channel-ready' }),
-      })
+      const relay = bridge(
+        socket,
+        settings.url,
+        { authorization: `Bearer ${settings.token}` },
+        {
+          emit: row => emit({ state: 'channel-error', code: safeCode(row) }),
+          onReady: () => emit({ state: 'channel-ready' }),
+        },
+      )
       relays.add(relay)
-      relay.closed.then(() => relays.delete(relay))
+      void relay.closed.then(() => relays.delete(relay))
     })
     servers.add(server)
     server.on('error', () => {}) // Do not print native errors containing URLs.
     await new Promise<void>((resolve, reject) => {
-      const failed = (error: Error) => { server.removeListener('listening', listening); reject(error) }
-      const listening = () => { server.removeListener('error', failed); resolve() }
+      const failed = (error: Error) => {
+        server.removeListener('listening', listening)
+        reject(error)
+      }
+      const listening = () => {
+        server.removeListener('error', failed)
+        resolve()
+      }
       server.once('error', failed)
       server.once('listening', listening)
       server.listen({ host, port: askedPort, ipv6Only: host === '::1' })
     })
-    if (stopped) { await unbind(server); throw failure('STARTUP') }
+    if (stopped) {
+      await unbind(server)
+      throw failure('STARTUP')
+    }
     return (server.address() as net.AddressInfo).port
   }
   try {
     settings = configOf(cfg)
     cfg = null
-    signal?.addEventListener('abort', close, { once: true })
-    if (signal?.aborted) { await close(); throw failure('STARTUP') }
+    signal?.addEventListener('abort', onAbort, { once: true })
+    if (signal?.aborted) {
+      await close()
+      throw failure('STARTUP')
+    }
     for (let attempt = 0; attempt < BIND_TRIES; attempt++) {
       ipv6 = false
       const asked = attempt ? 0 : settings.port
@@ -86,7 +137,12 @@ export async function start(cfg: any, { emit = notify, signal, createServer = ne
         port = await bind('127.0.0.1', asked)
         if (!asked && !(await vacant('::1', port, connect))) throw failure('EADDRINUSE')
         if (stopped) throw failure('STARTUP')
-        try { await bind('::1', port); ipv6 = true } catch (error: any) { if (!UNSUPPORTED_V6.has(error.code)) throw error }
+        try {
+          await bind('::1', port)
+          ipv6 = true
+        } catch (error: any) {
+          if (!UNSUPPORTED_V6.has(error.code)) throw error
+        }
         break
       } catch (caught: any) {
         // Conflict on either family rolls back every bind from this attempt.

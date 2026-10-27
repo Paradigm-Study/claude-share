@@ -21,12 +21,48 @@ const KEYS = new Set(['local', 'insecureLocal', 'origin', 'protocols', 'room', '
 function configOf(cfg: any): Settings {
   const url = (value: unknown, schemes: string[], max = 4096) => {
     if (typeof value !== 'string' || value.length > max) return null
-    try { const u = new URL(value); return schemes.includes(u.protocol) && !u.username && !u.password && !u.hash ? u : null } catch { return null }
+    try {
+      const u = new URL(value)
+      return schemes.includes(u.protocol) && !u.username && !u.password && !u.hash ? u : null
+    } catch {
+      return null
+    }
   }
-  if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg) || Object.keys(cfg).some(key => !KEYS.has(key)) || !tokenOK(cfg.token) || typeof cfg.version !== 'string' || !/^[\w.-]{0,64}$/.test(cfg.version) || (cfg.insecureLocal !== undefined && typeof cfg.insecureLocal !== 'boolean') || (cfg.protocols !== undefined && !Array.isArray(cfg.protocols))) throw failure('INVALID_CONFIG')
-  const local = url(cfg.local, ['ws:', 'wss:'], Infinity), origin = url(cfg.origin, ['http:', 'https:']), room = url(cfg.room, ['ws:', 'wss:'])
-  if (!local || !loopback(local.hostname) || !origin || !loopback(origin.hostname) || origin.href !== `${origin.origin}/` || !room || room.search || !/\/ws\/[A-Za-z0-9_-]{8,40}$/.test(room.pathname)) throw failure('INVALID_CONFIG')
-  return { local: local.href, insecureLocal: cfg.insecureLocal === true, origin: origin.origin, protocols: cfg.protocols ?? [], room: room.href, token: cfg.token, version: cfg.version }
+  if (
+    !cfg ||
+    typeof cfg !== 'object' ||
+    Array.isArray(cfg) ||
+    Object.keys(cfg).some(key => !KEYS.has(key)) ||
+    !tokenOK(cfg.token) ||
+    typeof cfg.version !== 'string' ||
+    !/^[\w.-]{0,64}$/.test(cfg.version) ||
+    (cfg.insecureLocal !== undefined && typeof cfg.insecureLocal !== 'boolean') ||
+    (cfg.protocols !== undefined && !Array.isArray(cfg.protocols))
+  )
+    throw failure('INVALID_CONFIG')
+  const local = url(cfg.local, ['ws:', 'wss:'], Infinity),
+    origin = url(cfg.origin, ['http:', 'https:']),
+    room = url(cfg.room, ['ws:', 'wss:'])
+  if (
+    !local ||
+    !loopback(local.hostname) ||
+    !origin ||
+    !loopback(origin.hostname) ||
+    origin.href !== `${origin.origin}/` ||
+    !room ||
+    room.search ||
+    !/\/ws\/[A-Za-z0-9_-]{8,40}$/.test(room.pathname)
+  )
+    throw failure('INVALID_CONFIG')
+  return {
+    local: local.href,
+    insecureLocal: cfg.insecureLocal === true,
+    origin: origin.origin,
+    protocols: cfg.protocols ?? [],
+    room: room.href,
+    token: cfg.token,
+    version: cfg.version,
+  }
 }
 
 // The local leg goes first, and the room is dialled only once it's open (the
@@ -42,31 +78,59 @@ function configOf(cfg: any): Settings {
 // dev server's with 1000, as a browser leaving would.
 export function start(cfg: unknown, options: Partial<RunOptions> = {}) {
   const settings = configOf(cfg)
-  let local: Ws | undefined, room: Ws | undefined, stopped = false, done = false, up!: { resolve: () => void; reject: (error: Error) => void }
+  let local: Ws | undefined,
+    room: Ws | undefined,
+    stopped = false,
+    done = false,
+    up!: { resolve: () => void; reject: (error: Error) => void }
   const connected = new Promise<void>((resolve, reject) => (up = { resolve, reject }))
   connected.catch(() => {}) // For whoever asks; never an unhandled rejection.
-  const finish = (code: number) => { if (done) return; done = true; local?.close(code); room?.close(code) }
+  const finish = (code: number) => {
+    if (done) return
+    done = true
+    local?.close(code)
+    room?.close(code)
+  }
   try {
-    local = connect(settings.local, { origin: settings.origin }, settings.protocols, {
-      open: () => {
-        room = connect(settings.room, { authorization: `Bearer ${settings.token}`, 'x-shared-session-version': settings.version }, [], { message: (data, binary) => local!.send(data, binary), close: finish }, { timeoutMs: 30_000 })
-        up.resolve()
+    local = connect(
+      settings.local,
+      { origin: settings.origin },
+      settings.protocols,
+      {
+        open: () => {
+          room = connect(
+            settings.room,
+            { authorization: `Bearer ${settings.token}`, 'x-shared-session-version': settings.version },
+            [],
+            { message: (data, binary) => local!.send(data, binary), close: finish },
+            { timeoutMs: 30_000 },
+          )
+          up.resolve()
+        },
+        message: (data, binary) => room?.send(data, binary),
+        close: code => {
+          if (!room) up.reject(failure(stopped ? 'STARTUP' : 'CONNECT'))
+          finish(code === 1006 || code === 1015 ? 1011 : code)
+        },
       },
-      message: (data, binary) => room?.send(data, binary),
-      close: code => {
-        if (!room) up.reject(failure(stopped ? 'STARTUP' : 'CONNECT'))
-        finish(code === 1006 || code === 1015 ? 1011 : code)
-      },
-    }, { timeoutMs: 30_000, insecure: settings.insecureLocal })
-  } catch { finish(1001); throw failure('INVALID_CONFIG') }
-  const abort = () => { stopped = true; finish(1001) }
+      { timeoutMs: 30_000, insecure: settings.insecureLocal },
+    )
+  } catch {
+    finish(1001)
+    throw failure('INVALID_CONFIG')
+  }
+  const abort = () => {
+    stopped = true
+    finish(1001)
+  }
   options.signal?.addEventListener('abort', abort, { once: true })
   if (options.signal?.aborted) abort()
   return { close: abort, connected }
 }
 
 // The executable waits for its local leg: CONNECT is its error row, and exit 1.
-if (import.meta.main) run((cfg, options) => {
-  const relay = start(cfg, options)
-  return relay.connected.then(() => relay)
-})
+if (import.meta.main)
+  run((cfg, options) => {
+    const relay = start(cfg, options)
+    return relay.connected.then(() => relay)
+  })

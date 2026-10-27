@@ -3,3 +3,6 @@
 
 # style: format server/ and scripts/ with oxfmt (#51)
 7848dbfd8c6bdc76cc841bd911322bd7475a2228
+
+# style: format the plugin's TypeScript with oxfmt
+2184e220b6e2ad1fffd3fbca206734c25b3aff0e

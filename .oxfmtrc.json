@@ -1,7 +1,9 @@
-// oxfmt (npm run format), on server/ and scripts/ for now: test/ and plugin/
-// join once the sessions moving them are done. The house style, wrapped at
-// 160 columns: most lines here are well under it, so wrapping touches only
-// the long ones.
+// oxfmt (npm run format), on server/, scripts/ and the plugin's TypeScript
+// (plugin/hooks, relay, tests, types and its tsconfig). Its manifest and its
+// command's Markdown, which Claude Code reads as they are, stay as written.
+// test/ joins after the last of its suites moves to Vitest. The house style,
+// wrapped at 160 columns: most lines here are well under it, so wrapping
+// touches only the long ones.
 {
   "$schema": "./node_modules/oxfmt/configuration_schema.json",
   "semi": false,

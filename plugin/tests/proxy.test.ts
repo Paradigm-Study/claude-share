@@ -9,12 +9,19 @@ import { curlString, localHeaders, pageHead, PROXY_HEAD_MAX, proxyHead, proxyPag
 const dump = (text: string) => btoa(text)
 
 test("an answer's head is the last response's headers, each value's bytes kept, all of it ASCII", () => {
-  const raw = 'HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 OK\r\nContent-Type: text/html\r\nSet-Cookie: a=1\r\nSet-Cookie: b=2\r\nX-Name: cafÃ©\r\nX-Latin: été\r\n\r\n'
+  const raw =
+    'HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 OK\r\nContent-Type: text/html\r\nSet-Cookie: a=1\r\nSet-Cookie: b=2\r\nX-Name: cafÃ©\r\nX-Latin: été\r\n\r\n'
   const head = proxyHead(200, dump(raw))!
   expect(/^[\x20-\x7e]+$/.test(head)).toBe(true)
   expect(JSON.parse(head)).toEqual({
     status: 200,
-    headers: [['Content-Type', 'text/html'], ['Set-Cookie', 'a=1'], ['Set-Cookie', 'b=2'], ['X-Name', 'cafÃ©'], ['X-Latin', 'été']],
+    headers: [
+      ['Content-Type', 'text/html'],
+      ['Set-Cookie', 'a=1'],
+      ['Set-Cookie', 'b=2'],
+      ['X-Name', 'cafÃ©'],
+      ['X-Latin', 'été'],
+    ],
   })
   // The 100 Continue's block is passed over, the final one counts.
   expect(head).not.toContain('Continue')
@@ -22,7 +29,10 @@ test("an answer's head is the last response's headers, each value's bytes kept, 
 
 test("an answer's head leaves out what no Headers would take, and is null without a response in it", () => {
   const raw = 'HTTP/2 302 \r\nlocation: http://localhost:3000/login\r\n folded: on\r\nbad name: x\r\n: empty\r\nx-cr: a\rb\r\nvalue-trim:  spaced \t\r\n\r\n'
-  expect(JSON.parse(proxyHead(302, dump(raw))!).headers).toEqual([['location', 'http://localhost:3000/login'], ['value-trim', 'spaced']])
+  expect(JSON.parse(proxyHead(302, dump(raw))!).headers).toEqual([
+    ['location', 'http://localhost:3000/login'],
+    ['value-trim', 'spaced'],
+  ])
   expect(proxyHead(200, dump(''))).toBeNull()
   expect(proxyHead(200, dump('not a response\r\n\r\n'))).toBeNull()
   expect(proxyHead(200, '%%% not base64')).toBeNull()
@@ -54,7 +64,18 @@ test("a request reaches the host's localhost as from the preview's own page", ()
     ['content-type', 'application/x-www-form-urlencoded'],
   ])
   // An opaque origin the browser chose stays one; a Referer that isn't a URL is the page's root.
-  expect(localHeaders([['origin', 'null'], ['referer', 'not a url']], 'http://localhost:3000')).toEqual([['origin', 'null'], ['referer', 'http://localhost:3000/']])
+  expect(
+    localHeaders(
+      [
+        ['origin', 'null'],
+        ['referer', 'not a url'],
+      ],
+      'http://localhost:3000',
+    ),
+  ).toEqual([
+    ['origin', 'null'],
+    ['referer', 'http://localhost:3000/'],
+  ])
 })
 
 test("the plugin's own pages: their head, nothing unescaped", () => {

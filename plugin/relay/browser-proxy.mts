@@ -37,33 +37,101 @@ type DohServer = { address: string; port: number; servername: string; path: stri
 type Server = DohServer & { ip: Addr }
 type Known = { own: Set<string>; onlink4: Range[]; onlink6: Range[] }
 /** One client of the proxy, from its greeting to its end. */
-type Conn = { client: net.Socket; target: net.Socket | null; timers: Set<NodeJS.Timeout>; done: boolean; spliced: boolean; closed: boolean; holding: boolean; wake: (() => void) | null }
+type Conn = {
+  client: net.Socket
+  target: net.Socket | null
+  timers: Set<NodeJS.Timeout>
+  done: boolean
+  spliced: boolean
+  closed: boolean
+  holding: boolean
+  wake: (() => void) | null
+}
 type StartOptions = {
-  emit?: (row: Record<string, unknown>) => void; signal?: AbortSignal
-  timeouts?: Partial<Record<keyof typeof TIMEOUTS, number>>; limits?: Partial<Record<keyof typeof LIMITS, number>>
-  lookup?: (...args: any[]) => void; interfaces?: () => any
-  connect?: (options: any) => net.Socket; knock?: (options: any) => net.Socket; doh?: readonly DohServer[]
+  emit?: (row: Record<string, unknown>) => void
+  signal?: AbortSignal
+  timeouts?: Partial<Record<keyof typeof TIMEOUTS, number>>
+  limits?: Partial<Record<keyof typeof LIMITS, number>>
+  lookup?: (...args: any[]) => void
+  interfaces?: () => any
+  connect?: (options: any) => net.Socket
+  knock?: (options: any) => net.Socket
+  doh?: readonly DohServer[]
 }
 
-export const LIMITS = Object.freeze({ clients: 512, held: 64, routes: 128, startable: 128, bypass: 64, entry: 253, body: 8192, headers: 8192, line: 8192, controlSockets: 8, upstreamHead: 8192, upstreamTries: 4, stdout: 1 << 20, dohBody: 65_536, dohNames: 256 })
+export const LIMITS = Object.freeze({
+  clients: 512,
+  held: 64,
+  routes: 128,
+  startable: 128,
+  bypass: 64,
+  entry: 253,
+  body: 8192,
+  headers: 8192,
+  line: 8192,
+  controlSockets: 8,
+  upstreamHead: 8192,
+  upstreamTries: 4,
+  stdout: 1 << 20,
+  dohBody: 65_536,
+  dohNames: 256,
+})
 // doh: one name's whole look, every server; dohEach: one server's A and AAAA;
 // dohDown: a server that couldn't be reached (and DoH as a whole, when none
 // could) is skipped this long, doubling while it stays so, up to dohDownMax;
 // dohMiss: a name no server answered in time (slow or bad) goes by its local
 // answer this long; dohTTL: the longest an answer is kept.
-export const TIMEOUTS = Object.freeze({ handshake: 10_000, firstConfig: 5_000, want: 8_000, wantEvery: 10_000, blockedEvery: 30_000, lanEvery: 30_000, interfaces: 30_000, lookup: 3_000, connect: 15_000, control: 2_000, linger: 2_000, doh: 6_000, dohEach: 2_500, dohDown: 30_000, dohDownMax: 600_000, dohMiss: 30_000, dohTTL: 60_000 })
+export const TIMEOUTS = Object.freeze({
+  handshake: 10_000,
+  firstConfig: 5_000,
+  want: 8_000,
+  wantEvery: 10_000,
+  blockedEvery: 30_000,
+  lanEvery: 30_000,
+  interfaces: 30_000,
+  lookup: 3_000,
+  connect: 15_000,
+  control: 2_000,
+  linger: 2_000,
+  doh: 6_000,
+  dohEach: 2_500,
+  dohDown: 30_000,
+  dohDownMax: 600_000,
+  dohMiss: 30_000,
+  dohTTL: 60_000,
+})
 // DNS-over-HTTPS servers, asked in order through the upstream at these
 // addresses (never by name) and checked against their own certificates.
-const DOH = Object.freeze([
-  { address: '1.1.1.1', port: 443, servername: 'cloudflare-dns.com', path: '/dns-query' },
-  { address: '1.0.0.1', port: 443, servername: 'cloudflare-dns.com', path: '/dns-query' },
-  { address: '8.8.8.8', port: 443, servername: 'dns.google', path: '/resolve' },
-  { address: '8.8.4.4', port: 443, servername: 'dns.google', path: '/resolve' },
-].map(Object.freeze)) as readonly DohServer[]
+const DOH = Object.freeze(
+  [
+    { address: '1.1.1.1', port: 443, servername: 'cloudflare-dns.com', path: '/dns-query' },
+    { address: '1.0.0.1', port: 443, servername: 'cloudflare-dns.com', path: '/dns-query' },
+    { address: '8.8.8.8', port: 443, servername: 'dns.google', path: '/resolve' },
+    { address: '8.8.4.4', port: 443, servername: 'dns.google', path: '/resolve' },
+  ].map(Object.freeze),
+) as readonly DohServer[]
 // RFC 1928 replies: general failure, not allowed, host unreachable, refused, command, address type.
-const FAILED = 1, NOT_ALLOWED = 2, UNREACHABLE = 4, REFUSED = 5, COMMAND = 7, ADDRESS = 8, NO_METHOD = 0xff
+const FAILED = 1,
+  NOT_ALLOWED = 2,
+  UNREACHABLE = 4,
+  REFUSED = 5,
+  COMMAND = 7,
+  ADDRESS = 8,
+  NO_METHOD = 0xff
 const SUCCESS = Buffer.from([5, 0, 0, 1, 0, 0, 0, 0, 0, 0])
-const UNREACHABLE_CODES = new Set(['EHOSTUNREACH', 'ENETUNREACH', 'ENETDOWN', 'EHOSTDOWN', 'ETIMEDOUT', 'EADDRNOTAVAIL', 'ENOTFOUND', 'EAI_AGAIN', 'EAI_NONAME', 'EAI_FAIL', 'EAI_NODATA'])
+const UNREACHABLE_CODES = new Set([
+  'EHOSTUNREACH',
+  'ENETUNREACH',
+  'ENETDOWN',
+  'EHOSTDOWN',
+  'ETIMEDOUT',
+  'EADDRNOTAVAIL',
+  'ENOTFOUND',
+  'EAI_AGAIN',
+  'EAI_NONAME',
+  'EAI_FAIL',
+  'EAI_NODATA',
+])
 const plain = (value: any): boolean => !!value && typeof value === 'object' && !Array.isArray(value)
 
 // The eight 16-bit words of a strict IPv6 literal (no zone), or null.
@@ -74,11 +142,13 @@ function words6(text: string): number[] | null {
   if (dotted && dotted[2]!.includes('.')) {
     if (!net.isIPv4(dotted[2]!)) return null
     const b = dotted[2]!.split('.').map(Number)
-    tail = [b[0]! << 8 | b[1]!, b[2]! << 8 | b[3]!]
+    tail = [(b[0]! << 8) | b[1]!, (b[2]! << 8) | b[3]!]
     text = dotted[1]!.endsWith('::') ? dotted[1]! : dotted[1]!.slice(0, -1)
   }
-  const halves = text.split('::'), groups = (part: string | undefined) => part ? part.split(':') : []
-  const head = groups(halves[0]), back = groups(halves[1])
+  const halves = text.split('::'),
+    groups = (part: string | undefined) => (part ? part.split(':') : [])
+  const head = groups(halves[0]),
+    back = groups(halves[1])
   if (halves.length > 2 || ![...head, ...back].every(group => /^[0-9a-f]{1,4}$/i.test(group))) return null
   const fill = 8 - head.length - back.length - tail.length
   if (halves.length === 2 ? fill < 1 : fill !== 0) return null
@@ -86,11 +156,15 @@ function words6(text: string): number[] | null {
 }
 // RFC 5952 text: the longest run of two or more zero words becomes '::'.
 function text6(words: number[]): string {
-  let at = -1, length = 0
+  let at = -1,
+    length = 0
   for (let i = 0; i < 8;) {
     let j = i
     while (j < 8 && !words[j]) j++
-    if (j - i > Math.max(1, length)) { at = i; length = j - i }
+    if (j - i > Math.max(1, length)) {
+      at = i
+      length = j - i
+    }
     i = j === i ? i + 1 : j
   }
   const hex = words.map(word => word.toString(16))
@@ -110,7 +184,8 @@ function address(value: unknown): Addr | null {
   return { family: 6, words, key: text6(words) }
 }
 // Loopback or unspecified: 127/8, 0/8, ::, ::1 and IPv4-compatible forms of those.
-const local = (a: Addr) => a.family === 4 ? a.bytes![0] === 127 || a.bytes![0] === 0 : a.words!.slice(0, 6).every(word => word === 0) && [0, 127].includes(a.words![6]! >> 8)
+const local = (a: Addr) =>
+  a.family === 4 ? a.bytes![0] === 127 || a.bytes![0] === 0 : a.words!.slice(0, 6).every(word => word === 0) && [0, 127].includes(a.words![6]! >> 8)
 // A lower-case DNS name without its trailing dot, or null.
 function hostname(value: unknown): string | null {
   if (typeof value !== 'string') return null
@@ -125,17 +200,32 @@ const numeric = (name: string) => /^(?:[0-9]+|0x[0-9a-f]*)$/.test(name.slice(nam
 // The Guest's own network, never dialled for the window: private ranges and
 // on-link subnets (both opened only by `lan: true`), and link-local (cloud
 // metadata), IETF protocol assignments (192.0.0.0/24), multicast and reserved.
-const PRIVATE4: Range[] = [[[10, 0, 0, 0], 8], [[172, 16, 0, 0], 12], [[192, 168, 0, 0], 16], [[100, 64, 0, 0], 10]]
-const SHUT4: Range[] = [[[169, 254, 0, 0], 16], [[192, 0, 0, 0], 24], [[224, 0, 0, 0], 4], [[240, 0, 0, 0], 4]]
+const PRIVATE4: Range[] = [
+  [[10, 0, 0, 0], 8],
+  [[172, 16, 0, 0], 12],
+  [[192, 168, 0, 0], 16],
+  [[100, 64, 0, 0], 10],
+]
+const SHUT4: Range[] = [
+  [[169, 254, 0, 0], 16],
+  [[192, 0, 0, 0], 24],
+  [[224, 0, 0, 0], 4],
+  [[240, 0, 0, 0], 4],
+]
 const PRIVATE6: Range[] = [[[0xfc00], 7]]
-const SHUT6: Range[] = [[[0xfe80], 10], [[0xfec0], 10], [[0xff00], 8], [[0x64, 0xff9b, 1], 48]]
+const SHUT6: Range[] = [
+  [[0xfe80], 10],
+  [[0xfec0], 10],
+  [[0xff00], 8],
+  [[0x64, 0xff9b, 1], 48],
+]
 // Metadata services inside ranges `lan` opens (Alibaba, AWS IPv6), and Azure's.
 const METADATA = new Set(['100.100.100.200', 'fd00:ec2::254', '168.63.129.16'])
-const v4n = (b: number[]) => (b[0]! << 24 | b[1]! << 16 | b[2]! << 8 | b[3]!) >>> 0
-const within4 = (bytes: number[], [base, bits]: Range) => ((v4n(bytes) ^ v4n(base)) >>> (32 - bits)) === 0
+const v4n = (b: number[]) => ((b[0]! << 24) | (b[1]! << 16) | (b[2]! << 8) | b[3]!) >>> 0
+const within4 = (bytes: number[], [base, bits]: Range) => (v4n(bytes) ^ v4n(base)) >>> (32 - bits) === 0
 function within6(words: number[], [base, bits]: Range) {
   for (let i = 0; bits > 0; i++, bits -= 16) {
-    if ((words[i]! ^ (base[i] ?? 0)) & (bits >= 16 ? 0xffff : 0xffff << (16 - bits) & 0xffff)) return false
+    if ((words[i]! ^ (base[i] ?? 0)) & (bits >= 16 ? 0xffff : (0xffff << (16 - bits)) & 0xffff)) return false
   }
   return true
 }
@@ -156,13 +246,13 @@ function subnetOf(cidr: unknown): Subnet | null {
   const bits = Number(match[2])
   if (net.isIPv4(match[1]!)) {
     if (bits < 8 || bits > 32) return null
-    const n = (v4n(match[1]!.split('.').map(Number)) & 0xffffffff << (32 - bits)) >>> 0
-    const bytes = [n >>> 24, n >>> 16 & 255, n >>> 8 & 255, n & 255]
+    const n = (v4n(match[1]!.split('.').map(Number)) & (0xffffffff << (32 - bits))) >>> 0
+    const bytes = [n >>> 24, (n >>> 16) & 255, (n >>> 8) & 255, n & 255]
     return { family: 4, range: [bytes, bits], key: `${bytes.join('.')}/${bits}` }
   }
   const words = words6(match[1]!)
   if (!words || bits < 32 || bits > 128) return null
-  const masked = words.map((word, i) => word & 0xffff << (16 - Math.max(0, Math.min(16, bits - 16 * i))) & 0xffff)
+  const masked = words.map((word, i) => word & (0xffff << (16 - Math.max(0, Math.min(16, bits - 16 * i)))) & 0xffff)
   return { family: 6, range: [masked, bits], key: `${text6(masked)}/${bits}` }
 }
 
@@ -175,7 +265,8 @@ function rulesOf(list: unknown): Rules {
   for (const raw of Array.isArray(list) ? list : []) {
     if (used >= LIMITS.bypass) break
     if (typeof raw !== 'string' || raw.length > LIMITS.entry) continue
-    const text = raw.trim().toLowerCase(), ip = address(text)
+    const text = raw.trim().toLowerCase(),
+      ip = address(text)
     if (text === '*') rules.all = true
     else if (ip) rules.ips.add(ip.key)
     else if (/^[0-9a-f.:]+\/[0-9]{1,3}$/.test(text)) {
@@ -183,7 +274,11 @@ function rulesOf(list: unknown): Rules {
       if (!base.includes(':') && /^[0-9]{1,3}(\.[0-9]{1,3}){0,2}$/.test(base)) base = [...base.split('.'), '0', '0', '0'].slice(0, 4).join('.')
       const subnet = address(base)
       if (!subnet || Number(prefix) > (subnet.family === 4 ? 32 : 128)) continue
-      try { rules.subnets.addSubnet(subnet.key, Number(prefix), subnet.family === 4 ? 'ipv4' : 'ipv6') } catch { continue }
+      try {
+        rules.subnets.addSubnet(subnet.key, Number(prefix), subnet.family === 4 ? 'ipv4' : 'ipv6')
+      } catch {
+        continue
+      }
     } else {
       const name = hostname(text.replace(/^\*?\./, ''))
       if (!name || numeric(name)) continue // A name ending in a number is never asked for.
@@ -196,7 +291,11 @@ function rulesOf(list: unknown): Rules {
 function bypassed(rules: Rules, verdict: Verdict): boolean {
   if (rules.all) return true
   if (verdict.ip) {
-    try { return rules.ips.has(verdict.ip.key) || rules.subnets.check(verdict.ip.key, verdict.ip.family === 4 ? 'ipv4' : 'ipv6') } catch { return false }
+    try {
+      return rules.ips.has(verdict.ip.key) || rules.subnets.check(verdict.ip.key, verdict.ip.family === 4 ? 'ipv4' : 'ipv6')
+    } catch {
+      return false
+    }
   }
   return rules.suffixes.some(suffix => verdict.host === suffix || verdict.host!.endsWith(`.${suffix}`))
 }
@@ -206,27 +305,55 @@ function bypassed(rules: Rules, verdict: Verdict): boolean {
 // host:port), with its bypass list.
 function upstreamOf(up: any): Upstream | null {
   if (!plain(up) || Object.keys(up).sort().join(',') !== 'bypass,host,kind,port' || !['http', 'socks5'].includes(up.kind) || !portOK(up.port)) return null
-  const ip = address(up.host), name = ip ? null : hostname(up.host)
+  const ip = address(up.host),
+    name = ip ? null : hostname(up.host)
   return ip || name ? { kind: up.kind, host: ip ? ip.key : name!, port: up.port, bypass: rulesOf(up.bypass) } : null
 }
 function configOf(cfg: any): Settings {
-  if (!plain(cfg) || Object.keys(cfg).filter(key => key !== 'lan').sort().join(',') !== 'controlToken,port,upstream' || (Object.hasOwn(cfg, 'lan') && typeof cfg.lan !== 'boolean') || !(cfg.port === 0 || portOK(cfg.port)) || typeof cfg.controlToken !== 'string' || !/^[A-Za-z0-9_-]{43,128}$/.test(cfg.controlToken)) throw failure('INVALID_CONFIG')
+  if (
+    !plain(cfg) ||
+    Object.keys(cfg)
+      .filter(key => key !== 'lan')
+      .sort()
+      .join(',') !== 'controlToken,port,upstream' ||
+    (Object.hasOwn(cfg, 'lan') && typeof cfg.lan !== 'boolean') ||
+    !(cfg.port === 0 || portOK(cfg.port)) ||
+    typeof cfg.controlToken !== 'string' ||
+    !/^[A-Za-z0-9_-]{43,128}$/.test(cfg.controlToken)
+  )
+    throw failure('INVALID_CONFIG')
   // An upstream it can't use is left out, never fatal: the window goes on
   // directly, and one row says so (the plugin's note), never what it was.
   const upstream = cfg.upstream === null ? null : upstreamOf(cfg.upstream)
   return { port: cfg.port, controlToken: cfg.controlToken, lan: cfg.lan === true, upstream, unusable: cfg.upstream !== null && !upstream }
 }
 function commandOf(row: any): Routes {
-  if (!plain(row) || Object.keys(row).sort().join(',') !== 'op,routes,startable' || row.op !== 'routes' || !plain(row.routes) || !Array.isArray(row.startable) || row.startable.length > LIMITS.startable || !row.startable.every(portOK)) throw failure('INVALID_CONFIG')
+  if (
+    !plain(row) ||
+    Object.keys(row).sort().join(',') !== 'op,routes,startable' ||
+    row.op !== 'routes' ||
+    !plain(row.routes) ||
+    !Array.isArray(row.startable) ||
+    row.startable.length > LIMITS.startable ||
+    !row.startable.every(portOK)
+  )
+    throw failure('INVALID_CONFIG')
   const entries = Object.entries(row.routes as Record<string, number>)
-  if (entries.length > LIMITS.routes || !entries.every(([key, target]) => /^[1-9][0-9]{0,4}$/.test(key) && portOK(Number(key)) && portOK(target))) throw failure('INVALID_CONFIG')
+  if (entries.length > LIMITS.routes || !entries.every(([key, target]) => /^[1-9][0-9]{0,4}$/.test(key) && portOK(Number(key)) && portOK(target)))
+    throw failure('INVALID_CONFIG')
   return { routes: new Map(entries.map(([key, target]) => [Number(key), target])), startable: new Set(row.startable) }
 }
 // Addresses in the order an upstream is given them: IPv4 first, then the
 // families in turn (A, AAAA, A, AAAA…), each address once.
 function alternate(pool: Addr[]): Addr[] {
-  const keys = new Set<string>(), fours: Addr[] = [], sixes: Addr[] = []
-  for (const a of pool) if (!keys.has(a.key)) { keys.add(a.key); (a.family === 4 ? fours : sixes).push(a) }
+  const keys = new Set<string>(),
+    fours: Addr[] = [],
+    sixes: Addr[] = []
+  for (const a of pool)
+    if (!keys.has(a.key)) {
+      keys.add(a.key)
+      ;(a.family === 4 ? fours : sixes).push(a)
+    }
   const order: Addr[] = []
   for (let i = 0; i < Math.max(fours.length, sixes.length); i++) order.push(...([fours[i], sixes[i]].filter(Boolean) as Addr[]))
   return order
@@ -250,7 +377,7 @@ function answerOf(body: any, type: string): Answer {
   for (const record of Array.isArray(body.Answer) ? body.Answer : []) {
     if (!plain(record) || record.type !== want) continue
     // A AAAA record holding a mapped IPv4 address is read as that address and judged as one.
-    const a = want === 1 ? (net.isIPv4(record.data) ? address(record.data) : null) : (net.isIPv6(record.data) ? address(record.data) : null)
+    const a = want === 1 ? (net.isIPv4(record.data) ? address(record.data) : null) : net.isIPv6(record.data) ? address(record.data) : null
     if (!a) throw failure('PROTOCOL')
     if (list.length === 0) ttl = Infinity
     ttl = Math.min(ttl, Number.isFinite(record.TTL) && record.TTL >= 0 ? record.TTL : 0)
@@ -262,14 +389,50 @@ function answerOf(body: any, type: string): Answer {
 // Test hooks (timeouts, limits, lookup, interfaces, connect for dials, knock
 // for the port's own check, doh for the DNS-over-HTTPS servers with a ca of
 // their own) are internal, never from stdin.
-export async function start(cfg: any, { emit = notify, signal, timeouts: wait = {}, limits: cap = {}, lookup = dns.lookup, interfaces = os.networkInterfaces, connect = net.connect, knock = net.connect, doh = DOH }: StartOptions = {}) {
-  const timeouts = { ...TIMEOUTS, ...wait }, limits = { ...LIMITS, ...cap }
-  const conns = new Set<Conn>(), held = new Set<Conn>(), lookups = new Map<string, Promise<Addr[] | null>>()
-  const servers = doh.map(server => ({ ...server, ip: address(server.address) })).filter((server): server is Server => Boolean(server.ip) && portOK(server.port))
-  const answers = new Map<string, { list: Addr[] | null; until: number }>(), looks = new Map<string, Promise<Addr[] | null>>(), down = new Map<Server, { until: number; wait: number }>(), asking = new Set<net.Socket>(), off = { until: 0, wait: 0 }
-  const seen = new Set<number>(), wanted = new Map<number, number>(), blocked = new Map<number, number>()
-  let settings!: Settings, routes = new Map<number, number>(), startable = new Set<number>(), configured = false, lanAt = -Infinity, known: Known | null = null, knownAt = 0
-  let stopped = false, closing: Promise<void> | undefined, binding: Promise<void> | undefined, socks: net.Server | undefined, control: ControlServer | undefined, port: number | undefined, controlPort: number | undefined
+export async function start(
+  cfg: any,
+  {
+    emit = notify,
+    signal,
+    timeouts: wait = {},
+    limits: cap = {},
+    lookup = dns.lookup,
+    interfaces = os.networkInterfaces,
+    connect = net.connect,
+    knock = net.connect,
+    doh = DOH,
+  }: StartOptions = {},
+) {
+  const timeouts = { ...TIMEOUTS, ...wait },
+    limits = { ...LIMITS, ...cap }
+  const conns = new Set<Conn>(),
+    held = new Set<Conn>(),
+    lookups = new Map<string, Promise<Addr[] | null>>()
+  const servers = doh
+    .map(server => ({ ...server, ip: address(server.address) }))
+    .filter((server): server is Server => Boolean(server.ip) && portOK(server.port))
+  const answers = new Map<string, { list: Addr[] | null; until: number }>(),
+    looks = new Map<string, Promise<Addr[] | null>>(),
+    down = new Map<Server, { until: number; wait: number }>(),
+    asking = new Set<net.Socket>(),
+    off = { until: 0, wait: 0 }
+  const seen = new Set<number>(),
+    wanted = new Map<number, number>(),
+    blocked = new Map<number, number>()
+  let settings!: Settings,
+    routes = new Map<number, number>(),
+    startable = new Set<number>(),
+    configured = false,
+    lanAt = -Infinity,
+    known: Known | null = null,
+    knownAt = 0
+  let stopped = false,
+    closing: Promise<void> | undefined,
+    binding: Promise<void> | undefined,
+    socks: net.Server | undefined,
+    control: ControlServer | undefined,
+    port: number | undefined,
+    controlPort: number | undefined
 
   const say = (row: Record<string, unknown>) => {
     try {
@@ -278,7 +441,8 @@ export async function start(cfg: any, { emit = notify, signal, timeouts: wait = 
     } catch {}
   }
   const signalOnce = (map: Map<number, number>, state: string, hostPort: number, every: number) => {
-    const now = Date.now(), last = map.get(hostPort)
+    const now = Date.now(),
+      last = map.get(hostPort)
     if (last !== undefined && now - last < every) return
     map.set(hostPort, now)
     say({ state, port: hostPort })
@@ -286,26 +450,34 @@ export async function start(cfg: any, { emit = notify, signal, timeouts: wait = 
   const close = () => {
     if (closing) return closing
     stopped = true
-    signal?.removeEventListener('abort', close)
+    signal?.removeEventListener('abort', onAbort)
     const ending = control?.close()
     for (const conn of [...conns]) drop(conn)
     for (const socket of [...asking]) socket.destroy()
     closing = (async () => {
       await binding?.catch(() => {})
-      await Promise.all([new Promise<void>(resolve => socks?.listening ? socks.close(() => resolve()) : resolve()), ending])
+      await Promise.all([new Promise<void>(resolve => (socks?.listening ? socks.close(() => resolve()) : resolve())), ending])
     })()
     return closing
   }
+  // The signal's listener: close() is a promise nobody waits for there.
+  const onAbort = () => void close()
 
   function later(conn: Conn, ms: number, action: () => void) {
-    const timer = setTimeout(() => { conn.timers.delete(timer); action() }, ms)
+    const timer = setTimeout(() => {
+      conn.timers.delete(timer)
+      action()
+    }, ms)
     conn.timers.add(timer)
     return timer
   }
   function settle(conn: Conn) {
     for (const timer of conn.timers) clearTimeout(timer)
     conn.timers.clear()
-    if (conn.holding) { held.delete(conn); conn.holding = false }
+    if (conn.holding) {
+      held.delete(conn)
+      conn.holding = false
+    }
     conn.wake?.()
   }
   function drop(conn: Conn) {
@@ -330,12 +502,18 @@ export async function start(cfg: any, { emit = notify, signal, timeouts: wait = 
     conn.done = conn.spliced = true
     settle(conn)
     conn.target = target
-    const { client } = conn, destroy = () => { client.destroy(); target.destroy() }
+    const { client } = conn,
+      destroy = () => {
+        client.destroy()
+        target.destroy()
+      }
     // FIN travels as a half-close each way (allowHalfOpen); only an error tears
     // down the peer, so a normal close never truncates bytes still queued.
     for (const socket of [client, target]) {
       socket.on('error', destroy)
-      socket.on('close', (hadError: boolean) => { if (hadError) destroy() })
+      socket.on('close', (hadError: boolean) => {
+        if (hadError) destroy()
+      })
     }
     client.write(SUCCESS)
     client.pipe(target)
@@ -348,12 +526,20 @@ export async function start(cfg: any, { emit = notify, signal, timeouts: wait = 
       conn.holding = true
     }
     return new Promise<boolean>(resolve => {
-      const timer = later(conn, ms, () => { conn.wake = null; resolve(true) })
-      conn.wake = () => { conn.wake = null; clearTimeout(timer); conn.timers.delete(timer); resolve(true) }
+      const timer = later(conn, ms, () => {
+        conn.wake = null
+        resolve(true)
+      })
+      conn.wake = () => {
+        conn.wake = null
+        clearTimeout(timer)
+        conn.timers.delete(timer)
+        resolve(true)
+      }
     })
   }
   function configure(next: Routes) {
-    ({ routes, startable } = next)
+    ;({ routes, startable } = next)
     configured = true
     for (const conn of [...held]) conn.wake?.()
   }
@@ -371,9 +557,12 @@ export async function start(cfg: any, { emit = notify, signal, timeouts: wait = 
     })
     // Reads pause once the request is in, so this only sees a FIN mid-handshake
     // (afterwards a FIN waits in the stream and reaches the target as a half-close).
-    client.once('end', () => { if (!conn.done) drop(conn) })
+    client.once('end', () => {
+      if (!conn.done) drop(conn)
+    })
     later(conn, timeouts.handshake, () => drop(conn))
-    let buffer: Buffer = Buffer.alloc(0), greeted = false
+    let buffer: Buffer = Buffer.alloc(0),
+      greeted = false
     const data = (chunk: Buffer) => {
       if (conn.done) return
       buffer = buffer.length ? Buffer.concat([buffer, chunk]) : chunk
@@ -394,10 +583,14 @@ export async function start(cfg: any, { emit = notify, signal, timeouts: wait = 
       if (![1, 3, 4].includes(atyp)) return refuse(conn, ADDRESS)
       const size = atyp === 1 ? 10 : atyp === 4 ? 22 : buffer.length < 5 ? Infinity : 7 + buffer[4]!
       if (buffer.length < size) return
-      const host = atyp === 1 ? [...buffer.subarray(4, 8)].join('.')
-        : atyp === 4 ? Array.from({ length: 8 }, (_, i) => buffer.readUInt16BE(4 + 2 * i).toString(16)).join(':')
-        : buffer.toString('latin1', 5, 5 + buffer[4]!)
-      const request = { host, port: buffer.readUInt16BE(size - 2) }, rest = buffer.subarray(size)
+      const host =
+        atyp === 1
+          ? [...buffer.subarray(4, 8)].join('.')
+          : atyp === 4
+            ? Array.from({ length: 8 }, (_, i) => buffer.readUInt16BE(4 + 2 * i).toString(16)).join(':')
+            : buffer.toString('latin1', 5, 5 + buffer[4]!)
+      const request = { host, port: buffer.readUInt16BE(size - 2) },
+        rest = buffer.subarray(size)
       buffer = null!
       // Hold further bytes until the target is ready; early data goes first.
       client.pause()
@@ -420,7 +613,10 @@ export async function start(cfg: any, { emit = notify, signal, timeouts: wait = 
   }
   // Says only that the local network was refused: never what or where.
   function refuseNetwork(conn: Conn) {
-    if (Date.now() - lanAt >= timeouts.lanEvery) { lanAt = Date.now(); say({ state: 'lan' }) }
+    if (Date.now() - lanAt >= timeouts.lanEvery) {
+      lanAt = Date.now()
+      say({ state: 'lan' })
+    }
     refuse(conn, NOT_ALLOWED)
   }
   // This computer's interfaces, read at most every `timeouts.interfaces`: its own
@@ -429,18 +625,22 @@ export async function start(cfg: any, { emit = notify, signal, timeouts: wait = 
   function network(): Known | null {
     if (known && performance.now() - knownAt < timeouts.interfaces) return known
     try {
-      const own = new Set<string>(), subnets = new Map<string, Subnet>()
-      for (const [name, list] of Object.entries<any>(interfaces() ?? {})) for (const entry of Array.isArray(list) ? list : []) {
-        const a = address(entry?.address)
-        if (a && !local(a)) own.add(a.key)
-        const subnet = TUNNEL.test(name) ? null : subnetOf(entry?.cidr)
-        if (subnet) subnets.set(subnet.key, subnet)
-      }
+      const own = new Set<string>(),
+        subnets = new Map<string, Subnet>()
+      for (const [name, list] of Object.entries<any>(interfaces() ?? {}))
+        for (const entry of Array.isArray(list) ? list : []) {
+          const a = address(entry?.address)
+          if (a && !local(a)) own.add(a.key)
+          const subnet = TUNNEL.test(name) ? null : subnetOf(entry?.cidr)
+          if (subnet) subnets.set(subnet.key, subnet)
+        }
       const ranges = (family: number) => [...subnets.values()].filter(subnet => subnet.family === family).map(subnet => subnet.range)
       known = { own, onlink4: ranges(4), onlink6: ranges(6) }
       knownAt = performance.now()
       return known
-    } catch { return null }
+    } catch {
+      return null
+    }
   }
   function resolve(name: string): Promise<Addr[] | null> {
     let pending = lookups.get(name)
@@ -449,14 +649,20 @@ export async function start(cfg: any, { emit = notify, signal, timeouts: wait = 
       const timer = setTimeout(() => done(null), timeouts.lookup)
       const finish = (error: any, list?: any) => {
         clearTimeout(timer)
-        const found = !error && Array.isArray(list) ? list.map((entry: any) => address(entry?.address)).filter(Boolean) as Addr[] : []
+        const found = !error && Array.isArray(list) ? (list.map((entry: any) => address(entry?.address)).filter(Boolean) as Addr[]) : []
         done(found.length ? found : null)
       }
-      try { lookup(name, { all: true }, finish) } catch (error) { finish(error) }
+      try {
+        lookup(name, { all: true }, finish)
+      } catch (error) {
+        finish(error)
+      }
     })
     lookups.set(name, pending)
     const mine = pending
-    pending.then(() => { if (lookups.get(name) === mine) lookups.delete(name) })
+    void pending.then(() => {
+      if (lookups.get(name) === mine) lookups.delete(name)
+    })
     return pending
   }
   // One address: 'loopback' (routed), 'own', 'lan' (the Guest's network) or 'ok'.
@@ -465,7 +671,8 @@ export async function start(cfg: any, { emit = notify, signal, timeouts: wait = 
     const lead = a.family === 6 ? embedded(a.words!) : null
     if (here.own.has(a.key) || (lead && here.own.has(lead.key))) return 'own'
     if (METADATA.has(a.key) || (lead && METADATA.has(lead.key))) return 'lan'
-    const v4 = a.family === 4, hit = (ranges: Range[]) => ranges.some(range => v4 ? within4(a.bytes!, range) : within6(a.words!, range))
+    const v4 = a.family === 4,
+      hit = (ranges: Range[]) => ranges.some(range => (v4 ? within4(a.bytes!, range) : within6(a.words!, range)))
     if (hit(v4 ? SHUT4 : SHUT6) || (!settings.lan && (hit(v4 ? PRIVATE4 : PRIVATE6) || hit(v4 ? here.onlink4 : here.onlink6)))) return 'lan'
     // A loopback behind NAT64 or SIIT is some gateway's, never this computer's.
     return lead && (local(lead) || kindOf(lead, here) === 'lan') ? 'lan' : 'ok'
@@ -502,16 +709,28 @@ export async function start(cfg: any, { emit = notify, signal, timeouts: wait = 
   }
 
   async function loopback(conn: Conn, hostPort: number) {
-    if (!seen.has(hostPort)) { seen.add(hostPort); say({ state: 'seen', port: hostPort }) }
+    if (!seen.has(hostPort)) {
+      seen.add(hostPort)
+      say({ state: 'seen', port: hostPort })
+    }
     const firstUntil = Date.now() + timeouts.firstConfig
     let wantUntil = 0
     for (;;) {
       if (conn.done || conn.closed || stopped) return
       const target = routes.get(hostPort)
-      if (target) return dial(conn, { host: '127.0.0.1', port: target, allowHalfOpen: true, noDelay: true }, () => REFUSED, socket => splice(conn, socket))
+      if (target)
+        return dial(
+          conn,
+          { host: '127.0.0.1', port: target, allowHalfOpen: true, noDelay: true },
+          () => REFUSED,
+          socket => splice(conn, socket),
+        )
       let until = firstUntil
       if (configured && startable.has(hostPort)) {
-        if (!wantUntil) { wantUntil = Date.now() + timeouts.want; signalOnce(wanted, 'want', hostPort, timeouts.wantEvery) }
+        if (!wantUntil) {
+          wantUntil = Date.now() + timeouts.want
+          signalOnce(wanted, 'want', hostPort, timeouts.wantEvery)
+        }
         until = wantUntil
       } else if (configured) {
         signalOnce(blocked, 'blocked', hostPort, timeouts.blockedEvery)
@@ -525,13 +744,20 @@ export async function start(cfg: any, { emit = notify, signal, timeouts: wait = 
     if (conn.done || conn.closed || stopped) return
     later(conn, timeouts.connect, () => refuse(conn, codeFor({ code: 'ETIMEDOUT' })))
     let socket: net.Socket
-    try { socket = connect(options) } catch (error) { return refuse(conn, codeFor(error)) }
+    try {
+      socket = connect(options)
+    } catch (error) {
+      return refuse(conn, codeFor(error))
+    }
     conn.target = socket
     socket.on('error', (error: any) => refuse(conn, codeFor(error)))
-    socket.once('connect', () => { if (!conn.done && !conn.closed) connected(socket) })
+    socket.once('connect', () => {
+      if (!conn.done && !conn.closed) connected(socket)
+    })
   }
   function upstreamFor(verdict: Verdict): Upstream | null {
-    const up = settings.upstream, ip = up && address(up.host)
+    const up = settings.upstream,
+      ip = up && address(up.host)
     if (!up || bypassed(up.bypass, verdict)) return null
     // An upstream that is this proxy itself would only loop.
     return up.port === port && (up.host === 'localhost' || (ip && local(ip))) ? null : up
@@ -548,8 +774,11 @@ export async function start(cfg: any, { emit = notify, signal, timeouts: wait = 
       if (!verdict.addresses) return refuse(conn, UNREACHABLE)
       // Connect only to the addresses just checked: a second lookup could rebind.
       const fixed = verdict.addresses.map(a => ({ address: a.key, family: a.family }))
-      const pinned = (_name: string, options: any, callback: any) => options?.all ? callback(null, fixed) : callback(null, fixed[0]!.address, fixed[0]!.family)
-      return dial(conn, { host: verdict.host, port: targetPort, lookup: pinned, allowHalfOpen: true, noDelay: true, autoSelectFamily: true }, codeOf, socket => splice(conn, socket))
+      const pinned = (_name: string, options: any, callback: any) =>
+        options?.all ? callback(null, fixed) : callback(null, fixed[0]!.address, fixed[0]!.family)
+      return dial(conn, { host: verdict.host, port: targetPort, lookup: pinned, allowHalfOpen: true, noDelay: true, autoSelectFamily: true }, codeOf, socket =>
+        splice(conn, socket),
+      )
     }
     // Nothing the local answer refused is tunnelled, whatever DNS-over-HTTPS says.
     if (verdict.tainted) return refuseNetwork(conn)
@@ -585,18 +814,31 @@ export async function start(cfg: any, { emit = notify, signal, timeouts: wait = 
     const attempt = (i: number, last: number): void => {
       if (conn.done || conn.closed || stopped) return
       if (i >= order.length) return refuse(conn, last)
-      let socket: net.Socket | undefined, share: NodeJS.Timeout | null = null, over = false, reached = false
-      const settled = () => { if (share) { clearTimeout(share); conn.timers.delete(share) } }
+      let socket: net.Socket | undefined,
+        share: NodeJS.Timeout | null = null,
+        over = false,
+        reached = false
+      const settled = () => {
+        if (share) {
+          clearTimeout(share)
+          conn.timers.delete(share)
+        }
+      }
       const failed = (code: number) => {
         if (over) return
         over = true
         settled()
         if (conn.target === socket) conn.target = null
         socket?.destroy()
-        reached ? attempt(i + 1, code) : refuse(conn, code)
+        if (reached) attempt(i + 1, code)
+        else refuse(conn, code)
       }
       if (i < order.length - 1) share = later(conn, Math.max(1, (deadline - Date.now()) / (order.length - i)), () => failed(codeOf({ code: 'ETIMEDOUT' })))
-      try { socket = connect({ host: up.host, port: up.port, allowHalfOpen: true, noDelay: true, autoSelectFamily: true }) } catch (error) { return failed(codeOf(error)) }
+      try {
+        socket = connect({ host: up.host, port: up.port, allowHalfOpen: true, noDelay: true, autoSelectFamily: true })
+      } catch (error) {
+        return failed(codeOf(error))
+      }
       // Held as the client's target, so a client leaving, a refusal or close() ends this try too.
       conn.target = socket
       const s = socket
@@ -605,7 +847,20 @@ export async function start(cfg: any, { emit = notify, signal, timeouts: wait = 
       s.once('connect', () => {
         reached = true
         if (conn.done || conn.closed) return s.destroy()
-        through(up.kind, s, order[i]!, targetPort, () => { if (!over) { over = true; settled(); splice(conn, s) } }, failed)
+        through(
+          up.kind,
+          s,
+          order[i]!,
+          targetPort,
+          () => {
+            if (!over) {
+              over = true
+              settled()
+              splice(conn, s)
+            }
+          },
+          failed,
+        )
       })
     }
     attempt(0, FAILED)
@@ -613,8 +868,15 @@ export async function start(cfg: any, { emit = notify, signal, timeouts: wait = 
   // Reads an upstream's reply: parse returns bytes used, 0 for more, or -REP.
   function collect(socket: net.Socket, max: number, parse: (buffer: Buffer) => number, done: () => void, fail: (code: number) => void) {
     let buffer: Buffer = Buffer.alloc(0)
-    const finish = () => { socket.pause(); socket.removeListener('data', data); socket.removeListener('end', ended) }
-    const ended = () => { finish(); fail(FAILED) }
+    const finish = () => {
+      socket.pause()
+      socket.removeListener('data', data)
+      socket.removeListener('end', ended)
+    }
+    const ended = () => {
+      finish()
+      fail(FAILED)
+    }
     const data = (chunk: Buffer) => {
       buffer = buffer.length ? Buffer.concat([buffer, chunk]) : chunk
       const used = parse(buffer)
@@ -637,26 +899,44 @@ export async function start(cfg: any, { emit = notify, signal, timeouts: wait = 
   function viaHTTP(socket: net.Socket, ip: Addr, targetPort: number, done: () => void, fail: (code: number) => void) {
     const authority = `${ip.family === 6 ? `[${ip.key}]` : ip.key}:${targetPort}`
     socket.write(`CONNECT ${authority} HTTP/1.1\r\nHost: ${authority}\r\n\r\n`)
-    collect(socket, LIMITS.upstreamHead, buffer => {
-      const end = buffer.indexOf('\r\n\r\n')
-      if (end === -1) return 0
-      if (end + 4 > LIMITS.upstreamHead) return -FAILED
-      return /^HTTP\/1\.[01] 2[0-9]{2}[ \r]/.test(buffer.toString('latin1', 0, Math.min(end + 2, 64))) ? end + 4 : -FAILED
-    }, done, fail)
+    collect(
+      socket,
+      LIMITS.upstreamHead,
+      buffer => {
+        const end = buffer.indexOf('\r\n\r\n')
+        if (end === -1) return 0
+        if (end + 4 > LIMITS.upstreamHead) return -FAILED
+        return /^HTTP\/1\.[01] 2[0-9]{2}[ \r]/.test(buffer.toString('latin1', 0, Math.min(end + 2, 64))) ? end + 4 : -FAILED
+      },
+      done,
+      fail,
+    )
   }
   function viaSOCKS(socket: net.Socket, ip: Addr, targetPort: number, done: () => void, fail: (code: number) => void) {
     socket.write(Buffer.from([5, 1, 0]))
-    collect(socket, 2, (b: Buffer) => b.length < 2 ? 0 : b[0] === 5 && b[1] === 0 ? 2 : -FAILED, () => {
-      const where = ip.family === 4 ? [1, ...ip.bytes!] : [4, ...ip.words!.flatMap(word => [word >> 8, word & 255])]
-      socket.write(Buffer.from([5, 1, 0, ...where, targetPort >> 8, targetPort & 255]))
-      collect(socket, 262, (b: Buffer) => {
-        if (b.length < 4) return 0
-        if (b[0] !== 5) return -FAILED
-        if (b[1] !== 0) return -(b[1]! <= ADDRESS ? b[1]! : FAILED)
-        const size = b[3] === 1 ? 10 : b[3] === 4 ? 22 : b[3] === 3 ? (b.length < 5 ? 263 : 7 + b[4]!) : 0
-        return !size ? -FAILED : b.length < size ? 0 : size
-      }, done, fail)
-    }, fail)
+    collect(
+      socket,
+      2,
+      (b: Buffer) => (b.length < 2 ? 0 : b[0] === 5 && b[1] === 0 ? 2 : -FAILED),
+      () => {
+        const where = ip.family === 4 ? [1, ...ip.bytes!] : [4, ...ip.words!.flatMap(word => [word >> 8, word & 255])]
+        socket.write(Buffer.from([5, 1, 0, ...where, targetPort >> 8, targetPort & 255]))
+        collect(
+          socket,
+          262,
+          (b: Buffer) => {
+            if (b.length < 4) return 0
+            if (b[0] !== 5) return -FAILED
+            if (b[1] !== 0) return -(b[1]! <= ADDRESS ? b[1]! : FAILED)
+            const size = b[3] === 1 ? 10 : b[3] === 4 ? 22 : b[3] === 3 ? (b.length < 5 ? 263 : 7 + b[4]!) : 0
+            return !size ? -FAILED : b.length < size ? 0 : size
+          },
+          done,
+          fail,
+        )
+      },
+      fail,
+    )
   }
 
   // A name's addresses from DNS-over-HTTPS through the upstream: the first
@@ -683,8 +963,10 @@ export async function start(cfg: any, { emit = notify, signal, timeouts: wait = 
     pending = (async (): Promise<Addr[] | null> => {
       // Back-offs grow from what they were as this look began, so a burst of
       // looks failing together doubles them once, not once a look.
-      const until = Date.now() + timeouts.doh, offWas = off.wait
-      let named = false, unreachable = false
+      const until = Date.now() + timeouts.doh,
+        offWas = off.wait
+      let named = false,
+        unreachable = false
       for (const server of servers) {
         if (stopped || Date.now() >= until) break
         const skip = down.get(server)
@@ -717,7 +999,9 @@ export async function start(cfg: any, { emit = notify, signal, timeouts: wait = 
     })().catch(() => null)
     looks.set(name, pending)
     const mine = pending
-    pending.then(() => { if (looks.get(name) === mine) looks.delete(name) })
+    void pending.then(() => {
+      if (looks.get(name) === mine) looks.delete(name)
+    })
     return pending
   }
   // One GET of one record type from one server, over TLS (its certificate
@@ -727,63 +1011,104 @@ export async function start(cfg: any, { emit = notify, signal, timeouts: wait = 
   // (nobody's); anything else unreachable (the server's).
   function ask(up: Upstream, server: Server, name: string, type: string, until: number, short: boolean): Promise<Answer> {
     return new Promise<Answer>((resolve, reject) => {
-      let socket: net.Socket | undefined, secure: tls.TLSSocket | undefined, over = false, reached = false
+      let socket: net.Socket | undefined,
+        secure: tls.TLSSocket | undefined,
+        over = false,
+        reached = false
       const finish = (error: Error | null, value?: Answer) => {
         if (over) return
         over = true
         clearTimeout(timer)
         secure?.destroy()
         socket?.destroy()
-        error ? reject(error) : resolve(value!)
+        if (error) reject(error)
+        else resolve(value!)
       }
       const fail = (code = 'CONNECT') => finish(failure(code))
       const timer = setTimeout(() => fail(reached ? 'SLOW' : short ? 'SHORT' : 'CONNECT'), Math.max(1, until - Date.now()))
       if (stopped) return fail()
-      try { socket = connect({ host: up.host, port: up.port, noDelay: true, autoSelectFamily: true }) } catch { return fail() }
+      try {
+        socket = connect({ host: up.host, port: up.port, noDelay: true, autoSelectFamily: true })
+      } catch {
+        return fail()
+      }
       const s = socket
       asking.add(s)
-      s.once('close', () => { asking.delete(s); fail() })
+      s.once('close', () => {
+        asking.delete(s)
+        fail()
+      })
       s.on('error', () => fail())
-      s.once('connect', () => through(up.kind, s, server.ip, server.port, () => {
-        if (over) return
-        const t = secure = tls.connect({ socket: s, servername: server.servername, ALPNProtocols: ['http/1.1'], ...(server.ca ? { ca: server.ca } : {}) })
-        t.on('error', () => fail())
-        t.once('secureConnect', () => { reached = true })
-        const request = http.request({ createConnection: () => t, method: 'GET', path: `${server.path}?name=${encodeURIComponent(name)}&type=${type}`, headers: { host: server.servername, accept: 'application/dns-json' } }, response => {
-          if (response.statusCode !== 200) return fail('PROTOCOL')
-          const parts: Buffer[] = []
-          let size = 0
-          response.on('data', (chunk: Buffer) => {
-            size += chunk.length
-            if (size > limits.dohBody) return fail('PROTOCOL')
-            parts.push(chunk)
-          })
-          response.on('end', () => {
+      s.once('connect', () =>
+        through(
+          up.kind,
+          s,
+          server.ip,
+          server.port,
+          () => {
             if (over) return
-            let value: Answer
-            try { value = answerOf(JSON.parse(Buffer.concat(parts, size).toString('utf8')), type) } catch { return fail('PROTOCOL') }
-            finish(null, value)
-          })
-          response.on('error', () => fail())
-        })
-        request.on('error', () => fail())
-        request.end()
-      }, () => fail()))
+            const t = (secure = tls.connect({ socket: s, servername: server.servername, ALPNProtocols: ['http/1.1'], ...(server.ca ? { ca: server.ca } : {}) }))
+            t.on('error', () => fail())
+            t.once('secureConnect', () => {
+              reached = true
+            })
+            const request = http.request(
+              {
+                createConnection: () => t,
+                method: 'GET',
+                path: `${server.path}?name=${encodeURIComponent(name)}&type=${type}`,
+                headers: { host: server.servername, accept: 'application/dns-json' },
+              },
+              response => {
+                if (response.statusCode !== 200) return fail('PROTOCOL')
+                const parts: Buffer[] = []
+                let size = 0
+                response.on('data', (chunk: Buffer) => {
+                  size += chunk.length
+                  if (size > limits.dohBody) return fail('PROTOCOL')
+                  parts.push(chunk)
+                })
+                response.on('end', () => {
+                  if (over) return
+                  let value: Answer
+                  try {
+                    value = answerOf(JSON.parse(Buffer.concat(parts, size).toString('utf8')), type)
+                  } catch {
+                    return fail('PROTOCOL')
+                  }
+                  finish(null, value)
+                })
+                response.on('error', () => fail())
+              },
+            )
+            request.on('error', () => fail())
+            request.end()
+          },
+          () => fail(),
+        ),
+      )
     })
   }
 
-  const bindTo = (server: net.Server, wanted: number) => new Promise<void>((resolve, reject) => {
-    const failed = (error: Error) => { server.removeListener('listening', listening); reject(error) }
-    const listening = () => { server.removeListener('error', failed); resolve() }
-    server.once('error', failed)
-    server.once('listening', listening)
-    server.listen({ host: '127.0.0.1', port: wanted })
-  })
+  const bindTo = (server: net.Server, wanted: number) =>
+    new Promise<void>((resolve, reject) => {
+      const failed = (error: Error) => {
+        server.removeListener('listening', listening)
+        reject(error)
+      }
+      const listening = () => {
+        server.removeListener('error', failed)
+        resolve()
+      }
+      server.once('error', failed)
+      server.once('listening', listening)
+      server.listen({ host: '127.0.0.1', port: wanted })
+    })
 
   try {
     settings = configOf(cfg)
     cfg = null
-    signal?.addEventListener('abort', close, { once: true })
+    signal?.addEventListener('abort', onAbort, { once: true })
     if (signal?.aborted) throw failure('STARTUP')
     // The window's own port again (a reload, a proxy that ended under its
     // window) is knocked on first, as the guest's listener knocks (vacant):
@@ -799,8 +1124,15 @@ export async function start(cfg: any, { emit = notify, signal, timeouts: wait = 
     port = (socks.address() as net.AddressInfo).port
     // Routes arrive here, from the plugin alone; a bad table changes nothing.
     control = controlServer({
-      token: settings.controlToken, bodyLimit: limits.body, sockets: limits.controlSockets, timeoutMs: timeouts.control, headers: limits.headers,
-      onCommand: value => { if (stopped) return { status: 503 }; configure(commandOf(value)) },
+      token: settings.controlToken,
+      bodyLimit: limits.body,
+      sockets: limits.controlSockets,
+      timeoutMs: timeouts.control,
+      headers: limits.headers,
+      onCommand: value => {
+        if (stopped) return { status: 503 }
+        configure(commandOf(value))
+      },
     })
     controlPort = await control.listen()
     if (stopped) throw failure('STARTUP')
@@ -816,8 +1148,15 @@ export async function start(cfg: any, { emit = notify, signal, timeouts: wait = 
   }
 }
 
-if (import.meta.main) run(async (cfg, options) => {
-  const proxy = await start(cfg, options)
-  // A DNS lookup in flight cannot be cancelled; it must not hold up an exit.
-  return { ...proxy, close: () => proxy.close().then(() => { setTimeout(() => process.exit(), 500).unref() }) }
-})
+if (import.meta.main)
+  run(async (cfg, options) => {
+    const proxy = await start(cfg, options)
+    // A DNS lookup in flight cannot be cancelled; it must not hold up an exit.
+    return {
+      ...proxy,
+      close: () =>
+        proxy.close().then(() => {
+          setTimeout(() => process.exit(), 500).unref()
+        }),
+    }
+  })

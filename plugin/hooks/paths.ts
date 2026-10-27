@@ -29,8 +29,11 @@ export function readTargets(tool: string, input: Record<string, unknown>, cwd: s
     return `/${parts.join('/')}`
   }
   const inside = (full: string) => full === root || full.startsWith(`${root}/`)
-  const given: { path: string; from: string; pattern: boolean }[] = [input.file_path, input.notebook_path, input.path].filter(named).map(path => ({ path, from: root, pattern: false }))
-  if (tool === 'Glob' && named(input.pattern)) given.push({ path: input.pattern, from: named(input.path) ? lexical(names(input.path, root, false)!) : root, pattern: true })
+  const given: { path: string; from: string; pattern: boolean }[] = [input.file_path, input.notebook_path, input.path]
+    .filter(named)
+    .map(path => ({ path, from: root, pattern: false }))
+  if (tool === 'Glob' && named(input.pattern))
+    given.push({ path: input.pattern, from: named(input.path) ? lexical(names(input.path, root, false)!) : root, pattern: true })
   const out: string[] = []
   for (const { path, from, pattern } of given) {
     if (path.startsWith('~') || path.includes('\n')) return null
