@@ -95,7 +95,7 @@ Guests see the first 40 lines of each tool result. Subagents' inner steps are no
 
 ## Develop
 
-The plugin is in `plugin/`; shared room logic is in `server/core/`. [CONTRIBUTING.md](CONTRIBUTING.md) covers local development and tests. [AGENTS.md](AGENTS.md) records the engine contracts and release procedure.
+The plugin is in `plugin/`; shared room logic is in `server/core/`. [CONTRIBUTING.md](CONTRIBUTING.md) covers local development and tests. [AGENTS.md](AGENTS.md) records setup and the release procedure, and [docs/rules/](docs/rules/) the engine contracts and the other rules the design keeps.
 
 If you use Shared Sessions, a star helps other developers find it. Bug reports with the versions and steps to reproduce help us improve it.
 
