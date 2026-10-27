@@ -119,8 +119,7 @@ async function startupError(cfg: unknown, code: string) {
 async function inProcess(hooks = {}, cfg = {}): Promise<Instance> {
   const rows: any[] = []
   // No DNS-over-HTTPS unless a check names its servers (dohChecks): never the real ones.
-  const instance = await proxy.start({ ...BASE, ...cfg }, // A cast: start()'s timeouts take TIMEOUTS' own literal values as their type, not any number.
-  { timeouts: FAST as any, emit: row => rows.push(row), doh: [], ...hooks }) as Instance
+  const instance = await proxy.start({ ...BASE, ...cfg }, { timeouts: FAST, emit: row => rows.push(row), doh: [], ...hooks }) as Instance
   running.add(instance)
   assert.deepEqual(rows.shift(), { state: 'ready', port: instance.port, control: instance.control })
   instance.rows = rows
@@ -257,7 +256,7 @@ async function configChecks() {
   for (const [behavior, free] of [['ECONNREFUSED', true], ['answer', false], ['silent', false]]) {
     const wanted = await deadPort(), rows: any[] = [], began = Date.now()
     knocked.length = 0
-    const starting = proxy.start({ ...BASE, port: wanted }, { timeouts: FAST as any, emit: row => rows.push(row), knock: knocking(behavior) })
+    const starting = proxy.start({ ...BASE, port: wanted }, { timeouts: FAST, emit: row => rows.push(row), knock: knocking(behavior) })
     if (free) {
       const started = await starting
       running.add(started as Instance)
