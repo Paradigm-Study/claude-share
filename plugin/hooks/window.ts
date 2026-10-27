@@ -5,7 +5,7 @@
 // (OAuth callbacks match) and the guest's own servers on the same ports are
 // never touched. These are the pure parts: the flags, settings and command
 // that start the window, the shell probes and what they print, and what the
-// window's proxy says. It imports nothing: test/local-preview.mjs loads this
+// window's proxy says. It imports nothing: test/local-preview.ts loads this
 // file under Node as it is, to start real browsers with these same flags and
 // run these same probes (the person's own proxy is ./upstream.ts's; a
 // preview's address, ./preview.ts's).
