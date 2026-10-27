@@ -49,7 +49,8 @@ export function connect(url: string, headers: Record<string, string> = {}, proto
     if (len >= 126 && len < 65536) head.writeUInt16BE(len, 2)
     if (len >= 65536) head.writeBigUInt64BE(BigInt(len), 2)
     const body = Buffer.from(payload)
-    for (let i = 0; i < body.length; i++) body[i] ^= mask[i & 3]
+    // i is within body, and i & 3 within the mask's four bytes.
+    for (let i = 0; i < body.length; i++) body[i]! ^= mask[i & 3]!
     return Buffer.concat([head, mask, body])
   }
   const write = (op: number, payload: Buffer) => {
@@ -99,9 +100,11 @@ export function connect(url: string, headers: Record<string, string> = {}, proto
     let buf: Buffer = Buffer.alloc(0), parts: Buffer[] = [], partOp = 0, partBytes = 0, partCount = 0
     const read = (): void => {
       while (!closed && buf.length >= 2) {
-        const fin = !!(buf[0] & 0x80), op = buf[0] & 15
-        if (buf[0] & 0x70 || buf[1] & 0x80 || ![0, 1, 2, 8, 9, 10].includes(op)) return end(1002)
-        let len = buf[1] & 127, at = 2
+        // The loop runs only while buf has its first two bytes.
+        const b0 = buf[0]!, b1 = buf[1]!
+        const fin = !!(b0 & 0x80), op = b0 & 15
+        if (b0 & 0x70 || b1 & 0x80 || ![0, 1, 2, 8, 9, 10].includes(op)) return end(1002)
+        let len = b1 & 127, at = 2
         if (len === 126) {
           if (buf.length < 4) return
           len = buf.readUInt16BE(2); at = 4

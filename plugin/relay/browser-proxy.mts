@@ -692,8 +692,7 @@ export async function start(cfg: any, { emit = notify, signal, timeouts: wait = 
         const by = Math.min(until, Date.now() + timeouts.dohEach)
         // Less than its own time (the whole look's ran short): a timeout says nothing of the server.
         const short = by < Date.now() + timeouts.dohEach
-        const asks = ['A', 'AAAA'].map(type => ask(up, server, name, type, by, short))
-        const [a, aaaa] = await Promise.allSettled(asks)
+        const [a, aaaa] = await Promise.allSettled([ask(up, server, name, 'A', by, short), ask(up, server, name, 'AAAA', by, short)])
         if (a.status === 'fulfilled' && aaaa.status === 'fulfilled') {
           down.delete(server)
           off.until = off.wait = 0
@@ -701,7 +700,7 @@ export async function start(cfg: any, { emit = notify, signal, timeouts: wait = 
           remember(list, Math.min(timeouts.dohTTL, 1000 * Math.min(a.value.ttl, aaaa.value.ttl)))
           return list
         }
-        const codes = [a, aaaa].filter(r => r.status === 'rejected').map(r => r.reason?.code)
+        const codes = [a, aaaa].filter((r): r is PromiseRejectedResult => r.status === 'rejected').map(r => r.reason?.code)
         if (codes.some(code => code === 'PROTOCOL' || code === 'SLOW')) named = true
         if (codes.some(code => code !== 'PROTOCOL' && code !== 'SLOW' && code !== 'SHORT')) {
           unreachable = true
