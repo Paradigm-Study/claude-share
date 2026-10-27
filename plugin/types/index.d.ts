@@ -197,7 +197,7 @@ export type ShareHostMemory = {
  * Messages between sessions, by id: whose each is. Guest: a handle, which the
  * room carries in the place of one of this person's sessions (`to`, its
  * address, which never leaves this computer; `name`, what it calls itself),
- * at the seat it was made at. Host: a mailbox (relay/mailbox.cjs), standing
+ * at the seat it was made at. Host: a mailbox (relay/mailbox.mts), standing
  * for a teammate's session by the seat and handle the room brought its
  * message with, that teammate's name (`who`) and the session's (`name`).
  * `at`: when it was last used.

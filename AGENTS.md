@@ -60,7 +60,7 @@ node test/browser-proxy.mjs                             # the preview window's S
 node test/discover.mjs                                  # same-project service discovery, and who holds a port
 node test/tcp-worker.mjs                                # the Worker's TCP lifecycle and hibernation, its public link, files and preview keys
 #   test/peer.test.ts                                   # messages and receipts between a guest's own sessions and the host's
-node test/mailbox.mjs                                   # the host's mailbox helper and relay/receipt.cjs through real Unix sockets (macOS or Linux)
+node test/mailbox.mjs                                   # the host's mailbox helper and relay/receipt.mts through real Unix sockets (macOS or Linux)
 node test/previews.mjs                                  # preview shares, forwarding, Stop, needs, the public link, bounded bodies and events, a worst-case meta, the home page's claims
 #   test/teams.test.ts                                  # accounts and teams, the sign-in's confirmation, Continue in a real headless Chrome when there is one
 #   test/cloud.test.ts                                  # the cloud host's handoff through the core; with CLOUD_DOCKER=1 and model access, a real runner in Docker under wrangler dev
