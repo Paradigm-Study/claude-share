@@ -6062,7 +6062,7 @@ async function previewTicket($: $, room: ShareRoom, pid: string, path?: string):
 // ---------------------------------------------------------------------------
 // Helpers: the plugin's own Node processes (relay/*.cjs, relay/*.mts). A guest's
 // listeners and the window's tunnels (local-preview.cjs), the window's proxy
-// (browser-proxy.cjs), discovery (discover.mts), the host's TCP worker
+// (browser-proxy.mts), discovery (discover.mts), the host's TCP worker
 // (tcp-worker.cjs) and its public sockets' relays (ws-relay.cjs) each run
 // under the Node a dev server would, 22.18 or later, which runs TypeScript as
 // it is (`FIND_NODE`, by its `--version`; exit 127: none here), take
@@ -6584,7 +6584,7 @@ async function openPublicPreview($: $, shown: ShareShown, surface?: RenderSurfac
 // cookies are the host's) in a browser window of its own: a Chromium-family
 // browser or Firefox on a profile of its own, started with this plugin's
 // SOCKS proxy for everything, localhost included (`<-loopback>`). The proxy
-// (relay/browser-proxy.cjs) sends a localhost connection only to a tunnel of
+// (relay/browser-proxy.mts) sends a localhost connection only to a tunnel of
 // what the host shares: a run of local-preview.cjs on a port the system
 // picks, so no host port is taken here and the guest's own servers on those
 // ports never see the window. Anything else on localhost is refused (and the
@@ -6847,7 +6847,7 @@ async function runBrowserProxy($: $, proxy: BrowserProxy) {
     proxy.lan = (await $.env.get('SHARED_SESSION_PREVIEW_LAN')) === '1'
     if (proxy.stopped || proxy.scope.children.windowProxy !== proxy || !proxy.scope.live) return
     const settings = { port: proxy.asked, controlToken: proxy.controlToken, lan: proxy.lan, upstream }
-    await runHelper($, proxy, 'browser-proxy.cjs', settings, 5_000, () => finishBrowserProxy(proxy), () => !proxy.stopped && proxy.scope.children.windowProxy === proxy, async said => {
+    await runHelper($, proxy, 'browser-proxy.mts', settings, 5_000, () => finishBrowserProxy(proxy), () => !proxy.stopped && proxy.scope.children.windowProxy === proxy, async said => {
       const line = proxyLine(said)
       if (!line) return
       if (line.state === 'ready') {
@@ -8250,7 +8250,7 @@ function hostAskWords(ask: ShareHostAsk): string {
 //   on this computer: in Claude's browser in Claude Desktop, else (or as the
 //   person chose) their own browser (`showPage`);
 // - else in a separate window, whose localhost reaches only what the host
-//   shares (relay/browser-proxy.cjs), the person's own servers untouched;
+//   shares (relay/browser-proxy.mts), the person's own servers untouched;
 // - else, with no window here (or one that couldn't open), the page on a
 //   free port and what it uses at their numbers where free, and one note of
 //   what that costs.

@@ -1,5 +1,5 @@
 // The person's own proxy, which a preview window's other traffic goes on
-// through (relay/browser-proxy.cjs): from the environment as their own tools
+// through (relay/browser-proxy.mts): from the environment as their own tools
 // take it, else macOS's settings. Split here, by the URL parser, into a
 // kind, a host and a port, and nothing more: whether the window's proxy can
 // use that host (an IP literal, or a plain host name, as it takes them) is

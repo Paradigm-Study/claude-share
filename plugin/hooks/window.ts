@@ -24,7 +24,7 @@ export type BrowserCandidate = { browser: string; family?: BrowserFamily; gecko?
 /** The oldest Gecko a preview window opens in: tested, and well past 67, from which Firefox's hand-off of an address goes only to an instance on the same profile. */
 export const FIREFOX_MIN = 140
 /**
- * What the window's proxy says (relay/browser-proxy.cjs): `upstream`, once
+ * What the window's proxy says (relay/browser-proxy.mts): `upstream`, once
  * after `ready`, that it left the person's own proxy out (`reason`,
  * INVALID_UPSTREAM: an address it can't take) and goes on without it.
  */
