@@ -1305,7 +1305,7 @@ async function realChain() {
   // the one before, put at most 16 batch starts and one batch's tail in a
   // second (850). Batches of 400 every 500 ms let a stall bunch one batch's
   // frames against the next two (about 1,200 in a second), and the room
-  // closed the channel, 1008 "TCP message rate exceeded.".
+  // closed the channel for its rate, 1013 "TCP message rate exceeded.".
   {
     const FRAMES = 21_000, began = Date.now()
     let paced = Date.now()
