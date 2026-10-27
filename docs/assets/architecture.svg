@@ -1,0 +1,113 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 3180 2080" width="1100" role="img" aria-labelledby="t d">
+<title id="t">Shared Sessions architecture</title>
+<desc id="d">The host and guests run Claude Code with the plugin and talk to the room server on Cloudflare: a main Worker and a preview Worker in front of Durable Objects for rooms, accounts and teams, the daily room count and the cloud host, with traces in Postgres.</desc>
+<style>
+svg{--bg:#fff;--ink:#1f2328;--sub:#59636e;--line:#6e7781;--ext:#9198a1;
+--cf:#ebfff0;--cs:#bfeccb;--cn:#aff4c6;--cb:#4fae78;
+--of:#f8f5ff;--os:#dccfff;--on:#e8d6ff;--ob:#b36be6;
+--wn:#fff;--wb:#6e7781;--sn:#d3ecff;--sb:#2b9bdc;--en:#fff;--eb:#9198a1}
+@media (prefers-color-scheme:dark){svg{--bg:#0d1117;--ink:#e6edf3;--sub:#9198a1;--line:#9198a1;--ext:#6e7781;
+--cf:#0f2418;--cs:#1f4a2e;--cn:#173d27;--cb:#3fb371;
+--of:#1b1530;--os:#3a2d63;--on:#2e2350;--ob:#a371f7;
+--wn:#161b22;--wb:#9198a1;--sn:#0c2d4a;--sb:#4aa8e8;--en:#161b22;--eb:#6e7781}}
+text{font-family:Inter,-apple-system,"Segoe UI",Helvetica,Arial,sans-serif;fill:var(--ink)}
+.n{font-size:34px;font-weight:600}.s{font-size:28px;fill:var(--sub)}
+.l{font-size:25px;font-weight:500;fill:var(--sub);paint-order:stroke;stroke:var(--bg);stroke-width:12px;stroke-linejoin:round}
+.h{font-size:30px;font-weight:600;fill:var(--sub);letter-spacing:.06em}
+.e{fill:none;stroke:var(--line);stroke-width:4}.x{stroke:var(--ext);stroke-dasharray:14 10}
+</style>
+<defs><marker id="a" viewBox="0 0 12 12" refX="10" refY="6" markerWidth="5" markerHeight="5" orient="auto-start-reverse"><path d="M1 1L10 6L1 11" fill="none" stroke="var(--line)" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></marker><marker id="b" viewBox="0 0 12 12" refX="10" refY="6" markerWidth="5" markerHeight="5" orient="auto-start-reverse"><path d="M1 1L10 6L1 11" fill="none" stroke="var(--ext)" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></marker></defs>
+<rect width="3180" height="2080" rx="24" fill="var(--bg)"/>
+<rect x="40" y="200" width="480" height="1340" rx="20" fill="var(--cf)" stroke="var(--cs)" stroke-width="3"/>
+<text class="h" x="70" y="260">CLIENTS</text>
+<rect x="1440" y="180" width="1040" height="1640" rx="20" fill="var(--of)" stroke="var(--os)" stroke-width="3"/>
+<text class="h" x="1470" y="240">DURABLE OBJECTS</text>
+<text class="h" x="980" y="580" text-anchor="middle">WORKERS</text>
+<text class="h" x="2940" y="280" text-anchor="middle">EXTERNAL</text>
+<text x="40" y="90" font-size="56" font-weight="700">Shared Sessions architecture</text>
+<text class="s" x="40" y="140">The host runs every tool call. Guests and the room server on Cloudflare see the session.</text>
+<path class="e" d="M428 1020 L832 1020" marker-start="url(#a)" marker-end="url(#a)"/>
+<path class="e" d="M428 420 L606 420 Q630 420 630 444 L630 956 Q630 980 654 980 L832 980" marker-start="url(#a)" marker-end="url(#a)"/>
+<path class="e" d="M428 720 L832 720" marker-end="url(#a)"/>
+<path class="e" d="M428 1320 L606 1320 Q630 1320 630 1296 L630 1084 Q630 1060 654 1060 L832 1060" marker-end="url(#a)"/>
+<path class="e" d="M1128 720 L1532 720" marker-end="url(#a)"/>
+<path class="e" d="M1128 980 L1306 980 Q1330 980 1330 956 L1330 784 Q1330 760 1354 760 L1532 760" marker-end="url(#a)"/>
+<path class="e" d="M1128 940 L1201 940 Q1225 940 1225 916 L1225 484 Q1225 460 1249 460 L2092 460" marker-end="url(#a)"/>
+<path class="e" d="M1128 1020 L1306 1020 Q1330 1020 1330 1044 L1330 1296 Q1330 1320 1354 1320 L1532 1320" marker-end="url(#a)"/>
+<path class="e" d="M1128 1060 L1201 1060 Q1225 1060 1225 1084 L1225 1596 Q1225 1620 1249 1620 L1532 1620" marker-end="url(#a)"/>
+<path class="e" d="M1828 680 L1936 680 Q1960 680 1960 656 L1960 444 Q1960 420 1984 420 L2092 420" marker-end="url(#a)"/>
+<path class="e" d="M1828 720 L2092 720" marker-end="url(#a)"/>
+<path class="e" d="M1828 760 L1936 760 Q1960 760 1960 784 L1960 996 Q1960 1020 1984 1020 L2792 1020" marker-end="url(#a)"/>
+<path class="e" d="M2388 460 L2566 460 Q2590 460 2590 484 L2590 956 Q2590 980 2614 980 L2792 980" marker-end="url(#a)"/>
+<path class="e x" d="M2388 420 L2792 420" marker-end="url(#b)"/>
+<path class="e x" d="M2388 720 L2792 720" marker-end="url(#b)"/>
+<path class="e" d="M1828 1620 L2792 1620" marker-end="url(#a)"/>
+<path class="e x" d="M1828 1660 L1936 1660 Q1960 1660 1960 1684 L1960 1896 Q1960 1920 1984 1920 L2792 1920" marker-end="url(#b)"/>
+<rect x="140" y="920" width="280" height="200" rx="60" fill="var(--cn)" stroke="var(--cb)" stroke-width="4"/>
+<text class="n" x="280" y="989" text-anchor="middle">Host</text>
+<text class="s" x="280" y="1031" text-anchor="middle">Claude Code</text>
+<text class="s" x="280" y="1073" text-anchor="middle">+ plugin</text>
+<rect x="140" y="320" width="280" height="200" rx="60" fill="var(--cn)" stroke="var(--cb)" stroke-width="4"/>
+<text class="n" x="280" y="389" text-anchor="middle">Guest</text>
+<text class="s" x="280" y="431" text-anchor="middle">Claude Code</text>
+<text class="s" x="280" y="473" text-anchor="middle">+ plugin</text>
+<rect x="140" y="620" width="280" height="200" rx="60" fill="var(--cn)" stroke="var(--cb)" stroke-width="4"/>
+<text class="n" x="280" y="710" text-anchor="middle">Guest browser</text>
+<text class="s" x="280" y="752" text-anchor="middle">preview window</text>
+<rect x="140" y="1220" width="280" height="200" rx="60" fill="var(--cn)" stroke="var(--cb)" stroke-width="4"/>
+<text class="n" x="280" y="1310" text-anchor="middle">Team</text>
+<text class="s" x="280" y="1352" text-anchor="middle">MCP client</text>
+<rect x="840" y="920" width="280" height="200" rx="10" fill="var(--wn)" stroke="var(--wb)" stroke-width="4"/>
+<text class="n" x="980" y="1031" text-anchor="middle">Main Worker</text>
+<rect x="840" y="620" width="280" height="200" rx="10" fill="var(--wn)" stroke="var(--wb)" stroke-width="4"/>
+<text class="n" x="980" y="710" text-anchor="middle">Preview</text>
+<text class="s" x="980" y="752" text-anchor="middle">Worker</text>
+<rect x="1540" y="620" width="280" height="200" rx="10" fill="var(--on)" stroke="var(--ob)" stroke-width="4"/>
+<text class="n" x="1680" y="710" text-anchor="middle">RoomObject</text>
+<text class="s" x="1680" y="752" text-anchor="middle">one per room</text>
+<rect x="2100" y="320" width="280" height="200" rx="10" fill="var(--on)" stroke="var(--ob)" stroke-width="4"/>
+<text class="n" x="2240" y="410" text-anchor="middle">DirectoryObject</text>
+<text class="s" x="2240" y="452" text-anchor="middle">accounts, teams</text>
+<rect x="1540" y="1220" width="280" height="200" rx="10" fill="var(--on)" stroke="var(--ob)" stroke-width="4"/>
+<text class="n" x="1680" y="1310" text-anchor="middle">GateObject</text>
+<text class="s" x="1680" y="1352" text-anchor="middle">daily room count</text>
+<rect x="2100" y="620" width="280" height="200" rx="10" fill="var(--on)" stroke="var(--ob)" stroke-width="4"/>
+<text class="n" x="2240" y="710" text-anchor="middle">HostContainer</text>
+<text class="s" x="2240" y="752" text-anchor="middle">cloud host</text>
+<rect x="1540" y="1520" width="280" height="200" rx="10" fill="var(--on)" stroke="var(--ob)" stroke-width="4"/>
+<text class="n" x="1680" y="1610" text-anchor="middle">Traces search</text>
+<text class="s" x="1680" y="1652" text-anchor="middle">MCP</text>
+<path d="M2800 924C2800 892 3080 892 3080 924V1116C3080 1148 2800 1148 2800 1116Z" fill="var(--sn)" stroke="var(--sb)" stroke-width="4"/>
+<path d="M2800 924C2800 956 3080 956 3080 924" fill="none" stroke="var(--sb)" stroke-width="4"/>
+<text class="n" x="2940" y="1024" text-anchor="middle">Durable Object</text>
+<text class="s" x="2940" y="1066" text-anchor="middle">storage</text>
+<path d="M2800 1524C2800 1492 3080 1492 3080 1524V1716C3080 1748 2800 1748 2800 1716Z" fill="var(--sn)" stroke="var(--sb)" stroke-width="4"/>
+<path d="M2800 1524C2800 1556 3080 1556 3080 1524" fill="none" stroke="var(--sb)" stroke-width="4"/>
+<text class="n" x="2940" y="1624" text-anchor="middle">Postgres</text>
+<text class="s" x="2940" y="1666" text-anchor="middle">via Hyperdrive</text>
+<rect x="2800" y="320" width="280" height="200" rx="8" fill="var(--en)" stroke="var(--eb)" stroke-width="4"/>
+<path d="M2818 320V520M3062 320V520" stroke="var(--eb)" stroke-width="4"/>
+<text class="n" x="2940" y="410" text-anchor="middle">GitHub and</text>
+<text class="s" x="2940" y="452" text-anchor="middle">Google OAuth</text>
+<rect x="2800" y="620" width="280" height="200" rx="8" fill="var(--en)" stroke="var(--eb)" stroke-width="4"/>
+<path d="M2818 620V820M3062 620V820" stroke="var(--eb)" stroke-width="4"/>
+<text class="n" x="2940" y="731" text-anchor="middle">Anthropic API</text>
+<rect x="2800" y="1820" width="280" height="200" rx="8" fill="var(--en)" stroke="var(--eb)" stroke-width="4"/>
+<path d="M2818 1820V2020M3062 1820V2020" stroke="var(--eb)" stroke-width="4"/>
+<text class="n" x="2940" y="1931" text-anchor="middle">Workers AI</text>
+<text class="l" x="630" y="1029" text-anchor="middle">Events, stream</text>
+<text class="l" x="646" y="569" text-anchor="start">Prompts, stream</text>
+<text class="l" x="646" y="1199" text-anchor="start">Search turns</text>
+<text class="l" x="1385" y="729" text-anchor="middle">Proxied requests</text>
+<text class="l" x="1346" y="879" text-anchor="start">Room API</text>
+<text class="l" x="1658" y="469" text-anchor="middle">Sign-in, teams</text>
+<text class="l" x="1346" y="1179" text-anchor="start">Counts new rooms</text>
+<text class="l" x="1241" y="1349" text-anchor="start">MCP</text>
+<text class="l" x="1976" y="559" text-anchor="start">Share, join checks</text>
+<text class="l" x="1960" y="729" text-anchor="middle">Move to cloud</text>
+<text class="l" x="2375" y="1029" text-anchor="middle">Events, files</text>
+<text class="l" x="2590" y="429" text-anchor="middle">Sign-in</text>
+<text class="l" x="2590" y="729" text-anchor="middle">Claude</text>
+<text class="l" x="2310" y="1629" text-anchor="middle">Turns, search</text>
+<text class="l" x="2375" y="1929" text-anchor="middle">Embeddings</text>
+</svg>

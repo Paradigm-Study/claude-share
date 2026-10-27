@@ -1,22 +1,14 @@
 # Shared Sessions for Claude Code
 
-Share a Claude Code session with a link. Teammates join from their own Claude Code and see your prompts, replies and tool results live. Their prompts run on your machine, and you approve what they do.
-
-[Install](#install) · [Quick start](#quick-start) · [Full guide](docs/guide.md) · [Contribute](CONTRIBUTING.md)
-
-[![A teammate's invitation above the composer in Claude Desktop](docs/assets/invitation-demo.png)](https://x.com/thescottfan/status/2109815791441072416)
-
-[Watch the 90-second demo](https://x.com/thescottfan/status/2109815791441072416). Recorded with fictional teammates; [credits](docs/assets/README.md).
+[Install](#install) · [Quick start](#quick-start) · [Commands](#commands) · [Full guide](docs/guide.md) · [Contribute](CONTRIBUTING.md)
 
 ## What you get
 
-- **Pair on a real task.** A teammate joins your session, history included, and prompts Claude on the same code.
-- **Stay in control.** A guest's edit, command or network call asks you first. Watch-only mode is available.
-- **Share your dev server.** `/share-preview 3000` lets guests open your app at `http://localhost:3000` on their machine.
-- **Keep working while you sleep.** Move the session to a cloud container and bring it home later.
-- **Find your team.** Optional teams add sign-in, session lists and invitations.
+Share a Claude Code session with a link, and a teammate joins it from their own Claude Code. They see your prompts, replies and tool results live, and they can prompt Claude on the same code. Their prompts run on your machine, and by default each edit, command or network call asks you first.
 
-Works in Claude Desktop and the terminal, on a public server or [your own](#host-your-own-server).
+[![A teammate's invitation above the composer in Claude Desktop](docs/assets/invitation-demo.png)](https://x.com/thescottfan/status/2109815791441072416)
+
+[Watch the 90-second demo](https://x.com/thescottfan/status/2109815791441072416). Recorded with fictional teammates; [credits](docs/assets/README.md). Works in Claude Desktop and the terminal, on a public server or [your own](#host-your-own-server).
 
 ## Install
 
@@ -40,22 +32,37 @@ node scripts/setup.ts join
 
 ## Quick start
 
+Before you share: anyone with the link can join. The session goes through the room server, encrypted in transit but not end to end. See [Privacy](#privacy). In a session that already has messages, Share asks whether to send them. Choose **Only from now on** to leave them out.
+
 1. **Host:** press **Share** above the prompt, or type `/share-session`. Copy the link.
 2. **Teammate:** paste the link into a new Claude Code session and send it.
-3. **Either:** ask Claude to read the README. Both sessions show the prompt, reply and tool calls.
+3. **Teammate:** ask Claude to read the README. The prompt runs on the host's machine, and both sessions show the reply and tool calls.
 4. **Host:** type `/stop-sharing`. The room ends for everyone.
 
-Sharing a session that already has messages asks whether to include them. Choose **Only from now on** to leave them out.
+## Commands
 
 | Command | Does |
 | --- | --- |
-| `/room` | People, timeline, changed files, side chat, host controls |
-| `/who` | Who is in the room |
-| `/share-preview <port>` | Let teammates open a local web server |
-| `/team` | Sign in and manage teams |
-| `/stop-sharing` | End the room |
+| `/share-session` | Share this session. Add `watch` so teammates can only watch, or `new` to leave out earlier messages |
+| `/stop-sharing` | Host: end the room for everyone. Guest: leave it |
+| `/room` | People, timeline, changed files, side chat, settings |
+| `/who` | Who is here, and what each person is doing |
+| `/share-preview <port>` | Host: let teammates open a local web server |
+| `/share-file <path>` | Host: show a file to everyone |
+| `/team` | Sign in, make a team, and see its shared sessions |
+| `/invite <name>` | Invite a teammate into this session. Needs sign-in and a shared team |
 
-[All commands, previews and the cloud host](docs/guide.md#use-it).
+[Every command, previews and the cloud host](docs/guide.md#use-it).
+
+## How it works
+
+![Shared Sessions architecture: the host and guests talk to the room server on Cloudflare, a main Worker and a preview Worker in front of Durable Objects, with storage and external services](docs/assets/architecture.svg)
+
+The host's machine does all the work. A guest's prompt goes through the room server to the host's Claude Code, which runs it as a turn of its own.
+
+By default, every edit, command and network call that a guest's prompt makes asks the host first, agents included. A call the host does not answer is declined.
+
+Guests see the host's tool calls replayed in their own Claude Code. A replay runs nothing on the guest's machine, and the guest's model is never called. [Permissions, files and preview boundaries](docs/guide.md#security-model).
 
 ## Privacy
 
@@ -71,18 +78,6 @@ A session moved to the cloud sends your project files, conversation and Claude t
 
 [What the server keeps, and for how long](docs/guide.md#privacy-and-the-public-server).
 
-## Security model
-
-The host's machine does all the work. Guests see replayed tool cards, which run nothing on their machines. The host's approval rules apply to every guest request, agents included. A request the host cannot answer, or does not answer, is declined. [Permissions, files and preview boundaries](docs/guide.md#security-model).
-
-## Host your own server
-
-```bash
-node scripts/setup.ts deploy
-```
-
-This deploys the room server to your Cloudflare account. It needs Node 22.18+, and a person must approve the browser sign-in. To use a server that already exists: `node scripts/setup.ts host --server https://your-server`. [Cloudflare and team sign-in setup](docs/guide.md#host-a-server).
-
 ## Troubleshooting
 
 - **No Share button, or unknown command:** the session started before the install. Start a new one.
@@ -91,6 +86,14 @@ This deploys the room server to your Cloudflare account. It needs Node 22.18+, a
 - **Check the setup:** run `node scripts/setup.ts check --live` from a clone.
 
 [More troubleshooting](docs/guide.md#troubleshooting) · [Known limits](docs/guide.md#limits) · [Report a bug](https://github.com/Paradigm-Study/claude-share/issues/new/choose)
+
+## Host your own server
+
+```bash
+node scripts/setup.ts deploy
+```
+
+This deploys the room server to your Cloudflare account. It needs Node 22.18+, and a person must approve the browser sign-in. To use a server that already exists: `node scripts/setup.ts host --server https://your-server`. [Cloudflare and team sign-in setup](docs/guide.md#host-a-server).
 
 ## Develop
 
