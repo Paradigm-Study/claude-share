@@ -782,7 +782,7 @@ async function admit(w, url, cookie) {
 // counted like any), browser sessions (256 a room), previews (128), seats
 // and the away list, names and titles at their longest, measured as the
 // Worker writes it (metaOf). The Worker keeps each
-// file's record beside its bytes, never in meta (tcp-worker.mjs checks that
+// file's record beside its bytes, never in meta (tcp-worker.test.ts checks that
 // it does), so a room takes as many as 100 MB of 10 KB files (S3-2), their
 // records at their longest: a name's 120 characters of three bytes and a
 // type's 100 of two (a type's control characters, six bytes each in JSON, go).
@@ -1020,7 +1020,7 @@ async function workerdChecks() {
     assert.equal((await fetch(byNone, { redirect: 'manual' })).status, 404)
     // Every body is bounded as the bytes arrive, per route (D7a): a JSON
     // route and the directory answer 413 before the body ends (a preview's,
-    // the room as it reads it: tcp-worker.mjs). A declared length past the bound is refused by the outer Worker
+    // the room as it reads it: tcp-worker.test.ts). A declared length past the bound is refused by the outer Worker
     // unread; wrangler dev's own proxy loses an answer given before the body
     // is read, so that one is asked of the Worker's fetch directly.
     for (const [path, write] of [[`${base}/events`, 1_600_000], ['/api/teams', 50_000], ['/api/rooms', 1_600_000]]) {

@@ -9,7 +9,6 @@ Use Node.js 22.18 or later on macOS or Linux, and run `npm install` once: the su
 ```sh
 npm install
 npm test
-node test/tcp-worker.mjs
 node test/local-preview.mjs
 node test/previews.mjs
 ```
