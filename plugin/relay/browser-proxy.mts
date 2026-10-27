@@ -286,7 +286,7 @@ export async function start(cfg: any, { emit = notify, signal, timeouts: wait = 
   const close = () => {
     if (closing) return closing
     stopped = true
-    signal?.removeEventListener('abort', close)
+    signal?.removeEventListener('abort', onAbort)
     const ending = control?.close()
     for (const conn of [...conns]) drop(conn)
     for (const socket of [...asking]) socket.destroy()
@@ -296,6 +296,8 @@ export async function start(cfg: any, { emit = notify, signal, timeouts: wait = 
     })()
     return closing
   }
+  // The signal's listener: close() is a promise nobody waits for there.
+  const onAbort = () => void close()
 
   function later(conn: Conn, ms: number, action: () => void) {
     const timer = setTimeout(() => { conn.timers.delete(timer); action() }, ms)
@@ -456,7 +458,7 @@ export async function start(cfg: any, { emit = notify, signal, timeouts: wait = 
     })
     lookups.set(name, pending)
     const mine = pending
-    pending.then(() => { if (lookups.get(name) === mine) lookups.delete(name) })
+    void pending.then(() => { if (lookups.get(name) === mine) lookups.delete(name) })
     return pending
   }
   // One address: 'loopback' (routed), 'own', 'lan' (the Guest's network) or 'ok'.
@@ -593,7 +595,8 @@ export async function start(cfg: any, { emit = notify, signal, timeouts: wait = 
         settled()
         if (conn.target === socket) conn.target = null
         socket?.destroy()
-        reached ? attempt(i + 1, code) : refuse(conn, code)
+        if (reached) attempt(i + 1, code)
+        else refuse(conn, code)
       }
       if (i < order.length - 1) share = later(conn, Math.max(1, (deadline - Date.now()) / (order.length - i)), () => failed(codeOf({ code: 'ETIMEDOUT' })))
       try { socket = connect({ host: up.host, port: up.port, allowHalfOpen: true, noDelay: true, autoSelectFamily: true }) } catch (error) { return failed(codeOf(error)) }
@@ -717,7 +720,7 @@ export async function start(cfg: any, { emit = notify, signal, timeouts: wait = 
     })().catch(() => null)
     looks.set(name, pending)
     const mine = pending
-    pending.then(() => { if (looks.get(name) === mine) looks.delete(name) })
+    void pending.then(() => { if (looks.get(name) === mine) looks.delete(name) })
     return pending
   }
   // One GET of one record type from one server, over TLS (its certificate
@@ -734,7 +737,8 @@ export async function start(cfg: any, { emit = notify, signal, timeouts: wait = 
         clearTimeout(timer)
         secure?.destroy()
         socket?.destroy()
-        error ? reject(error) : resolve(value!)
+        if (error) reject(error)
+        else resolve(value!)
       }
       const fail = (code = 'CONNECT') => finish(failure(code))
       const timer = setTimeout(() => fail(reached ? 'SLOW' : short ? 'SHORT' : 'CONNECT'), Math.max(1, until - Date.now()))
@@ -783,7 +787,7 @@ export async function start(cfg: any, { emit = notify, signal, timeouts: wait = 
   try {
     settings = configOf(cfg)
     cfg = null
-    signal?.addEventListener('abort', close, { once: true })
+    signal?.addEventListener('abort', onAbort, { once: true })
     if (signal?.aborted) throw failure('STARTUP')
     // The window's own port again (a reload, a proxy that ended under its
     // window) is knocked on first, as the guest's listener knocks (vacant):

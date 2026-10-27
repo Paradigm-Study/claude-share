@@ -58,7 +58,7 @@ export async function start(cfg: unknown, { emit = notify, signal }: { emit?: (r
         emit: (error: unknown) => { peer.code = safeCode(error) },
         onReady: () => { peer.paired = true },
       })
-      peer.controller.closed.then(() => release(row.id, peer))
+      void peer.controller.closed.then(() => release(row.id, peer))
     } catch (error) { peer.code = safeCode(error); release(row.id, peer) }
     return true
   }
@@ -70,7 +70,7 @@ export async function start(cfg: unknown, { emit = notify, signal }: { emit?: (r
   const close = () => {
     if (closing) return closing
     stopped = true
-    signal?.removeEventListener('abort', close)
+    signal?.removeEventListener('abort', onAbort)
     const ending = control.close() // First: no command is taken after this.
     for (const peer of peers.values()) { peer.cancelled = true; peer.controller!.close() }
     for (const controller of notifications) controller.abort()
@@ -80,8 +80,10 @@ export async function start(cfg: unknown, { emit = notify, signal }: { emit?: (r
     })()
     return closing
   }
+  // The signal's listener: close() is a promise nobody waits for there.
+  const onAbort = () => void close()
   try {
-    signal?.addEventListener('abort', close, { once: true })
+    signal?.addEventListener('abort', onAbort, { once: true })
     if (signal?.aborted) throw failure('STARTUP')
     const port = await control.listen()
     if (stopped) throw failure('STARTUP')

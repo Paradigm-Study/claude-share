@@ -187,7 +187,11 @@ export function connect(url: string, headers: Record<string, string> = {}, proto
       attach(s, head)
     })
     req.on('response', (res: http.IncomingMessage) => { const status = res.statusCode; res.destroy(); end(status === 401 || status === 403 ? 1008 : status === 429 ? 1013 : 1011, false, status) })
-    req.on('error', () => { if (!closed && !open) i + 1 < hosts.length ? attempt(i + 1) : end(1006, false) })
+    req.on('error', () => {
+      if (closed || open) return
+      if (i + 1 < hosts.length) attempt(i + 1)
+      else end(1006, false)
+    })
     req.end()
   }
   attempt(0)

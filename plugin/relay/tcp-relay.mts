@@ -221,14 +221,16 @@ export function startHost(cfg: any, { emit = notify, signal, timeoutMs = 10_000,
     s.pause()
     const failed = () => {
       s.destroy()
-      if (!done) family === 4 ? attempt(6) : error('CONNECT')
+      if (done) return
+      if (family === 4) attempt(6)
+      else error('CONNECT')
     }
     s.once('error', failed)
     s.once('connect', () => {
       s.removeListener('error', failed)
       if (done) return s.destroy()
       relay = bridge(s, url, { authorization: `Bearer ${cfg.token}`, 'x-shared-session-version': cfg.version }, { emit, timeoutMs: Math.max(1, timeoutMs - (Date.now() - began)), onReady: () => { clearTimeout(timer); onReady() } })
-      relay.closed.then(finish)
+      void relay.closed.then(finish)
     })
   }
   if (signal?.aborted) abort()
@@ -395,8 +397,9 @@ export function run(start: (cfg: any, options: RunOptions) => Running | Promise<
     await starting
     await running?.close()
   }
-  process.on('SIGTERM', stop)
-  process.on('SIGINT', stop)
-  process.stdout.on('error', stop)
+  const halt = () => void stop()
+  process.on('SIGTERM', halt)
+  process.on('SIGINT', halt)
+  process.stdout.on('error', halt)
 }
 

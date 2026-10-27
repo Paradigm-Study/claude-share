@@ -99,13 +99,14 @@ function main() {
   process.stdin.setEncoding('utf8')
   process.stdin.on('data', (data: string) => { if ((input += data).length > 16_384) { tooLarge = true; input = '' } })
   process.stdin.on('error', () => { tooLarge = true })
-  process.stdin.on('end', async () => {
+  // Its work is a promise that never rejects; the stream's listener doesn't wait for it.
+  process.stdin.on('end', () => void (async () => {
     let cfg: { path: string; line: string }
     try { if (tooLarge) throw failure('INVALID_CONFIG'); cfg = configOf(JSON.parse(input)) } catch { say({ state: 'error', code: 'INVALID_CONFIG' }); process.exitCode = 1; return }
     const sent = await writeLine(cfg.path, cfg.line)
     say(sent ? { state: 'sent' } : { state: 'error', code: 'CONNECT' })
     process.exitCode = sent ? 0 : 1
-  })
+  })())
   // Bounded whatever happens: a session that never reads gets nothing more.
   setTimeout(() => { say({ state: 'error', code: 'TIMEOUT' }); process.exit(1) }, WRITE_MS + 500).unref()
 }

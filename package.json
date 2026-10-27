@@ -13,9 +13,9 @@
     "typecheck:relay": "tsc -p plugin/relay/tsconfig.json",
     "typecheck:test": "wrangler types test/worker-runtime.d.ts --include-env=false >/dev/null && tsc -p test/tsconfig.json",
     "typecheck:plugin": "cd plugin && tsc -p .",
-    "lint": "wrangler types server/worker-configuration.d.ts >/dev/null && oxlint --type-aware server/ scripts/",
-    "format": "oxfmt server/ scripts/",
-    "format:check": "oxfmt --check server/ scripts/",
+    "lint": "wrangler types server/worker-configuration.d.ts >/dev/null && oxlint --type-aware server/ scripts/ plugin/relay/",
+    "format": "oxfmt server/ scripts/ plugin/hooks/ plugin/relay/ plugin/tests/ plugin/types/ plugin/tsconfig.json",
+    "format:check": "oxfmt --check server/ scripts/ plugin/hooks/ plugin/relay/ plugin/tests/ plugin/types/ plugin/tsconfig.json",
     "test": "vitest run",
     "test:e2e": "node test/e2e.ts"
   },

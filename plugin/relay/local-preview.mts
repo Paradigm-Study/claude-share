@@ -29,12 +29,14 @@ export async function start(cfg: any, { emit = notify, signal, createServer = ne
     if (closing) return closing
     stopped = true
     ready = false
-    signal?.removeEventListener('abort', close)
+    signal?.removeEventListener('abort', onAbort)
     for (const relay of relays) relay.close()
     for (const socket of sockets) socket.destroy()
     closing = Promise.all([...servers].map(unbind)).then(() => {})
     return closing
   }
+  // The signal's listener: close() is a promise nobody waits for there.
+  const onAbort = () => void close()
   function unbind(server: net.Server) {
     return new Promise<void>(resolve => {
       if (!server.listening) return resolve()
@@ -54,7 +56,7 @@ export async function start(cfg: any, { emit = notify, signal, createServer = ne
         onReady: () => emit({ state: 'channel-ready' }),
       })
       relays.add(relay)
-      relay.closed.then(() => relays.delete(relay))
+      void relay.closed.then(() => relays.delete(relay))
     })
     servers.add(server)
     server.on('error', () => {}) // Do not print native errors containing URLs.
@@ -71,7 +73,7 @@ export async function start(cfg: any, { emit = notify, signal, createServer = ne
   try {
     settings = configOf(cfg)
     cfg = null
-    signal?.addEventListener('abort', close, { once: true })
+    signal?.addEventListener('abort', onAbort, { once: true })
     if (signal?.aborted) { await close(); throw failure('STARTUP') }
     for (let attempt = 0; attempt < BIND_TRIES; attempt++) {
       ipv6 = false

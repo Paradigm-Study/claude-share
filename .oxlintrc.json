@@ -1,6 +1,9 @@
-// oxlint (npm run lint), on server/ and scripts/: its default correctness rules,
-// and, with --type-aware (oxlint-tsgolint, the TypeScript the tsconfigs
-// name), the rules about promises a Durable Object can't afford to drop.
+// oxlint (npm run lint), on server/, scripts/ and plugin/relay/: its default
+// correctness rules, and, with --type-aware (oxlint-tsgolint, the TypeScript
+// the tsconfigs name), the rules about promises a Durable Object, or a
+// helper's socket, can't afford to drop. Not plugin/hooks: their types are
+// the engine's (plugin/.claude/types, copied in from a Claude Code session and
+// git-ignored), so on CI every engine type would read as any.
 {
   "$schema": "./node_modules/oxlint/configuration_schema.json",
   "rules": {
