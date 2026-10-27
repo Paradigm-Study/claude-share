@@ -259,7 +259,7 @@ describe.skipIf(!url)('end to end, against Postgres (TRACES_DATABASE_URL)', () =
       ['缓存击穿', '缓存击穿', "a word in the turn the room's end closed"],
       ['hibernation', 'Why does the Durable Object', 'an English word'],
       ['serializeAttachment', 'Why does the Durable Object', 'an identifier from a reply'],
-    ]) ok((await firstOf(query)).startsWith(expect), `keyword search finds ${label}: ${query}`)
+    ]) ok((await firstOf(query!)).startsWith(expect), `keyword search finds ${label}: ${query}`)
 
     const scopes = [`t:${team.id}`]
     for (const query of ['部署', '迁移', '热点', '缓存', '主 Worker', 'wrangler']) {
@@ -281,7 +281,7 @@ describe.skipIf(!url)('end to end, against Postgres (TRACES_DATABASE_URL)', () =
         ['why is my object forgetting things after it sleeps', 'Why does the Durable Object'],
         ['热门数据失效导致数据库压力大', '缓存击穿'],
       ]) {
-        const found = await hits(a.access, query, { mode: 'semantic' })
+        const found = await hits(a.access, query!, { mode: 'semantic' })
         ok(found[0]?.prompt.startsWith(expect), `search by meaning: "${query}" → ${found[0]?.prompt.slice(0, 20) ?? 'nothing'}`)
       }
       const hybrid = await hits(a.access, '部署')

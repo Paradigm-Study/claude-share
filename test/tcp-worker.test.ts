@@ -217,7 +217,7 @@ async function entering(w: World, url: URL, cookie?: string) {
   const first = await go(url, cookie)
   if (first.status !== 200 || first.headers.get('clear-site-data') !== '"cache", "cookies", "storage"') return first
   assert.equal(first.headers.get('set-cookie'), null)
-  return go(new URL(/url=([^"]+)"/.exec(await first.text())![1].replaceAll('&amp;', '&'), url))
+  return go(new URL(/url=([^"]+)"/.exec(await first.text())![1]!.replaceAll('&amp;', '&'), url))
 }
 async function openPublic(w: World, pid: string, paired = true, bearer = w.member) {
   const request = req(w, `previews/${pid}/ticket`, bearer, 'POST', {})
@@ -227,7 +227,7 @@ async function openPublic(w: World, pid: string, paired = true, bearer = w.membe
   const entered = await entering(w, new URL((await ticket.json<any>()).url))
   assert.equal(entered.status, 302)
   const cookie = entered.headers.get('set-cookie')!.split(';')[0]
-  assert.equal((await w.obj.fetch(publicRequest(w, cookie))).status, 101)
+  assert.equal((await w.obj.fetch(publicRequest(w, cookie!))).status, 101)
   const notice = jsonControl(w.control).filter(x => x.ws).at(-1).ws
   assert.equal(notice.pid, pid)
   const pair = { id: notice.id, pid, cookie, guest: w.state.getWebSockets(`pb:${notice.id}`).at(-1)! } as Pair
@@ -327,8 +327,8 @@ describe('on the Worker, with stdlib stubs', () => {
     assert.deepEqual([w.obj.room!.previews.get(other.pid)?.port, w.obj.room!.previews.get(other.pid)?.tcp], [43170, true])
     const before = w.obj.room!.seq
     assert.deepEqual(await api(w, `previews/${other.pid}/end`, w.host, 'POST'), { ok: true })
-    closed(pairs[1], 1008)
-    assert.equal(pairs[0].guest.closes.length, 0, "another preview's channel goes on")
+    closed(pairs[1]!, 1008)
+    assert.equal(pairs[0]!.guest.closes.length, 0, "another preview's channel goes on")
     assert.equal((await w.obj.fetch(req(w, `previews/${other.pid}/tunnel`, w.member, 'GET', undefined, true))).status, 410)
     assert.deepEqual(w.obj.room!.since(before).filter(e => e.type === 'preview').map(e => [e.body.pid, e.body.state]), [[other.pid, 'closed']])
     assert.deepEqual(jsonControl(viewer).at(-1).events.filter((e: any) => e.type === 'preview').map((e: any) => e.body.state), ['closed'])
@@ -352,23 +352,23 @@ describe('on the Worker, with stdlib stubs', () => {
     const tcpPair = await open(w)
     await w.obj.persist(); await reconstruct(w)
     for (let i = 0; i < active.length; i++) {
-      await publicTraffic(w, active[i], `before stop ${i}`)
-      await w.obj.webSocketMessage(waiting[i].guest, `queued ${i}`)
-      assert.equal(w.obj.pending.get(waiting[i].id)!.messages[0], `queued ${i}`)
+      await publicTraffic(w, active[i]!, `before stop ${i}`)
+      await w.obj.webSocketMessage(waiting[i]!.guest, `queued ${i}`)
+      assert.equal(w.obj.pending.get(waiting[i]!.id)!.messages[0], `queued ${i}`)
     }
     await api(w, `previews/${pids[0]}/end`, w.host, 'POST')
-    closed(active[0], 1008); closed(waiting[0], 1008)
-    assert.equal(w.obj.pending.has(waiting[0].id), false)
-    assert.equal((await w.obj.fetch(req(w, `previews/${active[0].pid}`, w.member))).status, 404)
-    assert.equal((await w.obj.fetch(publicRequest(w, active[0].cookie!))).status, 404)
+    closed(active[0]!, 1008); closed(waiting[0]!, 1008)
+    assert.equal(w.obj.pending.has(waiting[0]!.id), false)
+    assert.equal((await w.obj.fetch(req(w, `previews/${active[0]!.pid}`, w.member))).status, 404)
+    assert.equal((await w.obj.fetch(publicRequest(w, active[0]!.cookie!))).status, 404)
     assert.equal(tcpPair.guest.closes.length, 0, "another preview's TCP goes on")
     for (let i = 1; i < active.length; i++) {
-      assert.equal(active[i].guest.closes.length, 0); assert.equal(active[i].host.closes.length, 0)
-      assert.equal(waiting[i].guest.closes.length, 0)
-      await pairPublic(w, waiting[i])
-      assert.equal(waiting[i].host.sent[0], `queued ${i}`)
-      await publicTraffic(w, active[i], `kept ${i}`)
-      await publicTraffic(w, waiting[i], `late pair ${i}`)
+      assert.equal(active[i]!.guest.closes.length, 0); assert.equal(active[i]!.host.closes.length, 0)
+      assert.equal(waiting[i]!.guest.closes.length, 0)
+      await pairPublic(w, waiting[i]!)
+      assert.equal(waiting[i]!.host.sent[0], `queued ${i}`)
+      await publicTraffic(w, active[i]!, `kept ${i}`)
+      await publicTraffic(w, waiting[i]!, `late pair ${i}`)
     }
     for (const pair of [...active, ...waiting]) {
       assert.equal(pair.guest.deserializeAttachment().pid, pair.pid)
@@ -377,28 +377,28 @@ describe('on the Worker, with stdlib stubs', () => {
     // Even if closing sockets remain listed across another reconstruction and
     // the same port is shared again, neither old half may forward or re-pair.
     const replacement = (await api(w, 'previews', w.host, 'POST', { port: 43211 })).pid
-    assert.notEqual(replacement, active[0].pid)
+    assert.notEqual(replacement, active[0]!.pid)
     await reconstruct(w)
-    const sent = [active[0].guest.sent.length, active[0].host.sent.length]
-    await w.obj.webSocketMessage(active[0].guest, 'revoked request')
-    await w.obj.webSocketMessage(active[0].host, 'revoked reply')
-    assert.deepEqual([active[0].guest.sent.length, active[0].host.sent.length], sent)
+    const sent = [active[0]!.guest.sent.length, active[0]!.host.sent.length]
+    await w.obj.webSocketMessage(active[0]!.guest, 'revoked request')
+    await w.obj.webSocketMessage(active[0]!.host, 'revoked reply')
+    assert.deepEqual([active[0]!.guest.sent.length, active[0]!.host.sent.length], sent)
     for (const pair of [active[0], waiting[0]]) {
-      assert.equal((await w.obj.fetch(req(w, `ws/${pair.id}`, w.host, 'GET', undefined, true))).status, 410)
-      assert.equal(pair.guest.deserializeAttachment().closed, true)
+      assert.equal((await w.obj.fetch(req(w, `ws/${pair!.id}`, w.host, 'GET', undefined, true))).status, 410)
+      assert.equal(pair!.guest.deserializeAttachment().closed, true)
     }
     const fresh = await openPublic(w, pids[1])
     await publicTraffic(w, fresh, 'a new public handshake')
     await api(w, `previews/${pids[1]}/end`, w.host, 'POST')
-    closed(active[1], 1008); closed(waiting[1], 1008); closed(fresh, 1008)
-    await publicTraffic(w, active[2], 'the other preview survives Stop')
+    closed(active[1]!, 1008); closed(waiting[1]!, 1008); closed(fresh, 1008)
+    await publicTraffic(w, active[2]!, 'the other preview survives Stop')
     const pendingEnd = await openPublic(w, w.pid, false)
     await api(w, 'end', w.host, 'POST')
-    for (const pair of [active[2], waiting[2], pendingEnd, tcpPair]) closed(pair, 1008)
+    for (const pair of [active[2], waiting[2], pendingEnd, tcpPair]) closed(pair!, 1008)
     await reconstruct(w)
-    const before = active[2].host.sent.length
-    await w.obj.webSocketMessage(active[2].guest, 'after room end')
-    assert.equal(active[2].host.sent.length, before)
+    const before = active[2]!.host.sent.length
+    await w.obj.webSocketMessage(active[2]!.guest, 'after room end')
+    assert.equal(active[2]!.host.sent.length, before)
   })
 
   // Expired browser sessions are swept by the alarm and by ordinary room
@@ -529,7 +529,7 @@ describe('on the Worker, with stdlib stubs', () => {
     assert.equal(w.obj.room!.tcpStats.opens.count, 1)
     assert.deepEqual(Object.keys(LIMITS).sort(), ['create', 'events', 'join'])
     for (const [method, rest, bearer] of [['POST', `previews/${w.pid}/tunnel`, w.member], ['GET', `previews/${w.pid}/tunnel`, w.member], ['POST', 'ws/x/reject', w.host]]) {
-      assert.equal(limitOf(req(w, '', bearer, method), w.id, rest, 'ip'), null, `${method} ${rest}`)
+      assert.equal(limitOf(req(w, '', bearer, method), w.id, rest!, 'ip'), null, `${method} ${rest}`)
     }
   })
 
@@ -702,26 +702,26 @@ describe('on the Worker, with stdlib stubs', () => {
     const byte = new Uint8Array([7]).buffer, most = { both: 0, sender: 0 }
     const [guest, host] = halves()
     for (let i = 0; i < 100_000; i++) {
-      relay(guest, host, { t: 'data', n: 1, data: byte }); relay(host, guest, ackOf(host.credits[0]))
-      relay(host, guest, { t: 'data', n: 1, data: byte }); relay(guest, host, ackOf(guest.credits[0]))
-      most.both = Math.max(most.both, guest.out - guest.read, host.out - host.read)
+      relay(guest, host, { t: 'data', n: 1, data: byte }); relay(host, guest, ackOf(host!.credits[0]!))
+      relay(host, guest, { t: 'data', n: 1, data: byte }); relay(guest, host, ackOf(guest!.credits[0]!))
+      most.both = Math.max(most.both, guest!.out - guest!.read, host!.out - host!.read)
     }
     assert(most.both < 256, `request/response: ${most.both} bytes unproven at most`)
     const [reader, writer] = halves()
     let asked = 0
     for (let i = 0; i < 100_000; i++) {
       relay(writer, reader, { t: 'data', n: 1, data: byte })
-      for (const message of relay(reader, writer, ackOf(reader.credits[0])).messages) {
+      for (const message of relay(reader, writer, ackOf(reader!.credits[0]!)).messages) {
         const row = JSON.parse(message as string)
         if (row.t === 'check') { asked++; relay(writer, reader, { t: 'seen', nonce: row.nonce }) }
       }
-      most.sender = Math.max(most.sender, writer.out - writer.read)
+      most.sender = Math.max(most.sender, writer!.out - writer!.read)
     }
     assert(asked > 300 && most.sender < TCP_LIMITS.checkBytes + 128, `one-way: ${asked} checks, ${most.sender} bytes unproven at most`)
-    assert(reader.out - reader.read < 256)
+    assert(reader!.out - reader!.read < 256)
     const [silent, silentReader] = halves()
     let frames = 0
-    assert.throws(() => { for (;;) { relay(silent, silentReader, { t: 'data', n: 1, data: byte }); relay(silentReader, silent, ackOf(silentReader.credits[0])); frames++ } }, /unread control output limit/)
+    assert.throws(() => { for (;;) { relay(silent, silentReader, { t: 'data', n: 1, data: byte }); relay(silentReader, silent, ackOf(silentReader!.credits[0]!)); frames++ } }, /unread control output limit/)
     assert(frames > 19_000 && frames < 21_000, `a one-way sender answering no check closes after ${frames} frames`)
   })
 
@@ -788,7 +788,7 @@ describe('on the Worker, with stdlib stubs', () => {
     const publicId = jsonControl(w.control).at(-1).ws.id, publicSocket = w.state.getWebSockets(`pb:${publicId}`)[0]
     assert.equal((await w.obj.fetch(req(w, `ws/${publicId}/reject`, w.member, 'POST', { code: 'BUSY' }))).status, 401)
     assert.equal((await w.obj.fetch(req(w, `ws/${publicId}/reject`, w.host, 'POST', { code: 'BUSY' }))).status, 200)
-    assert.equal(publicSocket.closes.at(-1)!.code, 1013)
+    assert.equal(publicSocket!.closes.at(-1)!.code, 1013)
     assert.equal(pending.guest.closes.length, 0)
     assert.equal(pending.guest.closes.length, 0)
     const half = tcp(pending.guest)
@@ -839,7 +839,7 @@ describe('on the Worker, with stdlib stubs', () => {
     const w = await world()
     const pid = (await (await w.obj.fetch(req(w, 'previews', w.host, 'POST', { port: 34568, tcp: true }))).json<any>()).pid
     const port = { ...w, pid }, lanes = [w, w, port]
-    for (let i = 0; i < 32; i++) await open(lanes[i % lanes.length], w.member, i % 2 === 0)
+    for (let i = 0; i < 32; i++) await open(lanes[i % lanes.length]!, w.member, i % 2 === 0)
     assert.equal(w.obj.tcpSockets().length, 48) // 32 channels, not 48 halves
     for (const where of [w, port]) assert.equal((await w.obj.fetch(req(where, `previews/${where.pid}/tunnel`, w.member, 'GET', undefined, true))).status, 429)
     await reconstruct(w); port.obj = w.obj
@@ -1016,28 +1016,28 @@ describe('on the Worker, with stdlib stubs', () => {
     const cookie = entered.headers.get('set-cookie')!.split(';')[0]
     const opened: Pair[] = []
     for (let i = 0; i < PUBLIC_LIMITS.seatPairs; i++) {
-      assert.equal((await w.obj.fetch(publicRequest(w, cookie))).status, 101)
+      assert.equal((await w.obj.fetch(publicRequest(w, cookie!))).status, 101)
       opened.push({ id: jsonControl(w.control).filter(x => x.ws).at(-1).ws.id } as Pair)
     }
-    for (const p of opened) p.guest = w.state.getWebSockets(`pb:${p.id}`)[0]
+    for (const p of opened) p.guest = w.state.getWebSockets(`pb:${p.id}`)[0]!
     assert(opened.every(p => p.guest.tags.includes('public')))
-    assert.equal((await w.obj.fetch(publicRequest(w, cookie))).status, 429)
-    const deadline = opened[0].guest.deserializeAttachment().deadline
+    assert.equal((await w.obj.fetch(publicRequest(w, cookie!))).status, 429)
+    const deadline = opened[0]!.guest.deserializeAttachment().deadline
     assert.equal(deadline, now + PUBLIC_LIMITS.pairMs); assert(w.state.storage.alarm! <= deadline)
     // Four more seats fill the room's 128; a sixth seat is refused.
     const members = [w.member]
     for (let i = 0; i < 4; i++) members.push((await (await w.obj.fetch(req(w, 'join', null, 'POST', { name: `Seat ${i}` }))).json<any>()).token)
     for (const member of members.slice(1, 4)) {
       const c = await cookieFor(member)
-      for (let i = 0; i < PUBLIC_LIMITS.seatPairs; i++) assert.equal((await w.obj.fetch(publicRequest(w, c))).status, 101)
+      for (let i = 0; i < PUBLIC_LIMITS.seatPairs; i++) assert.equal((await w.obj.fetch(publicRequest(w, c!))).status, 101)
     }
-    assert.equal((await w.obj.fetch(publicRequest(w, await cookieFor(members[4])))).status, 429, 'the room has 128')
+    assert.equal((await w.obj.fetch(publicRequest(w, (await cookieFor(members[4!]!))!))).status, 429, 'the room has 128')
     // Past the deadline: the alarm closes what the host never took up, and
     // they no longer hold places.
     now += PUBLIC_LIMITS.pairMs + 1
     await w.obj.alarm()
     for (const p of opened) assert.equal(p.guest.closes.at(-1)!.code, 1011)
-    assert.equal((await w.obj.fetch(req(w, `ws/${opened[0].id}`, w.host, 'GET', undefined, true))).status, 410)
+    assert.equal((await w.obj.fetch(req(w, `ws/${opened[0]!.id}`, w.host, 'GET', undefined, true))).status, 410)
     const late = await openPublic(w, pid, false)
     now += PUBLIC_LIMITS.pairMs + 1 // no alarm yet: a late host half is refused all the same
     assert.equal((await w.obj.fetch(req(w, `ws/${late.id}`, w.host, 'GET', undefined, true))).status, 410)
@@ -1070,20 +1070,20 @@ describe('on the Worker, with stdlib stubs', () => {
     closed(slow, 1009); assert.equal(slow.guest.sent.length, 0)
     // Leave ends the seat's sockets; another seat's go on.
     const mine = await openPublic(w, pid), theirs = await (async () => {
-      const c = await cookieFor(members[4])
-      assert.equal((await w.obj.fetch(publicRequest(w, c))).status, 101)
+      const c = await cookieFor(members[4]!)
+      assert.equal((await w.obj.fetch(publicRequest(w, c!))).status, 101)
       return { guest: w.state.getWebSockets(`pb:${jsonControl(w.control).filter(x => x.ws).at(-1).ws.id}`)[0] }
     })()
     assert.equal((await w.obj.fetch(req(w, 'leave', w.member, 'POST'))).status, 200)
-    closed(mine, 1008); assert.equal(theirs.guest.closes.length, 0)
+    closed(mine, 1008); assert.equal(theirs.guest!.closes.length, 0)
     // A seat's fifth browser on a preview lets the first go, its sockets too.
     const browsers = []
     for (let i = 0; i < PUBLIC_LIMITS.seatSessions + 1; i++) {
-      const c = await cookieFor(members[3])
-      assert.equal((await w.obj.fetch(publicRequest(w, c))).status, 101)
+      const c = await cookieFor(members[3]!)
+      assert.equal((await w.obj.fetch(publicRequest(w, c!))).status, 101)
       browsers.push(w.state.getWebSockets(`pb:${jsonControl(w.control).filter(x => x.ws).at(-1).ws.id}`)[0])
     }
-    assert.equal(browsers[0].closes.at(-1)!.code, 1008); assert(browsers.slice(1).every(b => b.closes.length === 0))
+    assert.equal(browsers[0]!.closes.at(-1)!.code, 1008); assert(browsers.slice(1).every(b => b!.closes.length === 0))
     // A browser session's expiry ends its sockets, from the alarm.
     const lasting = await openPublic(w, pid, true, members[2])
     const exp = lasting.guest.deserializeAttachment().exp
@@ -1145,7 +1145,7 @@ describe('on the Worker, with stdlib stubs', () => {
     const viaWorker = (url: string | URL) => fetchWorker(new Request(url, { headers: { cookie: elsewhere } }), env)
     const clearing = await viaWorker(link)
     assert.equal(clearing.status, 200); assert.equal(clearing.headers.get('clear-site-data'), '"cache", "cookies", "storage"'); assert.equal(clearing.headers.get('set-cookie'), null)
-    const next = new URL(/url=([^"]+)"/.exec(await clearing.text())![1].replaceAll('&amp;', '&'), link)
+    const next = new URL(/url=([^"]+)"/.exec(await clearing.text())![1]!.replaceAll('&amp;', '&'), link)
     const entered = await viaWorker(next)
     assert.equal(entered.status, 302); assert.equal(entered.headers.get('location'), '/start'); assert.match(entered.headers.get('set-cookie')!, /^cs_pv=/)
   })
@@ -1166,9 +1166,9 @@ describe('on the Worker, with stdlib stubs', () => {
     assert.equal(url.searchParams.get('room'), w.key); assert(!url.href.includes(w.id))
     const clearing = await fetchWorker(new Request(url), env)
     assert.equal(clearing.status, 200)
-    const entered = await fetchWorker(new Request(new URL(/url=([^"]+)"/.exec(await clearing.text())![1].replaceAll('&amp;', '&'), url)), env)
+    const entered = await fetchWorker(new Request(new URL(/url=([^"]+)"/.exec(await clearing.text())![1]!.replaceAll('&amp;', '&'), url)), env)
     assert.equal(entered.status, 302)
-    const cookie = entered.headers.get('set-cookie')!.split(';')[0], sid = cookie.split('.')[1]
+    const cookie = entered.headers.get('set-cookie')!.split(';')[0]!, sid = cookie.split('.')[1]
     assert.equal(cookie, `cs_pv=${w.key}.${sid}`)
     await reconstruct(w)
     assert.equal(w.obj.room!.previewKey, w.key, 'the same key after the object sleeps')
@@ -1340,13 +1340,13 @@ describe('on the Worker, with stdlib stubs', () => {
     for (let i = 0; i < 9; i++) waiting.push(await socketOn(next.cookie!))
     for (const p of waiting.slice(0, 8)) await w.obj.webSocketMessage(p.guest, bytes())
     assert.equal(w.obj.pendingBytes, 8_000_000)
-    await w.obj.webSocketMessage(waiting[8].guest, bytes())
-    assert.equal(waiting[8].guest.closes.at(-1)!.code, 1009)
+    await w.obj.webSocketMessage(waiting[8]!.guest, bytes())
+    assert.equal(waiting[8]!.guest.closes.at(-1)!.code, 1009)
     assert.equal(w.obj.pendingBytes, 8_000_000); assert(waiting.slice(0, 8).every(p => !p.guest.closes.length))
     // Paired or closed, a browser's bytes leave the count.
-    await pairPublic(w, waiting[0])
-    assert.equal(waiting[0].host.sent[0].byteLength, 1_000_000); assert.equal(w.obj.pendingBytes, 7_000_000)
-    await w.obj.webSocketClose(waiting[1].guest, 1000, '')
+    await pairPublic(w, waiting[0]!)
+    assert.equal(waiting[0]!.host.sent[0].byteLength, 1_000_000); assert.equal(w.obj.pendingBytes, 7_000_000)
+    await w.obj.webSocketClose(waiting[1]!.guest, 1000, '')
     assert.equal(w.obj.pendingBytes, 6_000_000)
     const later = await socketOn(next.cookie!)
     await w.obj.webSocketMessage(later.guest, bytes())
@@ -1485,11 +1485,11 @@ async function rawSocket(port: number, path: string, bearer?: string, cookie?: s
     }
     if (status !== 101) return
     while (buf.length >= 2) {
-      let n = buf[1] & 127, at = 2
+      let n = buf[1]! & 127, at = 2
       if (n === 126) { if (buf.length < 4) return; n = buf.readUInt16BE(2); at = 4 }
       if (n === 127) { if (buf.length < 10) return; n = Number(buf.readBigUInt64BE(2)); at = 10 }
       if (buf.length < at + n) return
-      deliver({ op: buf[0] & 15, data: Buffer.from(buf.subarray(at, at + n)) })
+      deliver({ op: buf[0]! & 15, data: Buffer.from(buf.subarray(at, at + n)) })
       buf = buf.subarray(at + n)
     }
   })
@@ -1567,7 +1567,7 @@ async function workerdFrames() {
     // The clearing page first (D2-3), then its next link, the browser's cookies cleared.
     const clearing = await fetch(ticket.url, { redirect: 'manual' })
     assert.equal(clearing.headers.get('clear-site-data'), '"cache", "cookies", "storage"')
-    const entered = await fetch(new URL(/url=([^"]+)"/.exec(await clearing.text())![1].replaceAll('&amp;', '&'), ticket.url), { redirect: 'manual' })
+    const entered = await fetch(new URL(/url=([^"]+)"/.exec(await clearing.text())![1]!.replaceAll('&amp;', '&'), ticket.url), { redirect: 'manual' })
     const cookie = entered.headers.get('set-cookie')!.split(';')[0]
     const publicSocket = await rawSocket(preview, '/live', '', cookie)
     assert.equal(publicSocket.status, 101)

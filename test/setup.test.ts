@@ -11,7 +11,7 @@ import { test } from 'vitest'
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
 const pluginId = 'shared-session@claude-share'
 const defaultSource = readFileSync(join(root, 'plugin/hooks/server.ts'), 'utf8')
-const defaultUrl = /export const SERVER_URL = ['"]([^'"]*)['"]/.exec(defaultSource)![1]
+const defaultUrl = /export const SERVER_URL = ['"]([^'"]*)['"]/.exec(defaultSource)![1]!
 
 const fakeCli = String.raw`
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
@@ -150,7 +150,7 @@ function setup(args: string[], scenario: Scenario = {}) {
     if (scenario.place) env.CLAUDE_CODE_HOST_SESSION_ID = scenario.place
     const result = spawnSync(process.execPath, ['--import', join(dir, 'fetch.mjs'), join(dir, 'scripts/setup.ts'), ...args], { env, cwd: dir, encoding: 'utf8', timeout: 15_000 })
     assert.ifError(result.error)
-    const calls = existsSync(env.SETUP_LOG) ? readFileSync(env.SETUP_LOG, 'utf8').trim().split('\n').map((line): Call => JSON.parse(line)) : []
+    const calls = existsSync(env.SETUP_LOG!) ? readFileSync(env.SETUP_LOG!, 'utf8').trim().split('\n').map((line): Call => JSON.parse(line)) : []
     const read = (path: string) => {
       if (!existsSync(path)) return null
       const text = readFileSync(path, 'utf8')
@@ -172,7 +172,7 @@ const commands = (result: Result) => result.calls.filter(c => c.kind === 'cli').
 test('fresh install checks the public build default and completes live share/join checks', () => {
   const result = setup(['check', '--live'])
   assert.equal(result.code, 0, result.out)
-  assert.equal(requests(result)[0].url, defaultUrl + '/api/health')
+  assert.equal(requests(result)[0]!.url, defaultUrl + '/api/health')
   assert.match(result.out, /plugin's default server/)
   assert.match(result.out, /a real session shared/)
   assert.match(result.out, /a real session joined/)
@@ -185,26 +185,26 @@ test('fresh install checks the public build default and completes live share/joi
 test('forks use the server baked into their plugin', () => {
   const result = setup(['check'], { buildServer: 'https://fork.example.invalid' })
   assert.equal(result.code, 0, result.out)
-  assert.equal(requests(result)[0].url, 'https://fork.example.invalid/api/health')
+  assert.equal(requests(result)[0]!.url, 'https://fork.example.invalid/api/health')
 })
 
 test('saved server wins over environment and schema URLs', () => {
   const result = setup(['check'], { saved: 'https://saved.example.invalid/', envServer: 'https://env.example.invalid' })
   assert.equal(result.code, 0, result.out)
-  assert.equal(requests(result)[0].url, 'https://saved.example.invalid/api/health')
+  assert.equal(requests(result)[0]!.url, 'https://saved.example.invalid/api/health')
 })
 
 test('environment server wins over the build default', () => {
   const result = setup(['check'], { envServer: 'https://env.example.invalid' })
   assert.equal(result.code, 0, result.out)
-  assert.equal(requests(result)[0].url, 'https://env.example.invalid/api/health')
+  assert.equal(requests(result)[0]!.url, 'https://env.example.invalid/api/health')
 })
 
 test('server in Claude settings env is checked without changing those settings', () => {
   const settings = { env: { SHARED_SESSION_SERVER: 'https://settings.example.invalid' } }
   const result = setup(['check', '--live'], { settings })
   assert.equal(result.code, 0, result.out)
-  assert.equal(requests(result)[0].url, 'https://settings.example.invalid/api/health')
+  assert.equal(requests(result)[0]!.url, 'https://settings.example.invalid/api/health')
   assert.deepEqual(result.settings, settings)
   assert.match(result.out, /a real session shared/)
 })
@@ -213,7 +213,7 @@ test('auto-update folder falls back to the installed copy saved setting', () => 
   const settings = { pluginConfigs: { [pluginId]: { options: { server: 'https://saved.example.invalid' } } }, keep: true }
   const result = setup(['check'], { inline: true, settings })
   assert.equal(result.code, 0, result.out)
-  assert.equal(requests(result)[0].url, 'https://saved.example.invalid/api/health')
+  assert.equal(requests(result)[0]!.url, 'https://saved.example.invalid/api/health')
   assert.deepEqual(result.settings, settings)
 })
 
@@ -221,12 +221,12 @@ test("a plugin folder elsewhere has its own option alone, as the plugin's server
   const settings = { pluginConfigs: { [pluginId]: { options: { server: 'https://saved.example.invalid' } } } }
   const plain = setup(['check'], { inline: 'folder', settings })
   assert.equal(plain.code, 0, plain.out)
-  assert.equal(requests(plain)[0].url, defaultUrl + '/api/health')
+  assert.equal(requests(plain)[0]!.url, defaultUrl + '/api/health')
   assert.match(plain.out, /NOTE sessions load the plugin from .*\/src\/claude-share\/plugin/)
   // The installed copy's saved setting doesn't reach a session there, so it doesn't refuse --server.
   const live = setup(['check', '--server', 'https://other.example.invalid', '--live'], { inline: 'folder', settings })
   assert.equal(live.code, 0, live.out)
-  assert.equal(requests(live)[0].url, 'https://other.example.invalid/api/health')
+  assert.equal(requests(live)[0]!.url, 'https://other.example.invalid/api/health')
   assert.match(live.out, /a real session shared/)
   assert.deepEqual(live.settings, settings)
 })
@@ -245,7 +245,7 @@ test('the automatic-update folder is told by its path, as the plugin tells it, a
   for (const inline of ['linked', 'unsaid']) {
     const result = setup(['check'], { inline, settings })
     assert.equal(result.code, 0, result.out)
-    assert.equal(requests(result)[0].url, 'https://saved.example.invalid/api/health', inline)
+    assert.equal(requests(result)[0]!.url, 'https://saved.example.invalid/api/health', inline)
     assert.doesNotMatch(result.out, /NOTE sessions load the plugin from/, inline)
   }
 })
@@ -271,7 +271,7 @@ test("a live check's leftover room that ended already is no failure; one on plai
 test('explicit non-live server checks may differ from the saved setting', () => {
   const result = setup(['check', '--server', 'https://other.example.invalid'], { saved: 'https://saved.example.invalid' })
   assert.equal(result.code, 0, result.out)
-  assert.equal(requests(result)[0].url, 'https://other.example.invalid/api/health')
+  assert.equal(requests(result)[0]!.url, 'https://other.example.invalid/api/health')
 })
 
 test('conflicting live server override fails before creating rooms or sessions', () => {
@@ -356,11 +356,11 @@ test('function hooks for a 2.1.285 terminal claude are set in CLAUDE_CONFIG_DIR'
 test('the saved server is read from CLAUDE_CONFIG_DIR, never ~/.claude', () => {
   const env = setup(['check'], { configDir: 'cfg', settings: { env: { SHARED_SESSION_SERVER: 'https://config.example.invalid' } }, homeSettings: { env: { SHARED_SESSION_SERVER: 'https://home.example.invalid' } } })
   assert.equal(env.code, 0, env.out)
-  assert.equal(requests(env)[0].url, 'https://config.example.invalid/api/health')
+  assert.equal(requests(env)[0]!.url, 'https://config.example.invalid/api/health')
   const saved = (server: string) => ({ pluginConfigs: { [pluginId]: { options: { server } } } })
   const inline = setup(['check'], { configDir: 'cfg', inline: true, settings: saved('https://config.example.invalid'), homeSettings: saved('https://home.example.invalid') })
   assert.equal(inline.code, 0, inline.out)
-  assert.equal(requests(inline)[0].url, 'https://config.example.invalid/api/health')
+  assert.equal(requests(inline)[0]!.url, 'https://config.example.invalid/api/health')
   const unreadable = setup(['check'], { configDir: 'cfg', rawSettings: '{not json' })
   assert.equal(unreadable.code, 1, unreadable.out)
   assert(unreadable.out.includes(`could not read the saved server settings from ${join(unreadable.configDir, 'settings.json')}`), unreadable.out)
@@ -422,7 +422,7 @@ test('an update deploys the preview Worker before the main one', () => {
   assert.equal(result.code, 0, result.out)
   assert.deepEqual(wrangler(result), [PROBE, PREVIEW, MAIN])
   const [preview, main] = ['OK previews deployed to https://claude-share-preview.team.workers.dev', 'OK deployed to https://claude-share.team.workers.dev'].map(line => result.out.indexOf(line))
-  assert(preview >= 0 && preview < main, result.out)
+  assert(preview! >= 0 && preview! < main!, result.out)
   assert(commands(result).includes(`plugin install ${pluginId} --config server=https://claude-share.team.workers.dev`))
 })
 
@@ -470,7 +470,7 @@ test('an update whose preview Worker is on a custom domain goes on to the main o
   assert.equal(result.code, 0, result.out)
   assert.deepEqual(wrangler(result), [PROBE, PREVIEW, MAIN])
   const [preview, main] = [/^OK previews deployed$/m, /^OK deployed to https:\/\/claude-share\.team\.workers\.dev$/m].map(line => result.out.search(line))
-  assert(preview >= 0 && preview < main, result.out)
+  assert(preview! >= 0 && preview! < main!, result.out)
   assert.doesNotMatch(result.out, /FAIL|NOTE previews/)
   assert(commands(result).includes(`plugin install ${pluginId} --config server=https://claude-share.team.workers.dev`))
 })

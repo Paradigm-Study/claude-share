@@ -82,7 +82,7 @@ test('a move hands the host to the runner and seats the mover as the approver', 
   const moved = await ask(room, { method: 'POST', rest: 'cloud', token: host, body: moveBody, cloud })
   assert.equal(moved.status, 200)
   assert.ok(moved.body.token && moved.body.seat && moved.body.ticket)
-  const { config, ticket } = cloud.calls.started[0].payload
+  const { config, ticket } = cloud.calls.started[0]!.payload
   assert.equal(ticket, moved.body.ticket)
   assert.equal(config.session, moveBody.session)
   assert.equal(config.cwd, moveBody.cwd)
@@ -132,14 +132,14 @@ test('a move needs a session, an absolute folder and a sign-in, and keeps nothin
   await ask(room, { method: 'POST', rest: 'cloud', token: host, body: { ...moveBody, auth: { oauthToken: 'secret-token', extra: 'x' } }, cloud })
   assert.ok(!JSON.stringify(room.toJSON()).includes('secret-token'))
   assert.ok(!JSON.stringify(room.events).includes('secret-token'))
-  assert.deepEqual(cloud.calls.started[0].payload.config.auth, { oauthToken: 'secret-token' })
+  assert.deepEqual(cloud.calls.started[0]!.payload.config.auth, { oauthToken: 'secret-token' })
 })
 
 test("only the approver answers the runner's questions, once each, and only questions asked", async () => {
   const { room, host, guest } = freshRoom()
   const cloud = standIn()
   const moved = await ask(room, { method: 'POST', rest: 'cloud', token: host, body: moveBody, cloud })
-  const runner = cloud.calls.started[0].payload.config.token
+  const runner = cloud.calls.started[0]!.payload.config.token
   const post = (token: string, events: unknown[]) => ask(room, { method: 'POST', rest: 'events', token, body: { events }, cloud })
   // Unasked: nothing.
   await post(moved.body.token, [{ type: 'answer', body: { id: 'q1', answer: 'Allow once' } }])
@@ -153,7 +153,7 @@ test("only the approver answers the runner's questions, once each, and only ques
   await post(moved.body.token, [{ type: 'answer', body: { id: 'q1', answer: 'Decline' } }])
   const answers = room.events.filter(e => e.type === 'answer')
   assert.equal(answers.length, 1)
-  assert.deepEqual(answers[0].body, { id: 'q1', answer: 'Allow once' })
+  assert.deepEqual(answers[0]!.body, { id: 'q1', answer: 'Allow once' })
   // A guest can't ask.
   await post(guest, [{ type: 'ask', body: { id: 'q2', what: 'x' } }])
   assert.ok(!room.events.some(e => e.type === 'ask' && e.body.id === 'q2'))
@@ -164,7 +164,7 @@ test("the approver's other sessions (the same account) may answer too", async ()
   const room = Room.create({ id: 'room0000000000000002', name: 'Scott', title: 'demo', now, version: '0.11.31', account: 'acct-scott' })
   const cloud = standIn()
   const moved = await ask(room, { method: 'POST', rest: 'cloud', token: room.host.token, body: moveBody, cloud })
-  const runner = cloud.calls.started[0].payload.config.token
+  const runner = cloud.calls.started[0]!.payload.config.token
   const other = room.join('Scott', now, '0.11.31', 'acct-scott')
   const stranger = room.join('Mallory', now, '0.11.31', 'acct-mallory')
   await ask(room, { method: 'POST', rest: 'events', token: runner, body: { events: [{ type: 'ask', body: { id: 'q1', what: 'x' } }] }, cloud })
@@ -206,7 +206,7 @@ test('Bring home: the approver alone, the runner stopped, its changes a room fil
   const { room, host, guest } = freshRoom()
   const cloud = standIn({ diff: 'diff --git a/README.md b/README.md\n+from the cloud\n' })
   const moved = await ask(room, { method: 'POST', rest: 'cloud', token: host, body: moveBody, cloud })
-  const runner = cloud.calls.started[0].payload.config.token
+  const runner = cloud.calls.started[0]!.payload.config.token
   assert.equal((await ask(room, { method: 'POST', rest: 'cloud/home', token: guest, cloud })).status, 403)
   assert.equal((await ask(room, { method: 'POST', rest: 'cloud/home', token: runner, cloud })).status, 403)
   const home = await ask(room, { method: 'POST', rest: 'cloud/home', token: moved.body.token, cloud })
@@ -227,7 +227,7 @@ test("the cloud host's week ends: stopped, its changes kept, and Bring home stil
   const { room, host } = freshRoom(start)
   const cloud = standIn({ diff: 'diff --git a/a b/a\n' })
   const moved = await ask(room, { method: 'POST', rest: 'cloud', token: host, body: moveBody, cloud, now: start })
-  const runner = cloud.calls.started[0].payload.config.token
+  const runner = cloud.calls.started[0]!.payload.config.token
   const later = start + CLOUD_MAX_MS + 1
   await ask(room, { method: 'GET', rest: 'events', token: moved.body.token, cloud, now: later })
   assert.equal(room.cloud!.state, 'stopped')
