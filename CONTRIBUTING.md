@@ -45,7 +45,7 @@ For changes to sharing, joining, or transcript behavior, also run the real host-
 CLAUDE_BIN="$(command -v claude)" node test/e2e.ts
 ```
 
-This test uses model access and starts a host in bypass mode. See [AGENTS.md](AGENTS.md) for the interaction contracts, server setup, and additional test options.
+This test uses model access and starts a host in bypass mode. See [AGENTS.md](AGENTS.md) for server setup and additional test options, and [docs/rules/](docs/rules/) for the interaction contracts.
 
 ## Send a pull request
 

@@ -1,0 +1,5 @@
+# Commits that only reformat; `git blame` skips them (GitHub reads this
+# file itself; locally: git config blame.ignoreRevsFile .git-blame-ignore-revs).
+
+# style: format server/ and scripts/ with oxfmt (#51)
+7848dbfd8c6bdc76cc841bd911322bd7475a2228
