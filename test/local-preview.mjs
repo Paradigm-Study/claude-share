@@ -25,7 +25,7 @@ import { startWorkerd } from './support/workerd.mjs'
 const ROOT = fileURLToPath(new URL('../', import.meta.url))
 const GUEST = fileURLToPath(new URL('../plugin/relay/local-preview.cjs', import.meta.url))
 const HOST = fileURLToPath(new URL('../plugin/relay/tcp-worker.cjs', import.meta.url))
-const PROXY = fileURLToPath(new URL('../plugin/relay/browser-proxy.cjs', import.meta.url))
+const PROXY = fileURLToPath(new URL('../plugin/relay/browser-proxy.mts', import.meta.url))
 const PUBLIC = fileURLToPath(new URL('../plugin/relay/ws-relay.cjs', import.meta.url))
 const VERSION = JSON.parse(await readFile(new URL('../plugin/.claude-plugin/plugin.json', import.meta.url))).version
 const scratch = await mkdtemp(`${tmpdir()}/shared-tcp-`)

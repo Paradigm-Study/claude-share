@@ -60,7 +60,7 @@ test("the person's exceptions stay small: 64 at most, none over 253 characters, 
 })
 
 // The window's proxy takes an upstream's host only as an IP literal or a
-// plain host name (relay/browser-proxy.cjs, `address` and `hostname`), and
+// plain host name (relay/browser-proxy.mts, `address` and `hostname`), and
 // leaves out one it can't take, saying so (test/browser-proxy.mjs). Here
 // it's only split from its URL: its brackets, case and trailing dot go, and
 // one the URL parser takes no host from isn't used, so the next one is.

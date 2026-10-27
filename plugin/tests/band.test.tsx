@@ -108,7 +108,7 @@ function world(
     // `gecko`: the Firefox version its files say (null: none read); Chrome-like paths say Chromium.
     // `isDefault`: the person's default browser (macOS); `others`: more found after it, in order.
     browser?: { platform?: string; path?: string | null; gecko?: number | null; isDefault?: boolean; others?: { path: string; gecko?: number | null; isDefault?: boolean }[] }
-    /** The window's proxy (relay/browser-proxy.cjs): ports it finds taken, Node missing, the port it picks. */
+    /** The window's proxy (relay/browser-proxy.mts): ports it finds taken, Node missing, the port it picks. */
     proxyBusy?: number[]
     proxyMissing?: boolean
     proxyPort?: number
@@ -357,7 +357,7 @@ function world(
       if (lines.length) yield { stream: 'stdout' as const, text: `${lines.join('\n')}\n` }
       return { value: { code: 0, signal: null } }
     }
-    if (e.argv.at(-1)?.endsWith('/relay/browser-proxy.cjs')) {
+    if (e.argv.at(-1)?.endsWith('/relay/browser-proxy.mts')) {
       const config = JSON.parse(e.input!)
       if (opts.proxyMissing) return { value: { code: 127, signal: null } }
       if (config.port && opts.proxyBusy?.includes(config.port)) {
@@ -6680,7 +6680,7 @@ test("a window left on a proxy port that's taken now is closed first, then opene
   await openedInWindow($, asked)
   expect(asked.windowState.kills).toBe(1)
   expect(asked.proxies.map(p => p.config.port)).toEqual([0])
-  expect(asked.spawned.filter(s => s.argv.at(-1)?.endsWith('/relay/browser-proxy.cjs')).map(s => JSON.parse(s.input!).port)).toEqual([49999, 0])
+  expect(asked.spawned.filter(s => s.argv.at(-1)?.endsWith('/relay/browser-proxy.mts')).map(s => JSON.parse(s.input!).port)).toEqual([49999, 0])
   expect(asked.launches[0]).toContain('--proxy-server=socks5://127.0.0.1:47100')
   await $.command.run({ command: 'stop-sharing', args: '' } as never)
 })
@@ -8639,7 +8639,7 @@ test("a window whose proxy can't start again for another reason than its port (n
   expect(asked.windowState.alive).toBe(true)
   expect(asked.launches).toHaveLength(0)
   // Tried once, on the window's own port: not again on another, which would fail the same way.
-  expect(asked.spawned.filter(s => s.argv.at(-1)?.endsWith('/relay/browser-proxy.cjs')).map(s => JSON.parse(s.input!).port)).toEqual([49999])
+  expect(asked.spawned.filter(s => s.argv.at(-1)?.endsWith('/relay/browser-proxy.mts')).map(s => JSON.parse(s.input!).port)).toEqual([49999])
   await $.command.run({ command: 'stop-sharing', args: '' } as never)
 })
 

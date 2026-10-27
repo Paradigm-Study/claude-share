@@ -16,9 +16,9 @@ import { join } from 'node:path'
 import { once } from 'node:events'
 import { fileURLToPath } from 'node:url'
 import { setTimeout as pause } from 'node:timers/promises'
-import proxy from '../plugin/relay/browser-proxy.cjs'
+import * as proxy from '../plugin/relay/browser-proxy.mts'
 
-const PROXY = fileURLToPath(new URL('../plugin/relay/browser-proxy.cjs', import.meta.url))
+const PROXY = fileURLToPath(new URL('../plugin/relay/browser-proxy.mts', import.meta.url))
 const TOKEN = randomBytes(32).toString('base64url')
 const FAST = { handshake: 300, firstConfig: 300, want: 300, wantEvery: 400, blockedEvery: 400, lanEvery: 400, lookup: 200, connect: 400, control: 2000, linger: 200 }
 const BASE = { port: 0, controlToken: TOKEN, upstream: null }
