@@ -18,6 +18,50 @@ Share a Claude Code session with a link. Teammates join from their own Claude Co
 
 Works in Claude Desktop and the terminal, on a public server or [your own](#host-your-own-server).
 
+## Install
+
+Both people need Claude Code **2.1.286 or later** (`claude --version`) and this plugin:
+
+```bash
+claude plugin marketplace add Paradigm-Study/claude-share
+claude plugin install shared-session@claude-share
+```
+
+Start a new session after you install. In Claude Desktop, quit and reopen the app.
+
+Is your terminal `claude` older than the one Claude Desktop bundles? Run the setup script instead. It needs Git and Node 22.18+:
+
+```bash
+git clone https://github.com/Paradigm-Study/claude-share.git && cd claude-share
+node scripts/setup.ts join
+```
+
+`join` installs the plugin for sharing and joining. If it prints `NEEDS HUMAN`, do that step and run it again. [More install options](docs/guide.md#install).
+
+## Quick start
+
+Before you share: anyone with the link can join. The session goes through the room server, encrypted in transit but not end to end. See [Privacy](#privacy). In a session that already has messages, Share asks whether to send them. Choose **Only from now on** to leave them out.
+
+1. **Host:** press **Share** above the prompt, or type `/share-session`. Copy the link.
+2. **Teammate:** paste the link into a new Claude Code session and send it.
+3. **Teammate:** ask Claude to read the README. The prompt runs on the host's machine, and both sessions show the reply and tool calls.
+4. **Host:** type `/stop-sharing`. The room ends for everyone.
+
+## Commands
+
+| Command | Does |
+| --- | --- |
+| `/share-session` | Share this session. Add `watch` so teammates can only watch, or `new` to leave out earlier messages |
+| `/stop-sharing` | Host: end the room for everyone. Guest: leave it |
+| `/room` | People, timeline, changed files, side chat, settings |
+| `/who` | Who is here, and what each person is doing |
+| `/share-preview <port>` | Host: let teammates open a local web server |
+| `/share-file <path>` | Host: show a file to everyone |
+| `/team` | Sign in, make a team, and see its shared sessions |
+| `/invite <name>` | Invite a teammate into this session. Needs sign-in and a shared team |
+
+[Every command, previews and the cloud host](docs/guide.md#use-it).
+
 ## How it works
 
 ![Shared Sessions architecture: the host and guests talk to the room server on Cloudflare, a main Worker and a preview Worker in front of Durable Objects, with storage and external services](docs/assets/architecture.svg)
@@ -41,50 +85,6 @@ A preview page left open in a browser can reach the previews of a session that b
 A session moved to the cloud sends your project files, conversation and Claude token to a container. The container is deleted when you bring the session home, the room ends, or a week passes.
 
 [What the server keeps, and for how long](docs/guide.md#privacy-and-the-public-server).
-
-## Install
-
-Both people need Claude Code **2.1.286 or later** (`claude --version`) and this plugin:
-
-```bash
-claude plugin marketplace add Paradigm-Study/claude-share
-claude plugin install shared-session@claude-share
-```
-
-Start a new session after you install. In Claude Desktop, quit and reopen the app.
-
-Is your terminal `claude` older than the one Claude Desktop bundles? Run the setup script instead. It needs Git and Node 22.18+:
-
-```bash
-git clone https://github.com/Paradigm-Study/claude-share.git && cd claude-share
-node scripts/setup.ts join
-```
-
-`join` installs the plugin for sharing and joining. If it prints `NEEDS HUMAN`, do that step and run it again. [More install options](docs/guide.md#install).
-
-## Quick start
-
-Sharing sends the session's whole history to everyone with the link. In a session that already has messages, Share asks first. Choose **Only from now on** to leave earlier messages out.
-
-1. **Host:** press **Share** above the prompt, or type `/share-session`. Copy the link.
-2. **Teammate:** paste the link into a new Claude Code session and send it.
-3. **Teammate:** ask Claude to read the README. The prompt runs on the host's machine, and both sessions show the reply and tool calls.
-4. **Host:** type `/stop-sharing`. The room ends for everyone.
-
-## Commands
-
-| Command | Does |
-| --- | --- |
-| `/share-session` | Share this session. Add `watch` so teammates can only watch, or `new` to leave out earlier messages |
-| `/stop-sharing` | Host: end the room for everyone. Guest: leave it |
-| `/room` | People, timeline, changed files, side chat, settings |
-| `/who` | Who is here, and what each person is doing |
-| `/share-preview <port>` | Host: let teammates open a local web server |
-| `/share-file <path>` | Host: show a file to everyone |
-| `/team` | Sign in, make a team, and see its shared sessions |
-| `/invite <name>` | Invite a teammate into this session. Needs sign-in and a shared team |
-
-[Every command, previews and the cloud host](docs/guide.md#use-it).
 
 ## Troubleshooting
 
