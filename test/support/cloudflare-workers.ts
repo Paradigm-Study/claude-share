@@ -2,7 +2,9 @@
 // workerd's DurableObject keeps ctx and env; RPC itself is the test's own
 // stub, calling the object's methods directly.
 export class DurableObject {
-  constructor(ctx, env) {
+  ctx: unknown
+  env: unknown
+  constructor(ctx: unknown, env: unknown) {
     this.ctx = ctx
     this.env = env
   }

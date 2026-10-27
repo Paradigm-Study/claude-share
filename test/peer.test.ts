@@ -12,8 +12,8 @@ import { RoomObject } from '../server/worker/index.ts'
 import type { ServerEnv } from '../server/worker/index.ts'
 import { State, asSocket, asState, installRuntime } from './support/durable.ts'
 import type { Socket } from './support/durable.ts'
-import { startWorkerd } from './support/workerd.mjs'
-import type { Workerd } from './support/workerd.mjs'
+import { startWorkerd } from './support/workerd.ts'
+import type { Workerd } from './support/workerd.ts'
 
 const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
 const HANDLE = 'a1'.repeat(16)

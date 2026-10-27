@@ -19,8 +19,8 @@ import { randomUUID } from 'node:crypto'
 import { afterAll, beforeAll, describe, test } from 'vitest'
 import { Room, roomRequest, CLOUD_MAX_MS } from '../server/core/index.ts'
 import type { RoomContext } from '../server/core/index.ts'
-import { startWorkerd } from './support/workerd.mjs'
-import type { Workerd } from './support/workerd.mjs'
+import { startWorkerd } from './support/workerd.ts'
+import type { Workerd } from './support/workerd.ts'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const ORIGIN = 'https://share.test'

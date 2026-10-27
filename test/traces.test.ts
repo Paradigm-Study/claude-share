@@ -22,8 +22,8 @@ import { grams, queryWords } from '../server/traces/grams.ts'
 import { migrate, reindex, search } from '../server/traces/store.ts'
 import { timeOf } from '../server/traces/time.ts'
 import { authorOf, takeTurns, tracesScope } from '../server/traces/turns.ts'
-import { startWorkerd } from './support/workerd.mjs'
-import type { Workerd } from './support/workerd.mjs'
+import { startWorkerd } from './support/workerd.ts'
+import type { Workerd } from './support/workerd.ts'
 
 // Each check is said by its label; one that fails is reported and the
 // test goes on to the next.
