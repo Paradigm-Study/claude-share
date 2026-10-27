@@ -17,7 +17,9 @@ jobs:
   no-model:
     name: ${{ matrix.suite }} / Node ${{ matrix.node }}
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    # local-preview runs 3 to 5 minutes on a runner (its 20,000-frame step
+    # alone took 148 s on a slow one): it gets 10, the others 5.
+    timeout-minutes: ${{ matrix.suite == 'local-preview' && 10 || 5 }}
     strategy:
       fail-fast: false
       matrix:
@@ -40,7 +42,7 @@ jobs:
       # teams (the sign-in page's Continue) and local-preview (preview windows,
       # WebRTC) drive a headless browser the runner image has, and print SKIP
       # for those checks where they find none. With both Chrome and Firefox,
-      # local-preview takes about a minute, well inside the timeout.
+      # local-preview takes 3 to 5 minutes, inside its own timeout above.
       # The plugin's own tests (plugin/tests: band.test.tsx, window.test.ts,
       # preview.test.ts, proxy.test.ts, upstream.test.ts) need Claude Code and
       # run with `claude plugin test plugin`, not here; see CONTRIBUTING.md.
