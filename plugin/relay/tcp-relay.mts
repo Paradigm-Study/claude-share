@@ -102,7 +102,7 @@ export function bridge(socket: net.Socket, url: string, headers: Record<string, 
     if (!done && receivedFin && !received.length && !expectCredit && !socket.writableEnded) socket.end()
   }
   function acknowledge() {
-    while (!done && received.length && received[0].credit && received[0].drained) {
+    while (!done && received[0]?.credit && received[0].drained) {
       const record = received.shift()!
       receivedBytes -= record.n
       nonces.delete(record.credit!.nonce)

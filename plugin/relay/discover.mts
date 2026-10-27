@@ -103,7 +103,7 @@ function canonical(address: string) {
   try { host = new URL(`http://[${address}]/`).hostname.slice(1, -1) } catch { return address }
   const mapped = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(host)
   if (!mapped) return host
-  const high = parseInt(mapped[1], 16), low = parseInt(mapped[2], 16)
+  const high = parseInt(mapped[1] ?? '', 16), low = parseInt(mapped[2] ?? '', 16)
   return `::ffff:${high >> 8}.${high & 255}.${low >> 8}.${low & 255}`
 }
 // Loopback (127/8, ::1) or wildcard; a LAN-only listener isn't what localhost reaches.
@@ -164,7 +164,7 @@ export function parsePs(text: unknown, wanted?: Set<number>) {
   for (const line of String(text).split('\n')) {
     const row = /^\s*(\d+) (.*)$/.exec(line)
     const pid = Number(row?.[1])
-    if (row && (!wanted || wanted.has(pid)) && !commands.has(pid)) commands.set(pid, { text: row[2].trim() })
+    if (row && (!wanted || wanted.has(pid)) && !commands.has(pid)) commands.set(pid, { text: (row[2] ?? '').trim() })
   }
   return commands
 }
@@ -174,9 +174,10 @@ export function parseProcNet(text: unknown, v6: boolean, endian = os.endianness(
   for (const line of String(text).split('\n')) {
     const parts = line.trim().split(/\s+/)
     const local = /^([0-9A-Fa-f]{8}|[0-9A-Fa-f]{32}):([0-9A-Fa-f]{4})$/.exec(parts[1] ?? '')
-    if (parts.length < 10 || !/^\d+:$/.test(parts[0]) || parts[3] !== '0A' || !local || (local[1].length === 32) !== v6 || !/^\d+$/.test(parts[7]) || !/^[1-9]\d*$/.test(parts[9])) continue
-    const port = parseInt(local[2], 16)
-    if (portOK(port)) rows.push({ address: hexAddress(local[1], endian), port, uid: Number(parts[7]), inode: parts[9] })
+    const hex = local?.[1] ?? '', uid = parts[7] ?? '', inode = parts[9] ?? ''
+    if (parts.length < 10 || !/^\d+:$/.test(parts[0] ?? '') || parts[3] !== '0A' || !local || (hex.length === 32) !== v6 || !/^\d+$/.test(uid) || !/^[1-9]\d*$/.test(inode)) continue
+    const port = parseInt(local[2] ?? '', 16)
+    if (portOK(port)) rows.push({ address: hexAddress(hex, endian), port, uid: Number(uid), inode })
   }
   return rows
 }
@@ -196,7 +197,7 @@ export function splitText(raw: unknown, name?: string) {
   const text = String(raw ?? '').slice(0, LIMITS.text).trim()
   if (!text || /^\(.*\)$/.test(text)) return [] // "(node)": argv unreadable
   const exe = name ? new RegExp(`^(?:/.*?/)?${escape(name)}(?=\\s|$)`).exec(text)?.[0] : undefined
-  const first = exe ?? text.split(/\s+/)[0], rest = text.slice(first.length).trim()
+  const first = exe ?? text.split(/\s+/)[0] ?? '', rest = text.slice(first.length).trim()
   return [first, ...(rest ? rest.split(/\s+/) : [])]
 }
 export function commandOf(raw: any, name?: string): Command {
@@ -213,6 +214,7 @@ function commandName(arg: unknown) {
 function scriptOf(argv: string[], joined: boolean, exists: (file: string) => boolean): string | null {
   for (let i = 1; i < argv.length; i++) {
     const arg = argv[i]
+    if (arg === undefined) break
     if (arg === '-m') return argv[i + 1] ?? null
     if (CODE.has(arg) || (arg === '-c' && !FILE_WORD.test(argv[i + 1] ?? ''))) return null
     if (VALUE_OPTIONS.has(arg)) i++
@@ -222,8 +224,10 @@ function scriptOf(argv: string[], joined: boolean, exists: (file: string) => boo
 }
 function pathAt(argv: string[], i: number, joined: boolean, exists: (file: string) => boolean) {
   // A script path with spaces, split by ps: the longest join that is a file.
-  if (joined && !exists(argv[i])) for (let j = Math.min(argv.length, i + 8); j > i + 1; j--) if (exists(argv.slice(i, j).join(' '))) return argv.slice(i, j).join(' ')
-  return argv[i]
+  const at = argv[i]
+  if (at === undefined) return null
+  if (joined && !exists(at)) for (let j = Math.min(argv.length, i + 8); j > i + 1; j--) if (exists(argv.slice(i, j).join(' '))) return argv.slice(i, j).join(' ')
+  return at
 }
 // Display only (exclusion reads commandName and RELAY): an interpreter's
 // script by its basename (dev-frontend.mjs), else a process title's first word
@@ -431,7 +435,8 @@ async function check(port: number, ctx: Ctx, { target = false, onConnect }: { ta
 }
 async function pool<T>(items: T[], size: number, work: (item: T) => Promise<void>) {
   let next = 0
-  await Promise.all(Array.from({ length: Math.min(size, items.length) }, async () => { while (next < items.length) await work(items[next++]) }))
+  // `next < items.length` is checked just before each item is taken.
+  await Promise.all(Array.from({ length: Math.min(size, items.length) }, async () => { while (next < items.length) await work(items[next++]!) }))
 }
 // Answering ones first, then by port; at most six, listed by port. Each
 // with its listener's pid, so the host is asked about one process's ports

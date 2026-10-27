@@ -145,7 +145,7 @@ export function frameRead(line: string): Read {
   const m = ENVELOPE.exec(frame.message.content)
   if (!m) return { kind: 'bad' }
   const attrs: Record<string, string | undefined> = {}
-  for (const a of m[1]!.matchAll(/([a-z-]+)="([^"]*)"/g)) attrs[a[1]] = a[2]
+  for (const [, key, value] of m[1]!.matchAll(/([a-z-]+)="([^"]*)"/g)) if (key !== undefined) attrs[key] = value
   if (attrs.from !== frame.from) return { kind: 'bad' }
   const body = m[2]!.slice(0, LIMITS.text)
   if (!body.trim()) return { kind: 'bad' }
