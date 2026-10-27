@@ -54,11 +54,11 @@ npm run typecheck:plugin                                # the plugin against the
 npm run format                                          # oxfmt over server/ and scripts/ (.oxfmtrc.json); test/ and plugin/ join once the sessions moving them are done
 claude plugin validate --strict plugin                  # what the engine and the plugin directory check
 claude plugin test plugin                               # plugin/tests: the UI tests (band.test.tsx, desktop and terminal) and the pure modules' (window, preview, proxy, upstream)
-npm run typecheck:test && npm test                      # the suites moved to Vitest (test/*.test.ts), strictly typed: setup (setup.ts against a fake CLI and a temporary home, the deploy order included), and peer, mailbox, discover, browser-proxy, teams, cloud, security and traces (below; traces' end to end only with TRACES_DATABASE_URL)
+npm run typecheck:test && npm test                      # the suites moved to Vitest (test/*.test.ts), strictly typed: setup (setup.ts against a fake CLI and a temporary home, the deploy order included), and peer, mailbox, discover, browser-proxy, tcp-worker, teams, cloud, security and traces (below; traces' end to end only with TRACES_DATABASE_URL)
 node test/local-preview.mjs                             # TCP helpers through the real Workers under wrangler dev; real Chrome and Firefox preview windows and their WebRTC when installed
 #   test/browser-proxy.test.ts                          # the preview window's SOCKS5 helper, its DNS-over-HTTPS against a local TLS fixture (openssl for the test CA)
 #   test/discover.test.ts                               # same-project service discovery, and who holds a port
-node test/tcp-worker.mjs                                # the Worker's TCP lifecycle and hibernation, its public link, files and preview keys
+#   test/tcp-worker.test.ts                             # the Worker's TCP lifecycle and hibernation, its public link, files and preview keys
 #   test/peer.test.ts                                   # messages and receipts between a guest's own sessions and the host's
 #   test/mailbox.test.ts                                # the host's mailbox helper and relay/receipt.mts through real Unix sockets (macOS or Linux)
 node test/previews.mjs                                  # preview shares, forwarding, Stop, needs, the public link, bounded bodies and events, a worst-case meta, the home page's claims
