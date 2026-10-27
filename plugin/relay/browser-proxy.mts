@@ -40,7 +40,7 @@ type Known = { own: Set<string>; onlink4: Range[]; onlink6: Range[] }
 type Conn = { client: net.Socket; target: net.Socket | null; timers: Set<NodeJS.Timeout>; done: boolean; spliced: boolean; closed: boolean; holding: boolean; wake: (() => void) | null }
 type StartOptions = {
   emit?: (row: Record<string, unknown>) => void; signal?: AbortSignal
-  timeouts?: Partial<typeof TIMEOUTS>; limits?: Partial<typeof LIMITS>
+  timeouts?: Partial<Record<keyof typeof TIMEOUTS, number>>; limits?: Partial<Record<keyof typeof LIMITS, number>>
   lookup?: (...args: any[]) => void; interfaces?: () => any
   connect?: (options: any) => net.Socket; knock?: (options: any) => net.Socket; doh?: readonly DohServer[]
 }
