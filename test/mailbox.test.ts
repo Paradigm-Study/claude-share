@@ -26,11 +26,18 @@ const RECEIPT = fileURLToPath(new URL('../plugin/relay/receipt.mts', import.meta
 const mb = require(MAILBOX)
 const rc = require(RECEIPT)
 const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
-const until = async (test: () => unknown, ms = 3000) => { for (const end = Date.now() + ms; Date.now() < end; await wait(20)) if (await test()) return true; return false }
-const BOX = 'b0'.repeat(16), HANDLE = 'a1'.repeat(16), SEAT = 'seat_scott'
+const until = async (test: () => unknown, ms = 3000) => {
+  for (const end = Date.now() + ms; Date.now() < end; await wait(20)) if (await test()) return true
+  return false
+}
+const BOX = 'b0'.repeat(16),
+  HANDLE = 'a1'.repeat(16),
+  SEAT = 'seat_scott'
 const CHAIN = ['ab'.repeat(12), 'cd'.repeat(12)]
-const ID = '0f8fad5b-d9cb-469f-a165-70867728950e', REF = '7c9e6679-7425-40de-944b-e07fc1f90ae7'
-const TOKEN = 'h'.repeat(32), CONTROL = 'c'.repeat(64)
+const ID = '0f8fad5b-d9cb-469f-a165-70867728950e',
+  REF = '7c9e6679-7425-40de-944b-e07fc1f90ae7'
+const TOKEN = 'h'.repeat(32),
+  CONTROL = 'c'.repeat(64)
 
 // Unix sockets: macOS and Linux only.
 const unix = process.platform === 'darwin' || process.platform === 'linux'
@@ -45,20 +52,30 @@ const own = netServer(socket => {
   const conn: string[] = []
   lines.push(conn)
   socket.setEncoding('utf8')
-  socket.on('data', chunk => { buffer += chunk; let i; while ((i = buffer.indexOf('\n')) >= 0) { conn.push(buffer.slice(0, i)); buffer = buffer.slice(i + 1) } })
+  socket.on('data', chunk => {
+    buffer += chunk
+    let i
+    while ((i = buffer.indexOf('\n')) >= 0) {
+      conn.push(buffer.slice(0, i))
+      buffer = buffer.slice(i + 1)
+    }
+  })
   socket.on('error', () => {})
 })
-own.listen(ownPath); await once(own, 'listening')
+own.listen(ownPath)
+await once(own, 'listening')
 const allLines = () => lines.flat()
 // The room: every POST peer, and its answer (the test's to choose), taken
 // after `slowFor` its body milliseconds (the test's to choose too).
 // What the room was sent, as the checks read it.
-const posts: { path?: string, auth?: string, version?: unknown, body: any }[] = []
+const posts: { path?: string; auth?: string; version?: unknown; body: any }[] = []
 let answer: () => [number, unknown] = () => [200, { delivered: true }]
 let slowFor: (body: any) => number = () => 0
 const room = httpServer((req, res) => {
   let body = ''
-  req.on('data', c => { body += c })
+  req.on('data', c => {
+    body += c
+  })
   req.on('end', () => {
     const parsed = JSON.parse(body)
     setTimeout(() => {
@@ -68,23 +85,39 @@ const room = httpServer((req, res) => {
     }, slowFor(parsed))
   })
 })
-room.listen(0, '127.0.0.1'); await once(room, 'listening')
+room.listen(0, '127.0.0.1')
+await once(room, 'listening')
 const roomUrl = `http://127.0.0.1:${(room.address() as AddressInfo).port}/api/rooms/${'r'.repeat(20)}`
 const config = (extra = {}) => ({ room: roomUrl, token: TOKEN, version: '0.11.26', controlToken: CONTROL, dir, own: ownPath, ...extra })
 
 // One line to a socket, as a session writes one.
-const write = (file: string, line: string) => new Promise<void>((resolve, reject) => {
-  const s = createConnection({ path: file })
-  s.once('error', reject)
-  s.once('connect', () => s.end(`${line}\n`, resolve))
-})
+const write = (file: string, line: string) =>
+  new Promise<void>((resolve, reject) => {
+    const s = createConnection({ path: file })
+    s.once('error', reject)
+    s.once('connect', () => s.end(`${line}\n`, resolve))
+  })
 // The control port, as the plugin asks it (controlPost), or not.
-function control(port: number, body: unknown, { token = CONTROL, host = `127.0.0.1:${port}`, headers = {}, raw }: { token?: string, host?: string, headers?: Record<string, string>, raw?: string } = {}) {
+function control(
+  port: number,
+  body: unknown,
+  { token = CONTROL, host = `127.0.0.1:${port}`, headers = {}, raw }: { token?: string; host?: string; headers?: Record<string, string>; raw?: string } = {},
+) {
   return new Promise<number>(resolve => {
     const data = raw ?? JSON.stringify(body)
-    const req = request({ host: '127.0.0.1', port, method: 'POST', path: '/', headers: { host, authorization: `Bearer ${token}`, 'content-type': 'application/json', 'content-length': Buffer.byteLength(data), ...headers } }, res => {
-      res.resume(); res.on('end', () => resolve(res.statusCode!))
-    })
+    const req = request(
+      {
+        host: '127.0.0.1',
+        port,
+        method: 'POST',
+        path: '/',
+        headers: { host, authorization: `Bearer ${token}`, 'content-type': 'application/json', 'content-length': Buffer.byteLength(data), ...headers },
+      },
+      res => {
+        res.resume()
+        res.on('end', () => resolve(res.statusCode!))
+      },
+    )
     req.on('error', () => resolve(0))
     req.end(data)
   })
@@ -93,57 +126,119 @@ function control(port: number, body: unknown, { token = CONTROL, host = `127.0.0
 describe.skipIf(!unix)('the mailbox helper and the receipt writer', () => {
   // The frame, byte for byte: the engine's attribute order, the teammate's
   // session's hop chain and message id, a name the envelope can carry.
-  test('the frame byte for byte (chain, the teammate\'s message id, no auth), what the session writes read, commands and config checked', async () => {
+  test("the frame byte for byte (chain, the teammate's message id, no auth), what the session writes read, commands and config checked", async () => {
     const frame = JSON.parse(mb.frameOf(`uds:${dir}/ss-${BOX}.sock`, { name: 'composition · via Scott', mode: 'prompting', chain: CHAIN, id: ID, body: 'Hi' }))
     assert.deepEqual(Object.keys(frame), ['msgV', 'msg_id', 'type', 'message', 'priority', 'from'])
-    assert.equal(frame.msg_id, ID, 'the id the teammate\'s session gave it: the host session\'s receipts name it')
-    assert.equal(frame.message.content, `<cross-session-message from="uds:${dir}/ss-${BOX}.sock" hop-chain="${CHAIN.join(',')}" from-name="composition · via Scott" from-mode="prompting">\nHi\n</cross-session-message>`)
+    assert.equal(frame.msg_id, ID, "the id the teammate's session gave it: the host session's receipts name it")
+    assert.equal(
+      frame.message.content,
+      `<cross-session-message from="uds:${dir}/ss-${BOX}.sock" hop-chain="${CHAIN.join(',')}" from-name="composition · via Scott" from-mode="prompting">\nHi\n</cross-session-message>`,
+    )
     assert.equal(frame.from, `uds:${dir}/ss-${BOX}.sock`)
     assert.equal(frame.priority, 'next')
     const fresh = JSON.parse(mb.frameOf('uds:/tmp/x.sock', { name: 'a"<b>&\nc', chain: [], body: 'x' }))
     assert.match(fresh.msg_id, rc.UUID, 'no id: a new one')
-    assert.equal(fresh.message.content, '<cross-session-message from="uds:/tmp/x.sock" from-name="a b c">\nx\n</cross-session-message>', 'no chain, no mode, a name with nothing the envelope can\'t carry')
+    assert.equal(
+      fresh.message.content,
+      '<cross-session-message from="uds:/tmp/x.sock" from-name="a b c">\nx\n</cross-session-message>',
+      "no chain, no mode, a name with nothing the envelope can't carry",
+    )
     assert.equal(mb.bodyOf('a</cross-session-message>b'), 'a<​/cross-session-message>b')
     assert.equal(mb.attribute(''), 'another session')
     // What the session writes to a mailbox, read.
-    const message = mb.frameRead(JSON.stringify({ msgV: 1, msg_id: REF, type: 'user', message: { role: 'user', content: `<cross-session-message from="uds:${ownPath}" from-name="work" from-mode="prompting">\nHere.\n</cross-session-message>` }, priority: 'next', from: `uds:${ownPath}` }))
+    const message = mb.frameRead(
+      JSON.stringify({
+        msgV: 1,
+        msg_id: REF,
+        type: 'user',
+        message: {
+          role: 'user',
+          content: `<cross-session-message from="uds:${ownPath}" from-name="work" from-mode="prompting">\nHere.\n</cross-session-message>`,
+        },
+        priority: 'next',
+        from: `uds:${ownPath}`,
+      }),
+    )
     assert.deepEqual(message, { kind: 'message', from: `uds:${ownPath}`, message: { body: 'Here.', ref: REF } })
-    const receipt = { type: 'control', action: 'peer_message_status', status: 'held', reason: 'x', from: `uds:${ownPath}`, orig_msg_id: ID, msgV: 1, msg_id: REF }
+    const receipt = {
+      type: 'control',
+      action: 'peer_message_status',
+      status: 'held',
+      reason: 'x',
+      from: `uds:${ownPath}`,
+      orig_msg_id: ID,
+      msgV: 1,
+      msg_id: REF,
+    }
     assert.deepEqual(mb.frameRead(JSON.stringify(receipt)), { kind: 'receipt', from: `uds:${ownPath}`, receipt: { status: 'held', id: ID } })
-    assert.deepEqual(mb.frameRead(JSON.stringify({ ...receipt, status: 'expired', status_detail: 'refused' })).receipt, { status: 'refused', id: ID }, 'Claude Code writes refused as expired')
-    assert.deepEqual(mb.frameRead(JSON.stringify({ ...receipt, status: 'dropped', drop_reason: 'hop-loop' })).receipt, { status: 'dropped', id: ID, reason: 'hop-loop' })
-    for (const bad of ['{', '[]', JSON.stringify({ ...receipt, status: 'read' }), JSON.stringify({ ...receipt, orig_msg_id: 'x' }), JSON.stringify({ ...receipt, action: 'rename' }),
-      JSON.stringify({ msgV: 1, type: 'user', from: 'uds:/a', message: { content: '<cross-session-message from="uds:/b">\nx\n</cross-session-message>' } })]) assert.equal(mb.frameRead(bad).kind, 'bad', bad)
+    assert.deepEqual(
+      mb.frameRead(JSON.stringify({ ...receipt, status: 'expired', status_detail: 'refused' })).receipt,
+      { status: 'refused', id: ID },
+      'Claude Code writes refused as expired',
+    )
+    assert.deepEqual(mb.frameRead(JSON.stringify({ ...receipt, status: 'dropped', drop_reason: 'hop-loop' })).receipt, {
+      status: 'dropped',
+      id: ID,
+      reason: 'hop-loop',
+    })
+    for (const bad of [
+      '{',
+      '[]',
+      JSON.stringify({ ...receipt, status: 'read' }),
+      JSON.stringify({ ...receipt, orig_msg_id: 'x' }),
+      JSON.stringify({ ...receipt, action: 'rename' }),
+      JSON.stringify({ msgV: 1, type: 'user', from: 'uds:/a', message: { content: '<cross-session-message from="uds:/b">\nx\n</cross-session-message>' } }),
+    ])
+      assert.equal(mb.frameRead(bad).kind, 'bad', bad)
     assert.equal(mb.frameRead(JSON.stringify({ type: 'auth', token: 'x' })).kind, 'auth')
     // Commands, checked.
     assert.doesNotThrow(() => mb.commandOf({ op: 'deliver', box: BOX, name: 'n', chain: [], body: 'x'.repeat(32_000) }))
-    for (const bad of [{ op: 'deliver', box: BOX, name: 'n', chain: [], body: 'x'.repeat(32_001) }, { op: 'deliver', box: BOX, name: 'n', chain: ['zz'], body: 'x' }, { op: 'deliver', box: BOX, name: 'n', chain: [], id: 'x', body: 'x' },
-      { op: 'open', box: BOX, seat: SEAT }, { op: 'open', box: BOX, seat: 'a b', handle: HANDLE }, { op: 'receipt', box: BOX, status: 'held', ref: REF, reason: 'hop-loop' }, { op: 'receipt', box: BOX, status: 'read', ref: REF },
-      { op: 'exit', now: true }, { op: 'token', token: TOKEN }]) assert.throws(() => mb.commandOf(bad), JSON.stringify(bad))
+    for (const bad of [
+      { op: 'deliver', box: BOX, name: 'n', chain: [], body: 'x'.repeat(32_001) },
+      { op: 'deliver', box: BOX, name: 'n', chain: ['zz'], body: 'x' },
+      { op: 'deliver', box: BOX, name: 'n', chain: [], id: 'x', body: 'x' },
+      { op: 'open', box: BOX, seat: SEAT },
+      { op: 'open', box: BOX, seat: 'a b', handle: HANDLE },
+      { op: 'receipt', box: BOX, status: 'held', ref: REF, reason: 'hop-loop' },
+      { op: 'receipt', box: BOX, status: 'read', ref: REF },
+      { op: 'exit', now: true },
+      { op: 'token', token: TOKEN },
+    ])
+      assert.throws(() => mb.commandOf(bad), JSON.stringify(bad))
     assert.throws(() => mb.configOf(config({ pid: process.pid })), 'the launcher takes no pid: it names its own parent')
     assert.doesNotThrow(() => mb.configOf(config({ pid: process.pid }), true))
     assert.throws(() => mb.configOf(config({ room: 'http://share.example/api/rooms/rrrrrrrrrrrrrrrrrrrr' })), 'a bearer in the clear only to this computer')
-    assert.throws(() => mb.configOf(config({ dir: '/tmp' })), 'mailboxes beside the session\'s own socket')
+    assert.throws(() => mb.configOf(config({ dir: '/tmp' })), "mailboxes beside the session's own socket")
   })
 
   // The receipt writer: Claude Code's own line, written once and half-closed.
   test("receipt: Claude Code's own line (refused as expired, why a drop), one line half-closed into a socket alone, its input checked", async () => {
     const line = JSON.parse(rc.receiptLine({ status: 'held', from: 'uds:/tmp/g.sock', ref: ID }))
     assert.deepEqual(Object.keys(line), ['type', 'action', 'status', 'reason', 'from', 'orig_msg_id', 'msgV', 'msg_id'])
-    assert.deepEqual([line.type, line.action, line.status, line.from, line.orig_msg_id, line.msgV], ['control', 'peer_message_status', 'held', 'uds:/tmp/g.sock', ID, 1])
+    assert.deepEqual(
+      [line.type, line.action, line.status, line.from, line.orig_msg_id, line.msgV],
+      ['control', 'peer_message_status', 'held', 'uds:/tmp/g.sock', ID, 1],
+    )
     assert.equal(line.reason, rc.REASONS.held)
     assert.match(line.msg_id, rc.UUID)
     const refused = JSON.parse(rc.receiptLine({ status: 'refused', from: 'uds:/tmp/g.sock', ref: ID }))
     assert.deepEqual([refused.status, refused.status_detail], ['expired', 'refused'], 'refused as Claude Code writes it')
     assert.equal(JSON.parse(rc.receiptLine({ status: 'dropped', from: 'uds:/tmp/g.sock', ref: ID, reason: 'rate-limited' })).drop_reason, 'rate-limited')
-    for (const bad of [{ status: 'held', from: 'uds:/tmp/g.sock', ref: 'x' }, { status: 'held', from: '/tmp/g.sock', ref: ID }, { status: 'held', from: 'uds:/tmp/g.sock', ref: ID, reason: 'hop-loop' }, { status: 'dropped', from: 'uds:/tmp/g.sock', ref: ID, reason: 'bored' }]) {
+    for (const bad of [
+      { status: 'held', from: 'uds:/tmp/g.sock', ref: 'x' },
+      { status: 'held', from: '/tmp/g.sock', ref: ID },
+      { status: 'held', from: 'uds:/tmp/g.sock', ref: ID, reason: 'hop-loop' },
+      { status: 'dropped', from: 'uds:/tmp/g.sock', ref: ID, reason: 'bored' },
+    ]) {
       assert.throws(() => rc.receiptLine(bad), JSON.stringify(bad))
     }
     // Its input: the receipt as an object, or a line that isn't one.
     const run = async (input: string | object) => {
       const child = spawn(process.execPath, [RECEIPT], { stdio: ['pipe', 'pipe', 'ignore'] })
       let out = ''
-      child.stdout.on('data', b => { out += b })
+      child.stdout.on('data', b => {
+        out += b
+      })
       child.stdin.end(typeof input === 'string' ? input : JSON.stringify(input))
       const [code] = await once(child, 'exit')
       return { code, out: out.trim() }
@@ -154,8 +249,15 @@ describe.skipIf(!unix)('the mailbox helper and the receipt writer', () => {
     assert(await until(() => lines.length === before + 1 && lines.at(-1)!.length === 1), 'one connection, one line')
     assert.deepEqual(JSON.parse(lines.at(-1)![0]!).orig_msg_id, ID)
     await writeFile(join(dir, 'plain'), 'x')
-    assert.deepEqual(await run({ path: join(dir, 'plain'), status: 'held', from: 'uds:/tmp/g.sock', ref: ID }), { code: 1, out: '{"state":"error","code":"CONNECT"}' }, 'never a file that isn\'t a socket')
-    assert.deepEqual(await run({ path: ownPath, status: 'held', from: 'uds:/tmp/g.sock', ref: ID, extra: 1 }), { code: 1, out: '{"state":"error","code":"INVALID_CONFIG"}' })
+    assert.deepEqual(
+      await run({ path: join(dir, 'plain'), status: 'held', from: 'uds:/tmp/g.sock', ref: ID }),
+      { code: 1, out: '{"state":"error","code":"CONNECT"}' },
+      "never a file that isn't a socket",
+    )
+    assert.deepEqual(await run({ path: ownPath, status: 'held', from: 'uds:/tmp/g.sock', ref: ID, extra: 1 }), {
+      code: 1,
+      out: '{"state":"error","code":"INVALID_CONFIG"}',
+    })
     assert.deepEqual(await run('{'), { code: 1, out: '{"state":"error","code":"INVALID_CONFIG"}' })
     assert.equal(lines.length, before + 1, 'nothing more written')
   })
@@ -163,17 +265,32 @@ describe.skipIf(!unix)('the mailbox helper and the receipt writer', () => {
   test("the helper delivers with the chain and id, posts what the session writes and its receipts, in order though the room is slow, writes the seat's receipts back, refuses strangers, is swept and hardened", async () => {
     // Stale mailboxes from a helper that was killed: swept at start, a minute
     // old and nobody listening, nothing else touched.
-    const stale = join(dir, `ss-${'5e'.repeat(16)}.sock`), fresh = join(dir, `ss-${'f0'.repeat(16)}.sock`), live = join(dir, `ss-${'1e'.repeat(16)}.sock`), other = join(dir, 'other.sock')
+    const stale = join(dir, `ss-${'5e'.repeat(16)}.sock`),
+      fresh = join(dir, `ss-${'f0'.repeat(16)}.sock`),
+      live = join(dir, `ss-${'1e'.repeat(16)}.sock`),
+      other = join(dir, 'other.sock')
     // Left behind: bound by a process killed outright, so nobody listens and the files stay.
     {
       const files = [stale, fresh, other]
-      const holder = spawn(process.execPath, ['-e', `const net=require('net');let n=0;for(const f of ${JSON.stringify(files)})net.createServer().listen(f,()=>{if(++n===${files.length})console.log('ok')})`], { stdio: ['ignore', 'pipe', 'ignore'] })
+      const holder = spawn(
+        process.execPath,
+        [
+          '-e',
+          `const net=require('net');let n=0;for(const f of ${JSON.stringify(files)})net.createServer().listen(f,()=>{if(++n===${files.length})console.log('ok')})`,
+        ],
+        { stdio: ['ignore', 'pipe', 'ignore'] },
+      )
       await once(holder.stdout, 'data')
       holder.kill('SIGKILL')
       await once(holder, 'exit')
-      assert(files.every(f => existsSync(f)), 'left behind')
+      assert(
+        files.every(f => existsSync(f)),
+        'left behind',
+      )
     }
-    const liveServer = netServer(); liveServer.listen(live); await once(liveServer, 'listening')
+    const liveServer = netServer()
+    liveServer.listen(live)
+    await once(liveServer, 'listening')
     const old = new Date(Date.now() - 5 * 60_000)
     for (const file of [stale, live, other]) await utimes(file, old, old)
 
@@ -193,39 +310,109 @@ describe.skipIf(!unix)('the mailbox helper and the receipt writer', () => {
       assert.equal(await control(port, { op: 'deliver', box: BOX, name: 'n', chain: [], body: 'x' }), 404, 'no such mailbox')
       assert.equal(await control(port, { op: 'open', box: BOX, seat: SEAT, handle: HANDLE }), 200)
       const file = join(dir, `ss-${BOX}.sock`)
-      assert(lstatSync(file).isSocket() && ((await stat(file)).mode & 0o777) === 0o600, 'a private socket beside the session\'s own')
+      assert(lstatSync(file).isSocket() && ((await stat(file)).mode & 0o777) === 0o600, "a private socket beside the session's own")
       const address = `uds:${file}`
 
       // A teammate's session's message into this session, from the mailbox: one
       // line on one connection, no auth line, its chain and id as sent.
       const before = lines.length
-      assert.equal(await control(port, { op: 'deliver', box: BOX, name: 'composition · via Scott', mode: 'bypass', chain: CHAIN, id: ID, body: 'Count to three.' }), 200)
+      assert.equal(
+        await control(port, { op: 'deliver', box: BOX, name: 'composition · via Scott', mode: 'bypass', chain: CHAIN, id: ID, body: 'Count to three.' }),
+        200,
+      )
       assert(await until(() => lines.length === before + 1 && lines.at(-1)!.length === 1))
       const frame = JSON.parse(lines.at(-1)![0]!)
       assert.equal(frame.type, 'user', 'no auth line first')
       assert.deepEqual([frame.msg_id, frame.from], [ID, address])
-      assert.equal(frame.message.content, `<cross-session-message from="${address}" hop-chain="${CHAIN.join(',')}" from-name="composition · via Scott" from-mode="bypass">\nCount to three.\n</cross-session-message>`)
-      assert.equal(await control(port, { op: 'deliver', box: BOX, name: 'n', chain: [], body: 'x'.repeat(32_000) }), 200, 'a message of 32,000 characters fits the raised body limit')
+      assert.equal(
+        frame.message.content,
+        `<cross-session-message from="${address}" hop-chain="${CHAIN.join(',')}" from-name="composition · via Scott" from-mode="bypass">\nCount to three.\n</cross-session-message>`,
+      )
+      assert.equal(
+        await control(port, { op: 'deliver', box: BOX, name: 'n', chain: [], body: 'x'.repeat(32_000) }),
+        200,
+        'a message of 32,000 characters fits the raised body limit',
+      )
 
       // This session's Claude writes back to the mailbox: posted to the seat,
       // with the msg_id its receipts will name. Anyone else's frame: nothing.
-      const reply = { msgV: 1, msg_id: REF, type: 'user', message: { role: 'user', content: `<cross-session-message from="uds:${ownPath}" from-name="work" from-mode="prompting">\nThree.\n</cross-session-message>` }, priority: 'next', from: `uds:${ownPath}` }
+      const reply = {
+        msgV: 1,
+        msg_id: REF,
+        type: 'user',
+        message: {
+          role: 'user',
+          content: `<cross-session-message from="uds:${ownPath}" from-name="work" from-mode="prompting">\nThree.\n</cross-session-message>`,
+        },
+        priority: 'next',
+        from: `uds:${ownPath}`,
+      }
       await write(file, JSON.stringify({ type: 'auth', token: 'whatever' }) + '\n' + JSON.stringify(reply))
       assert(await until(() => posts.length === 1))
-      assert.deepEqual(posts[0], { path: `/api/rooms/${'r'.repeat(20)}/peer`, auth: `Bearer ${TOKEN}`, version: '0.11.26', body: { to: SEAT, handle: HANDLE, body: 'Three.', ref: REF } })
-      const stranger = { ...reply, from: 'uds:/tmp/cc-socks/9.sock', message: { ...reply.message, content: reply.message.content.replace(`uds:${ownPath}`, 'uds:/tmp/cc-socks/9.sock') } }
+      assert.deepEqual(posts[0], {
+        path: `/api/rooms/${'r'.repeat(20)}/peer`,
+        auth: `Bearer ${TOKEN}`,
+        version: '0.11.26',
+        body: { to: SEAT, handle: HANDLE, body: 'Three.', ref: REF },
+      })
+      const stranger = {
+        ...reply,
+        from: 'uds:/tmp/cc-socks/9.sock',
+        message: { ...reply.message, content: reply.message.content.replace(`uds:${ownPath}`, 'uds:/tmp/cc-socks/9.sock') },
+      }
       await write(file, JSON.stringify(stranger))
-      await write(file, JSON.stringify({ type: 'control', action: 'peer_message_status', status: 'held', from: 'uds:/tmp/cc-socks/9.sock', orig_msg_id: ID, msgV: 1, msg_id: REF }))
+      await write(
+        file,
+        JSON.stringify({
+          type: 'control',
+          action: 'peer_message_status',
+          status: 'held',
+          from: 'uds:/tmp/cc-socks/9.sock',
+          orig_msg_id: ID,
+          msgV: 1,
+          msg_id: REF,
+        }),
+      )
       await wait(150)
       assert.equal(posts.length, 1, 'a frame or receipt from another session goes nowhere')
 
       // This session's receipts for what came from the mailbox: to the seat,
       // in the order they were sent, though the room takes the first slowly.
       slowFor = (body: any) => (body.status === 'held' ? 200 : 0)
-      await write(file, JSON.stringify({ type: 'control', action: 'peer_message_status', status: 'held', reason: 'x', from: `uds:${ownPath}`, orig_msg_id: ID, msgV: 1, msg_id: REF }))
-      await write(file, JSON.stringify({ type: 'control', action: 'peer_message_status', status: 'expired', status_detail: 'refused', from: `uds:${ownPath}`, orig_msg_id: ID, msgV: 1, msg_id: REF }))
+      await write(
+        file,
+        JSON.stringify({
+          type: 'control',
+          action: 'peer_message_status',
+          status: 'held',
+          reason: 'x',
+          from: `uds:${ownPath}`,
+          orig_msg_id: ID,
+          msgV: 1,
+          msg_id: REF,
+        }),
+      )
+      await write(
+        file,
+        JSON.stringify({
+          type: 'control',
+          action: 'peer_message_status',
+          status: 'expired',
+          status_detail: 'refused',
+          from: `uds:${ownPath}`,
+          orig_msg_id: ID,
+          msgV: 1,
+          msg_id: REF,
+        }),
+      )
       assert(await until(() => posts.length === 3))
-      assert.deepEqual(posts.slice(1).map(p => p.body), [{ to: SEAT, handle: HANDLE, status: 'held', id: ID }, { to: SEAT, handle: HANDLE, status: 'refused', id: ID }])
+      assert.deepEqual(
+        posts.slice(1).map(p => p.body),
+        [
+          { to: SEAT, handle: HANDLE, status: 'held', id: ID },
+          { to: SEAT, handle: HANDLE, status: 'refused', id: ID },
+        ],
+      )
       slowFor = () => 0
 
       // The seat's receipts for what this session wrote, into it from the
@@ -243,18 +430,31 @@ describe.skipIf(!unix)('the mailbox helper and the receipt writer', () => {
       assert.equal(await control(port, { op: 'receipt', box: BOX, status: 'dropped', ref: REF, reason: 'hop-loop' }), 200)
       assert(await until(() => allLines().length === mark + 3))
       await wait(100)
-      const receipts = allLines().slice(mark).map(l => JSON.parse(l))
-      assert.deepEqual(receipts.map(r => [r.action, r.status, r.from, r.orig_msg_id, r.drop_reason]), [['peer_message_status', 'held', address, REF, undefined], ['peer_message_status', 'delivered', address, REF, undefined], ['peer_message_status', 'dropped', address, REF, 'hop-loop']])
+      const receipts = allLines()
+        .slice(mark)
+        .map(l => JSON.parse(l))
+      assert.deepEqual(
+        receipts.map(r => [r.action, r.status, r.from, r.orig_msg_id, r.drop_reason]),
+        [
+          ['peer_message_status', 'held', address, REF, undefined],
+          ['peer_message_status', 'delivered', address, REF, undefined],
+          ['peer_message_status', 'dropped', address, REF, 'hop-loop'],
+        ],
+      )
 
       // What this session wrote that couldn't reach the seat: it hears so, as
       // Claude Code says it, from the mailbox.
       const failed = async (status: number, json: unknown, expect: string, reason?: string) => {
         answer = () => [status, json]
-        const at = allLines().length, id = crypto.randomUUID()
+        const at = allLines().length,
+          id = crypto.randomUUID()
         await write(file, JSON.stringify({ ...reply, msg_id: id }))
         assert(await until(() => allLines().length === at + 1), `${status} ${JSON.stringify(json)}`)
         const r = JSON.parse(allLines().at(-1)!)
-        assert.deepEqual([r.status === 'expired' && r.status_detail === 'refused' ? 'refused' : r.status, r.orig_msg_id, r.from, r.drop_reason], [expect, id, address, reason])
+        assert.deepEqual(
+          [r.status === 'expired' && r.status_detail === 'refused' ? 'refused' : r.status, r.orig_msg_id, r.from, r.drop_reason],
+          [expect, id, address, reason],
+        )
       }
       await failed(200, { delivered: false, reason: 'offline' }, 'dropped')
       await failed(429, { error: 'busy' }, 'dropped', 'rate-limited')
@@ -279,11 +479,20 @@ describe.skipIf(!unix)('the mailbox helper and the receipt writer', () => {
       // `viaShell`: through a stand-in for Claude Code that can be killed, so the helper's Claude Code is gone.
       const cfg = JSON.stringify(config())
       const child = viaShell
-        ? spawn(process.execPath, ['-e', `const c=require('child_process').spawn(process.execPath,[${JSON.stringify(MAILBOX)}],{stdio:['pipe','inherit','ignore']});c.stdin.end(${JSON.stringify(cfg)});setInterval(()=>{},1000)`], { stdio: ['ignore', 'pipe', 'ignore'] })
+        ? spawn(
+            process.execPath,
+            [
+              '-e',
+              `const c=require('child_process').spawn(process.execPath,[${JSON.stringify(MAILBOX)}],{stdio:['pipe','inherit','ignore']});c.stdin.end(${JSON.stringify(cfg)});setInterval(()=>{},1000)`,
+            ],
+            { stdio: ['ignore', 'pipe', 'ignore'] },
+          )
         : spawn(process.execPath, [MAILBOX], { stdio: ['pipe', 'pipe', 'ignore'] })
       if (!viaShell) child.stdin!.end(cfg)
       let out = ''
-      child.stdout.on('data', b => { out += b })
+      child.stdout.on('data', b => {
+        out += b
+      })
       assert(await until(() => out.includes('\n'), 6000), 'a ready line')
       const ready = JSON.parse(out.split('\n')[0]!)
       assert.equal(ready.state, 'ready')
@@ -293,13 +502,24 @@ describe.skipIf(!unix)('the mailbox helper and the receipt writer', () => {
     const ancestors = (pid: number) => {
       const chain = []
       for (let p = pid; p > 1 && chain.length < 64;) {
-        const up = Number(execFileSync('ps', ['-o', 'ppid=', '-p', String(p)]).toString().trim())
+        const up = Number(
+          execFileSync('ps', ['-o', 'ppid=', '-p', String(p)])
+            .toString()
+            .trim(),
+        )
         chain.push(up)
         p = up
       }
       return chain
     }
-    const alive = (pid: number) => { try { process.kill(pid, 0); return true } catch { return false } }
+    const alive = (pid: number) => {
+      try {
+        process.kill(pid, 0)
+        return true
+      } catch {
+        return false
+      }
+    }
     const opened = async (port: number) => {
       const box = crypto.randomUUID().replaceAll('-', '')
       assert.equal(await control(port, { op: 'open', box, seat: SEAT, handle: HANDLE }), 200)
@@ -310,7 +530,15 @@ describe.skipIf(!unix)('the mailbox helper and the receipt writer', () => {
       const [code] = child.exitCode === null ? await once(child, 'exit') : [child.exitCode]
       assert.equal(code, 0, 'the launcher is gone once the helper is ready')
       assert(await until(() => !ancestors(ready.pid).includes(process.pid)), 'the helper is no descendant of whoever started it')
-      assert.equal(Number(execFileSync('ps', ['-o', 'pgid=', '-p', String(ready.pid)]).toString().trim()), ready.pid, 'a session of its own: no terminal\'s hangup reaches it')
+      assert.equal(
+        Number(
+          execFileSync('ps', ['-o', 'pgid=', '-p', String(ready.pid)])
+            .toString()
+            .trim(),
+        ),
+        ready.pid,
+        "a session of its own: no terminal's hangup reaches it",
+      )
       const file = await opened(ready.port)
       // It writes into the session only once it's on its own.
       const at = lines.length
@@ -346,15 +574,22 @@ describe.skipIf(!unix)('the mailbox helper and the receipt writer', () => {
       // A launcher given a bad config says so and starts nothing.
       const child = spawn(process.execPath, [MAILBOX], { stdio: ['pipe', 'pipe', 'ignore'] })
       let out = ''
-      child.stdout.on('data', b => { out += b })
+      child.stdout.on('data', b => {
+        out += b
+      })
       child.stdin.end(JSON.stringify({ ...config(), pid: 1 }))
       const [code] = await once(child, 'exit')
       assert.deepEqual([code, out.trim()], [1, '{"state":"error","code":"INVALID_CONFIG"}'])
     }
-    assert.deepEqual((await readdir(dir)).filter(n => /^ss-/.test(n)), [`ss-${'f0'.repeat(16)}.sock`], 'only the fresh leftover the sweep spared remains')
+    assert.deepEqual(
+      (await readdir(dir)).filter(n => n.startsWith('ss-')),
+      [`ss-${'f0'.repeat(16)}.sock`],
+      'only the fresh leftover the sweep spared remains',
+    )
   })
   afterAll(async () => {
-    own.close(); room.close()
+    own.close()
+    room.close()
     await rm(dir, { recursive: true, force: true })
   })
 })

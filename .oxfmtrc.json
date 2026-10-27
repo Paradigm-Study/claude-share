@@ -1,7 +1,7 @@
-// oxfmt (npm run format), on server/, scripts/ and the plugin's TypeScript
-// (plugin/hooks, relay, tests, types and its tsconfig). Its manifest and its
-// command's Markdown, which Claude Code reads as they are, stay as written.
-// test/ joins after the last of its suites moves to Vitest. The house style,
+// oxfmt (npm run format), on every folder of TypeScript: server/, scripts/,
+// test/ (with vitest.config.ts) and the plugin's (plugin/hooks, relay, tests,
+// types and its tsconfig). The plugin's manifest and its command's Markdown,
+// which Claude Code reads as they are, stay as written. The house style,
 // wrapped at 160 columns: most lines here are well under it, so wrapping
 // touches only the long ones.
 {

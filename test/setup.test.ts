@@ -107,12 +107,20 @@ globalThis.fetch = async (url, init = {}) => {
 // What a scenario makes the fake CLI and the fake network do; the fakes'
 // comments above say what each flag means.
 type Scenario = {
-  buildServer?: string, saved?: string, envServer?: string, configDir?: string, pathVersion?: string, place?: string, withToml?: boolean,
-  settings?: Record<string, unknown>, rawSettings?: string, homeSettings?: Record<string, unknown>,
-  [flag: string]: unknown,
+  buildServer?: string
+  saved?: string
+  envServer?: string
+  configDir?: string
+  pathVersion?: string
+  place?: string
+  withToml?: boolean
+  settings?: Record<string, unknown>
+  rawSettings?: string
+  homeSettings?: Record<string, unknown>
+  [flag: string]: unknown
 }
 // One line of the log the fakes write.
-type Call = { kind: 'cli' | 'fetch' | 'transcript', args: string[], url: string, method: string, serverEnv?: string, place?: string, path?: string }
+type Call = { kind: 'cli' | 'fetch' | 'transcript'; args: string[]; url: string; method: string; serverEnv?: string; place?: string; path?: string }
 type Result = ReturnType<typeof setup>
 
 function setup(args: string[], scenario: Scenario = {}) {
@@ -133,33 +141,65 @@ function setup(args: string[], scenario: Scenario = {}) {
     }
     // Claude Code's folder: ~/.claude (CLAUDE_CONFIG_DIR unset), or the scenario's
     // configDir as CLAUDE_CONFIG_DIR, with ~/.claude beside it (homeSettings) a decoy.
-    const configDir = join(dir, scenario.configDir ?? '.claude'), homeDir = join(dir, '.claude')
+    const configDir = join(dir, scenario.configDir ?? '.claude'),
+      homeDir = join(dir, '.claude')
     mkdirSync(configDir, { recursive: true })
-    const settingsPath = join(configDir, 'settings.json'), homeSettingsPath = join(homeDir, 'settings.json')
+    const settingsPath = join(configDir, 'settings.json'),
+      homeSettingsPath = join(homeDir, 'settings.json')
     if (scenario.settings) writeFileSync(settingsPath, JSON.stringify(scenario.settings))
     if (scenario.rawSettings) writeFileSync(settingsPath, scenario.rawSettings)
     if (scenario.homeSettings) writeFileSync(homeSettingsPath, JSON.stringify(scenario.homeSettings))
-    const env: Record<string, string> = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('CLAUDE') && !key.startsWith('SHARED_SESSION') && key !== 'NODE_OPTIONS') as [string, string][])
+    const env: Record<string, string> = Object.fromEntries(
+      Object.entries(process.env).filter(([key]) => !key.startsWith('CLAUDE') && !key.startsWith('SHARED_SESSION') && key !== 'NODE_OPTIONS') as [
+        string,
+        string,
+      ][],
+    )
     Object.assign(env, {
-      HOME: dir, PATH: join(dir, 'bin'), CLAUDE_BIN: join(dir, scenario.pathVersion ? 'desk/claude' : 'bin/claude'),
-      SETUP_SCENARIO: join(dir, 'scenario.json'), SETUP_LOG: join(dir, 'calls.jsonl'), SETUP_STOPPED: join(dir, 'stopped'),
+      HOME: dir,
+      PATH: join(dir, 'bin'),
+      CLAUDE_BIN: join(dir, scenario.pathVersion ? 'desk/claude' : 'bin/claude'),
+      SETUP_SCENARIO: join(dir, 'scenario.json'),
+      SETUP_LOG: join(dir, 'calls.jsonl'),
+      SETUP_STOPPED: join(dir, 'stopped'),
     })
     if (scenario.configDir) env.CLAUDE_CONFIG_DIR = configDir
     if (scenario.envServer) env.SHARED_SESSION_SERVER = scenario.envServer
     // place: run from a Claude Desktop session, as an agent there runs it.
     if (scenario.place) env.CLAUDE_CODE_HOST_SESSION_ID = scenario.place
-    const result = spawnSync(process.execPath, ['--import', join(dir, 'fetch.mjs'), join(dir, 'scripts/setup.ts'), ...args], { env, cwd: dir, encoding: 'utf8', timeout: 15_000 })
+    const result = spawnSync(process.execPath, ['--import', join(dir, 'fetch.mjs'), join(dir, 'scripts/setup.ts'), ...args], {
+      env,
+      cwd: dir,
+      encoding: 'utf8',
+      timeout: 15_000,
+    })
     assert.ifError(result.error)
-    const calls = existsSync(env.SETUP_LOG!) ? readFileSync(env.SETUP_LOG!, 'utf8').trim().split('\n').map((line): Call => JSON.parse(line)) : []
+    const calls = existsSync(env.SETUP_LOG!)
+      ? readFileSync(env.SETUP_LOG!, 'utf8')
+          .trim()
+          .split('\n')
+          .map((line): Call => JSON.parse(line))
+      : []
     const read = (path: string) => {
       if (!existsSync(path)) return null
       const text = readFileSync(path, 'utf8')
-      try { return JSON.parse(text) } catch { return text }
+      try {
+        return JSON.parse(text)
+      } catch {
+        return text
+      }
     }
-    const list = (path: string) => existsSync(path) ? readdirSync(path) : []
+    const list = (path: string) => (existsSync(path) ? readdirSync(path) : [])
     return {
-      code: result.status, out: result.stdout + result.stderr, calls, configDir, selfhost: read(join(dir, 'wrangler.selfhost.toml')),
-      settings: read(settingsPath), homeSettings: read(homeSettingsPath), projects: list(join(configDir, 'projects')), rooms: list(join(configDir, 'shared-session/rooms')),
+      code: result.status,
+      out: result.stdout + result.stderr,
+      calls,
+      configDir,
+      selfhost: read(join(dir, 'wrangler.selfhost.toml')),
+      settings: read(settingsPath),
+      homeSettings: read(homeSettingsPath),
+      projects: list(join(configDir, 'projects')),
+      rooms: list(join(configDir, 'shared-session/rooms')),
     }
   } finally {
     rmSync(dir, { recursive: true, force: true })
@@ -179,7 +219,7 @@ test('fresh install checks the public build default and completes live share/joi
   assert(commands(result).some(c => c.includes('/stop-sharing')))
   assert.equal(result.settings, null)
   assert(result.calls.some(c => c.kind === 'transcript'))
-  assert.deepEqual(result.projects, [], 'the throwaway sessions\' transcripts are removed from ~/.claude')
+  assert.deepEqual(result.projects, [], "the throwaway sessions' transcripts are removed from ~/.claude")
 })
 
 test('forks use the server baked into their plugin', () => {
@@ -236,7 +276,10 @@ test("a live check ends a room its session left open elsewhere, and removes its 
   assert.equal(result.code, 1, result.out)
   assert.match(result.out, /FAIL a real session could not share/)
   assert.match(result.out, /NOTE ended the room the check's session left open on https:\/\/stray\.example\.invalid/)
-  assert(requests(result).some(r => r.url === 'https://stray.example.invalid/api/rooms/stray-room-abcdefghijkl/end' && r.method === 'POST'), JSON.stringify(requests(result)))
+  assert(
+    requests(result).some(r => r.url === 'https://stray.example.invalid/api/rooms/stray-room-abcdefghijkl/end' && r.method === 'POST'),
+    JSON.stringify(requests(result)),
+  )
   assert.deepEqual(result.rooms, [], 'no checkpoint is left behind')
 })
 
@@ -255,7 +298,10 @@ test("a live check's sessions are never the Claude Desktop session it runs in", 
   assert.equal(result.code, 0, result.out)
   const sessions = result.calls.filter(c => c.kind === 'cli' && c.args[0] === '-p')
   assert.equal(sessions.length, 3, JSON.stringify(sessions))
-  assert(sessions.every(c => c.place === undefined), JSON.stringify(sessions))
+  assert(
+    sessions.every(c => c.place === undefined),
+    JSON.stringify(sessions),
+  )
 })
 
 test("a live check's leftover room that ended already is no failure; one on plain http is never sent its token", () => {
@@ -283,7 +329,9 @@ test('conflicting live server override fails before creating rooms or sessions',
 })
 
 test('live override cannot bypass a server in Claude settings env', () => {
-  const result = setup(['check', '--live', '--server', 'https://other.example.invalid'], { settings: { env: { SHARED_SESSION_SERVER: 'https://settings.example.invalid' } } })
+  const result = setup(['check', '--live', '--server', 'https://other.example.invalid'], {
+    settings: { env: { SHARED_SESSION_SERVER: 'https://settings.example.invalid' } },
+  })
   assert.equal(result.code, 1, result.out)
   assert.match(result.out, /saved server setting overrides --server/)
   assert.deepEqual(requests(result), [])
@@ -297,13 +345,14 @@ for (const [name, scenario, message] of [
   ['failed config read', { configFail: true }, /reading the share server/],
   ['malformed config read', { configMalformed: true }, /unexpected response/],
   ['invalid saved server', { saved: 'not a server' }, /not a valid/],
-] as [string, Scenario, RegExp][]) test(`${name} fails before network and live checks`, () => {
-  const result = setup(['check', '--live'], scenario)
-  assert.equal(result.code, 1, result.out)
-  assert.match(result.out, message)
-  assert.deepEqual(requests(result), [])
-  assert(!commands(result).some(c => c.startsWith('-p ')))
-})
+] as [string, Scenario, RegExp][])
+  test(`${name} fails before network and live checks`, () => {
+    const result = setup(['check', '--live'], scenario)
+    assert.equal(result.code, 1, result.out)
+    assert.match(result.out, message)
+    assert.deepEqual(requests(result), [])
+    assert(!commands(result).some(c => c.startsWith('-p ')))
+  })
 
 test('invalid explicit server does not silently check the default', () => {
   const result = setup(['check', '--server'])
@@ -317,13 +366,14 @@ for (const [name, scenario, message] of [
   ['plugin update', { updateFail: true }, /FAIL updating the plugin/],
   ['plugin install', { missing: true, installFail: true }, /FAIL installing the plugin/],
   ['plugin enable', { disabled: true, enableFail: true }, /FAIL enabling the plugin/],
-] as [string, Scenario, RegExp][]) test(`${name} failure cannot report installed or change update settings`, () => {
-  const result = setup(['join'], scenario)
-  assert.equal(result.code, 1, result.out)
-  assert.match(result.out, message)
-  assert.doesNotMatch(result.out, /OK plugin installed/)
-  assert.equal(result.settings, null)
-})
+] as [string, Scenario, RegExp][])
+  test(`${name} failure cannot report installed or change update settings`, () => {
+    const result = setup(['join'], scenario)
+    assert.equal(result.code, 1, result.out)
+    assert.match(result.out, message)
+    assert.doesNotMatch(result.out, /OK plugin installed/)
+    assert.equal(result.settings, null)
+  })
 
 test('installing an existing disabled plugin enables it and preserves other settings', () => {
   const result = setup(['join'], { disabled: true, settings: { env: { KEEP: 'yes' }, unrelated: true } })
@@ -354,11 +404,20 @@ test('function hooks for a 2.1.285 terminal claude are set in CLAUDE_CONFIG_DIR'
 })
 
 test('the saved server is read from CLAUDE_CONFIG_DIR, never ~/.claude', () => {
-  const env = setup(['check'], { configDir: 'cfg', settings: { env: { SHARED_SESSION_SERVER: 'https://config.example.invalid' } }, homeSettings: { env: { SHARED_SESSION_SERVER: 'https://home.example.invalid' } } })
+  const env = setup(['check'], {
+    configDir: 'cfg',
+    settings: { env: { SHARED_SESSION_SERVER: 'https://config.example.invalid' } },
+    homeSettings: { env: { SHARED_SESSION_SERVER: 'https://home.example.invalid' } },
+  })
   assert.equal(env.code, 0, env.out)
   assert.equal(requests(env)[0]!.url, 'https://config.example.invalid/api/health')
   const saved = (server: string) => ({ pluginConfigs: { [pluginId]: { options: { server } } } })
-  const inline = setup(['check'], { configDir: 'cfg', inline: true, settings: saved('https://config.example.invalid'), homeSettings: saved('https://home.example.invalid') })
+  const inline = setup(['check'], {
+    configDir: 'cfg',
+    inline: true,
+    settings: saved('https://config.example.invalid'),
+    homeSettings: saved('https://home.example.invalid'),
+  })
   assert.equal(inline.code, 0, inline.out)
   assert.equal(requests(inline)[0]!.url, 'https://config.example.invalid/api/health')
   const unreadable = setup(['check'], { configDir: 'cfg', rawSettings: '{not json' })
@@ -415,13 +474,17 @@ test('failed Cloudflare account check cannot deploy or claim signed in', () => {
 // rooms made. The first deploy goes the other way: the preview Worker's binding
 // needs the main Worker's rooms.
 const wrangler = (result: Result) => commands(result).filter(c => c.startsWith('-y wrangler@4 deploy'))
-const MAIN = '-y wrangler@4 deploy', PREVIEW = '-y wrangler@4 deploy -c wrangler.preview.toml', PROBE = '-y wrangler@4 deployments list'
+const MAIN = '-y wrangler@4 deploy',
+  PREVIEW = '-y wrangler@4 deploy -c wrangler.preview.toml',
+  PROBE = '-y wrangler@4 deployments list'
 
 test('an update deploys the preview Worker before the main one', () => {
   const result = setup(['deploy'], { deployed: true, missing: true })
   assert.equal(result.code, 0, result.out)
   assert.deepEqual(wrangler(result), [PROBE, PREVIEW, MAIN])
-  const [preview, main] = ['OK previews deployed to https://claude-share-preview.team.workers.dev', 'OK deployed to https://claude-share.team.workers.dev'].map(line => result.out.indexOf(line))
+  const [preview, main] = ['OK previews deployed to https://claude-share-preview.team.workers.dev', 'OK deployed to https://claude-share.team.workers.dev'].map(
+    line => result.out.indexOf(line),
+  )
   assert(preview! >= 0 && preview! < main!, result.out)
   assert(commands(result).includes(`plugin install ${pluginId} --config server=https://claude-share.team.workers.dev`))
 })
@@ -483,15 +546,19 @@ test('a first deploy whose preview Worker is on a custom domain says it deployed
   assert.doesNotMatch(result.out, /NOTE previews didn't deploy/)
 })
 
-for (const [name, previewFail] of [['fails to deploy', true], ['fails after printing its address', 'late']]) test(`an update whose preview Worker ${name} changes nothing else`, () => {
-  const result = setup(['deploy'], { deployed: true, previewFail, missing: true })
-  assert.equal(result.code, 1, result.out)
-  assert.match(result.out, /FAIL the preview Worker didn't deploy \((.* \| )?A request to the Cloudflare API failed\.\), so nothing was updated/)
-  assert.deepEqual(wrangler(result), [PROBE, PREVIEW])
-  assert.doesNotMatch(result.out, /OK deployed to|OK previews deployed/)
-  assert(!commands(result).some(c => c.startsWith('plugin ')))
-  assert.deepEqual(requests(result), [])
-})
+for (const [name, previewFail] of [
+  ['fails to deploy', true],
+  ['fails after printing its address', 'late'],
+])
+  test(`an update whose preview Worker ${name} changes nothing else`, () => {
+    const result = setup(['deploy'], { deployed: true, previewFail, missing: true })
+    assert.equal(result.code, 1, result.out)
+    assert.match(result.out, /FAIL the preview Worker didn't deploy \((.* \| )?A request to the Cloudflare API failed\.\), so nothing was updated/)
+    assert.deepEqual(wrangler(result), [PROBE, PREVIEW])
+    assert.doesNotMatch(result.out, /OK deployed to|OK previews deployed/)
+    assert(!commands(result).some(c => c.startsWith('plugin ')))
+    assert.deepEqual(requests(result), [])
+  })
 
 test('a first deploy whose preview Worker fails still shares, with a note', () => {
   const result = setup(['deploy'], { previewFail: true, missing: true })

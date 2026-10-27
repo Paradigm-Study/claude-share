@@ -26,26 +26,39 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const ORIGIN = 'https://share.test'
 
 // A request as the adapters hand it to the core.
-type Ask = { method?: string, rest?: string, token?: string, account?: string, body?: unknown, now?: number, cloud?: unknown, directory?: unknown }
+type Ask = { method?: string; rest?: string; token?: string; account?: string; body?: unknown; now?: number; cloud?: unknown; directory?: unknown }
 // What the core answered: its body as the checks read it.
-type Asked = { status: number, body: any, raw: Response, changed: boolean | undefined }
+type Asked = { status: number; body: any; raw: Response; changed: boolean | undefined }
 const ask = (room: Room, { method = 'GET', rest = '', token, account, body, now = Date.now(), cloud, directory }: Ask): Promise<Asked> =>
   roomRequest(
     room,
     new Request(`${ORIGIN}/api/rooms/${room.id}/${rest}`, {
       method,
-      headers: { 'content-type': 'application/json', 'x-shared-session-version': '0.11.31', ...(token ? { authorization: `Bearer ${token}` } : {}), ...(account ? { 'x-shared-session-account': account } : {}) },
+      headers: {
+        'content-type': 'application/json',
+        'x-shared-session-version': '0.11.31',
+        ...(token ? { authorization: `Bearer ${token}` } : {}),
+        ...(account ? { 'x-shared-session-account': account } : {}),
+      },
       body: body === undefined ? undefined : JSON.stringify(body),
     }),
     rest,
     now,
     ORIGIN,
     { cloud, directory } as RoomContext,
-  ).then(async ({ response, changed }) => ({ status: response.status, body: await response.clone().json().catch(() => null), raw: response, changed }))
+  ).then(async ({ response, changed }) => ({
+    status: response.status,
+    body: await response
+      .clone()
+      .json()
+      .catch(() => null),
+    raw: response,
+    changed,
+  }))
 
 // The container, as the room sees it: what it was started with, and its changes.
 function standIn({ fail = false, diff = 'diff --git a/x b/x\n' } = {}) {
-  const calls = { started: [] as { id: string, payload: any }[], stopped: [] as string[] }
+  const calls = { started: [] as { id: string; payload: any }[], stopped: [] as string[] }
   return {
     calls,
     async start(id: string, payload: unknown) {
@@ -59,7 +72,12 @@ function standIn({ fail = false, diff = 'diff --git a/x b/x\n' } = {}) {
   }
 }
 
-const moveBody = { session: randomUUID(), cwd: '/Users/scott/project', auth: { oauthToken: 'sk-ant-oat01-test' }, state: { policy: { prompts: 'everyone', approvals: 'edits' } } }
+const moveBody = {
+  session: randomUUID(),
+  cwd: '/Users/scott/project',
+  auth: { oauthToken: 'sk-ant-oat01-test' },
+  state: { policy: { prompts: 'everyone', approvals: 'edits' } },
+}
 
 function freshRoom(now = Date.now()) {
   const room = Room.create({ id: 'room0000000000000001', name: 'Scott', title: 'demo', now, version: '0.11.31' })
@@ -128,7 +146,8 @@ test('a move needs a session, an absolute folder and a sign-in, and keeps nothin
     { ...moveBody, cwd: '/a/../etc' },
     { ...moveBody, auth: {} },
     { ...moveBody, auth: { baseUrl: 'file:///x', authToken: 't' } },
-  ]) assert.equal((await ask(room, { method: 'POST', rest: 'cloud', token: host, body, cloud })).status, 400)
+  ])
+    assert.equal((await ask(room, { method: 'POST', rest: 'cloud', token: host, body, cloud })).status, 400)
   await ask(room, { method: 'POST', rest: 'cloud', token: host, body: { ...moveBody, auth: { oauthToken: 'secret-token', extra: 'x' } }, cloud })
   assert.ok(!JSON.stringify(room.toJSON()).includes('secret-token'))
   assert.ok(!JSON.stringify(room.events).includes('secret-token'))
@@ -168,7 +187,13 @@ test("the approver's other sessions (the same account) may answer too", async ()
   const other = room.join('Scott', now, '0.11.31', 'acct-scott')
   const stranger = room.join('Mallory', now, '0.11.31', 'acct-mallory')
   await ask(room, { method: 'POST', rest: 'events', token: runner, body: { events: [{ type: 'ask', body: { id: 'q1', what: 'x' } }] }, cloud })
-  await ask(room, { method: 'POST', rest: 'events', token: stranger.token, body: { events: [{ type: 'answer', body: { id: 'q1', answer: 'Allow once' } }] }, cloud })
+  await ask(room, {
+    method: 'POST',
+    rest: 'events',
+    token: stranger.token,
+    body: { events: [{ type: 'answer', body: { id: 'q1', answer: 'Allow once' } }] },
+    cloud,
+  })
   assert.ok(!room.events.some(e => e.type === 'answer'))
   await ask(room, { method: 'POST', rest: 'events', token: other.token, body: { events: [{ type: 'answer', body: { id: 'q1', answer: 'Decline' } }] }, cloud })
   assert.equal(room.events.filter(e => e.type === 'answer').length, 1)
@@ -190,14 +215,26 @@ test("only the approver changes the cloud host's settings, only as its Room woul
   await post(moved.body.token, [{ type: 'set', body: { approvals: 'none', prompts: 'watch', files: 'off', untrust: true, extra: 1 } }])
   await post(moved.body.token, [{ type: 'set', body: { approvals: 'none' } }])
   await post(other.token, [{ type: 'set', body: { approvals: 'all' } }])
-  assert.deepEqual(room.events.filter(e => e.type === 'set').map(e => e.body), [{ prompts: 'watch', files: 'off', untrust: true }, { approvals: 'all' }])
+  assert.deepEqual(
+    room.events.filter(e => e.type === 'set').map(e => e.body),
+    [{ prompts: 'watch', files: 'off', untrust: true }, { approvals: 'all' }],
+  )
   // Their prompts say so (the cloud host's watch-only keeps to teammates); a teammate's don't.
   await post(moved.body.token, [{ type: 'prompt', body: { text: 'Fix it', pid: 'p1' } }])
   await post(guest.token, [{ type: 'prompt', body: { text: 'Break it', pid: 'p2' } }])
-  assert.deepEqual(room.events.filter(e => e.type === 'prompt').map(e => [e.body.pid, e.from.approver === true]), [['p1', true], ['p2', false]])
+  assert.deepEqual(
+    room.events.filter(e => e.type === 'prompt').map(e => [e.body.pid, e.from.approver === true]),
+    [
+      ['p1', true],
+      ['p2', false],
+    ],
+  )
   // Home again: no approver, no settings from a guest seat, no mark.
   assert.equal((await ask(room, { method: 'POST', rest: 'cloud/home', token: moved.body.token, cloud })).status, 200)
-  await post(other.token, [{ type: 'set', body: { prompts: 'everyone' } }, { type: 'prompt', body: { text: 'Again', pid: 'p3' } }])
+  await post(other.token, [
+    { type: 'set', body: { prompts: 'everyone' } },
+    { type: 'prompt', body: { text: 'Again', pid: 'p3' } },
+  ])
   assert.equal(room.events.filter(e => e.type === 'set').length, 2)
   assert.equal(room.events.find(e => e.type === 'prompt' && e.body.pid === 'p3')?.from.approver, undefined)
 })
@@ -253,7 +290,10 @@ test("the host's sign-in ending the room (the Team panel's Stop) stops its runne
   const now = Date.now()
   const room = Room.create({ id: 'room0000000000000003', name: 'Scott', title: 'demo', now, version: '0.11.31', account: 'acct-scott' })
   const cloud = standIn()
-  const directory = { whoIs: async (tok: string) => (tok === 'sign-in-scott' ? { id: 'acct-scott' } : tok === 'sign-in-eve' ? { id: 'acct-eve' } : null), roomEnded: async () => {} }
+  const directory = {
+    whoIs: async (tok: string) => (tok === 'sign-in-scott' ? { id: 'acct-scott' } : tok === 'sign-in-eve' ? { id: 'acct-eve' } : null),
+    roomEnded: async () => {},
+  }
   await ask(room, { method: 'POST', rest: 'cloud', token: room.host.token, body: moveBody, cloud })
   assert.equal((await ask(room, { method: 'POST', rest: 'end', account: 'sign-in-eve', cloud, directory })).status, 403)
   assert.deepEqual(cloud.calls.stopped, [])
@@ -275,7 +315,9 @@ test('a saved room keeps its cloud host, never the sign-in', async () => {
 
 test('wrangler.toml names the image built from cloud/ as it is (node scripts/push-image.ts after changing it)', async () => {
   const { imageTag } = await import('../scripts/push-image.ts')
-  const named = /^image = "registry\.cloudflare\.com\/[0-9a-f]{32}\/claude-share-host:(r-[0-9a-f]{10})"$/m.exec(readFileSync(join(ROOT, 'wrangler.toml'), 'utf8'))?.[1]
+  const named = /^image = "registry\.cloudflare\.com\/[0-9a-f]{32}\/claude-share-host:(r-[0-9a-f]{10})"$/m.exec(
+    readFileSync(join(ROOT, 'wrangler.toml'), 'utf8'),
+  )?.[1]
   assert.equal(named, imageTag())
 })
 
@@ -283,24 +325,41 @@ test('wrangler.toml names the image built from cloud/ as it is (node scripts/pus
 // The real thing: the Workers under wrangler dev starting the image in Docker.
 // The runner reaches the room at the address links name (PUBLIC_URL).
 describe.skipIf(!(process.env.CLOUD_DOCKER === '1' && process.env.ANTHROPIC_AUTH_TOKEN))('in Docker (CLOUD_DOCKER=1 and model access)', () => {
-  let server: Workerd, S = ''
+  let server: Workerd,
+    S = ''
   beforeAll(async () => {
     server = await startWorkerd({ containers: true, vars: ({ port }) => ({ PUBLIC_URL: `http://host.docker.internal:${port}` }) })
     S = server.origin
-    for (let i = 0; i < 50; i++) { try { if ((await fetch(`${S}/api/version`)).ok) break } catch {} await sleep(100) }
+    for (let i = 0; i < 50; i++) {
+      try {
+        if ((await fetch(`${S}/api/version`)).ok) break
+      } catch {}
+      await sleep(100)
+    }
   }, 600_000)
   afterAll(() => server?.stop())
   const sleep = (ms: number) => new Promise(r => setTimeout(r, ms))
-  const call = async (path: string, { token, body, method = body ? 'POST' : 'GET', raw }: { token?: string, body?: unknown, method?: string, raw?: BodyInit } = {}): Promise<{ status: number, body: any }> => {
+  const call = async (
+    path: string,
+    { token, body, method = body ? 'POST' : 'GET', raw }: { token?: string; body?: unknown; method?: string; raw?: BodyInit } = {},
+  ): Promise<{ status: number; body: any }> => {
     const r = await fetch(S + path, {
       method,
       signal: AbortSignal.timeout(130_000),
-      headers: { 'x-shared-session-version': '0.11.31', ...(raw ? {} : { 'content-type': 'application/json' }), ...(token ? { authorization: `Bearer ${token}` } : {}) },
+      headers: {
+        'x-shared-session-version': '0.11.31',
+        ...(raw ? {} : { 'content-type': 'application/json' }),
+        ...(token ? { authorization: `Bearer ${token}` } : {}),
+      },
       body: raw ?? (body ? JSON.stringify(body) : undefined),
       ...(raw ? { duplex: 'half' } : {}),
     })
     const text = await r.text()
-    try { return { status: r.status, body: JSON.parse(text) } } catch { return { status: r.status, body: text } }
+    try {
+      return { status: r.status, body: JSON.parse(text) }
+    } catch {
+      return { status: r.status, body: text }
+    }
   }
   test('in Docker: a session moves to a container, a teammate is answered there, and Bring home brings its changes', async () => {
     const made = (await call('/api/rooms', { body: { name: 'Scott', title: 'cloud test' } })).body
@@ -315,18 +374,30 @@ describe.skipIf(!(process.env.CLOUD_DOCKER === '1' && process.env.ANTHROPIC_AUTH
     rmSync(work, { recursive: true, force: true })
     const moved = await call(`/api/rooms/${made.id}/cloud`, {
       token: made.token,
-      body: { session: randomUUID(), cwd: '/Users/scott/demo', model: 'claude-haiku-4-5-20251001', auth: { baseUrl: 'http://host.docker.internal:8317', authToken: process.env.ANTHROPIC_AUTH_TOKEN } },
+      body: {
+        session: randomUUID(),
+        cwd: '/Users/scott/demo',
+        model: 'claude-haiku-4-5-20251001',
+        auth: { baseUrl: 'http://host.docker.internal:8317', authToken: process.env.ANTHROPIC_AUTH_TOKEN },
+      },
     })
     assert.equal(moved.status, 200, JSON.stringify(moved.body))
     const sent = await call(`/api/rooms/${made.id}/cloud/bundle`, { method: 'PUT', token: moved.body.ticket, raw: bundle })
     assert.equal(sent.status, 200, JSON.stringify(sent.body))
     // Taken up: running.
     let state = ''
-    for (let i = 0; i < 120 && state !== 'running'; i++) { await sleep(1000); state = (await call(`/api/rooms/${made.id}`)).body.cloud?.state }
+    for (let i = 0; i < 120 && state !== 'running'; i++) {
+      await sleep(1000)
+      state = (await call(`/api/rooms/${made.id}`)).body.cloud?.state
+    }
     assert.equal(state, 'running')
     await sleep(3000) // its takeover read the room
-    await call(`/api/rooms/${made.id}/events`, { token: kyle.token, body: { events: [{ type: 'prompt', body: { text: 'Reply with exactly: answered from the cloud', pid: 'p1' } }] } })
-    let seq = kyle.seq, answered = false
+    await call(`/api/rooms/${made.id}/events`, {
+      token: kyle.token,
+      body: { events: [{ type: 'prompt', body: { text: 'Reply with exactly: answered from the cloud', pid: 'p1' } }] },
+    })
+    let seq = kyle.seq,
+      answered = false
     for (let i = 0; i < 90 && !answered; i++) {
       await sleep(1000)
       const page = (await call(`/api/rooms/${made.id}/events?after=${seq}&wait=0`, { token: kyle.token })).body
@@ -337,7 +408,20 @@ describe.skipIf(!(process.env.CLOUD_DOCKER === '1' && process.env.ANTHROPIC_AUTH
     }
     assert.ok(answered, 'the cloud host answered')
     // A teammate's write is asked of the approver, through the room; their yes lets it run there.
-    await call(`/api/rooms/${made.id}/events`, { token: kyle.token, body: { events: [{ type: 'prompt', body: { text: 'Use the Read tool on /Users/scott/demo/README.md, then use the Write tool to create /Users/scott/demo/hello.txt containing exactly: hi from the cloud, then that file\'s first line', pid: 'p2' } }] } })
+    await call(`/api/rooms/${made.id}/events`, {
+      token: kyle.token,
+      body: {
+        events: [
+          {
+            type: 'prompt',
+            body: {
+              text: "Use the Read tool on /Users/scott/demo/README.md, then use the Write tool to create /Users/scott/demo/hello.txt containing exactly: hi from the cloud, then that file's first line",
+              pid: 'p2',
+            },
+          },
+        ],
+      },
+    })
     let question = null
     let readThere = false
     for (let i = 0; i < 90 && !question; i++) {
@@ -356,7 +440,10 @@ describe.skipIf(!(process.env.CLOUD_DOCKER === '1' && process.env.ANTHROPIC_AUTH
     assert.match(question.what, /hello\.txt/)
     // Kyle isn't the approver: his answer isn't taken.
     await call(`/api/rooms/${made.id}/events`, { token: kyle.token, body: { events: [{ type: 'answer', body: { id: question.id, answer: 'Allow once' } }] } })
-    await call(`/api/rooms/${made.id}/events`, { token: moved.body.token, body: { events: [{ type: 'answer', body: { id: question.id, answer: 'Allow once' } }] } })
+    await call(`/api/rooms/${made.id}/events`, {
+      token: moved.body.token,
+      body: { events: [{ type: 'answer', body: { id: question.id, answer: 'Allow once' } }] },
+    })
     let written = false
     for (let i = 0; i < 90 && !written; i++) {
       await sleep(1000)
@@ -371,10 +458,17 @@ describe.skipIf(!(process.env.CLOUD_DOCKER === '1' && process.env.ANTHROPIC_AUTH
     const home = await call(`/api/rooms/${made.id}/cloud/home`, { token: moved.body.token, body: {} })
     assert.equal(home.status, 200, JSON.stringify(home.body))
     assert.equal(home.body.changes?.name, 'cloud-changes.patch')
-    const patch = await fetch(`${S}/api/rooms/${made.id}/files/${home.body.changes.id}`, { headers: { authorization: `Bearer ${home.body.token}`, 'x-shared-session-version': '0.11.31' } }).then(r => r.text())
+    const patch = await fetch(`${S}/api/rooms/${made.id}/files/${home.body.changes.id}`, {
+      headers: { authorization: `Bearer ${home.body.token}`, 'x-shared-session-version': '0.11.31' },
+    }).then(r => r.text())
     assert.match(patch, /hello\.txt/)
     assert.match(patch, /hi from the cloud/)
     assert.equal((await call(`/api/rooms/${made.id}/events?after=0&wait=0`, { token: home.body.token })).status, 200)
-    assert.ok(!execFileSync('docker', ['ps', '-q', '--filter', `name=ss-host-${made.id}`]).toString().trim(), 'the container is gone')
+    assert.ok(
+      !execFileSync('docker', ['ps', '-q', '--filter', `name=ss-host-${made.id}`])
+        .toString()
+        .trim(),
+      'the container is gone',
+    )
   }, 900_000)
 })

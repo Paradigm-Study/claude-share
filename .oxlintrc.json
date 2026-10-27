@@ -1,7 +1,7 @@
-// oxlint (npm run lint), on server/, scripts/ and plugin/relay/: its default
-// correctness rules, and, with --type-aware (oxlint-tsgolint, the TypeScript
-// the tsconfigs name), the rules about promises a Durable Object, or a
-// helper's socket, can't afford to drop. Not plugin/hooks: their types are
+// oxlint (npm run lint), on server/, scripts/, plugin/relay/ and test/ (with
+// vitest.config.ts): its default correctness rules, and, with --type-aware
+// (oxlint-tsgolint, the TypeScript the tsconfigs name), the rules about
+// promises a Durable Object, or a helper's socket, can't afford to drop. Not plugin/hooks: their types are
 // the engine's (plugin/.claude/types, copied in from a Claude Code session and
 // git-ignored), so on CI every engine type would read as any.
 {
@@ -11,7 +11,9 @@
     "typescript/no-misused-promises": "error",
     "typescript/await-thenable": "error",
     // Destructuring to leave a field out names what it leaves out.
-    "no-unused-vars": ["warn", { "ignoreRestSiblings": true }],
+    // A parameter named with a leading _ is there for its type: a placeholder
+    // function a later assignment replaces.
+    "no-unused-vars": ["warn", { "ignoreRestSiblings": true, "argsIgnorePattern": "^_" }],
     // `return void (await x)` is this code's way to end a function early.
     "typescript/no-meaningless-void-operator": "off",
     // Names, titles and file names have their control characters taken out on purpose.
@@ -25,6 +27,10 @@
   },
   "overrides": [
     // Search grams are made of code points, on purpose.
-    { "files": ["server/traces/grams.ts"], "rules": { "typescript/no-misused-spread": "off" } }
+    { "files": ["server/traces/grams.ts"], "rules": { "typescript/no-misused-spread": "off" } },
+    // A test's fixture server takes an async handler, its promise ignored by
+    // node:net and node:http: one that fails is an unhandled rejection, which
+    // fails the run. The rule stays whole for the server and the helpers.
+    { "files": ["test/**"], "rules": { "typescript/no-misused-promises": ["error", { "checksVoidReturn": false }] } }
   ]
 }

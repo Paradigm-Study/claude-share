@@ -49,7 +49,7 @@ mkdirSync(guestDir, { recursive: true })
 writeFileSync(join(hostDir, 'README.md'), '# demo repo\n\nThe secret word is "marmalade".\n')
 
 const children: { kill: (signal?: NodeJS.Signals) => unknown }[] = []
-const results: { name: string, ok: unknown }[] = []
+const results: { name: string; ok: unknown }[] = []
 const check = (name: string, ok: unknown, detail = '') => {
   results.push({ name, ok })
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? `  (${detail})` : ''}`)
@@ -59,11 +59,24 @@ const check = (name: string, ok: unknown, detail = '') => {
 // whoever its link names, for the team checks (they post its confirmation form).
 async function startServer() {
   const server = await startWorkerd({ port: PORT, previewPort: PORT + 1, quiet: false, vars: { AUTH_TEST: '1' } })
-  children.push({ kill: () => { writeFileSync(join(WORK, 'server.log'), server.logs()); return server.stop() } })
+  children.push({
+    kill: () => {
+      writeFileSync(join(WORK, 'server.log'), server.logs())
+      return server.stop()
+    },
+  })
 }
 
 // A headless Claude Code session: what it printed, line by line, and how to type into it.
-type Session = { name: string, child: ChildProcessWithoutNullStreams, home: string, lines: any[], text: string, say: (content: unknown) => void, type: (content: unknown) => void }
+type Session = {
+  name: string
+  child: ChildProcessWithoutNullStreams
+  home: string
+  lines: any[]
+  text: string
+  say: (content: unknown) => void
+  type: (content: unknown) => void
+}
 function session(name: string, cwd: string, extraArgs: string[] = [], logName = name, extraEnv: Record<string, string> = {}): Session {
   // A home of its own: no installed plugins, settings hooks or transcripts of
   // the machine's user leak into the run (model access comes from the env).
@@ -126,8 +139,7 @@ function session(name: string, cwd: string, extraArgs: string[] = [], logName = 
   child.stderr.on('data', chunk => out.write(chunk))
   s.say = (content: unknown) => child.stdin.write(`${JSON.stringify({ type: 'user', message: { role: 'user', content } })}\n`)
   // As Claude Desktop sends what a person typed (the engine reads it as `composer`).
-  s.type = (content: unknown) =>
-    child.stdin.write(`${JSON.stringify({ type: 'user', origin: { kind: 'human' }, message: { role: 'user', content } })}\n`)
+  s.type = (content: unknown) => child.stdin.write(`${JSON.stringify({ type: 'user', origin: { kind: 'human' }, message: { role: 'user', content } })}\n`)
   return s
 }
 
@@ -219,12 +231,10 @@ function desktopPrompt(text: string) {
 }
 
 function assistantText(s: Session): string[] {
-  return s.lines
-    .filter(l => l.type === 'assistant')
-    .flatMap(l => (l.message?.content ?? []).filter((b: any) => b.type === 'text').map((b: any) => b.text))
+  return s.lines.filter(l => l.type === 'assistant').flatMap(l => (l.message?.content ?? []).filter((b: any) => b.type === 'text').map((b: any) => b.text))
 }
 
-function transcriptRows(s: Session): { type: string, text: string }[] {
+function transcriptRows(s: Session): { type: string; text: string }[] {
   return transcriptOf(s)
     .split('\n')
     .filter(Boolean)
@@ -232,7 +242,13 @@ function transcriptRows(s: Session): { type: string, text: string }[] {
     .filter(d => d.type === 'user' || d.type === 'assistant')
     .map(d => {
       const c = d.message?.content
-      const text = typeof c === 'string' ? c : (c ?? []).filter((b: any) => b.type === 'text').map((b: any) => b.text).join('')
+      const text =
+        typeof c === 'string'
+          ? c
+          : (c ?? [])
+              .filter((b: any) => b.type === 'text')
+              .map((b: any) => b.text)
+              .join('')
       return { type: d.type, text }
     })
 }
@@ -257,7 +273,10 @@ const roomInfo = async (id: string): Promise<any> => (await fetch(`${SERVER}/api
 // browser session it makes, end with their seat.
 async function publicPreview(id: string, port: number) {
   const base = `${SERVER}/api/rooms/${id}`
-  const headers: Record<string, string> = { 'content-type': 'application/json', 'x-shared-session-version': JSON.parse(readFileSync(join(ROOT, 'plugin/.claude-plugin/plugin.json'), 'utf8')).version }
+  const headers: Record<string, string> = {
+    'content-type': 'application/json',
+    'x-shared-session-version': JSON.parse(readFileSync(join(ROOT, 'plugin/.claude-plugin/plugin.json'), 'utf8')).version,
+  }
   const joined = await fetch(`${base}/join`, { method: 'POST', headers, body: JSON.stringify({ name: 'preview probe' }) })
   const seat = await joined.json<any>()
   if (!joined.ok || !seat.token) throw new Error('Preview probe could not join')
@@ -265,13 +284,17 @@ async function publicPreview(id: string, port: number) {
   const leave = () => fetch(`${base}/leave`, { method: 'POST', headers }).catch(() => {})
   try {
     let events = seat.history ?? []
-    const shown = await until('shared preview registered', async () => {
-      const found = events.find((e: any) => e.type === 'artifact' && e.body.kind === 'preview' && e.body.port === port)
-      if (found) return found
-      const page = await fetch(`${base}/events?after=${seat.seq}&wait=0`, { headers }).then(r => r.json<any>())
-      events = page.events ?? []
-      return events.find((e: any) => e.type === 'artifact' && e.body.kind === 'preview' && e.body.port === port)
-    }, 60_000)
+    const shown = await until(
+      'shared preview registered',
+      async () => {
+        const found = events.find((e: any) => e.type === 'artifact' && e.body.kind === 'preview' && e.body.port === port)
+        if (found) return found
+        const page = await fetch(`${base}/events?after=${seat.seq}&wait=0`, { headers }).then(r => r.json<any>())
+        events = page.events ?? []
+        return events.find((e: any) => e.type === 'artifact' && e.body.kind === 'preview' && e.body.port === port)
+      },
+      60_000,
+    )
     const ticket = await fetch(`${base}/previews/${shown.body.pid}/ticket`, { method: 'POST', headers, body: JSON.stringify({ path: shown.body.path ?? '/' }) })
     const data = await ticket.json<any>()
     if (!ticket.ok || !data.url) throw new Error('Public preview ticket was refused')
@@ -286,7 +309,10 @@ async function publicPreview(id: string, port: number) {
 // to look sees them (then leaves): null when the look itself failed.
 async function previewsShared(id: string, port: number) {
   const base = `${SERVER}/api/rooms/${id}`
-  const headers: Record<string, string> = { 'content-type': 'application/json', 'x-shared-session-version': JSON.parse(readFileSync(join(ROOT, 'plugin/.claude-plugin/plugin.json'), 'utf8')).version }
+  const headers: Record<string, string> = {
+    'content-type': 'application/json',
+    'x-shared-session-version': JSON.parse(readFileSync(join(ROOT, 'plugin/.claude-plugin/plugin.json'), 'utf8')).version,
+  }
   const joined = await fetch(`${base}/join`, { method: 'POST', headers, body: JSON.stringify({ name: 'preview probe' }) }).catch(() => null)
   const seat = joined?.ok ? await joined.json<any>() : null
   if (!seat?.token) return null
@@ -305,23 +331,51 @@ async function enterPreview(url: string) {
 
 // Sharing: hosts and guests, everything a shared session carries.
 async function sharing() {
-
   // A plugin older than the server's minimum (or one that doesn't say) can't
   // share or join, and is told the command that updates it.
-  const outdated = await fetch(`${SERVER}/api/rooms`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: 'old', title: 'old' }) })
+  const outdated = await fetch(`${SERVER}/api/rooms`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ name: 'old', title: 'old' }),
+  })
   const outdatedBody = await outdated.json<any>().catch(() => ({}))
-  const home = await fetch(`${SERVER}/`).then(r => r.text()).catch(() => '')
-  check("the server's page says how to install and what it keeps", home.includes('claude plugin install shared-session@claude-share') && home.includes('What this server sees and keeps'))
+  const home = await fetch(`${SERVER}/`)
+    .then(r => r.text())
+    .catch(() => '')
+  check(
+    "the server's page says how to install and what it keeps",
+    home.includes('claude plugin install shared-session@claude-share') && home.includes('What this server sees and keeps'),
+  )
   // The room knows which plugin its host runs now, one an update in place loaded included.
   const current = JSON.parse(readFileSync(join(ROOT, 'plugin/.claude-plugin/plugin.json'), 'utf8')).version
   const later = current.replace(/\d+$/, (n: string) => String(Number(n) + 1))
-  const versioned = await fetch(`${SERVER}/api/rooms`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-shared-session-version': current }, body: JSON.stringify({ name: 'host', title: 'versions' }) }).then(r => r.json<any>())
-  await fetch(`${SERVER}/api/rooms/${versioned.id}/events?after=0&wait=0`, { headers: { authorization: `Bearer ${versioned.token}`, 'x-shared-session-version': later } })
+  const versioned = await fetch(`${SERVER}/api/rooms`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-shared-session-version': current },
+    body: JSON.stringify({ name: 'host', title: 'versions' }),
+  }).then(r => r.json<any>())
+  await fetch(`${SERVER}/api/rooms/${versioned.id}/events?after=0&wait=0`, {
+    headers: { authorization: `Bearer ${versioned.token}`, 'x-shared-session-version': later },
+  })
   check('the room says which plugin its host runs now', (await roomInfo(versioned.id)).hostVersion === later)
-  await fetch(`${SERVER}/api/rooms/${versioned.id}/end`, { method: 'POST', headers: { authorization: `Bearer ${versioned.token}`, 'x-shared-session-version': later } })
-  const tooOld = await fetch(`${SERVER}/api/rooms`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-shared-session-version': '0.9.7' }, body: JSON.stringify({ name: 'old', title: 'old' }) })
-  check('a plugin older than the minimum is turned away with the update command', tooOld.status === 426 && String((await tooOld.json<any>()).error).includes(UPDATE_LINE))
-  check('an out-of-date plugin is told how to update', outdated.status === 426 && String(outdatedBody.error).includes('claude plugin update shared-session@claude-share'), `HTTP ${outdated.status}`)
+  await fetch(`${SERVER}/api/rooms/${versioned.id}/end`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${versioned.token}`, 'x-shared-session-version': later },
+  })
+  const tooOld = await fetch(`${SERVER}/api/rooms`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-shared-session-version': '0.9.7' },
+    body: JSON.stringify({ name: 'old', title: 'old' }),
+  })
+  check(
+    'a plugin older than the minimum is turned away with the update command',
+    tooOld.status === 426 && String((await tooOld.json<any>()).error).includes(UPDATE_LINE),
+  )
+  check(
+    'an out-of-date plugin is told how to update',
+    outdated.status === 426 && String(outdatedBody.error).includes('claude plugin update shared-session@claude-share'),
+    `HTTP ${outdated.status}`,
+  )
 
   // Kim's session gave out a dev server's address before sharing. A page
   // Claude only gave out is the host's to give (a teammate's prompt could
@@ -339,7 +393,11 @@ async function sharing() {
   const kimLink = await until("Kim's link", () => /\/s\/([A-Za-z0-9_-]{16,})/.exec(kim.text)?.[1], 60_000)
   await new Promise(r => setTimeout(r, 10_000)) // past the page's slow first answer, and the look at it
   const kimShown = await previewsShared(kimLink, (kimDev.address() as AddressInfo).port)
-  check('a dev server Claude gave out before Share is shared only once the host says so: a -p run has nowhere to ask, so nothing is', kimShown === false, String(kimShown))
+  check(
+    'a dev server Claude gave out before Share is shared only once the host says so: a -p run has nowhere to ask, so nothing is',
+    kimShown === false,
+    String(kimShown),
+  )
   kim.say('/stop-sharing')
 
   // Scott's session: a normal session with some history, then Share.
@@ -381,8 +439,24 @@ async function sharing() {
   await until('Sam joined', async () => (await roomInfo(id!)).people?.some((p: any) => p.name === 'Sam'))
   await until('history shown to guest', () => /marmalade/i.test(guest.text), 30_000)
   check('guest sees what happened before Share', /marmalade/i.test(guest.text))
-  await until('history card', () => guest.lines.some(l => l.type === 'assistant' && l.message.content.some((b: any) => b.type === 'tool_use' && b.name === 'mcp__shared-session__replay' && b.input?.tool === 'Read')), 30_000).catch(() => null)
-  check('what happened before shows its tool calls as cards too', guest.lines.some(l => l.type === 'assistant' && l.message.content.some((b: any) => b.type === 'tool_use' && b.name === 'mcp__shared-session__replay' && b.input?.tool === 'Read')))
+  await until(
+    'history card',
+    () =>
+      guest.lines.some(
+        l =>
+          l.type === 'assistant' &&
+          l.message.content.some((b: any) => b.type === 'tool_use' && b.name === 'mcp__shared-session__replay' && b.input?.tool === 'Read'),
+      ),
+    30_000,
+  ).catch(() => null)
+  check(
+    'what happened before shows its tool calls as cards too',
+    guest.lines.some(
+      l =>
+        l.type === 'assistant' &&
+        l.message.content.some((b: any) => b.type === 'tool_use' && b.name === 'mcp__shared-session__replay' && b.input?.tool === 'Read'),
+    ),
+  )
 
   // Alex talks to the shared session.
   const before = host.lines.length
@@ -390,8 +464,8 @@ async function sharing() {
   await until('host ran guest prompt', () => host.lines.slice(before).some(l => l.type === 'result' && /\b51\b/.test(l.result ?? '')))
   check('guest prompt runs in the host session', true)
   const hostTranscript = transcriptOf(host)
-  check('host sees the prompt as Alex\'s', hostTranscript.includes('Alex: What is 17 times 3'))
-  check('the host never sees context from Alex\'s app', !hostTranscript.includes('GUEST-ONLY-CONTEXT'))
+  check("host sees the prompt as Alex's", hostTranscript.includes('Alex: What is 17 times 3'))
+  check("the host never sees context from Alex's app", !hostTranscript.includes('GUEST-ONLY-CONTEXT'))
   await until('answer streamed into the guest', () => assistantText(guest).some(t => /\b51\b/.test(t)), 30_000)
   check('guest sees the answer as a normal reply', true)
 
@@ -399,13 +473,25 @@ async function sharing() {
   // tool, a long think): the guest still shows it, never answering it itself.
   const quiet = host.lines.length
   host.say('Use the Bash tool to run `sleep 15 && touch replay-marker.txt`, then reply with just the word lantern.')
-  await until('host ran the quiet turn', () => host.lines.slice(quiet).some(l => l.type === 'result' && /lantern/i.test(l.result ?? '')), 120_000).catch(() => null)
+  await until('host ran the quiet turn', () => host.lines.slice(quiet).some(l => l.type === 'result' && /lantern/i.test(l.result ?? '')), 120_000).catch(
+    () => null,
+  )
   await until('guest shows the quiet turn', () => assistantText(guest).some(t => /lantern/i.test(t)), 30_000).catch(() => null)
   // The host's Bash call is drawn in the guest as a card of the plugin's own
   // replay tool, answered with the host's result: nothing runs on the guest.
-  const replayed = guest.lines.flatMap(l => (l.type === 'assistant' ? l.message.content : [])).find(b => b.type === 'tool_use' && b.name === 'mcp__shared-session__replay' && JSON.stringify(b.input).includes('replay-marker'))
-  const answered = replayed && guest.lines.flatMap(l => (l.type === 'user' && Array.isArray(l.message?.content) ? l.message.content : [])).some(b => b.type === 'tool_result' && b.tool_use_id === replayed.id)
-  check('a host tool call shows in the guest as a tool card with the host\'s result', Boolean(replayed && replayed.input?.tool === 'Bash' && answered), replayed ? JSON.stringify(replayed.input).slice(0, 80) : 'no card')
+  const replayed = guest.lines
+    .flatMap(l => (l.type === 'assistant' ? l.message.content : []))
+    .find(b => b.type === 'tool_use' && b.name === 'mcp__shared-session__replay' && JSON.stringify(b.input).includes('replay-marker'))
+  const answered =
+    replayed &&
+    guest.lines
+      .flatMap(l => (l.type === 'user' && Array.isArray(l.message?.content) ? l.message.content : []))
+      .some(b => b.type === 'tool_result' && b.tool_use_id === replayed.id)
+  check(
+    "a host tool call shows in the guest as a tool card with the host's result",
+    Boolean(replayed && replayed.input?.tool === 'Bash' && answered),
+    replayed ? JSON.stringify(replayed.input).slice(0, 80) : 'no card',
+  )
   // The host's Claude may run it in the background and answer first: wait for the host's file.
   await until('host made the marker', () => existsSync(join(hostDir, 'replay-marker.txt')), 60_000).catch(() => null)
   await new Promise(r => setTimeout(r, 2000))
@@ -413,18 +499,27 @@ async function sharing() {
   check(
     'a host turn quiet for over 10 s plays in the guest, not its own model',
     assistantText(guest).some(t => /lantern/i.test(t)) && guest.lines.filter(l => l.type === 'result').every(l => !(l.total_cost_usd > 0)),
-    guest.lines.filter(l => l.type === 'result').map(l => l.total_cost_usd).join(','),
+    guest.lines
+      .filter(l => l.type === 'result')
+      .map(l => l.total_cost_usd)
+      .join(','),
   )
 
   // The host's own prompts play out in the guest too.
   host.say('Say the word "pineapple" and nothing else.')
   await until('host prompt shown in guest', () => assistantText(guest).some(t => /pineapple/i.test(t)), 60_000)
-  check('guest sees Scott\'s prompt', transcriptOf(guest).includes('Scott: Say the word'))
-  check('guest sees Scott\'s reply', assistantText(guest).some(t => /pineapple/i.test(t)))
+  check("guest sees Scott's prompt", transcriptOf(guest).includes('Scott: Say the word'))
+  check(
+    "guest sees Scott's reply",
+    assistantText(guest).some(t => /pineapple/i.test(t)),
+  )
   check(
     'guest never calls a model of its own',
     guest.lines.filter(l => l.type === 'result').every(l => !(l.total_cost_usd > 0)),
-    guest.lines.filter(l => l.type === 'result').map(l => l.total_cost_usd).join(','),
+    guest.lines
+      .filter(l => l.type === 'result')
+      .map(l => l.total_cost_usd)
+      .join(','),
   )
 
   // A picture the host's Claude looks at (an image it reads, a screenshot)
@@ -437,7 +532,12 @@ async function sharing() {
     guest.lines
       .slice(pictureAt)
       .flatMap(l => (l.type === 'user' && Array.isArray(l.message?.content) ? l.message.content : []))
-      .some(b => b.type === 'tool_result' && Array.isArray(b.content) && b.content.some((x: any) => x.type === 'image' && x.source?.type === 'base64' && x.source.data?.length > 50))
+      .some(
+        b =>
+          b.type === 'tool_result' &&
+          Array.isArray(b.content) &&
+          b.content.some((x: any) => x.type === 'image' && x.source?.type === 'base64' && x.source.data?.length > 50),
+      )
   await until("guest's card has the picture", pictured, 60_000).catch(() => null)
   check("a picture the host's Claude reads shows in the guest's card as an image", pictured())
 
@@ -453,7 +553,10 @@ async function sharing() {
   // A picture a guest attaches to a prompt reaches the host's Claude: saved in
   // the host's project and opened there, and the answer comes back.
   const attachAt = host.lines.length
-  guest.type([...desktopPrompt('What color is the picture I attached? Reply with just the color, one word.'), { type: 'image', source: { type: 'base64', media_type: 'image/png', data: SWATCH_PNG } }])
+  guest.type([
+    ...desktopPrompt('What color is the picture I attached? Reply with just the color, one word.'),
+    { type: 'image', source: { type: 'base64', media_type: 'image/png', data: SWATCH_PNG } },
+  ])
   const sawIt = () => host.lines.slice(attachAt).some(l => l.type === 'result' && /red/i.test(l.result ?? ''))
   await until("host's Claude answered about the guest's picture", sawIt, 120_000).catch(() => null)
   const keptAt = join(hostDir, '.shared-session', 'Alex')
@@ -465,10 +568,21 @@ async function sharing() {
 
   // Everyone's plugin version reaches the room, so the Room says who's behind.
   const versions = (await roomInfo(id!)).people ?? []
-  check("the room knows each person's plugin version", versions.length >= 2 && versions.every((p: any) => /^\d+\.\d+\.\d+$/.test(p.version ?? '')), JSON.stringify(versions.map((p: any) => [p.name, p.version])))
+  check(
+    "the room knows each person's plugin version",
+    versions.length >= 2 && versions.every((p: any) => /^\d+\.\d+\.\d+$/.test(p.version ?? '')),
+    JSON.stringify(versions.map((p: any) => [p.name, p.version])),
+  )
 
-  await until('Sam sees Alex\'s exchange', () => transcriptOf(sam).includes('Alex: What is 17 times 3') && assistantText(sam).some(t => /\b51\b/.test(t)), 30_000).catch(() => null)
-  check('a third person sees Alex\'s prompt and the answer', transcriptOf(sam).includes('Alex: What is 17 times 3') && assistantText(sam).some(t => /\b51\b/.test(t)))
+  await until(
+    "Sam sees Alex's exchange",
+    () => transcriptOf(sam).includes('Alex: What is 17 times 3') && assistantText(sam).some(t => /\b51\b/.test(t)),
+    30_000,
+  ).catch(() => null)
+  check(
+    "a third person sees Alex's prompt and the answer",
+    transcriptOf(sam).includes('Alex: What is 17 times 3') && assistantText(sam).some(t => /\b51\b/.test(t)),
+  )
 
   // Alex types while Scott's turn is running: both play out, in order.
   host.say('Count from 1 to 40, one number per line, nothing else.')
@@ -476,7 +590,10 @@ async function sharing() {
   guest.type('Say the word "kiwi" and nothing else.')
   await until('kiwi shown', () => assistantText(guest).some(t => /kiwi/i.test(t)), 90_000)
   await until('transcript written', () => transcriptRows(guest).some(r => r.type === 'assistant' && /kiwi/i.test(r.text)), 10_000).catch(() => null)
-  const shown = transcriptRows(guest).filter(r => r.type === 'assistant').map(r => r.text).join('\n')
+  const shown = transcriptRows(guest)
+    .filter(r => r.type === 'assistant')
+    .map(r => r.text)
+    .join('\n')
   const countAt = shown.search(/\b40\b/)
   const kiwiAt = shown.search(/kiwi/i)
   check('a prompt typed while the host is busy runs after, in order', countAt >= 0 && kiwiAt > countAt, `count at ${countAt}, kiwi at ${kiwiAt}`)
@@ -487,7 +604,11 @@ async function sharing() {
   const resultsBefore = host.lines.filter(l => l.type === 'result').length
   guest.say('Write a 1500-word story about a lighthouse keeper.')
   // Interrupt a few seconds into the host's turn (stream-json only shows whole blocks).
-  await until('story turn started on host', () => existsSync(join(WORK, 'Scott.debug.log')) && readFileSync(join(WORK, 'Scott.debug.log'), 'utf8').split('Alex: Write a 1500-word story').length > 1, 30_000).catch(() => null)
+  await until(
+    'story turn started on host',
+    () => existsSync(join(WORK, 'Scott.debug.log')) && readFileSync(join(WORK, 'Scott.debug.log'), 'utf8').split('Alex: Write a 1500-word story').length > 1,
+    30_000,
+  ).catch(() => null)
   await new Promise(r => setTimeout(r, 4000))
   guest.child.stdin.write(`${JSON.stringify({ type: 'control_request', request_id: 'esc-1', request: { subtype: 'interrupt' } })}\n`)
   const t0 = Date.now()
@@ -500,11 +621,7 @@ async function sharing() {
   // A guest asking for a write is gated even in bypass mode (nobody can approve headless).
   const writeAt = host.lines.length
   guest.say('Use the Write tool to create a file named pwned.txt containing "hi". Do not use Bash.')
-  await until(
-    'write attempt settled',
-    () => host.lines.slice(writeAt).some(l => l.type === 'result'),
-    90_000,
-  )
+  await until('write attempt settled', () => host.lines.slice(writeAt).some(l => l.type === 'result'), 90_000)
   check('a guest cannot write on the host without approval', !existsSync(join(hostDir, 'pwned.txt')))
 
   // What the host shows reaches guests: a file, saved in the guest's project.
@@ -538,7 +655,10 @@ async function sharing() {
   const toldToOpen = (text: string) => openInstruction.test(text)
   host.say(`/share-preview ${(app.address() as AddressInfo).port} Dev app`)
   await until('live guest told to press Open for forwarding', () => toldToOpen(guest.text.slice(beforePreview)), 60_000).catch(() => null)
-  check('a live guest is told to press Open before forwarding, without public fallback', toldToOpen(guest.text.slice(beforePreview)) && !guest.text.slice(beforePreview).includes('/__share/enter?'))
+  check(
+    'a live guest is told to press Open before forwarding, without public fallback',
+    toldToOpen(guest.text.slice(beforePreview)) && !guest.text.slice(beforePreview).includes('/__share/enter?'),
+  )
   const probe = await publicPreview(id!, (app.address() as AddressInfo).port).catch(() => null)
   const enter = probe?.url
   let previewed = false
@@ -572,7 +692,9 @@ async function sharing() {
 
   // A WebSocket through the preview (a dev server's live reload; Next.js 16's
   // dev pages don't start without theirs): the app's echo answers.
-  const echoed = origin ? await wsEcho(`${origin.replace(/^http/, 'ws')}/__echo`, cookie, 'ping-through-preview').catch(e => `error: ${e.message}`) : 'no preview'
+  const echoed = origin
+    ? await wsEcho(`${origin.replace(/^http/, 'ws')}/__echo`, cookie, 'ping-through-preview').catch(e => `error: ${e.message}`)
+    : 'no preview'
   check("a WebSocket opened on a preview reaches the host's dev server and back", echoed === 'echo:ping-through-preview', echoed)
   await probe?.leave()
 
@@ -587,12 +709,19 @@ async function sharing() {
   check('a late guest is also told to press Open before forwarding, without public fallback', toldToOpen(lee.text) && !lee.text.includes('/__share/enter?'))
   // Each earlier prompt arrives as a turn of its own, as it was for the host,
   // and quickly: one step for its calls, one for its last words.
-  check('and sees each earlier prompt as its own turn, with its reply', ['marmalade', 'pineapple', 'kiwi'].every(w => assistantText(lee).some(t => t.toLowerCase().includes(w))) && lee.lines.filter(l => l.type === 'result').length >= 6, `${lee.lines.filter(l => l.type === 'result').length} turns in ${((leeCaughtUp - leeJoined) / 1000).toFixed(1)} s`)
+  check(
+    'and sees each earlier prompt as its own turn, with its reply',
+    ['marmalade', 'pineapple', 'kiwi'].every(w => assistantText(lee).some(t => t.toLowerCase().includes(w))) &&
+      lee.lines.filter(l => l.type === 'result').length >= 6,
+    `${lee.lines.filter(l => l.type === 'result').length} turns in ${((leeCaughtUp - leeJoined) / 1000).toFixed(1)} s`,
+  )
 
   // A web page the host's Claude mentions is the host's to give, asked in the
   // row above the prompt (band tests press it); a -p run draws none, so it
   // isn't shared, through its link or otherwise.
-  const dev = createServer((req, res) => res.writeHead(req.url === '/dash' ? 200 : 404, { 'content-type': 'text/html' }).end(req.url === '/dash' ? '<h1>mentioned ok</h1>' : 'wrong page'))
+  const dev = createServer((req, res) =>
+    res.writeHead(req.url === '/dash' ? 200 : 404, { 'content-type': 'text/html' }).end(req.url === '/dash' ? '<h1>mentioned ok</h1>' : 'wrong page'),
+  )
   await new Promise<void>(r => dev.listen(0, '127.0.0.1', () => r()))
   children.push({ kill: () => dev.close() })
   const turns = host.lines.filter(l => l.type === 'result').length
@@ -600,7 +729,11 @@ async function sharing() {
   await until('host answered the mention', () => host.lines.filter(l => l.type === 'result').length > turns, 120_000)
   await new Promise(r => setTimeout(r, 5_000)) // past the look at the page
   const mentioned = await previewsShared(id!, (dev.address() as AddressInfo).port)
-  check("a dev server the host's Claude mentions is shared only once the host says so: a -p run has nowhere to ask, so it isn't", mentioned === false, String(mentioned))
+  check(
+    "a dev server the host's Claude mentions is shared only once the host says so: a -p run has nowhere to ask, so it isn't",
+    mentioned === false,
+    String(mentioned),
+  )
 
   // How everyone heard the room: one open stream each, or polls when asked to.
   const polling = process.env.SHARED_SESSION_TRANSPORT === 'poll'
@@ -631,13 +764,24 @@ async function sharing() {
   // The server sees the host before the guest's stream updates its Room.
   // Wait for the guest-visible return; a prompt sent while its own Room still
   // says away is deliberately refused, even if the server has just changed.
-  await until('guest sees the host return', () => guest.lines.slice(guestBeforeResume).some(l => l.type === 'system' && l.subtype === 'ui_toast' && l.text === 'Scott is back'), 60_000)
+  await until(
+    'guest sees the host return',
+    () => guest.lines.slice(guestBeforeResume).some(l => l.type === 'system' && l.subtype === 'ui_toast' && l.text === 'Scott is back'),
+    60_000,
+  )
   guest.type(desktopPrompt('What is 9 times 4? Reply with just the number.'))
   await until('reopened host ran a guest prompt', () => host.lines.some(l => l.type === 'result' && /\b36\b/.test(l.result ?? '')), 120_000).catch(() => null)
-  check("and runs a guest's prompt there", host.lines.some(l => l.type === 'result' && /\b36\b/.test(l.result ?? '')))
+  check(
+    "and runs a guest's prompt there",
+    host.lines.some(l => l.type === 'result' && /\b36\b/.test(l.result ?? '')),
+  )
   // A stream-json session names its id once its first prompt comes in.
   const reopenedAs = host.lines.find(l => l.type === 'system' && l.subtype === 'init')?.session_id
-  check('…though it was reopened under a new Claude Code id', Boolean(reopenedAs) && reopenedAs !== hostSession, `ids ${hostSession?.slice(0, 8)} → ${reopenedAs?.slice(0, 8)}`)
+  check(
+    '…though it was reopened under a new Claude Code id',
+    Boolean(reopenedAs) && reopenedAs !== hostSession,
+    `ids ${hostSession?.slice(0, 8)} → ${reopenedAs?.slice(0, 8)}`,
+  )
   check('a prompt sent while it was closed never ran', !/\bember\b/i.test(transcriptOf(host)))
 
   // A guest's Claude Code closes too, long enough for the room to let its
@@ -676,7 +820,11 @@ async function sharing() {
 // history plays, the first exchange and the last, page by page.
 async function longHistory() {
   const V = { 'content-type': 'application/json', 'x-shared-session-version': '9.9.9' }
-  const made = await fetch(`${SERVER}/api/rooms`, { method: 'POST', headers: V, body: JSON.stringify({ name: 'Morgan', title: 'long: a session with a long history' }) }).then(r => r.json<any>())
+  const made = await fetch(`${SERVER}/api/rooms`, {
+    method: 'POST',
+    headers: V,
+    body: JSON.stringify({ name: 'Morgan', title: 'long: a session with a long history' }),
+  }).then(r => r.json<any>())
   // Mostly Chinese, as the team writes: the limit is bytes (three each here),
   // so a page measured in characters would still come back cut.
   const words = '帮我看看这个问题，然后修一下。'.repeat(700) // ~10,500 characters, ~31,500 bytes
@@ -688,9 +836,15 @@ async function longHistory() {
   }
   // A request body is at most 512 KB: a few rows at a time.
   for (let i = 0; i < events.length; i += 24) {
-    await fetch(`${SERVER}/api/rooms/${made.id}/events`, { method: 'POST', headers: { ...V, authorization: `Bearer ${made.token}` }, body: JSON.stringify({ events: events.slice(i, i + 24) }) })
+    await fetch(`${SERVER}/api/rooms/${made.id}/events`, {
+      method: 'POST',
+      headers: { ...V, authorization: `Bearer ${made.token}` },
+      body: JSON.stringify({ events: events.slice(i, i + 24) }),
+    })
   }
-  const whole = await fetch(`${SERVER}/api/rooms/${made.id}/events?after=0&wait=0`, { headers: { ...V, authorization: `Bearer ${made.token}` } }).then(r => r.text())
+  const whole = await fetch(`${SERVER}/api/rooms/${made.id}/events?after=0&wait=0`, { headers: { ...V, authorization: `Bearer ${made.token}` } }).then(r =>
+    r.text(),
+  )
   const remy = session('Remy', join(WORK, 'remy'))
   remy.type(made.url)
   await until('Remy in the long room', async () => (await roomInfo(made.id)).people?.some((p: any) => p.name === 'Remy'), 60_000)
@@ -707,7 +861,9 @@ async function longHistory() {
 // invite finds the session in the team's list and joins; someone outside
 // the team is refused until the team lets anyone with the link in.
 async function teams() {
-  const providers = await fetch(`${SERVER}/api/auth/providers`).then(r => r.json<any>()).catch(() => ({}))
+  const providers = await fetch(`${SERVER}/api/auth/providers`)
+    .then(r => r.json<any>())
+    .catch(() => ({}))
   if (providers.providers?.some((p: any) => p.id === 'test')) {
     const NO_BROWSER = { SHARED_SESSION_NO_BROWSER: '1' }
     const accountOf = (s: Session) => {
@@ -727,8 +883,15 @@ async function teams() {
       const url = await until(`${s.name}'s sign-in link`, () => /If no browser opened: (https?:\/\/[^\s"\\]+)/.exec(s.text.slice(before))?.[1], 60_000)
       const page = await fetch(`${url}&email=${encodeURIComponent(email)}&name=${s.name}`).then(r => r.text())
       const field = (name: string) => /value="([^"]*)"/.exec(new RegExp(`<input[^>]*name="${name}"[^>]*>`).exec(page)?.[0] ?? '')?.[1] ?? ''
-      await fetch(new URL('/auth/confirm', url), { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ login: field('login'), nonce: field('nonce') }) })
-      codes.push([/code <b>([^<]+)<\/b>/.exec(page)?.[1] ?? 'none on the page', /code\W{0,4}([0-9A-F]{4}-[0-9A-F]{4})/.exec(s.text.slice(before))?.[1] ?? 'none in Claude Code'])
+      await fetch(new URL('/auth/confirm', url), {
+        method: 'POST',
+        headers: { 'content-type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ login: field('login'), nonce: field('nonce') }),
+      })
+      codes.push([
+        /code <b>([^<]+)<\/b>/.exec(page)?.[1] ?? 'none on the page',
+        /code\W{0,4}([0-9A-F]{4}-[0-9A-F]{4})/.exec(s.text.slice(before))?.[1] ?? 'none in Claude Code',
+      ])
       return until(`${s.name} signed in`, () => accountOf(s), 30_000)
     }
     const pat = session('Pat', join(WORK, 'pat'), [], 'Pat', NO_BROWSER)
@@ -736,10 +899,18 @@ async function teams() {
     pat.say('/team create Acme')
     const invite = await until('the team', () => /Invite people with this link: (https?:\/\/[^\s"\\]+)/.exec(pat.text)?.[1], 30_000)
     const keptPrivate = (statSync(join(pat.home, '.claude', 'shared-session', 'account.json')).mode & 0o077) === 0
-    check('signing in from Claude Code keeps the sign-in where only its user reads it, and a team is made', Boolean(patSignIn?.token) && keptPrivate && Boolean(invite), invite)
+    check(
+      'signing in from Claude Code keeps the sign-in where only its user reads it, and a team is made',
+      Boolean(patSignIn?.token) && keptPrivate && Boolean(invite),
+      invite,
+    )
     check('the sign-in page shows the code Claude Code showed', codes[0]![0] === codes[0]![1], codes[0]!.join(' / '))
     pat.say('/share-session all')
-    const teamLink = await until('a team share', () => /Sharing this session with Acme\. [^\n]*?: (https?:\/\/[^\s"\\]+?\/s\/[A-Za-z0-9_-]+)/.exec(pat.text)?.[1], 30_000)
+    const teamLink = await until(
+      'a team share',
+      () => /Sharing this session with Acme\. [^\n]*?: (https?:\/\/[^\s"\\]+?\/s\/[A-Za-z0-9_-]+)/.exec(pat.text)?.[1],
+      30_000,
+    )
     const teamRoom = teamLink.split('/s/')[1]
     check('Share goes to the team', (await roomInfo(teamRoom!)).team?.name === 'Acme', teamLink)
 
@@ -791,7 +962,8 @@ async function teams() {
 
 try {
   // A server already on the port (one an earlier run left) would be tested in place of this code.
-  if (!process.env.EXTERNAL_SERVER && (await fetch(`${SERVER}/api/health`).catch(() => null))) throw new Error(`something already answers on ${SERVER}; stop it first`)
+  if (!process.env.EXTERNAL_SERVER && (await fetch(`${SERVER}/api/health`).catch(() => null)))
+    throw new Error(`something already answers on ${SERVER}; stop it first`)
   if (!process.env.EXTERNAL_SERVER) await startServer()
   await until('server', async () => (await fetch(`${SERVER}/api/health`).catch(() => null))?.ok)
   // E2E_ONLY=teams (or long, or a list of them) runs just those checks.

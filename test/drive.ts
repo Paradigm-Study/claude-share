@@ -18,9 +18,27 @@ writeFileSync(log, '')
 const gitconfig = join(dir, `${name}.gitconfig`)
 writeFileSync(gitconfig, `[user]\n\tname = ${name}\n`)
 
-const env: Record<string, string | undefined> = { HOME: process.env.HOME, PATH: process.env.PATH, USER: name, TERM: 'dumb', GIT_CONFIG_GLOBAL: gitconfig, SHARED_SESSION_SERVER: process.env.SHARED_SESSION_SERVER ?? 'http://localhost:8787' }
+const env: Record<string, string | undefined> = {
+  HOME: process.env.HOME,
+  PATH: process.env.PATH,
+  USER: name,
+  TERM: 'dumb',
+  GIT_CONFIG_GLOBAL: gitconfig,
+  SHARED_SESSION_SERVER: process.env.SHARED_SESSION_SERVER ?? 'http://localhost:8787',
+}
 for (const key of ['ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY']) if (process.env[key]) env[key] = process.env[key]
-const args = ['-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--model', process.env.MODEL ?? 'claude-haiku-4-5-20251001', '--debug-file', join(dir, `${name}.debug.log`)]
+const args = [
+  '-p',
+  '--input-format',
+  'stream-json',
+  '--output-format',
+  'stream-json',
+  '--verbose',
+  '--model',
+  process.env.MODEL ?? 'claude-haiku-4-5-20251001',
+  '--debug-file',
+  join(dir, `${name}.debug.log`),
+]
 if (process.env.PLUGIN_DIR) args.push('--plugin-dir', process.env.PLUGIN_DIR)
 const child = spawn(process.env.CLAUDE_BIN ?? 'claude', args, { cwd, env })
 const note = (line: string) => appendFileSync(log, `${new Date().toISOString().slice(11, 19)} ${line}\n`)
