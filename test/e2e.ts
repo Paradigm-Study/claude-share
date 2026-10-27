@@ -138,24 +138,24 @@ function wsFrame(op: number, payload: Buffer, masked: boolean) {
   const head = len < 126 ? Buffer.from([0x80 | op, (masked ? 0x80 : 0) | len]) : Buffer.from([0x80 | op, (masked ? 0x80 : 0) | 126, len >> 8, len & 255])
   if (!masked) return Buffer.concat([head, payload])
   const mask = randomBytes(4)
-  const body = Buffer.from(payload).map((b, i) => b ^ mask[i & 3])
+  const body = Buffer.from(payload).map((b, i) => b ^ mask[i & 3]!)
   return Buffer.concat([head, mask, body])
 }
 function wsReadText(buf: Buffer) {
   if (buf.length < 2) return null
-  let len = buf[1] & 0x7f
+  let len = buf[1]! & 0x7f
   let at = 2
   if (len === 126) {
     if (buf.length < 4) return null
     len = buf.readUInt16BE(2)
     at = 4
   }
-  const masked = buf[1] & 0x80
+  const masked = buf[1]! & 0x80
   const mask = masked ? buf.subarray(at, at + 4) : null
   if (masked) at += 4
   if (buf.length < at + len) return null
-  const body = Buffer.from(buf.subarray(at, at + len)).map((b, i) => (mask ? b ^ mask[i & 3] : b))
-  return { op: buf[0] & 0x0f, text: Buffer.from(body).toString('utf8') }
+  const body = Buffer.from(buf.subarray(at, at + len)).map((b, i) => (mask ? b ^ mask[i & 3]! : b))
+  return { op: buf[0]! & 0x0f, text: Buffer.from(body).toString('utf8') }
 }
 function wsEchoServer(req: IncomingMessage, socket: Duplex) {
   const accept = createHash('sha1').update(`${req.headers['sec-websocket-key']}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`).digest('base64')
@@ -370,7 +370,7 @@ async function sharing() {
   const guest = session('Alex', guestDir)
   guest.type(desktopPrompt(link))
   const joined = await until('guest joined', async () => {
-    const info = await roomInfo(id)
+    const info = await roomInfo(id!)
     return info.people?.some((p: any) => p.name === 'Alex') && info
   })
   check('pasting the link joins', Boolean(joined), joined.people.map((p: any) => `${p.name}:${p.role}`).join(', '))
@@ -378,7 +378,7 @@ async function sharing() {
   mkdirSync(join(WORK, 'sam'), { recursive: true })
   let sam = session('Sam', join(WORK, 'sam'))
   sam.say(link)
-  await until('Sam joined', async () => (await roomInfo(id)).people?.some((p: any) => p.name === 'Sam'))
+  await until('Sam joined', async () => (await roomInfo(id!)).people?.some((p: any) => p.name === 'Sam'))
   await until('history shown to guest', () => /marmalade/i.test(guest.text), 30_000)
   check('guest sees what happened before Share', /marmalade/i.test(guest.text))
   await until('history card', () => guest.lines.some(l => l.type === 'assistant' && l.message.content.some((b: any) => b.type === 'tool_use' && b.name === 'mcp__shared-session__replay' && b.input?.tool === 'Read')), 30_000).catch(() => null)
@@ -464,7 +464,7 @@ async function sharing() {
   )
 
   // Everyone's plugin version reaches the room, so the Room says who's behind.
-  const versions = (await roomInfo(id)).people ?? []
+  const versions = (await roomInfo(id!)).people ?? []
   check("the room knows each person's plugin version", versions.length >= 2 && versions.every((p: any) => /^\d+\.\d+\.\d+$/.test(p.version ?? '')), JSON.stringify(versions.map((p: any) => [p.name, p.version])))
 
   await until('Sam sees Alex\'s exchange', () => transcriptOf(sam).includes('Alex: What is 17 times 3') && assistantText(sam).some(t => /\b51\b/.test(t)), 30_000).catch(() => null)
@@ -539,7 +539,7 @@ async function sharing() {
   host.say(`/share-preview ${(app.address() as AddressInfo).port} Dev app`)
   await until('live guest told to press Open for forwarding', () => toldToOpen(guest.text.slice(beforePreview)), 60_000).catch(() => null)
   check('a live guest is told to press Open before forwarding, without public fallback', toldToOpen(guest.text.slice(beforePreview)) && !guest.text.slice(beforePreview).includes('/__share/enter?'))
-  const probe = await publicPreview(id, (app.address() as AddressInfo).port).catch(() => null)
+  const probe = await publicPreview(id!, (app.address() as AddressInfo).port).catch(() => null)
   const enter = probe?.url
   let previewed = false
   let cookie = ''
@@ -547,7 +547,7 @@ async function sharing() {
   if (enter) {
     origin = new URL(enter).origin
     const opened = await enterPreview(enter)
-    cookie = (opened.headers.get('set-cookie') ?? '').split(';')[0]
+    cookie = (opened.headers.get('set-cookie') ?? '').split(';')[0]!
     const page = await fetch(`${origin}/`, { headers: { cookie } }).then(r => r.text())
     const asset = await fetch(`${origin}/assets/app.js`, { headers: { cookie } })
     const echo = await fetch(`${origin}/echo`, { method: 'POST', body: 'ping', headers: { cookie } })
@@ -599,7 +599,7 @@ async function sharing() {
   host.say(`Reply with exactly this line and nothing else: The dev server is running at http://localhost:${(dev.address() as AddressInfo).port}/dash`)
   await until('host answered the mention', () => host.lines.filter(l => l.type === 'result').length > turns, 120_000)
   await new Promise(r => setTimeout(r, 5_000)) // past the look at the page
-  const mentioned = await previewsShared(id, (dev.address() as AddressInfo).port)
+  const mentioned = await previewsShared(id!, (dev.address() as AddressInfo).port)
   check("a dev server the host's Claude mentions is shared only once the host says so: a -p run has nowhere to ask, so it isn't", mentioned === false, String(mentioned))
 
   // How everyone heard the room: one open stream each, or polls when asked to.
@@ -617,8 +617,8 @@ async function sharing() {
   const hostSession = host.lines.find(l => l.type === 'system' && l.subtype === 'init')?.session_id
   host.child.stdin.end()
   await until('host closed', () => host.child.exitCode !== null || host.child.signalCode !== null, 60_000).catch(() => null)
-  await until('host shown away', async () => (await roomInfo(id)).people?.some((p: any) => p.role === 'host' && !p.online), 90_000).catch(() => null)
-  const away = await roomInfo(id)
+  await until('host shown away', async () => (await roomInfo(id!)).people?.some((p: any) => p.role === 'host' && !p.online), 90_000).catch(() => null)
+  const away = await roomInfo(id!)
   check('a host that closes leaves the room open, shown away', away.ended === false && away.people?.some((p: any) => p.role === 'host' && !p.online))
   await new Promise(r => setTimeout(r, 2500)) // the room tells guests a moment after it counts the host gone
   guest.type(desktopPrompt('Say the word ember and nothing else.'))
@@ -626,8 +626,8 @@ async function sharing() {
   check("a guest's prompt while the host is closed is answered there, not sent", /Claude Code is closed right now/.test(guest.text))
   const guestBeforeResume = guest.lines.length
   host = session('Scott', hostDir, [...hostFlags, '--resume', hostSession, '--fork-session'], 'Scott-reopened', hostPlace)
-  await until('host back', async () => (await roomInfo(id)).people?.some((p: any) => p.role === 'host' && p.online), 60_000).catch(() => null)
-  check('the reopened session shares the same room again', (await roomInfo(id)).people?.some((p: any) => p.role === 'host' && p.online) === true)
+  await until('host back', async () => (await roomInfo(id!)).people?.some((p: any) => p.role === 'host' && p.online), 60_000).catch(() => null)
+  check('the reopened session shares the same room again', (await roomInfo(id!)).people?.some((p: any) => p.role === 'host' && p.online) === true)
   // The server sees the host before the guest's stream updates its Room.
   // Wait for the guest-visible return; a prompt sent while its own Room still
   // says away is deliberately refused, even if the server has just changed.
@@ -649,13 +649,13 @@ async function sharing() {
   const missedAt = host.lines.length
   host.say('Say the word "walnut" and nothing else.')
   await until('host said walnut', () => host.lines.slice(missedAt).some(l => l.type === 'result' && /walnut/i.test(l.result ?? '')), 120_000).catch(() => null)
-  await until("Sam's seat let go", async () => !(await roomInfo(id)).people?.some((p: any) => p.name === 'Sam'), 90_000).catch(() => null)
+  await until("Sam's seat let go", async () => !(await roomInfo(id!)).people?.some((p: any) => p.name === 'Sam'), 90_000).catch(() => null)
   sam = session('Sam', join(WORK, 'sam'), ['--resume', samSession], 'Sam-reopened')
-  await until('Sam back in the room', async () => (await roomInfo(id)).people?.some((p: any) => p.name === 'Sam' && p.online), 60_000).catch(() => null)
+  await until('Sam back in the room', async () => (await roomInfo(id!)).people?.some((p: any) => p.name === 'Sam' && p.online), 60_000).catch(() => null)
   await until('Sam caught up', () => assistantText(sam).some(t => /walnut/i.test(t)), 60_000).catch(() => null)
   check(
     'a guest that closes and reopens is back in the room by itself, and sees what it missed',
-    (await roomInfo(id)).people?.some((p: any) => p.name === 'Sam' && p.online) === true && assistantText(sam).some(t => /walnut/i.test(t)),
+    (await roomInfo(id!)).people?.some((p: any) => p.name === 'Sam' && p.online) === true && assistantText(sam).some(t => /walnut/i.test(t)),
     /Back in Scott's session/.test(sam.text) ? 'said it was back' : 'no back line',
   )
 
@@ -663,7 +663,7 @@ async function sharing() {
   host.say('/stop-sharing')
   await until('guest told sharing ended', () => /stopped sharing|no longer shared/i.test(guest.text), 30_000)
   check('guest is told when sharing stops', true)
-  const after = await roomInfo(id)
+  const after = await roomInfo(id!)
   check('the room is ended on the server', after.ended === true)
   if (origin) {
     const gone = await fetch(`${origin}/`, { headers: { cookie } })
@@ -737,11 +737,11 @@ async function teams() {
     const invite = await until('the team', () => /Invite people with this link: (https?:\/\/[^\s"\\]+)/.exec(pat.text)?.[1], 30_000)
     const keptPrivate = (statSync(join(pat.home, '.claude', 'shared-session', 'account.json')).mode & 0o077) === 0
     check('signing in from Claude Code keeps the sign-in where only its user reads it, and a team is made', Boolean(patSignIn?.token) && keptPrivate && Boolean(invite), invite)
-    check('the sign-in page shows the code Claude Code showed', codes[0][0] === codes[0][1], codes[0].join(' / '))
+    check('the sign-in page shows the code Claude Code showed', codes[0]![0] === codes[0]![1], codes[0]!.join(' / '))
     pat.say('/share-session all')
     const teamLink = await until('a team share', () => /Sharing this session with Acme\. [^\n]*?: (https?:\/\/[^\s"\\]+?\/s\/[A-Za-z0-9_-]+)/.exec(pat.text)?.[1], 30_000)
     const teamRoom = teamLink.split('/s/')[1]
-    check('Share goes to the team', (await roomInfo(teamRoom)).team?.name === 'Acme', teamLink)
+    check('Share goes to the team', (await roomInfo(teamRoom!)).team?.name === 'Acme', teamLink)
 
     // Quinn opens the invite link, signs in, and is in the team.
     const quinn = session('Quinn', join(WORK, 'quinn'), [], 'Quinn', NO_BROWSER)
@@ -761,7 +761,7 @@ async function teams() {
     // A fresh session of Quinn's (the same sign-in) joins it.
     const quinnJoin = session('Quinn', join(WORK, 'quinn-join'), [], 'Quinn-join', NO_BROWSER)
     quinnJoin.type(teamLink)
-    await until('Quinn joins', async () => (await roomInfo(teamRoom)).people?.some((p: any) => p.name === 'Quinn'), 60_000)
+    await until('Quinn joins', async () => (await roomInfo(teamRoom!)).people?.some((p: any) => p.name === 'Quinn'), 60_000)
     check('and joins it', true)
 
     // Rae is signed in but not in Acme: refused, until Acme lets links in.
@@ -770,16 +770,16 @@ async function teams() {
     const raeJoin = session('Rae', join(WORK, 'rae-join'), [], 'Rae-join', NO_BROWSER)
     raeJoin.type(teamLink)
     await until("Rae's refusal", () => /This session is for Acme, and Rae isn't in it/.test(raeJoin.text), 60_000)
-    check("someone outside the team can't join its session", !(await roomInfo(teamRoom)).people?.some((p: any) => p.name === 'Rae'))
+    check("someone outside the team can't join its session", !(await roomInfo(teamRoom!)).people?.some((p: any) => p.name === 'Rae'))
     pat.say('/team access link')
     await until('access changed', () => /Anyone with a link joins/.test(pat.text), 30_000)
     const raeAgain = session('Rae', join(WORK, 'rae-again'), [], 'Rae-again', NO_BROWSER)
     raeAgain.type(teamLink)
-    await until('Rae joins', async () => (await roomInfo(teamRoom)).people?.some((p: any) => p.name === 'Rae'), 60_000)
+    await until('Rae joins', async () => (await roomInfo(teamRoom!)).people?.some((p: any) => p.name === 'Rae'), 60_000)
     check('once the team lets anyone with the link in, they can', true)
 
     pat.say('/stop-sharing')
-    await until('team share ended', async () => (await roomInfo(teamRoom)).ended === true, 30_000)
+    await until('team share ended', async () => (await roomInfo(teamRoom!)).ended === true, 30_000)
     const before = quinn.text.length
     quinn.say('/team sessions')
     await until("Quinn's list again", () => /Nothing is shared with Acme right now/.test(quinn.text.slice(before)), 30_000)

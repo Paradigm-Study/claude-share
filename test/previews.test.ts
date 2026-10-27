@@ -202,7 +202,7 @@ test('need: host stream only, never stored or broadcast; 403/401/400/413/410/429
   assert.deepEqual(await answer({ port: 43800 }), { status: 200, body: { delivered: false }, changed: false }, 'no host stream: nowhere to go')
   assert.equal(JSON.stringify(w.room.toJSON()), saved, 'an undelivered need is not kept for later')
   const heard: Record<string, any[]> = { host: [], guest: [] }, woken: Record<string, number> = { host: 0, guest: 0 }
-  const listen = (name: string, who: string) => w.room.subscribers.add({ seat: who, send: (m: any) => heard[name].push(m), push: () => { woken[name]++ } })
+  const listen = (name: string, who: string) => w.room.subscribers.add({ seat: who, send: (m: any) => heard[name]!.push(m), push: () => { woken[name]!++ } })
   listen('host', 'host'); listen('guest', seat)
   const seq = w.room.seq, events = w.room.events.length
   saved = JSON.stringify(w.room.toJSON())
@@ -311,7 +311,7 @@ const enter = (w: World, url: string | URL, cookie?: string, at = Date.now()) =>
 // The cookie a check expects the answer to set.
 const cookieOf = (result: { response: Response }) => result.response.headers.get('set-cookie')?.split(';')[0] as string
 // The clearing page's next link (D2-3).
-const nextOf = (html: string, base: string | URL) => new URL(/url=([^"]+)"/.exec(html)![1].replaceAll('&amp;', '&'), base)
+const nextOf = (html: string, base: string | URL) => new URL(/url=([^"]+)"/.exec(html)![1]!.replaceAll('&amp;', '&'), base)
 const clears = (response: Response) => response.status === 200 && response.headers.get('clear-site-data') === '"cache", "cookies", "storage"' && !response.headers.get('set-cookie')
 // A browser entering as one does: not yet in this room's previews, it
 // passes the clearing page, clears (its cookies go) and follows the next link.
@@ -330,12 +330,12 @@ test('links kept with the room (reload, restart), pruned on expiry; seat/room mi
   const url = await enterLink(w, pid, w.guest, '/page?x=1')
   assert.equal(url.searchParams.get('pid'), pid)
   const saved = structuredClone(w.room.toJSON())
-  assert.deepEqual(saved.tickets![url.searchParams.get('ticket')!], { pid, exp: saved.tickets![url.searchParams.get('ticket')!].exp, path: '/page?x=1', seat })
+  assert.deepEqual(saved.tickets![url.searchParams.get('ticket')!], { pid, exp: saved.tickets![url.searchParams.get('ticket')!]!.exp, path: '/page?x=1', seat })
   const copy = { room: Room.resume(saved, Date.now()) } as World
   assert.equal(copy.room.previewKey, w.room.previewKey, 'the preview key is kept with the room')
   const entered = await admit(copy, url)
   assert.equal(entered.response.status, 302); assert.equal(entered.response.headers.get('location'), '/page?x=1')
-  assert.deepEqual(copy.room.previewSessions.get(cookieOf(entered).split('.')[1]), { pid, exp: copy.room.previewSessions.get(cookieOf(entered).split('.')[1])!.exp, seat })
+  assert.deepEqual(copy.room.previewSessions.get(cookieOf(entered).split('.')[1]!), { pid, exp: copy.room.previewSessions.get(cookieOf(entered).split('.')[1]!)!.exp, seat })
   // Expired: pruned by the next request, and gone from what's saved.
   const later = Date.now() + 10 * 60_000 + 1
   await roomRequest(w.room, request(w, '', w.guest), '', later, 'https://room.test', { isCurrent: () => true })
@@ -379,7 +379,7 @@ test('enter never switches preview; sessions carry seats, newest 4 per preview; 
   const w = world(), seat = w.room.auth(w.guest)!.seat
   const a = (await api(w, 'previews', w.host, 'POST', { port: 43420 })).pid, b = (await api(w, 'previews', w.host, 'POST', { port: 43421 })).pid
   const first = await enterLink(w, a, w.guest, '/a'), opened = await admit(w, first), cookie = cookieOf(opened), sid = cookie.split('.')[1]
-  assert.equal(w.room.previewSessions.get(sid)!.seat, seat)
+  assert.equal(w.room.previewSessions.get(sid!)!.seat, seat)
   assert.equal((await enter(w, first, cookie)).response.headers.get('location'), '/a', 'a reload goes back')
   assert.equal((await enter(w, first)).response.status, 403, 'another browser does not')
   const other = await enterLink(w, b, w.guest, '/b')
@@ -404,7 +404,7 @@ test('enter never switches preview; sessions carry seats, newest 4 per preview; 
   assert.equal(live(`cs_pv=${w.room.previewKey}.seatless`), false, 'a session without a seat serves nothing')
   // Made before the Leave: its links go with it, unused or used (D2-4).
   const pending = await enterLink(w, a)
-  const pair = previewSocketTarget(w.room, new Request('https://preview.test/live', { headers: { cookie: cookies[1] } }), Date.now())
+  const pair = previewSocketTarget(w.room, new Request('https://preview.test/live', { headers: { cookie: cookies[1]! } }), Date.now())
   assert(publicPairValid(w.room, pair as any, Date.now()))
   await api(w, 'leave', w.guest, 'POST')
   assert.deepEqual(cookies.map(live), [false, false, false, false, false])
@@ -499,10 +499,10 @@ test('a new link renews the session it goes on in, 12 hours from that link; a so
     // A link entered again after it was used renews nothing: only a new one does.
     const r = world(), rpid = (await api(r, 'previews', r.host, 'POST', { port: 43424 })).pid, start = clock
     const link = await enterLink(r, rpid), used = cookieOf(await admit(r, link))
-    const sid = used.split('.')[1], exp = r.room.previewSessions.get(sid)!.exp
+    const sid = used.split('.')[1], exp = r.room.previewSessions.get(sid!)!.exp
     clock = start + 5 * 60_000
     assert.equal((await enter(r, link, used, clock)).response.status, 302)
-    assert.equal(r.room.previewSessions.get(sid)!.exp, exp)
+    assert.equal(r.room.previewSessions.get(sid!)!.exp, exp)
   } finally { Date.now = real }
 })
 
@@ -795,8 +795,8 @@ test("What's kept with a room in its one Durable Object value (`meta`, 2 MB at m
   assert.equal(tooMany.status, 413); assert.equal(room.files.size, ROOM_FILES_COUNT)
   assert((await upload('file 0')).ok, 'the same bytes again are no new file')
   // Links at their longest (the links block checks the room keeps 128).
-  for (let i = 0; i < PUBLIC_LIMITS.roomTickets; i++) room.tickets.set(token(18), { pid: pids[i], exp: Date.now() + 60_000, path: `/${'a'.repeat(PUBLIC_LIMITS.pathBytes - 1)}`, seat: room.seats.get(guest)!.id, used: true, clear: true })
-  for (let i = 0; i < PUBLIC_LIMITS.roomSessions; i++) room.previewSessions.set(token(18), { pid: pids[i % pids.length], exp: Date.now() + 60_000, seat: room.seats.get(guest)!.id })
+  for (let i = 0; i < PUBLIC_LIMITS.roomTickets; i++) room.tickets.set(token(18), { pid: pids[i]!, exp: Date.now() + 60_000, path: `/${'a'.repeat(PUBLIC_LIMITS.pathBytes - 1)}`, seat: room.seats.get(guest!)!.id, used: true, clear: true })
+  for (let i = 0; i < PUBLIC_LIMITS.roomSessions; i++) room.previewSessions.set(token(18), { pid: pids[i % pids.length]!, exp: Date.now() + 60_000, seat: room.seats.get(guest!)!.id })
   room.tcpStats = { used: 2 ** 40, refunded: 2 ** 40, opens: { start: Date.now(), count: TCP_LIMITS.opensPerMinute } }
   const { meta } = metaOf(room)
   const bytes = Buffer.byteLength(JSON.stringify(meta))
@@ -820,7 +820,7 @@ test('a room keeps its newest 256 browser sessions; clearing links count toward 
   assert(live('old0'))
   const fresh = cookieOf(await admit(w, await enterLink(w, pid)))
   assert.equal(w.room.previewSessions.size, PUBLIC_LIMITS.roomSessions)
-  assert.equal(w.room.previewSessions.has('old0'), false, 'the oldest went'); assert(w.room.previewSessions.has(fresh.split('.')[1]))
+  assert.equal(w.room.previewSessions.has('old0'), false, 'the oldest went'); assert(w.room.previewSessions.has(fresh.split('.')[1]!))
   const r = world(), rpid = (await api(r, 'previews', r.host, 'POST', { port: 43481 })).pid, seat = r.room.auth(r.guest)!.seat
   for (let i = 0; i < PUBLIC_LIMITS.roomTickets - 1; i++) r.room.tickets.set(`filler${i}`, { pid: rpid, exp: Date.now() + 60_000 + i, path: '/', seat: `seat${i}` })
   for (let i = 0; i < 20; i++) {
@@ -840,7 +840,7 @@ test('preview links and cookies carry a key of the room’s own, never its id; a
   assert.equal(url.searchParams.get('room'), w.room.previewKey); assert.notEqual(w.room.previewKey, w.room.id)
   assert(!url.href.includes(w.room.id), 'the room id is nowhere in the link')
   const cookie = cookieOf(await admit(w, url))
-  assert.equal(cookie.split('=')[1].split('.')[0], w.room.previewKey); assert(!cookie.includes(w.room.id))
+  assert.equal(cookie.split('=')[1]!.split('.')[0], w.room.previewKey); assert(!cookie.includes(w.room.id))
   assert.notEqual(world().room.previewKey, w.room.previewKey, 'a key of its own')
   assert.equal(Room.resume(structuredClone(w.room.toJSON()), Date.now()).previewKey, w.room.previewKey)
   const old = w.room.toJSON(); delete old.previewKey
@@ -944,7 +944,7 @@ async function workerdChecks() {
     const forwarded = await ok(`${base}/previews`, room.token, 'POST', { port: 43701, tcp: true })
     const response = await http(`${base}/stream`, room.token)
     stream = response.body!.getReader()
-    const first = JSON.parse(new TextDecoder().decode((await stream.read()).value).split('\n')[0])
+    const first = JSON.parse(new TextDecoder().decode((await stream.read()).value).split('\n')[0]!)
     assert.ok(Array.isArray(first.events))
     assert.equal((await http(`${base}/previews/${forwarded.pid}/tunnel`, guest.token, 'POST', {})).status, 404, 'no grant to ask for')
     const tunnel = ws.connect(`${origin.replace('http', 'ws')}${base}/previews/${forwarded.pid}/tunnel`, { authorization: `Bearer ${guest.token}` }, [], { message() {}, close() {} })
@@ -1095,11 +1095,11 @@ async function publicSocketChecks(http: any, ok: any, origin: string, previewPor
         const read = (data: any) => {
           buffer = Buffer.concat([buffer, data])
           while (buffer.length >= 2) {
-            const op = buffer[0] & 15, n = buffer[1] & 127
-            if (n >= 126 || !(buffer[1] & 128)) return socket.destroy()
+            const op = buffer[0]! & 15, n = buffer[1]! & 127
+            if (n >= 126 || !(buffer[1]! & 128)) return socket.destroy()
             if (buffer.length < n + 6) return
             const mask = buffer.subarray(2, 6), bytes = Buffer.from(buffer.subarray(6, n + 6))
-            for (let j = 0; j < n; j++) bytes[j] ^= mask[j % 4]
+            for (let j = 0; j < n; j++) bytes[j]! ^= mask[j % 4]!
             buffer = buffer.subarray(n + 6)
             if (op === 8) return socket.end(frame(8, bytes))
             if (op === 1 || op === 2) { app.messages.push({ path: req.url, bytes }); socket.write(frame(op, bytes)) }
@@ -1139,7 +1139,7 @@ async function publicSocketChecks(http: any, ok: any, origin: string, previewPor
       const ticket = await ok(`${base}/previews/${pid}/ticket`, guest.token, 'POST', {})
       const entered = await admitted(ticket.url)
       assert.equal(entered.status, 302)
-      const cookie = entered.headers.get('set-cookie')!.split(';')[0]
+      const cookie = entered.headers.get('set-cookie')!.split(';')[0]!
       const p = { ...connect(`ws://127.0.0.1:${previewPort}${path}`, { cookie }), pid, app, path, cookie }
       await until(() => p.client.isOpen() && notices.some(n => n.ws?.path === path), 'public browser handshake')
       const notice = notices.find(n => n.ws?.path === path).ws
@@ -1213,7 +1213,7 @@ async function publicLimitChecks(http: any, ok: any, origin: string, previewPort
     })().catch(() => {})
     const enter = async (bearer: string | null) => {
       const ticket = await ok(`${base}/previews/${pid}/ticket`, bearer, 'POST', {})
-      return (await admitted(ticket.url)).headers.get('set-cookie')!.split(';')[0]
+      return (await admitted(ticket.url)).headers.get('set-cookie')!.split(';')[0]!
     }
     const socket = (url: string | URL, headers: any, path?: string) => {
       const p: any = { messages: [], closes: [], path }
@@ -1227,18 +1227,18 @@ async function publicLimitChecks(http: any, ok: any, origin: string, previewPort
       return notices.find(n => n.ws?.path === p.path).ws.id
     }
     const started = Date.now(), cookie = await enter(guest.token), waiting: any[] = []
-    for (let i = 0; i < PUBLIC_LIMITS.seatPairs; i++) waiting.push(browser(cookie))
+    for (let i = 0; i < PUBLIC_LIMITS.seatPairs; i++) waiting.push(browser(cookie!))
     await until(() => waiting.every(p => p.client.isOpen()), "a seat's 32 sockets open")
-    const refused = browser(cookie)
+    const refused = browser(cookie!)
     await until(() => refused.closes.length, 'the 33rd is refused')
     assert.equal(refused.closes[0].status, 429)
     const otherCookie = await enter(other.token)
-    const rejected = browser(otherCookie), rejectedId = await idOf(rejected)
+    const rejected = browser(otherCookie!), rejectedId = await idOf(rejected)
     assert.equal((await http(`${base}/ws/${rejectedId}/reject`, other.token, 'POST', { code: 'CONNECT' })).status, 401)
     assert.equal((await http(`${base}/ws/${rejectedId}/reject`, room.token, 'POST', { code: 'CONNECT' })).status, 200)
     await until(() => rejected.closes.length, 'the host turned it away')
     assert.equal(rejected.closes[0].code, 1011)
-    const paired = browser(otherCookie), pairedId = await idOf(paired)
+    const paired = browser(otherCookie!), pairedId = await idOf(paired)
     const host = socket(`${origin.replace('http', 'ws')}${base}/ws/${pairedId}`, { authorization: `Bearer ${room.token}` })
     await until(() => host.client.isOpen(), 'the host half pairs')
     assert.equal((await http(`${base}/ws/${pairedId}/reject`, room.token, 'POST', { code: 'BUSY' })).status, 409)
@@ -1481,7 +1481,7 @@ async function ownOriginChecks() {
     assert.ok(labels.every(label => /^[a-z2-7]{52}$/.test(label)), labels.join(' '))
     // Entered at its own host name: no clearing hop, whatever another room
     // left in the browser, and a cookie for that host name alone.
-    const entered = await at(links[0].host, `${links[0].pathname}${links[0].search}`, 'cs_pv=someotherroom.x; app=1')
+    const entered = await at(links[0]!.host, `${links[0]!.pathname}${links[0]!.search}`, 'cs_pv=someotherroom.x; app=1')
     assert.equal(entered.status, 302, entered.body)
     assert.equal(entered.headers['clear-site-data'], undefined)
     const cookie = entered.headers['set-cookie'][0]
@@ -1490,12 +1490,12 @@ async function ownOriginChecks() {
     // That cookie opens the room's preview on its own host name (the host
     // isn't connected here: a 503 page, so the room was found) and nowhere
     // else: not another room's host name, not the bare one.
-    assert.equal((await at(links[0].host, '/', jar)).status, 503)
-    assert.equal((await at(links[1].host, '/', jar)).status, 404)
+    assert.equal((await at(links[0]!.host, '/', jar)).status, 503)
+    assert.equal((await at(links[1]!.host, '/', jar)).status, 404)
     assert.equal((await at(`previews.test:${preview}`, '/', jar)).status, 404)
-    assert.equal((await at(`x.${links[0].host}`, '/', jar)).status, 404, 'a host name deeper than the wildcard')
+    assert.equal((await at(`x.${links[0]!.host}`, '/', jar)).status, 404, 'a host name deeper than the wildcard')
     // A link used at another room's host name opens nothing there.
-    assert.equal((await at(links[0].host.replace(labels[0], labels[1]), `${links[1].pathname}${links[1].search}`.replace(links[1].searchParams.get('ticket')!, links[0].searchParams.get('ticket')!))).status, 403)
+    assert.equal((await at(links[0]!.host.replace(labels[0]!, labels[1]!), `${links[1]!.pathname}${links[1]!.search}`.replace(links[1]!.searchParams.get('ticket')!, links[0]!.searchParams.get('ticket')!))).status, 403)
     console.log("OK per-room preview origins on workerd: a link names its room's own host name, entered there with no clearing hop, and only that host name serves the room")
   } finally {
     await server.stop()
@@ -1529,7 +1529,7 @@ test("per-room preview origins: a room's key as one DNS label and back, a ticket
   // with no clearing hop.
   const entered = (await previewRequest(w.room, new Request(url, { headers: { cookie: 'cs_pv=other.x' } }), Date.now(), { own: true })).response
   assert.equal(entered.status, 302); assert.equal(entered.headers.get('clear-site-data'), null)
-  const cookie = entered.headers.get('set-cookie')!.split(';')[0]
+  const cookie = entered.headers.get('set-cookie')!.split(';')[0]!
   // What the app sets stays on that host name: no Domain, and never the room's own cookie.
   const lines: any[] = []
   w.room.subscribers.add({ seat: 'host', send: (m: any) => lines.push(m), push() {} })

@@ -152,7 +152,7 @@ describe.skipIf(!unix)('the mailbox helper and the receipt writer', () => {
     const sent = await run({ path: ownPath, status: 'delivered', from: 'uds:/tmp/g.sock', ref: ID })
     assert.deepEqual(sent, { code: 0, out: '{"state":"sent"}' })
     assert(await until(() => lines.length === before + 1 && lines.at(-1)!.length === 1), 'one connection, one line')
-    assert.deepEqual(JSON.parse(lines.at(-1)![0]).orig_msg_id, ID)
+    assert.deepEqual(JSON.parse(lines.at(-1)![0]!).orig_msg_id, ID)
     await writeFile(join(dir, 'plain'), 'x')
     assert.deepEqual(await run({ path: join(dir, 'plain'), status: 'held', from: 'uds:/tmp/g.sock', ref: ID }), { code: 1, out: '{"state":"error","code":"CONNECT"}' }, 'never a file that isn\'t a socket')
     assert.deepEqual(await run({ path: ownPath, status: 'held', from: 'uds:/tmp/g.sock', ref: ID, extra: 1 }), { code: 1, out: '{"state":"error","code":"INVALID_CONFIG"}' })
@@ -201,7 +201,7 @@ describe.skipIf(!unix)('the mailbox helper and the receipt writer', () => {
       const before = lines.length
       assert.equal(await control(port, { op: 'deliver', box: BOX, name: 'composition · via Scott', mode: 'bypass', chain: CHAIN, id: ID, body: 'Count to three.' }), 200)
       assert(await until(() => lines.length === before + 1 && lines.at(-1)!.length === 1))
-      const frame = JSON.parse(lines.at(-1)![0])
+      const frame = JSON.parse(lines.at(-1)![0]!)
       assert.equal(frame.type, 'user', 'no auth line first')
       assert.deepEqual([frame.msg_id, frame.from], [ID, address])
       assert.equal(frame.message.content, `<cross-session-message from="${address}" hop-chain="${CHAIN.join(',')}" from-name="composition · via Scott" from-mode="bypass">\nCount to three.\n</cross-session-message>`)
@@ -285,7 +285,7 @@ describe.skipIf(!unix)('the mailbox helper and the receipt writer', () => {
       let out = ''
       child.stdout.on('data', b => { out += b })
       assert(await until(() => out.includes('\n'), 6000), 'a ready line')
-      const ready = JSON.parse(out.split('\n')[0])
+      const ready = JSON.parse(out.split('\n')[0]!)
       assert.equal(ready.state, 'ready')
       assert(Number.isInteger(ready.port) && Number.isInteger(ready.pid))
       return { ready, child, parent }

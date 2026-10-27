@@ -223,7 +223,7 @@ function frame(op: any, payload: any, { fin = true, mask = false, rsv = 0 } = {}
   if (head.length === 4) head.writeUInt16BE(payload.length, 2)
   if (head.length === 10) head.writeBigUInt64BE(BigInt(payload.length), 2)
   const key = Buffer.from([1, 2, 3, 4]), body = Buffer.from(payload)
-  if (mask) for (let i = 0; i < body.length; i++) body[i] ^= key[i & 3]
+  if (mask) for (let i = 0; i < body.length; i++) body[i]! ^= key[i & 3]!
   return Buffer.concat([head, ...(mask ? [key] : []), body])
 }
 function readFrames(socket: any, head: any, receive: any) {
@@ -236,7 +236,7 @@ function readFrames(socket: any, head: any, receive: any) {
       const masked = !!(bytes[1] & 128), payloadAt = at + (masked ? 4 : 0)
       if (bytes.length < payloadAt + length) return
       const op = bytes[0] & 15, data = Buffer.from(bytes.subarray(payloadAt, payloadAt + length))
-      if (masked) for (let i = 0; i < data.length; i++) data[i] ^= bytes[at + (i & 3)]
+      if (masked) for (let i = 0; i < data.length; i++) data[i]! ^= bytes[at + (i & 3)]
       bytes = bytes.subarray(payloadAt + length)
       receive(op, data)
     }
@@ -313,7 +313,7 @@ async function findFirefox(): Promise<any> {
 async function firefoxUserJs(proxyPort: any) {
   const source = await readFile(new URL('../plugin/hooks/window.ts', import.meta.url), 'utf8')
   const list = /export const FIREFOX_PREFS[^=]*= \[\n([\s\S]*?)\n\]/.exec(source)?.[1] ?? ''
-  const prefs = list.split('\n').map(line => /^\s*\['([^']+)', ('[^']*'|-?\d+|true|false)\],$/.exec(line)).filter((m): m is RegExpExecArray => m !== null).map(([, name, raw]) => [name, raw.startsWith("'") ? raw.slice(1, -1) : JSON.parse(raw)])
+  const prefs = list.split('\n').map(line => /^\s*\['([^']+)', ('[^']*'|-?\d+|true|false)\],$/.exec(line)).filter((m): m is RegExpExecArray => m !== null).map(([, name, raw]) => [name, raw!.startsWith("'") ? raw!.slice(1, -1) : JSON.parse(raw!)])
   assert.ok(prefs.length >= 30 && prefs.length === list.split('\n').filter(l => l.trim()).length, 'every FIREFOX_PREFS line was read')
   const all = [['network.proxy.socks', '127.0.0.1'], ['network.proxy.socks_port', proxyPort], ...prefs]
   return ['// shared-session: a preview window (written before every start)', ...all.map(([name, value]) => `user_pref(${JSON.stringify(name)}, ${JSON.stringify(value)});`), ''].join('\n')
@@ -927,7 +927,7 @@ async function workerChecks() {
   assert.equal((await ipc(host, commands[0])).status, 200, 'a released id can be admitted afresh')
   await until(() => localSockets.size === 33, 'released worker capacity reused')
   await stop(host)
-  assert.equal(closed(commands[0].id).length, 2)
+  assert.equal(closed(commands[0]!.id).length, 2)
   assert.ok(commands.slice(1).every(c => closed(c.id).length === 1), 'shutdown closes each admitted peer exactly once')
   await until(() => localSockets.size === 0 && peers.size === 0, 'worker shutdown owns all TCP/WS sockets')
   // Its control port is free again. The kernel can hold it a moment after the
@@ -1590,7 +1590,7 @@ async function realChain() {
       if (req.method === 'POST' && req.url!.startsWith('/report')) { reports.push({ path: req.url, cookie: req.headers.cookie ?? '', body: JSON.parse(text) }); res.writeHead(204); return res.end() }
       res.writeHead(404); res.end()
     }))
-    app.on('connection', () => counts.hostE++)
+    app.on('connection', () => counts.hostE!++)
     const cors = { 'access-control-allow-origin': `http://localhost:${E}`, vary: 'origin' }
     const dependencyServer = track(http.createServer((req, res) => {
       res.on('error', () => {})
@@ -1603,7 +1603,7 @@ async function realChain() {
       }
       res.writeHead(404, cors); res.end()
     }))
-    dependencyServer.on('connection', () => counts.hostD++)
+    dependencyServer.on('connection', () => counts.hostD!++)
     dependencyServer.on('upgrade', (req: http.IncomingMessage, socket: any, head: any) => {
       dependency.push({ url: req.url, origin: req.headers.origin, upgrade: true })
       handshake(req, socket)
@@ -1611,7 +1611,7 @@ async function realChain() {
     })
     await listen(app, '127.0.0.1', E)
     await listen(dependencyServer, '127.0.0.1', D)
-    const own = (key: string) => { const server = track(http.createServer((_req, res) => res.end('the Guest\'s own service'))); server.on('connection', () => counts[key]++); return server }
+    const own = (key: string) => { const server = track(http.createServer((_req, res) => res.end('the Guest\'s own service'))); server.on('connection', () => counts[key]!++); return server }
     if (ipv6) { await listen(own('ownE'), '::1', E); await listen(own('ownD'), '::1', D) }
     await listen(own('ownU'), '127.0.0.1', U)
     // The browser's own background traffic goes to a refusing upstream, not the internet.
@@ -1815,7 +1815,7 @@ async function realChain() {
   assert.ok(growing.every(r => r.written < LARGE), 'credit + TCP backpressure bounds every non-reading flow')
   // This is an observed RSS bound with headroom for Node, TLS and allocator
   // retention, not a claim that the protocol's 32 MiB credit sum is an RSS cap.
-  assert.ok(Math.max(...memory) - memory[0] < 128 * 1024 * 1024, `bounded worker RSS growth: ${Math.max(...memory) - memory[0]}`)
+  assert.ok(Math.max(...memory) - memory[0]! < 128 * 1024 * 1024, `bounded worker RSS growth: ${Math.max(...memory) - memory[0]!}`)
   await appEcho(pressureWS, 'unrelated WS works while consumers do not read')
   for (const client of pressure) client.client.destroy()
   pressureWS.socket.close()
@@ -2008,12 +2008,12 @@ async function webrtcChecks() {
     const udp = async (key: string) => {
       const socket = dgram.createSocket('udp4')
       datagrams.push(socket)
-      socket.on('message', () => counts[key]++)
+      socket.on('message', () => counts[key]!++)
       await new Promise<void>((resolve, reject) => { socket.once('error', reject); socket.bind(0, lan, () => { socket.removeListener('error', reject); resolve() }) })
       socket.on('error', () => {})
       return socket.address().port
     }
-    const tcp = (key: string) => listen(track(net.createServer(socket => { counts[key]++; setTimeout(() => socket.destroy(), 500) })), lan)
+    const tcp = (key: string) => listen(track(net.createServer(socket => { counts[key]!++; setTimeout(() => socket.destroy(), 500) })), lan)
     const STUN = await udp('stun'), PEER = await udp('peer'), TURN = await tcp('turn'), PEER_TCP = await tcp('peerTcp')
     // launched, served, firstTurn: when the browser started, the page went out and the proxy began its first TURN connection.
     let report: any, launched = 0, served = 0, firstTurn = 0
@@ -2052,19 +2052,19 @@ async function webrtcChecks() {
       const data = (chunk: Buffer) => {
         buffer = Buffer.concat([buffer, chunk])
         if (!greeted) {
-          if (buffer.length < 2 || buffer.length < 2 + buffer[1]) return
-          buffer = buffer.subarray(2 + buffer[1]); greeted = true
+          if (buffer.length < 2 || buffer.length < 2 + buffer[1]!) return
+          buffer = buffer.subarray(2 + buffer[1]!); greeted = true
           client.write(Buffer.from([5, 0]))
         }
         if (buffer.length < 5) return
-        const atyp = buffer[3], size = atyp === 1 ? 10 : atyp === 4 ? 22 : 7 + buffer[4]
+        const atyp = buffer[3], size = atyp === 1 ? 10 : atyp === 4 ? 22 : 7 + buffer[4]!
         if (buffer.length < size) return
         client.removeListener('data', data)
-        const host = atyp === 1 ? [...buffer.subarray(4, 8)].join('.') : atyp === 3 ? buffer.toString('latin1', 5, 5 + buffer[4]) : 'IPv6', port = buffer.readUInt16BE(size - 2)
+        const host = atyp === 1 ? [...buffer.subarray(4, 8)].join('.') : atyp === 3 ? buffer.toString('latin1', 5, 5 + buffer[4]!) : 'IPv6', port = buffer.readUInt16BE(size - 2)
         const to = port === APP && ['localhost', '127.0.0.1'].includes(host) ? { host: '127.0.0.1', port } : port === TURN && host === lan ? { host: lan, port } : null
         if (!to) return client.end(Buffer.from([5, 2, 0, 1, 0, 0, 0, 0, 0, 0]))
-        if (to.port === TURN) { counts.turnViaProxy++; firstTurn ||= Date.now() }
-        const upstream = net.connect(to, () => { if (to.port === TURN) counts.turnProxied++; client.write(Buffer.from([5, 0, 0, 1, 0, 0, 0, 0, 0, 0])); client.pipe(upstream).pipe(client) })
+        if (to.port === TURN) { counts.turnViaProxy!++; firstTurn ||= Date.now() }
+        const upstream = net.connect(to, () => { if (to.port === TURN) counts.turnProxied!++; client.write(Buffer.from([5, 0, 0, 1, 0, 0, 0, 0, 0, 0])); client.pipe(upstream).pipe(client) })
         sockets.add(upstream)
         upstream.on('error', () => client.destroy())
         upstream.on('close', () => { sockets.delete(upstream); client.destroy() })
@@ -2085,8 +2085,8 @@ async function webrtcChecks() {
       await pause(1000) // A late retransmit still counts.
       // What a failure reports, to tell a browser that never tried TURN from one that tried too late or elsewhere.
       const seen = () => `\n${JSON.stringify({ launchToPageMs: served ? served - launched : null, pageToTurnMs: firstTurn ? firstTurn - served : null, counts, candidates: report.candidates, gathering: report.gathering, errors: report.errors }, null, 1)}\n${name}'s output, its end:\n${browserLog.slice(-3000)}`
-      assert.deepEqual({ stun: counts.stun, peer: counts.peer, peerTcp: counts.peerTcp, turn: counts.turn - counts.turnProxied }, { stun: 0, peer: 0, peerTcp: 0, turn: 0 }, `${name} (${version}): WebRTC reaches this machine's address directly${seen()}`)
-      assert.ok(counts.turnViaProxy >= 1, `${name} (${version}): TURN over TCP must come through the proxy${seen()}`)
+      assert.deepEqual({ stun: counts.stun, peer: counts.peer, peerTcp: counts.peerTcp, turn: counts.turn! - counts.turnProxied! }, { stun: 0, peer: 0, peerTcp: 0, turn: 0 }, `${name} (${version}): WebRTC reaches this machine's address directly${seen()}`)
+      assert.ok(counts.turnViaProxy! >= 1, `${name} (${version}): TURN over TCP must come through the proxy${seen()}`)
     } finally {
       await endBrowser(browser, exited, profile)
       for (const socket of datagrams) socket.close()

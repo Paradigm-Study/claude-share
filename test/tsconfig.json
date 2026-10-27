@@ -5,8 +5,6 @@
 // would be required keys of Node's process.env here.
 {
   "extends": "../server/tsconfig.json",
-  // noUncheckedIndexedAccess is the server's alone until the suites' move to
-  // Vitest is done: then they take it too.
-  "compilerOptions": { "types": ["node"], "noUncheckedIndexedAccess": false },
+  "compilerOptions": { "types": ["node"] },
   "include": ["worker-runtime.d.ts", "**/*.ts", "../vitest.config.ts"]
 }

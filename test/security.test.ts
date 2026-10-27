@@ -119,7 +119,7 @@ test('relay/real.sh says where each path really is: through a folder\'s link, a 
   assert.deepEqual(real(join(project, 'src'), join(project, 'src', 'new.ts'), join(project, 'new', 'deeper')), [`${root}/src`, `${root}/src/new.ts`, `${root}/new/deeper`])
   const [awayReal] = real(away) as string[]
   // Through a folder's link, a file's, and climbing back out of one.
-  assert.deepEqual(real(join(project, 'notes', 'id_ed25519'), join(project, 'key'), `${project}/src/../notes/../x`), [`${awayReal}/id_ed25519`, `${awayReal}/id_ed25519`, `${awayReal.slice(0, awayReal.lastIndexOf('/'))}/x`])
+  assert.deepEqual(real(join(project, 'notes', 'id_ed25519'), join(project, 'key'), `${project}/src/../notes/../x`), [`${awayReal}/id_ed25519`, `${awayReal}/id_ed25519`, `${awayReal!.slice(0, awayReal!.lastIndexOf('/'))}/x`])
   // A dangling link can't be told.
   assert.equal(real(join(project, 'dangling', 'x')), 1)
 })
@@ -152,7 +152,7 @@ test('the room page escapes what it embeds, and its policy runs only its own scr
   assert.match(policy, /frame-ancestors 'none'/)
   const scripts = [...html.matchAll(/<script([^>]*)>/g)].map(m => m[1])
   assert.deepEqual(scripts, [` nonce="${nonce}"`], 'one script, the nonce its own')
-  const data = JSON.parse(/var data = (.*);\n/.exec(html)![1])
+  const data = JSON.parse(/var data = (.*);\n/.exec(html)![1]!)
   assert.ok(data.people.some((p: { name: string }) => p.name === evil), 'the name still shows as given')
 })
 
@@ -162,9 +162,9 @@ test('a seat holds four long polls, one more answering the oldest at once', asyn
   const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
   const room = Room.create({ id: token(16), title: undefined, name: 'Host', now: Date.now(), version: PLUGIN_LATEST })
   const guest = room.join('Gia', Date.now(), PLUGIN_LATEST)
-  const ask = (path: string, bearer = guest.token) => roomRequest(room, new Request(`https://share.test/api/rooms/${room.id}/${path}`, { headers: { authorization: `Bearer ${bearer}`, 'x-shared-session-version': PLUGIN_LATEST } }), path.split('?')[0], Date.now(), 'https://share.test')
+  const ask = (path: string, bearer = guest.token) => roomRequest(room, new Request(`https://share.test/api/rooms/${room.id}/${path}`, { headers: { authorization: `Bearer ${bearer}`, 'x-shared-session-version': PLUGIN_LATEST } }), path.split('?')[0]!, Date.now(), 'https://share.test')
   const polls = Array.from({ length: SEAT_POLLS + 1 }, () => ask(`events?after=${room.seq}&wait=20000`))
-  const answered = await Promise.race([polls[0].then(() => true), wait(500).then(() => false)])
+  const answered = await Promise.race([polls[0]!.then(() => true), wait(500).then(() => false)])
   assert.equal(answered, true, 'a seat\'s long poll past SEAT_POLLS answers its oldest at once')
   assert.equal(room.waiters.size, SEAT_POLLS)
   room.append({ seat: 'host', name: 'Host', role: 'host' }, 'row', { kind: 'assistant', text: 'here' }, Date.now())

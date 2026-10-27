@@ -293,12 +293,12 @@ async function configChecks() {
   void discover.start({ ...good, deadlineMs: 1000 }, { emit: row => aborted.push(row), platform: 'stuck', adapters: stuck, signal: controller.signal })
   controller.abort()
   await until(() => late.length, 'deadline answer', 2000)
-  assert.deepEqual(late[0].row, { state: 'done', platform: 'stuck', target: null, related: [] })
-  assert.ok(late[0].ms < 1000, `answered after ${late[0].ms} ms`)
+  assert.deepEqual(late[0]!.row, { state: 'done', platform: 'stuck', target: null, related: [] })
+  assert.ok(late[0]!.ms < 1000, `answered after ${late[0]!.ms} ms`)
   await pause(300)
   assert.deepEqual(aborted, [])
   assert.equal(late.length, 1)
-  console.log(`ok strict stdin (keys, ranges, 64 excludes, absolute root, size): INVALID_CONFIG exit 1; unsupported platform; stuck listing answers in ${late[0].ms} ms; abort is silent`)
+  console.log(`ok strict stdin (keys, ranges, 64 excludes, absolute root, size): INVALID_CONFIG exit 1; unsupported platform; stuck listing answers in ${late[0]!.ms} ms; abort is silent`)
 }
 
 const FIXTURE = `'use strict'
@@ -433,21 +433,21 @@ async function liveChecks() {
   const run = (port: number, extra = {}, env?: NodeJS.ProcessEnv) => helper({ port, pluginRoot, exclude: [], ...extra }, env).then(result => ({ result, row: answer(result, secrets) }))
   const noGit = { ...process.env, PATH: path.join(scratch, 'no-git-on-this-path') }, repoHome = { ...process.env, HOME: project }
   const [all, excluded, fromApi, fromApiNoGit, fromApiRepoHome, nothing, debuggerTarget, inspectorTarget, slowTarget] = await Promise.all([
-    run(main), run(main, { exclude: [d1, d2, d3] }), run(apiPort, { exclude: docs.ports }), run(apiPort, { exclude: docs.ports }, noGit), run(apiPort, { exclude: docs.ports }, repoHome),
-    run(closed), run(devtools.ports[0]), run(inspector), run(slow.ports[0]),
+    run(main!), run(main!, { exclude: [d1, d2, d3] }), run(apiPort!, { exclude: docs.ports }), run(apiPort!, { exclude: docs.ports }, noGit), run(apiPort!, { exclude: docs.ports }, repoHome),
+    run(closed), run(devtools.ports[0]!), run(inspector), run(slow.ports[0]!),
   ])
   // Each with its listener's pid: one process's ports (api's two, docs' five) share it.
   const yes = (port: number, label: string, pid: number | undefined) => ({ port, label, web: 'yes', pid })
   const slowOne = { port: slow.ports[0], label: 'slow.cjs', web: 'slow', pid: slow.child.pid }
-  const answering = [yes(hmr, 'web.cjs', web.child.pid), yes(apiPort, 'api.cjs', apiRun.child.pid), yes(apiPort2, 'api.cjs', apiRun.child.pid), ...[d1, d2, d3, d4, d5].map(port => yes(port, 'docs.cjs', docs.child.pid))].sort((a, b) => a.port - b.port)
+  const answering = [yes(hmr!, 'web.cjs', web.child.pid), yes(apiPort!, 'api.cjs', apiRun.child.pid), yes(apiPort2!, 'api.cjs', apiRun.child.pid), ...[d1, d2, d3, d4, d5].map(port => yes(port!, 'docs.cjs', docs.child.pid))].sort((a, b) => a.port - b.port)
   for (const { row } of [all, excluded, fromApi, fromApiNoGit, fromApiRepoHome, debuggerTarget, inspectorTarget, slowTarget]) {
     assert.deepEqual(row.related.filter((item: any) => forbidden.has(item.port)), [], 'raw TCP, resets, debuggers, plugin relays and outside servers are never suggested')
   }
   assert.deepEqual(all.row.target, { port: main, label: 'web.cjs', web: 'yes', devtools: false })
   assert.deepEqual(all.row.related, answering.slice(0, 6), 'six answering services beat the slow one')
-  assert.deepEqual(excluded.row.related, [...answering.filter(item => ![d1, d2, d3].includes(item.port)), slowOne].sort((a, b) => a.port - b.port), 'exclude, and a silent listener as slow')
+  assert.deepEqual(excluded.row.related, [...answering.filter(item => ![d1, d2, d3].includes(item.port)), slowOne].sort((a, b) => a.port! - b.port!), 'exclude, and a silent listener as slow')
   assert.deepEqual(fromApi.row.target, { port: apiPort, label: 'api.cjs', web: 'yes', devtools: false })
-  const own = [yes(apiPort2, 'api.cjs', apiRun.child.pid)], siblings = [yes(main, 'web.cjs', web.child.pid), yes(hmr, 'web.cjs', web.child.pid), ...own, slowOne].sort((a, b) => a.port - b.port)
+  const own = [yes(apiPort2!, 'api.cjs', apiRun.child.pid)], siblings = [yes(main!, 'web.cjs', web.child.pid), yes(hmr!, 'web.cjs', web.child.pid), ...own, slowOne].sort((a, b) => a.port! - b.port!)
   assert.deepEqual(fromApi.row.related, git ? siblings : own, git ? 'git top level finds the project from packages/api' : 'without git the root is the cwd')
   assert.deepEqual(fromApiNoGit.row, { ...fromApi.row, related: own }, 'no git on PATH: the root is the target cwd')
   assert.deepEqual(fromApiRepoHome.row, { ...fromApi.row, related: own }, 'a git repo at the home folder is not the project: the root is the target cwd')
@@ -460,7 +460,7 @@ async function liveChecks() {
 
   // Owner mode: who holds one port, on both families, by the holders' commands alone.
   const ownerRun = (port: number, extra = {}) => helper({ port, pluginRoot, owner: true, ...extra }).then(result => ({ result, row: ownerAnswer(result, secrets) }))
-  const [guestOwner, workerOwner, otherCopyOwner, webOwner, apiOwner, nobody] = await Promise.all([ownerRun(guest.ports[0]), ownerRun(worker.ports[0], { exclude: [] }), ownerRun(otherWorker.ports[0]), ownerRun(main), ownerRun(apiPort), ownerRun(closed)])
+  const [guestOwner, workerOwner, otherCopyOwner, webOwner, apiOwner, nobody] = await Promise.all([ownerRun(guest.ports[0]!), ownerRun(worker.ports[0]!, { exclude: [] }), ownerRun(otherWorker.ports[0]!), ownerRun(main!), ownerRun(apiPort!), ownerRun(closed)])
   assert.deepEqual(guestOwner.row.target, { port: guest.ports[0], label: 'local-preview.cjs', relay: true }, `a guest's listener on ${v6 ? '127.0.0.1 and ::1' : '127.0.0.1'}`)
   assert.deepEqual(workerOwner.row.target, { port: worker.ports[0], label: 'worker.cjs', relay: true }, "under the caller's own relay/")
   assert.deepEqual(otherCopyOwner.row.target, { port: otherWorker.ports[0], label: 'tcp-worker.cjs', relay: true }, "another copy's helper")
@@ -473,7 +473,7 @@ async function liveChecks() {
 
   // A need's look (`web`): who holds it, as above, and what the port answers, within the same 2 s.
   const webRun = (port: number) => helper({ port, pluginRoot, owner: true, web: true }).then(result => ({ result, row: ownerAnswer(result, secrets, true) }))
-  const [webPage, webDebugger, webInspector, webSlow, webGuest, webNobody] = await Promise.all([webRun(main), webRun(devtools.ports[0]), webRun(inspector), webRun(slow.ports[0]), webRun(guest.ports[0]), webRun(closed)])
+  const [webPage, webDebugger, webInspector, webSlow, webGuest, webNobody] = await Promise.all([webRun(main!), webRun(devtools.ports[0]!), webRun(inspector), webRun(slow.ports[0]!), webRun(guest.ports[0]!), webRun(closed)])
   assert.deepEqual(webPage.row.target, { port: main, label: 'web.cjs', relay: false, web: 'yes', devtools: false })
   assert.deepEqual(webDebugger.row.target, { port: devtools.ports[0], label: 'devtools.cjs', relay: false, web: 'yes', devtools: true })
   assert.deepEqual(webInspector.row.target, { port: inspector, label: 'idle.cjs', relay: false, web: 'yes', devtools: true }, "Node's inspector is a debugger here too")
@@ -485,7 +485,7 @@ async function liveChecks() {
   console.log(`ok a need's look ${process.platform}: a page, a debugger and Node's inspector, a slow one, a guest's listener and a closed port, each with who holds it; slowest ${webSlowest} ms`)
 
   const began = Date.now()
-  const quick = await run(main, { deadlineMs: 1000 })
+  const quick = await run(main!, { deadlineMs: 1000 })
   assert.ok(quick.result.ms < 1000 + 400, `deadline 1000 answered after ${quick.result.ms} ms (process start included)`)
   assert.ok(quick.row.target?.port === main)
   const allowed = new Set([hmr, ...apiRun.ports, ...docs.ports, slow.ports[0]])

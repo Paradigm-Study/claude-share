@@ -197,9 +197,9 @@ const loopbackTo = (port: number): Target => ({ atyp: 3, host: 'localhost', port
 const iface = (address: string, cidr: any, internal = false) => ({ address, netmask: '', family: net.isIPv4(address) ? 'IPv4' : 'IPv6', mac: '00:00:00:00:00:00', internal, cidr })
 // The address beside one (its last bit flipped), as a SOCKS target.
 function neighborOf(address: string) {
-  if (net.isIPv4(address)) { const b = address.split('.').map(Number); b[3] ^= 1; return { atyp: 1, host: b.join('.') } }
-  const b = v6(address); b[15] ^= 1
-  return { atyp: 4, host: Array.from({ length: 8 }, (_, i) => (b[2 * i] << 8 | b[2 * i + 1]).toString(16)).join(':') }
+  if (net.isIPv4(address)) { const b = address.split('.').map(Number); b[3]! ^= 1; return { atyp: 1, host: b.join('.') } }
+  const b = v6(address); b[15]! ^= 1
+  return { atyp: 4, host: Array.from({ length: 8 }, (_, i) => (b[2 * i]! << 8 | b[2 * i + 1]!).toString(16)).join(':') }
 }
 
 async function configChecks() {
@@ -391,11 +391,11 @@ async function handshakeChecks() {
     await until(() => ended(c), 'no acceptable method')
     assert.deepEqual([...c.bytes], [5, 0xff])
   }
-  for (const [cmd, atyp, rep] of [[2, 1, 7], [3, 1, 7], [0, 1, 7], [9, 1, 7], [1, 0, 8], [1, 2, 8], [1, 5, 8], [1, 255, 8]]) {
+  for (const [cmd, atyp, rep] of [[2, 1, 7], [3, 1, 7], [0, 1, 7], [9, 1, 7], [1, 0, 8], [1, 2, 8], [1, 5, 8], [1, 255, 8]] as [number, number, number][]) {
     const c = await wire(p.port)
     c.client.write(Buffer.from([5, 1, 0, 5, cmd, 0, atyp, 127, 0, 0, 1, 0, 80]))
     await until(() => ended(c), `CMD ${cmd} ATYP ${atyp}`)
-    assert.deepEqual([...c.bytes], [5, 0, ...reply(rep)])
+    assert.deepEqual([...c.bytes], [5, 0, ...reply(rep!)])
   }
   for (const [target, rep] of [[{ atyp: 3, host: 'bad name', port: 3000 }, 4], [{ atyp: 3, host: 'user@host', port: 3000 }, 4], [{ atyp: 3, host: '', port: 3000 }, 4], [{ atyp: 3, host: 'localhost', port: 0 }, 2]] as [Target, number][]) {
     await expectReply(await socks(p.port, target), rep, JSON.stringify(target))
@@ -543,7 +543,7 @@ async function routingChecks() {
   assert.ok(Date.now() - excess < 1000, 'held capacity refuses at once')
   await configure(crowd, { 4100: echoPort }, [4100])
   for (const c of waiting) await expectReply(c, 0)
-  await echoes(waiting[63])
+  await echoes(waiting[63]!)
   await expectReply(await socks(crowd.port, loopbackTo(4100)), 0, 'capacity released after routing')
   await shut(crowd)
   console.log('ok routing: first-config hold then route, never-configured 02 without blocked, want + route during hold, want window, startable timeout 02, revoked startable, unauthorized 02 + deduplicated blocked, dead route 05, 64 held CONNECTs')
@@ -780,10 +780,10 @@ async function outboundChecks() {
         if (greeting[1] !== 0) return socket.end()
       }
       if (buffer.length < 5) return
-      const atyp = buffer[3], size = atyp === 1 ? 10 : atyp === 4 ? 22 : 7 + buffer[4]
+      const atyp = buffer[3], size = atyp === 1 ? 10 : atyp === 4 ? 22 : 7 + buffer[4]!
       if (buffer.length < size) return
       socket.removeListener('data', read)
-      const seen = atyp === 1 ? [...buffer.subarray(4, 8)].join('.') : atyp === 4 ? buffer.subarray(4, 20).toString('hex') : buffer.toString('latin1', 5, 5 + buffer[4])
+      const seen = atyp === 1 ? [...buffer.subarray(4, 8)].join('.') : atyp === 4 ? buffer.subarray(4, 20).toString('hex') : buffer.toString('latin1', 5, 5 + buffer[4]!)
       socksSeen.push({ atyp, host: seen, port: buffer.readUInt16BE(size - 2) })
       const host = byAddress[seen] ?? seen
       const rest = buffer.subarray(size)
@@ -805,7 +805,7 @@ async function outboundChecks() {
   const viaSocks = await inProcess({ lookup, interfaces }, { upstream: { kind: 'socks5', host: 'localhost', port: socksPort, bypass: [] } })
   for (const [target, seenAs] of [[{ atyp: 3, host: 'ok.test', port: 443 }, { atyp: 1, host: '93.184.216.34', port: 443 }], [{ atyp: 1, host: '93.184.216.34', port: 80 }, { atyp: 1, host: '93.184.216.34', port: 80 }],
     [{ atyp: 4, host: '2001:db8::5', port: 443 }, { atyp: 4, host: '20010db8000000000000000000000005', port: 443 }], [{ atyp: 3, host: 'bnd6.test', port: 443 }, { atyp: 1, host: '198.51.100.40', port: 443 }], [{ atyp: 3, host: 'bnd3.test', port: 443 }, { atyp: 1, host: '198.51.100.41', port: 443 }]]) {
-    const c = await expectReply(await socks(viaSocks.port, target), 0, `SOCKS5 upstream ${target.host}`)
+    const c = await expectReply(await socks(viaSocks.port, target!), 0, `SOCKS5 upstream ${target!.host}`)
     await until(() => c.bytes.length >= 17, 'upstream extra bytes')
     assert.equal(c.bytes.subarray(12, 17).toString(), 'EXTRA')
     await echoes(c)
@@ -881,7 +881,7 @@ async function localNetworkChecks() {
   // ULA, link-local, site-local, multicast, AWS metadata, local NAT64, and IPv4 behind NAT64/compat/SIIT.
   const blocked6 = ['fc00::1', 'fd12:3456::1', 'fe80::1', 'febf::1', 'fec0::1', 'ff02::1', 'ff05::fb', 'fd00:ec2::254', '64:ff9b:1::1', '64:ff9b::a9fe:a9fe', '64:ff9b::a01:203', '64:ff9b::7f00:1', '64:ff9b::c000:aa', '::a01:203', '::ffff:0:a01:203']
   const open4 = ['172.15.255.255', '172.32.0.1', '100.63.255.255', '100.128.0.1', '169.253.255.255', '223.255.255.255', '192.169.0.1', '191.255.255.255', '192.0.1.1', '198.18.0.5'], open6 = ['fbff::1', '2001:db8::5', '64:ff9b::5db8:d822']
-  const hex = (ip: string) => { const b = ip.split('.').map(Number); return `${(b[0] << 8 | b[1]).toString(16)}:${(b[2] << 8 | b[3]).toString(16)}` }
+  const hex = (ip: string) => { const b = ip.split('.').map(Number); return `${(b[0]! << 8 | b[1]!).toString(16)}:${(b[2]! << 8 | b[3]!).toString(16)}` }
   const names: Record<string, any> = { 'mixed.test': ['192.168.1.10', '93.184.216.34', 'fe80::1', '2001:db8::5', '169.254.169.254'], 'nas.test': ['192.168.1.10', 'fd00::10'], 'loop-lan.test': ['192.168.1.1', '127.0.0.1'], 'own-lan.test': ['192.168.1.5'], 'meta-lan.test': ['169.254.169.254', '192.168.1.20'],
     'public.test': ['93.184.216.34'], 'own-mixed.test': ['93.184.216.34', '192.168.1.5'], 'link-mixed.test': ['93.184.216.34', 'fe80::1'], 'proto-mixed.test': ['93.184.216.34', '192.0.0.8'], 'public-private.test': ['93.184.216.34', '10.0.0.7'] }
   blocked4.forEach((ip, i) => { names[`b4-${i}.test`] = [ip] }); blocked6.forEach((ip, i) => { names[`b6-${i}.test`] = [ip] })
@@ -1283,8 +1283,8 @@ async function dohFixtures() {
       const authority = /^CONNECT (\S+) HTTP\/1\.1\r\n/.exec(head.toString('latin1', 0, end + 2))?.[1] ?? ''
       ctx.connects.push(authority)
       const [, host, port] = /^\[?(.*?)\]?:([0-9]+)$/.exec(authority) ?? []
-      if (special(socket, host, 'HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n')) return
-      pipeTo(socket, destination(host, Number(port)), head.subarray(end + 4), 'HTTP/1.1 200 Connection established\r\n\r\n', 'HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n')
+      if (special(socket, host!, 'HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n')) return
+      pipeTo(socket, destination(host!, Number(port)), head.subarray(end + 4), 'HTTP/1.1 200 Connection established\r\n\r\n', 'HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n')
     }
     socket.on('data', read)
   })))
@@ -1299,10 +1299,10 @@ async function dohFixtures() {
         socket.write(Buffer.from([5, 0]))
       }
       if (buffer.length < 5) return
-      const atyp = buffer[3], size = atyp === 1 ? 10 : atyp === 4 ? 22 : 7 + buffer[4]
+      const atyp = buffer[3], size = atyp === 1 ? 10 : atyp === 4 ? 22 : 7 + buffer[4]!
       if (buffer.length < size) return
       socket.removeListener('data', read)
-      const host = atyp === 1 ? [...buffer.subarray(4, 8)].join('.') : atyp === 4 ? new net.SocketAddress({ address: Array.from({ length: 8 }, (_, i) => buffer.readUInt16BE(4 + 2 * i).toString(16)).join(':'), family: 'ipv6' }).address : buffer.toString('latin1', 5, 5 + buffer[4])
+      const host = atyp === 1 ? [...buffer.subarray(4, 8)].join('.') : atyp === 4 ? new net.SocketAddress({ address: Array.from({ length: 8 }, (_, i) => buffer.readUInt16BE(4 + 2 * i).toString(16)).join(':'), family: 'ipv6' }).address : buffer.toString('latin1', 5, 5 + buffer[4]!)
       const port = buffer.readUInt16BE(size - 2)
       ctx.socksSeen.push({ atyp, host, port })
       if (special(socket, host, Buffer.from(reply(5)))) return
@@ -1609,8 +1609,8 @@ const RETRY_CASES: Record<string, (ctx: DohCtx) => Promise<void>> = {
 async function dohChecks(cases = Object.keys(DOH_CASES), retries = Object.keys(RETRY_CASES)) {
   const ctx = await dohFixtures()
   if (ctx.skip) return console.log(`SKIP DNS-over-HTTPS through the upstream (${ctx.skip})`)
-  for (const name of cases) { ctx.reset(); await DOH_CASES[name](ctx) }
-  for (const name of retries) { ctx.reset(); await RETRY_CASES[name](ctx) }
+  for (const name of cases) { ctx.reset(); await DOH_CASES[name]!(ctx) }
+  for (const name of retries) { ctx.reset(); await RETRY_CASES[name]!(ctx) }
   console.log(`ok checked addresses in turn through the upstream: ${retries.length} regressions (${retries.map(name => name.slice(0, 1)).join(', ')}): an IPv4 address the upstream refuses (HTTP 502, SOCKS5 REP 5) gives way to the checked IPv6 one in a fresh tunnel (DoH and local answers), families in turn, IPv4 first, four tries at most within one deadline, the last try's code; a client leaving or close() mid-retry ends the tries, nothing left open`)
   await dohClientChecks(ctx)
   console.log(`ok DNS-over-HTTPS through the upstream (real TLS with a test CA, HTTP CONNECT and SOCKS5): ${cases.length} regressions (${cases.map(name => name.slice(0, 1)).join(', ')}): names never reach the upstream, only checked addresses (CONNECT a.b.c.d / ATYP 1 or 4); a DoH answer with any refused address refuses; DoH down or empty falls back to the local answer, pinned; neither refuses 04; certificate name and CA checked, servers in order, an unreachable one skipped, a slow name its own failure (the next name still asked), DoH held by the proxy backing off as a whole and doubling until an answer, bad answers (SERVFAIL, past 64 KiB, no address) fall back, concurrent asks shared, TTL kept, literals ask nothing`)
