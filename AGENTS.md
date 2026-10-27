@@ -58,8 +58,8 @@ node test/previews.mjs                                  # preview shares, forwar
 #   test/cloud.test.ts                                  # the cloud host's handoff through the core; with CLOUD_DOCKER=1 and model access, a real runner in Docker under wrangler dev
 #   test/security.test.ts                               # where a room's files land on a teammate's computer (relay/save.sh) and where a guest's read really goes (relay/real.sh), through real links; names, the room page, what a seat holds open, uploads, and on the Worker team removals, what a room serves and the daily room count
 TRACES_DATABASE_URL=… npm test -- test/traces.test.ts   # traces end to end against a throwaway Postgres (its tables are dropped first): OAuth, keeping turns, keyword and meaning search
-CLAUDE_BIN=$(which claude) node test/e2e.mjs            # a real host and guests through a local server (needs model access)
-EXTERNAL_SERVER=1 SHARE_SERVER=https://… node test/e2e.mjs   # …or through a deployed one (`npx wrangler dev` runs the Worker locally: SHARE_SERVER=http://127.0.0.1:8787)
+CLAUDE_BIN=$(which claude) node test/e2e.ts             # a real host and guests through a local server (needs model access)
+EXTERNAL_SERVER=1 SHARE_SERVER=https://… node test/e2e.ts    # …or through a deployed one (`npx wrangler dev` runs the Worker locally: SHARE_SERVER=http://127.0.0.1:8787)
 ```
 
 All but the e2e run without a model. A Vitest suite that starts the Workers (`startWorkerd`) goes in `vitest.config.ts`'s `WORKERD` list, whose tests have minutes; the others have 30 s. Under Vitest, `vitest.config.ts` aliases `cloudflare:workers`, workerd's own module, to `test/support/cloudflare-workers.mjs`, and a suite imports the server as it likes. The `node test/x.mjs` suites that load anything of `server/` import `test/support/cloudflare.mjs` first and the server with `import()` after it, for the same stand-in. Node strips the server's TypeScript types itself.

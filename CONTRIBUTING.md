@@ -42,7 +42,7 @@ Four tests in `band.test.tsx` wait in real time, 10 to 12 seconds each (about 46
 For changes to sharing, joining, or transcript behavior, also run the real host-and-guests test with a signed-in Claude Code that can call a model:
 
 ```sh
-CLAUDE_BIN="$(command -v claude)" node test/e2e.mjs
+CLAUDE_BIN="$(command -v claude)" node test/e2e.ts
 ```
 
 This test uses model access and starts a host in bypass mode. See [AGENTS.md](AGENTS.md) for the interaction contracts, server setup, and additional test options.
