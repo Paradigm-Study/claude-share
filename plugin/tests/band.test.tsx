@@ -391,7 +391,7 @@ function world(
       }
       return { value: { code: 0, signal: null } }
     }
-    if (e.argv.at(-1)?.endsWith('/relay/discover.cjs') && JSON.parse(e.input!).owner === true) {
+    if (e.argv.at(-1)?.endsWith('/relay/discover.mts') && JSON.parse(e.input!).owner === true) {
       const config = JSON.parse(e.input!)
       owners.push(config)
       // A guest's need's look (`web`): the port as discovery would find it, and who holds it.
@@ -409,7 +409,7 @@ function world(
       yield { stream: 'stdout' as const, text: `${JSON.stringify({ state: 'done', platform: 'darwin', target, related: [] })}\n` }
       return { value: { code: 0, signal: null } }
     }
-    if (e.argv.at(-1)?.endsWith('/relay/discover.cjs')) {
+    if (e.argv.at(-1)?.endsWith('/relay/discover.mts')) {
       const config = JSON.parse(e.input!)
       discovered.push(config)
       await opts.discoverWait?.()

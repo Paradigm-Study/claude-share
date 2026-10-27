@@ -1,4 +1,4 @@
-// Standalone Node 22.18+ checks for plugin/relay/discover.cjs: no model, deps or network.
+// Standalone Node 22.18+ checks for plugin/relay/discover.mts: no model, deps or network.
 //   node test/discover.mjs
 // Parser fixtures first, then real listeners started here: a temp git project
 // with web services, a silent one, raw TCP, a fake debugger, Node's inspector
@@ -16,9 +16,9 @@ import { once } from 'node:events'
 import { mkdtemp, mkdir, writeFile, copyFile, rm, realpath } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 import { setTimeout as pause } from 'node:timers/promises'
-import discover from '../plugin/relay/discover.cjs'
+import * as discover from '../plugin/relay/discover.mts'
 
-const HELPER = fileURLToPath(new URL('../plugin/relay/discover.cjs', import.meta.url))
+const HELPER = fileURLToPath(new URL('../plugin/relay/discover.mts', import.meta.url))
 const children = new Set()
 const SECRET = `argv-secret-${process.pid}-${Date.now()}`
 let scratch
@@ -192,6 +192,14 @@ function parserChecks() {
   assert.equal(discover.excludedCommand(discover.commandOf({ text: '/usr/bin/node /other/copy/relay/mailbox.cjs --serve' }, 'node'), markers), true, "another copy's mailbox, never suggested")
   assert.equal(discover.pluginHelper(discover.commandOf({ argv: ['claude', '--resume'] }, 'claude'), markers), false)
   assert.equal(discover.pluginHelper(discover.commandOf({ argv: ['node', '/proj/relay/local-preview.cjs.bak'] }, 'node'), markers), false)
+  // …and any copy's helpers as .mts, the names after the move to TypeScript: a
+  // copy of either version can be running beside the other.
+  for (const name of ['tcp-worker', 'local-preview', 'ws-relay', 'browser-proxy', 'discover', 'mailbox']) {
+    assert.equal(discover.pluginHelper(discover.commandOf({ text: `/usr/bin/node /other/copy/relay/${name}.mts` }, 'node'), markers), true, `${name}.mts`)
+    assert.equal(discover.pluginHelper(discover.commandOf({ argv: ['node', `/elsewhere/relay/${name}.cjs`] }, 'node'), markers), true, `${name}.cjs`)
+  }
+  assert.equal(discover.excludedCommand(discover.commandOf({ text: '/usr/bin/node /other/copy/relay/mailbox.mts --serve' }, 'node'), markers), true, "another copy's mailbox as .mts, never suggested")
+  assert.equal(discover.pluginHelper(discover.commandOf({ argv: ['node', '/proj/relay/local-preview.mts.bak'] }, 'node'), markers), false)
   console.log("ok labels: script (an option's value passed over, an address or code never one), executable, process title, spaces, python -m, bun/deno/ruby, 40 printable chars; Claude Code/browser/IDE/tunnel/relay exclusions")
 
   assert.equal(discover.inside('/a/b', '/a/b'), true)
@@ -481,7 +489,7 @@ try {
   parserChecks()
   await configChecks()
   if (process.platform === 'darwin' || process.platform === 'linux') await liveChecks()
-  else console.log(`SKIP live listeners: ${process.platform} is not supported by discover.cjs yet`)
+  else console.log(`SKIP live listeners: ${process.platform} is not supported by discover.mts yet`)
   console.log('All discover tests passed.')
 } finally {
   await Promise.all([...children].map(stopChild))
