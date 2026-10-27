@@ -186,12 +186,32 @@ async function continueInChrome() {
         return status
       },
       close: () => send('Target.closeTarget', { targetId }),
+      // The page's own clock (ms since its navigation), and the earliest its
+      // guard can have started on it: its script runs once the answer came.
+      now: () => value('performance.now()'),
+      answered: () => value("performance.getEntriesByType('navigation')[0]?.responseStart ?? 0"),
     }
   }
+  // A check that something done within the guard's 400 ms does nothing.
+  // Those 400 ms are the page's, from when its script ran, and each action
+  // is a DevTools round trip: on a loaded machine one can land after them,
+  // where the guard rightly lets it through. So a try counts only when the
+  // page's clock says it landed within them (from the earliest the guard can
+  // have started to just after the action); a later one proves nothing and
+  // is made again, on a fresh page, three times at most.
+  const within = async <T,>(what: string, attempt: () => Promise<{ landed: number } & T>) => {
+    for (let i = 0; i < 3; i++) {
+      const tried = await attempt()
+      if (tried.landed < 400) return tried
+    }
+    ok(false, `in ${browserName}: ${what}: couldn't act within 400 ms in 3 tries`)
+    return null
+  }
+  let browserName = ''
   try {
     const started = await send('Browser.getVersion')
     if (!started.result) return console.log(`SKIP Continue in a real browser (${chrome.path} didn't start: ${started.error?.message} ${said.trim().split('\n').slice(-2).join(' | ')})`)
-    const browserName = started.result.product
+    browserName = started.result.product
     // A click with no move does nothing; a move, and then one, goes on.
     const a = await open('Ann')
     await wait(500)
@@ -218,57 +238,75 @@ async function continueInChrome() {
     await e.close()
     // Out of sight (another tab in front) nothing counts, and back in sight
     // the 400 ms start over: where this browser shows its tab in front alone.
-    const f = await open('Fay', false)
-    const alone = await f.shown()
-    const { result: { targetId: front } } = await send('Target.createTarget', { url: 'about:blank' })
-    await wait(500)
-    const behind = await f.shown()
-    if (!alone || behind !== false) console.log(`SKIP out of sight in ${browserName} (its headless tab ${alone ? 'still shows behind another' : "isn't shown in front"})`)
-    else {
-      // A hidden tab has no input surface: its CDP mouse-move acknowledgments
-      // took 5.0–5.1 s each locally and could exhaust CI's test deadline.
-      // Exercise its page handlers directly; visible tabs still use real input.
-      expect(await f.hiddenInput()).toEqual({ shown: false, disabled: true })
-      await wait(300)
-      const hidden = await f.status()
+    const fay = await within('a move and a click back in front', async () => {
+      const f = await open('Fay', false)
+      const alone = await f.shown()
+      const { result: { targetId: front } } = await send('Target.createTarget', { url: 'about:blank' })
+      await wait(500)
+      const behind = await f.shown()
+      let tried = { landed: 0, skip: !alone || behind !== false, alone: Boolean(alone), hidden: '', back: '', shown: '' }
+      if (!tried.skip) {
+        // A hidden tab has no input surface: its CDP mouse-move acknowledgments
+        // took 5.0–5.1 s each locally and could exhaust CI's test deadline.
+        // Exercise its page handlers directly; visible tabs still use real input.
+        expect(await f.hiddenInput()).toEqual({ shown: false, disabled: true })
+        await wait(300)
+        const hidden = await f.status()
+        // The guard starts over once its tab is in front again, after this.
+        const before = await f.now()
+        await send('Target.closeTarget', { targetId: front })
+        await wait(50)
+        await f.move()
+        await f.click()
+        const landed = (await f.now()) - before
+        await wait(100)
+        const back = await f.status()
+        await wait(450)
+        await f.click()
+        tried = { ...tried, landed, hidden, back, shown: await f.status('done') }
+      }
       await send('Target.closeTarget', { targetId: front })
-      await wait(50)
-      await f.move()
-      await f.click()
-      await wait(100)
-      const back = await f.status()
-      await wait(450)
-      await f.click()
-      const shown = await f.status('done')
-      ok(hidden === 'confirm' && back === 'confirm' && shown === 'done', `in ${browserName}: behind another tab nothing counts, and back in front the 400 ms start over (${hidden}, ${back}, then ${shown})`)
-    }
-    await send('Target.closeTarget', { targetId: front })
-    await f.close()
+      await f.close()
+      return tried
+    })
+    if (fay?.skip) console.log(`SKIP out of sight in ${browserName} (its headless tab ${fay.alone ? 'still shows behind another' : "isn't shown in front"})`)
+    else if (fay) ok(fay.hidden === 'confirm' && fay.back === 'confirm' && fay.shown === 'done', `in ${browserName}: behind another tab nothing counts, and back in front the 400 ms start over (${fay.hidden}, ${fay.back}, then ${fay.shown})`)
     // A move and a click at once (a double-click's second click) do nothing; the same click once the page has been up 400 ms goes on.
-    const b = await open('Ben')
-    await b.move()
-    await b.click()
-    await wait(100)
-    const early = await b.status()
-    await wait(450)
-    await b.click()
-    const later = await b.status('done')
-    ok(early === 'confirm' && later === 'done', `in ${browserName}: a click within 400 ms of the page showing does nothing, and the same click after them continues (${early}, then ${later})`)
-    await b.close()
+    const ben = await within('a move and a click at once', async () => {
+      const b = await open('Ben')
+      const from = await b.answered()
+      await b.move()
+      await b.click()
+      const landed = (await b.now()) - from
+      await wait(100)
+      const early = await b.status()
+      await wait(450)
+      await b.click()
+      const later = await b.status('done')
+      await b.close()
+      return { landed, early, later }
+    })
+    if (ben) ok(ben.early === 'confirm' && ben.later === 'done', `in ${browserName}: a click within 400 ms of the page showing does nothing, and the same click after them continues (${ben.early}, then ${ben.later})`)
     // Keys at once do nothing; after the 400 ms, Tab to Continue and Enter go on.
-    const c = await open('Cal')
-    await c.tab()
-    await c.tab()
-    await c.enter()
-    await wait(300)
-    const keyed = await c.status()
-    await c.close()
+    const cal = await within('keys at once', async () => {
+      const c = await open('Cal')
+      const from = await c.answered()
+      await c.tab()
+      await c.tab()
+      await c.enter()
+      const landed = (await c.now()) - from
+      await wait(300)
+      const keyed = await c.status()
+      await c.close()
+      return { landed, keyed }
+    })
+    const keyed = cal?.keyed
     const d = await open('Dee')
     await wait(500)
     for (let i = 0; i < 4 && !(await d.focused()); i++) await d.tab()
     await d.enter()
     const typed = await d.status('done')
-    ok(keyed === 'confirm' && typed === 'done', `in ${browserName}: keys within 400 ms do nothing, and after them Tab to Continue and Enter continue (${keyed}, then ${typed})`)
+    ok((!cal || keyed === 'confirm') && typed === 'done', `in ${browserName}: keys within 400 ms do nothing, and after them Tab to Continue and Enter continue (${keyed}, then ${typed})`)
     await d.close()
   } finally {
     // Closed through its own pipe, its helpers with it; killed (by its pid) only if that doesn't end it.
