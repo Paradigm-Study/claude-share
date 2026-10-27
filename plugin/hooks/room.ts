@@ -75,7 +75,8 @@ export function diffOf(before: string, after: string): Patch {
   const n = Math.min(a.length, 600)
   const m = Math.min(b.length, 600)
   const dp: number[][] = Array.from({ length: n + 1 }, () => new Array<number>(m + 1).fill(0))
-  for (let i = n - 1; i >= 0; i--) for (let j = m - 1; j >= 0; j--) dp[i]![j] = a[i] === b[j] ? dp[i + 1]![j + 1]! + 1 : Math.max(dp[i + 1]![j]!, dp[i]![j + 1]!)
+  for (let i = n - 1; i >= 0; i--)
+    for (let j = m - 1; j >= 0; j--) dp[i]![j] = a[i] === b[j] ? dp[i + 1]![j + 1]! + 1 : Math.max(dp[i + 1]![j]!, dp[i]![j + 1]!)
   const lines: string[] = []
   let i = 0
   let j = 0

@@ -29,7 +29,21 @@ export type ShareCloud = { state: 'starting' | 'running' | 'stopped'; approver: 
  * host's row above the prompt would (`ShareHostAsk`): `port` and `related`
  * are what a yes shares, and `options` its two answers.
  */
-export type ShareCloudAsk = { id: string; who: string; seat?: string; kind?: ShareHostAsk['kind']; port?: number; label?: string; related?: { port: number; label: string }[]; what: string; extent?: string; preview?: string; always: string; options: string[]; ts: number }
+export type ShareCloudAsk = {
+  id: string
+  who: string
+  seat?: string
+  kind?: ShareHostAsk['kind']
+  port?: number
+  label?: string
+  related?: { port: number; label: string }[]
+  what: string
+  extent?: string
+  preview?: string
+  always: string
+  options: string[]
+  ts: number
+}
 
 export type SharePerson = {
   id: string
@@ -276,7 +290,17 @@ export type ShareTeam = {
 }
 
 /** A session shared with a team, as the team's list shows it. */
-export type ShareTeamSession = { id: string; url: string; title: string; host: string; hostAccount?: string; hostOnline: boolean; people: string[]; /** Who's in it by account. */ accounts?: string[]; createdAt: number }
+export type ShareTeamSession = {
+  id: string
+  url: string
+  title: string
+  host: string
+  hostAccount?: string
+  hostOnline: boolean
+  people: string[]
+  /** Who's in it by account. */ accounts?: string[]
+  createdAt: number
+}
 
 /** A host's invite to a session, as the invitee's Claude Code shows it. */
 export type ShareInvite = { room: { id: string; url: string; title: string; host: string }; from: { name: string }; at: number }

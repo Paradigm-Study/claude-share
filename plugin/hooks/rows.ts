@@ -37,7 +37,12 @@ export type Media = { data: string; type: string }
 export function attachmentsOf(content: unknown): Media[] {
   const out: Media[] = []
   for (const b of blocksOf(content) as (Block & { source?: { type?: unknown; media_type?: unknown; data?: unknown } })[]) {
-    if ((b.type === 'image' || b.type === 'document') && b.source?.type === 'base64' && typeof b.source.data === 'string' && typeof b.source.media_type === 'string') {
+    if (
+      (b.type === 'image' || b.type === 'document') &&
+      b.source?.type === 'base64' &&
+      typeof b.source.data === 'string' &&
+      typeof b.source.media_type === 'string'
+    ) {
       out.push({ data: b.source.data, type: b.source.media_type })
     }
   }
@@ -49,7 +54,8 @@ export function imagesOf(content: unknown): Media[] {
   const out: Media[] = []
   for (const b of blocksOf(content) as (Block & { source?: { type?: unknown; media_type?: unknown; data?: unknown }; data?: unknown; mimeType?: unknown })[]) {
     if (b.type !== 'image') continue
-    if (b.source?.type === 'base64' && typeof b.source.data === 'string' && typeof b.source.media_type === 'string') out.push({ data: b.source.data, type: b.source.media_type })
+    if (b.source?.type === 'base64' && typeof b.source.data === 'string' && typeof b.source.media_type === 'string')
+      out.push({ data: b.source.data, type: b.source.media_type })
     else if (typeof b.data === 'string' && typeof b.mimeType === 'string') out.push({ data: b.data, type: b.mimeType })
   }
   return out
@@ -92,7 +98,13 @@ export function delivered(text: string): { from: string; text: string; midTurn: 
   const address = from && /^(?:uds|bridge):/.test(from) && from.length <= 512 ? from : undefined
   // The sender's permission mode class, as its engine said it: passed on as it is.
   const mode = attr('from-mode')
-  return { from: attr('from-name') ?? attr('source') ?? attr('teammate') ?? 'another session', text: body.trim(), midTurn, ...(address ? { address } : {}), ...(mode && /^[a-z_-]{1,24}$/.test(mode) ? { mode } : {}) }
+  return {
+    from: attr('from-name') ?? attr('source') ?? attr('teammate') ?? 'another session',
+    text: body.trim(),
+    midTurn,
+    ...(address ? { address } : {}),
+    ...(mode && /^[a-z_-]{1,24}$/.test(mode) ? { mode } : {}),
+  }
 }
 
 // The open tags of what a session, a teammate, a channel or an agent
@@ -173,8 +185,12 @@ export function summarizeTool(name: string, input: unknown, cwd: string): { text
         detail: clip(str(i.content), 6, 600),
       }
     case 'Edit': {
-      const minus = str(i.old_string).split('\n').map(l => `- ${l}`)
-      const plus = str(i.new_string).split('\n').map(l => `+ ${l}`)
+      const minus = str(i.old_string)
+        .split('\n')
+        .map(l => `- ${l}`)
+      const plus = str(i.new_string)
+        .split('\n')
+        .map(l => `+ ${l}`)
       return { text: relative(i.file_path, cwd), detail: clip([...minus, ...plus].join('\n'), DETAIL_LINES, 1200) }
     }
     case 'NotebookEdit':
@@ -203,11 +219,7 @@ export function summarizeTool(name: string, input: unknown, cwd: string): { text
  * The rows one transcript message makes. `who` names the person behind a
  * user-typed row; `null` means the row was not typed by a person (skip it).
  */
-export function rowsFromMessage(
-  message: { role?: string; type?: string; isMeta?: boolean; content: unknown },
-  who: string | null,
-  cwd: string,
-): Row[] {
+export function rowsFromMessage(message: { role?: string; type?: string; isMeta?: boolean; content: unknown }, who: string | null, cwd: string): Row[] {
   if (message.isMeta) return []
   const role = message.role ?? message.type
   const rows: Row[] = []
@@ -226,7 +238,10 @@ export function rowsFromMessage(
       } else if (block.type === 'tool_result') {
         // A file read's lines come numbered ("   12\tcode"); the numbers are noise
         // here, and so is what the engine adds for the model (reminders).
-        const text = textOf(block.content).replace(SYSTEM_BLOCKS, '').replace(/^ *\d+\t/gm, '').trim()
+        const text = textOf(block.content)
+          .replace(SYSTEM_BLOCKS, '')
+          .replace(/^ *\d+\t/gm, '')
+          .trim()
         const media = imagesOf(block.content)
         rows.push({
           kind: 'result',
@@ -241,7 +256,10 @@ export function rowsFromMessage(
         rows.push({ kind: 'assistant', text: block.text.trim() })
       } else if (block.type === 'tool_use' && block.name) {
         const { text, detail } = summarizeTool(block.name, block.input, cwd)
-        const input = block.input && typeof block.input === 'object' && JSON.stringify(block.input).length <= INPUT_MAX ? (block.input as Record<string, unknown>) : undefined
+        const input =
+          block.input && typeof block.input === 'object' && JSON.stringify(block.input).length <= INPUT_MAX
+            ? (block.input as Record<string, unknown>)
+            : undefined
         rows.push({ kind: 'tool', tool: block.name, text, detail, id: block.id, input })
       }
     }

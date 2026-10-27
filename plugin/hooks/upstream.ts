@@ -31,7 +31,11 @@ function bypassList(text: string): string[] {
 // A URL's host as the window's proxy is given it: an IPv6 address without
 // its brackets, lowercased (the URL parser keeps a socks5:// URL's host as
 // written), its trailing dot gone.
-const hostOf = (hostname: string) => hostname.toLowerCase().replace(/^\[(.*)\]$/, '$1').replace(/\.$/, '')
+const hostOf = (hostname: string) =>
+  hostname
+    .toLowerCase()
+    .replace(/^\[(.*)\]$/, '$1')
+    .replace(/\.$/, '')
 
 // An upstream's address: http:// (CONNECT), socks5:// or socks5h://. The
 // URL parser refuses what's no address at all (a space in it, no host, a
@@ -82,7 +86,10 @@ export function upstreamFromEnv(env: ProxyEnv): UpstreamFound {
 // apart), or as an IPv6 address without its brackets: the host alone, or
 // null where the URL parser takes none.
 function scutilHost(raw: string): string | null {
-  const bare = raw.trim().replace(/^[a-z][a-z0-9+.-]*:\/\//i, '').replace(/[/?#].*$/, '')
+  const bare = raw
+    .trim()
+    .replace(/^[a-z][a-z0-9+.-]*:\/\//i, '')
+    .replace(/[/?#].*$/, '')
   const literal = !/^\[.*\]$/.test(bare) && (bare.match(/:/g) ?? []).length > 1 ? `[${bare}]` : bare
   try {
     return hostOf(new URL(`http://${literal}`).hostname) || null
@@ -102,7 +109,10 @@ export function upstreamFromScutil(text: string): { upstream: Upstream | null; p
   const value = (key: string) => new RegExp(`^\\s*${key}\\s*:\\s*(.+?)\\s*$`, 'm').exec(text)?.[1]
   const on = (key: string) => value(key) === '1'
   const listed = /ExceptionsList\s*:\s*<array>\s*\{([^}]*)\}/.exec(text)?.[1] ?? ''
-  const exceptions = listed.split('\n').map(line => /^\s*\d+\s*:\s*(.+?)\s*$/.exec(line)?.[1]).filter((x): x is string => Boolean(x))
+  const exceptions = listed
+    .split('\n')
+    .map(line => /^\s*\d+\s*:\s*(.+?)\s*$/.exec(line)?.[1])
+    .filter((x): x is string => Boolean(x))
   const bypass = bypassList(exceptions.join(','))
   let invalid = false
   const pick = (kind: Upstream['kind'], raw?: string, port?: string): Upstream | null => {
@@ -112,6 +122,8 @@ export function upstreamFromScutil(text: string): { upstream: Upstream | null; p
     if (!host) invalid = true
     return host ? { kind, host, port: p, bypass } : null
   }
-  const upstream = (on('HTTPSEnable') ? pick('http', value('HTTPSProxy'), value('HTTPSPort')) : null) ?? (on('SOCKSEnable') ? pick('socks5', value('SOCKSProxy'), value('SOCKSPort')) : null)
+  const upstream =
+    (on('HTTPSEnable') ? pick('http', value('HTTPSProxy'), value('HTTPSPort')) : null) ??
+    (on('SOCKSEnable') ? pick('socks5', value('SOCKSProxy'), value('SOCKSPort')) : null)
   return { upstream, pac: !upstream && on('ProxyAutoConfigEnable'), invalid: !upstream && invalid }
 }

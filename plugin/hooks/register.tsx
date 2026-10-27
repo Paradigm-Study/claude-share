@@ -16,9 +16,54 @@
 // a side chat Claude never reads, and the host's controls).
 
 import { atom, memberOf, read, update } from 'claude-code'
-import type { Elements, EngineInterface, HookStream, ProcessSpawnChunk, ProcessSpawnResult, Register, RenderChildren, RenderSurface, Timer, TurnStepChunk } from 'claude-code'
+import type {
+  Elements,
+  EngineInterface,
+  HookStream,
+  ProcessSpawnChunk,
+  ProcessSpawnResult,
+  Register,
+  RenderChildren,
+  RenderSurface,
+  Timer,
+  TurnStepChunk,
+} from 'claude-code'
 
-import type { HostShare, ShareAccount, ShareActivity, ShareChange, ShareChat, ShareCloud, ShareCloudAsk, ShareDoing, ShareFileMeta, ShareGuestPrompt, ShareHostAsk, ShareHostMemory, ShareInvite, ShareLocalPreview, ShareMailboxHelper, ShareMode, ShareNeedAsked, ShareOwner, SharePeerRelay, SharePeerRoute, SharePeerSend, SharePerson, SharePolicy, SharePrefs, SharePreviewWindow, ShareRoom, ShareShown, ShareTeam, ShareTeams, ShareTeamSession, ShareTrust, ShareTurn, ShareWorking } from '../types'
+import type {
+  HostShare,
+  ShareAccount,
+  ShareActivity,
+  ShareChange,
+  ShareChat,
+  ShareCloud,
+  ShareCloudAsk,
+  ShareDoing,
+  ShareFileMeta,
+  ShareGuestPrompt,
+  ShareHostAsk,
+  ShareHostMemory,
+  ShareInvite,
+  ShareLocalPreview,
+  ShareMailboxHelper,
+  ShareMode,
+  ShareNeedAsked,
+  ShareOwner,
+  SharePeerRelay,
+  SharePeerRoute,
+  SharePeerSend,
+  SharePerson,
+  SharePolicy,
+  SharePrefs,
+  SharePreviewWindow,
+  ShareRoom,
+  ShareShown,
+  ShareTeam,
+  ShareTeams,
+  ShareTeamSession,
+  ShareTrust,
+  ShareTurn,
+  ShareWorking,
+} from '../types'
 import { fit, isModern } from './fit'
 import { BAD, GOOD, ago, avatarSvg, cloverSvg, colorFor, colorsFor, labelsFor, liveSvg, stackSvg, toolGlyph } from './look'
 import { REACTS, diffOf, mentionsOf, patchOf, replyKey, took, writeOf } from './room'
@@ -28,11 +73,59 @@ import { attachmentsOf, delivered, neutralize, PEER_ID, rowsFromMessage, rowsToM
 import type { Media, RoomImage, Row } from './rows'
 import { SERVER_URL } from './server'
 import { readTargets, realInside } from './paths'
-import { browserFamily, browserName, chromeFlags, chromePrefs, chromePrefsScript, detectScript, FIREFOX_MIN, FIREFOX_PATH_MAX, firefoxFlags, firefoxProfileScript, gcScript, hostProfileName, killScript, LAUNCH_LOCK_BUSY, launchArgv, launchLockScript, launchUnlockScript, lockScript, parseDetect, profileName, profileScript, proxyLine, trashScript, windowOf } from './window'
+import {
+  browserFamily,
+  browserName,
+  chromeFlags,
+  chromePrefs,
+  chromePrefsScript,
+  detectScript,
+  FIREFOX_MIN,
+  FIREFOX_PATH_MAX,
+  firefoxFlags,
+  firefoxProfileScript,
+  gcScript,
+  hostProfileName,
+  killScript,
+  LAUNCH_LOCK_BUSY,
+  launchArgv,
+  launchLockScript,
+  launchUnlockScript,
+  lockScript,
+  parseDetect,
+  profileName,
+  profileScript,
+  proxyLine,
+  trashScript,
+  windowOf,
+} from './window'
 import type { BrowserFamily, BrowserFound, WindowPlatform } from './window'
 import { upstreamFromEnv, upstreamFromScutil } from './upstream'
 import type { Upstream } from './upstream'
-import { ASK_PORTS, alsoUses, cleanLabel, dependencyFor, dependencyOf, dependencyTitle, discoverResult, everyName, everyService, heldResult, pageLook, previewHost, previewScheme, previewUrl, questionsOf, relayedResult, rootMissing, serviceName, servicesOf, shareTooWords, urlHost, urlScheme } from './preview'
+import {
+  ASK_PORTS,
+  alsoUses,
+  cleanLabel,
+  dependencyFor,
+  dependencyOf,
+  dependencyTitle,
+  discoverResult,
+  everyName,
+  everyService,
+  heldResult,
+  pageLook,
+  previewHost,
+  previewScheme,
+  previewUrl,
+  questionsOf,
+  relayedResult,
+  rootMissing,
+  serviceName,
+  servicesOf,
+  shareTooWords,
+  urlHost,
+  urlScheme,
+} from './preview'
 import type { Discovered, DiscoveredService, PageLook, PreviewHost } from './preview'
 import { curlString, localHeaders, pageHead, PROXY_FETCH_MAX, PROXY_HEAD_MAX, proxyHead, proxyPage } from './proxy'
 
@@ -100,12 +193,18 @@ const ownersA = atom({ plugin: 'shared-session', key: 'owners' } as const, {} as
 const liveUpdatesA = atom({ plugin: 'shared-session', key: 'liveUpdates' } as const, null as 'running' | 'next' | 'pinned' | null)
 const replayRunF = atom({ plugin: 'shared-session', key: 'replayRun' } as const, null as { tools?: string[]; hidden?: true } | null)
 const toolRowsA = atom({ plugin: 'shared-session', key: 'toolRows' } as const, 'grouped' as 'grouped' | 'each')
-const approvingA = atom({ plugin: 'shared-session', key: 'approving' } as const, null as { id: string; who: string; what: string; extent?: string; always: string; more: number } | null)
+const approvingA = atom(
+  { plugin: 'shared-session', key: 'approving' } as const,
+  null as { id: string; who: string; what: string; extent?: string; always: string; more: number } | null,
+)
 // The room's host in the cloud (docs/cloud-host.md), its approver's questions, and a move under way.
 const cloudA = atom({ plugin: 'shared-session', key: 'cloud' } as const, null as ShareCloud | null)
 const cloudAsksA = atom({ plugin: 'shared-session', key: 'cloudAsks' } as const, [] as ShareCloudAsk[])
 const cloudTrustedA = atom({ plugin: 'shared-session', key: 'cloudTrusted' } as const, [] as string[])
-const cloudMoveA = atom({ plugin: 'shared-session', key: 'cloudMove' } as const, null as { stage: 'idle' | 'token' | 'packing' | 'starting' | 'home' | 'failed'; note?: string } | null)
+const cloudMoveA = atom(
+  { plugin: 'shared-session', key: 'cloudMove' } as const,
+  null as { stage: 'idle' | 'token' | 'packing' | 'starting' | 'home' | 'failed'; note?: string } | null,
+)
 type CloudMove = { stage: 'idle' | 'token' | 'packing' | 'starting' | 'home' | 'failed'; note?: string }
 const cloudMove = (stage: CloudMove['stage'], note?: string): CloudMove => (note ? { stage, note } : { stage })
 // Host: a teammate's calls put to the host and not answered yet, by
@@ -155,10 +254,26 @@ const closingA = atom({ plugin: 'shared-session', key: 'closing' } as const, nul
 const stoppingRoomA = atom({ plugin: 'shared-session', key: 'stoppingRoom' } as const, null as string | null)
 const newerA = atom({ plugin: 'shared-session', key: 'newer' } as const, null as string | null)
 // The Update button's run: under way, or what it did and when.
-const updatingA = atom({ plugin: 'shared-session', key: 'updating' } as const, null as { state: 'running' } | { state: 'done'; ok: boolean; text: string; at: number } | null)
+const updatingA = atom(
+  { plugin: 'shared-session', key: 'updating' } as const,
+  null as { state: 'running' } | { state: 'done'; ok: boolean; text: string; at: number } | null,
+)
 const pagesA = atom({ plugin: 'shared-session', key: 'pages' } as const, {} as Record<string, Record<string, unknown>>)
 const updatesA = atom({ plugin: 'shared-session', key: 'updates' } as const, null as boolean | null)
-const NO_TEAMS: ShareTeams = { server: '', account: null, teams: [], current: null, byLink: false, sessions: [], members: [], providers: [], signingIn: null, invite: null, loaded: 0, error: null }
+const NO_TEAMS: ShareTeams = {
+  server: '',
+  account: null,
+  teams: [],
+  current: null,
+  byLink: false,
+  sessions: [],
+  members: [],
+  providers: [],
+  signingIn: null,
+  invite: null,
+  loaded: 0,
+  error: null,
+}
 const teamsA = atom({ plugin: 'shared-session', key: 'teams' } as const, NO_TEAMS)
 const invitesA = atom({ plugin: 'shared-session', key: 'invites' } as const, [] as ShareInvite[])
 const invitedA = atom({ plugin: 'shared-session', key: 'invited' } as const, {} as Record<string, number>)
@@ -234,7 +349,16 @@ type ServerEvent = {
   body: Record<string, unknown>
 }
 
-type EventsPage = { seq: number; events: ServerEvent[]; people: SharePerson[]; previews?: unknown; ended: boolean; title: string; more?: boolean; cloud?: CloudSummary }
+type EventsPage = {
+  seq: number
+  events: ServerEvent[]
+  people: SharePerson[]
+  previews?: unknown
+  ended: boolean
+  title: string
+  more?: boolean
+  cloud?: CloudSummary
+}
 // What a room's pages say of its host in the cloud.
 type CloudSummary = { state: ShareCloud['state']; approver: string; since: number; until?: number }
 
@@ -249,7 +373,13 @@ async function isRunner($: $): Promise<boolean> {
 // The room's word on its cloud host, this session's part in it kept.
 function cloudFrom(summary: CloudSummary | undefined, was: ShareCloud | null): ShareCloud | null {
   if (!summary) return null
-  return { state: summary.state, approver: summary.approver, since: summary.since, ...(summary.until ? { until: summary.until } : {}), mine: was?.mine ?? false }
+  return {
+    state: summary.state,
+    approver: summary.approver,
+    since: summary.since,
+    ...(summary.until ? { until: summary.until } : {}),
+    mine: was?.mine ?? false,
+  }
 }
 
 // The engine hands a plugin at most 4 MiB of a response body, in bytes, cut
@@ -363,7 +493,9 @@ async function nameLiveDir($: $, on: boolean): Promise<boolean> {
   const read0 = await readSettings($)
   if (!dir || !read0) return false
   const env = { ...((read0.settings.env ?? {}) as Record<string, string>) }
-  const dirs = String(env.CLAUDE_CODE_PLUGIN_DIRS ?? '').split(':').filter(d => d && d !== dir)
+  const dirs = String(env.CLAUDE_CODE_PLUGIN_DIRS ?? '')
+    .split(':')
+    .filter(d => d && d !== dir)
   if (on) {
     env.CLAUDE_CODE_PLUGIN_DIRS = [...dirs, dir].join(':')
     env.CLAUDE_CODE_PLUGIN_DIR_WATCH = '1'
@@ -447,7 +579,9 @@ async function selfUpdate($: $, latest: string) {
       $,
       [
         `live=${sq(live)}; next="$live.next"; lock="$live.lock"`,
-        apply ? 'if command -v rsync >/dev/null 2>&1; then rsync -a --delete --checksum --exclude .claude "$next/" "$live/"; else cp -R "$next/." "$live/"; fi' : ':',
+        apply
+          ? 'if command -v rsync >/dev/null 2>&1; then rsync -a --delete --checksum --exclude .claude "$next/" "$live/"; else cp -R "$next/." "$live/"; fi'
+          : ':',
         'rm -rf "$next" "$lock"; echo done',
         '',
       ].join('\n'),
@@ -478,7 +612,9 @@ async function catchUpFromInstalled($: $) {
   let installed: { installPath?: unknown; version?: unknown } | undefined
   try {
     const list = JSON.parse(await $.fs.read(`${dir}/plugins/installed_plugins.json`))
-    installed = ((list.plugins ?? list)[INSTALLED_ID] as { installPath?: unknown; version?: unknown }[] | undefined)?.find(e => typeof e.installPath === 'string')
+    installed = ((list.plugins ?? list)[INSTALLED_ID] as { installPath?: unknown; version?: unknown }[] | undefined)?.find(
+      e => typeof e.installPath === 'string',
+    )
   } catch {
     return
   }
@@ -574,14 +710,22 @@ async function readUpdates($: $) {
     on = path && !(await $.fs.exists(path).catch(() => true)) ? false : null
   }
   const dir = await liveDirOf($)
-  const named = Boolean(dir && String((settings.env as Record<string, unknown> | undefined)?.CLAUDE_CODE_PLUGIN_DIRS ?? '').split(':').includes(dir))
+  const named = Boolean(
+    dir &&
+    String((settings.env as Record<string, unknown> | undefined)?.CLAUDE_CODE_PLUGIN_DIRS ?? '')
+      .split(':')
+      .includes(dir),
+  )
   // The marketplace added again (moved to GitHub, say) comes back without
   // autoUpdate, and the plugin's options with it. The folder still named says
   // the person chose updates (turning them off un-names it): on again.
   const known = (settings.extraKnownMarketplaces ?? {}) as Record<string, Record<string, unknown>>
   if (path && named && known[MARKETPLACE] && known[MARKETPLACE].autoUpdate === undefined) {
     try {
-      await $.fs.write(path, `${JSON.stringify({ ...settings, extraKnownMarketplaces: { ...known, [MARKETPLACE]: { ...known[MARKETPLACE], autoUpdate: true } } }, null, 2)}\n`)
+      await $.fs.write(
+        path,
+        `${JSON.stringify({ ...settings, extraKnownMarketplaces: { ...known, [MARKETPLACE]: { ...known[MARKETPLACE], autoUpdate: true } } }, null, 2)}\n`,
+      )
       on = true
     } catch {}
   }
@@ -614,7 +758,7 @@ async function writeUpdates($: $, on: boolean) {
   try {
     await $.fs.write(path, `${JSON.stringify(settings, null, 2)}\n`)
   } catch {
-    $.ui.toast('Couldn\'t change it here: use /plugin → Marketplaces → claude-share')
+    $.ui.toast("Couldn't change it here: use /plugin → Marketplaces → claude-share")
     return
   }
   await update($, updatesA, () => on)
@@ -658,12 +802,15 @@ function secureServer(url: string): boolean {
 }
 class PlainServer extends Error {
   constructor(url: string) {
-    super(`The share server ${url} is plain http, which would send everyone's tokens unencrypted. Use its https:// address (plain http works only for a server on this computer).`)
+    super(
+      `The share server ${url} is plain http, which would send everyone's tokens unencrypted. Use its https:// address (plain http works only for a server on this computer).`,
+    )
   }
 }
 // A room saved on such a server isn't taken up again (`resumeHosting`,
 // `resumeJoined`): its token would go with the first request.
-const plainSaved = (server: string) => `This session's room is on ${server}, plain http, which would send its tokens unencrypted, so it isn't taken up again. Share or join again through an https:// server.`
+const plainSaved = (server: string) =>
+  `This session's room is on ${server}, plain http, which would send its tokens unencrypted, so it isn't taken up again. Share or join again through an https:// server.`
 let myName: string | undefined
 // An entry held (`hold`) waits for its pictures to go up, and what follows it waits too.
 let outbox: { type: string; body: Record<string, unknown>; hold?: boolean }[] = []
@@ -1076,12 +1223,7 @@ let rideSubmitted = false
 // ---------------------------------------------------------------------------
 // Server
 
-async function api<T>(
-  $: $,
-  server: string,
-  path: string,
-  init: { method?: string; token?: string; body?: unknown; account?: string } = {},
-): Promise<T> {
+async function api<T>($: $, server: string, path: string, init: { method?: string; token?: string; body?: unknown; account?: string } = {}): Promise<T> {
   // Nothing to a share server over plain http elsewhere, whatever brought it here.
   if (!secureServer(server)) throw new PlainServer(server)
   const headers: Record<string, string> = { 'content-type': 'application/json' }
@@ -1162,7 +1304,10 @@ async function stillSeated($: $, room: ShareRoom, status: number): Promise<boole
     const again = await reseat($, room)
     if (again.ok) return true
     if (!again.gone) return true // the server didn't answer: try again later
-    await closeRoom($, 'ended', { room, log: again.why && !/no longer shared/i.test(again.why) ? `Left ${room.host}'s session: ${again.why}` : `${room.host}'s session is no longer shared.` })
+    await closeRoom($, 'ended', {
+      room,
+      log: again.why && !/no longer shared/i.test(again.why) ? `Left ${room.host}'s session: ${again.why}` : `${room.host}'s session is no longer shared.`,
+    })
     return false
   }
   const mode = await read($, modeA)
@@ -1171,7 +1316,11 @@ async function stillSeated($: $, room: ShareRoom, status: number): Promise<boole
   const leftHere = mode === 'guest' && status === 410 && (await roomStillShared($, room))
   await closeRoom($, 'ended', {
     room,
-    log: leftHere ? `You left ${room.host}'s session from the Team panel.` : mode === 'guest' ? `${room.host}'s session is no longer shared.` : 'Sharing ended: the room closed on the server. Press Share to start a new one.',
+    log: leftHere
+      ? `You left ${room.host}'s session from the Team panel.`
+      : mode === 'guest'
+        ? `${room.host}'s session is no longer shared.`
+        : 'Sharing ended: the room closed on the server. Press Share to start a new one.',
   })
   return false
 }
@@ -1220,7 +1369,11 @@ async function liveFeed($: $, turnId: string): Promise<(chunk: TurnStepChunk) =>
   return chunk => {
     if (!s.live) return
     // Someone may join mid-step: looked at again every 50 pieces.
-    if (++seen % 50 === 0) void othersHere().then(w => void (watching = w), () => {})
+    if (++seen % 50 === 0)
+      void othersHere().then(
+        w => void (watching = w),
+        () => {},
+      )
     if (!watching) return
     if (chunk.kind === 'text' && chunk.text) send($, 'delta', { turnId, text: chunk.text })
     else if (chunk.kind === 'thinking' && chunk.text) send($, 'delta', { turnId, thinking: chunk.text })
@@ -1426,7 +1579,8 @@ type RoomAsk = (typeof ROOM_ASKS)[number]
 // Each answered on its own, never awaited by the stream, and whatever goes
 // wrong in one goes to the debug log, never unhandled.
 function answerRoomAsk($: $, room: ShareRoom, kind: RoomAsk, ask: Record<string, unknown>) {
-  const answering = kind === 'proxy' ? answerProxy($, room, ask) : kind === 'ws' ? relaySocket($, room, ask) : kind === 'tcp' ? relayTcp($, room, ask) : hostNeed($, room, ask)
+  const answering =
+    kind === 'proxy' ? answerProxy($, room, ask) : kind === 'ws' ? relaySocket($, room, ask) : kind === 'tcp' ? relayTcp($, room, ask) : hostNeed($, room, ask)
   void answering.catch(error => {
     try {
       $.ui.log(`Shared session: the room's ${kind}: ${String((error as Error)?.message ?? error)}`, { to: 'debug' })
@@ -1511,7 +1665,10 @@ async function runStream($: $, generation: number) {
           const ask = ROOM_ASKS.find(kind => message[kind] && typeof message[kind] === 'object')
           if (typeof message.httpStatus === 'number') status = message.httpStatus
           else if (ask) answerRoomAsk($, room, ask, message[ask] as Record<string, unknown>)
-          else if (message.peer && typeof message.peer === 'object') void takePeer($, room, host, message.peer as Record<string, unknown>).catch(error => $.ui.log(`Shared session: a message between sessions: ${String((error as Error)?.message ?? error)}`, { to: 'debug' }))
+          else if (message.peer && typeof message.peer === 'object')
+            void takePeer($, room, host, message.peer as Record<string, unknown>).catch(error =>
+              $.ui.log(`Shared session: a message between sessions: ${String((error as Error)?.message ?? error)}`, { to: 'debug' }),
+            )
           else if (Array.isArray(message.events)) {
             if (!streamUp && !delivered) $.ui.log('Shared session: listening on a stream', { to: 'debug' })
             // Connected: the Stops the room didn't hear are told again.
@@ -1604,8 +1761,10 @@ async function hostResult($: $, room: ShareRoom, call: { hostId: string; seq: nu
     for (const event of page?.events ?? []) {
       cursor = Math.max(cursor, event.seq)
       const row = event.body as unknown as Row
-      if (event.type === 'row' && row.kind === 'result' && row.id === call.hostId) return withImages($, room, `${row.isError ? 'Error: ' : ''}${stripLineNumbers(row.text)}`, row.images)
-      if (event.type === 'turn' && event.body.state === 'end' && (!call.turnId || event.body.turnId === call.turnId)) return "(the host's turn ended before this finished)"
+      if (event.type === 'row' && row.kind === 'result' && row.id === call.hostId)
+        return withImages($, room, `${row.isError ? 'Error: ' : ''}${stripLineNumbers(row.text)}`, row.images)
+      if (event.type === 'turn' && event.body.state === 'end' && (!call.turnId || event.body.turnId === call.turnId))
+        return "(the host's turn ended before this finished)"
       if (event.type === 'ended') return '(sharing ended)'
     }
     if (page?.ended) return '(sharing ended)'
@@ -1746,7 +1905,8 @@ async function absorb($: $, room: ShareRoom, mode: ShareMode, event: ServerEvent
     case 'declined':
       // A message one of this person's sessions wrote here that the host's
       // side couldn't take in: that session hears why.
-      if (live && mode === 'guest' && typeof body.pid === 'string' && typeof body.reason === 'string') void declinedRelay($, body.pid, body.reason).catch(() => {})
+      if (live && mode === 'guest' && typeof body.pid === 'string' && typeof body.reason === 'string')
+        void declinedRelay($, body.pid, body.reason).catch(() => {})
       break
     case 'approval':
       if (body.pending === false && typeof body.what === 'string') {
@@ -1794,7 +1954,8 @@ async function absorb($: $, room: ShareRoom, mode: ShareMode, event: ServerEvent
     case 'artifact': {
       const shown = shownOf(event)
       if (!shown) break
-      const guest = mode === 'guest', preview = shown.kind === 'preview'
+      const guest = mode === 'guest',
+        preview = shown.kind === 'preview'
       let kept = shown
       await update($, shownA, list => {
         const old = list.find(s => s.key === shown.key)
@@ -1827,7 +1988,13 @@ async function absorb($: $, room: ShareRoom, mode: ShareMode, event: ServerEvent
           lastTurnFor = turnBy
           turnBy = null
         }
-        await update($, turnsA, list => (s.live ? list.map(t => (t.id === id && t.ms === undefined ? { ...t, ms: typeof body.durationMs === 'number' ? body.durationMs : Math.max(0, event.ts - t.at) } : t)) : list))
+        await update($, turnsA, list =>
+          s.live
+            ? list.map(t =>
+                t.id === id && t.ms === undefined ? { ...t, ms: typeof body.durationMs === 'number' ? body.durationMs : Math.max(0, event.ts - t.at) } : t,
+              )
+            : list,
+        )
       }
       break
     case 'row':
@@ -1925,7 +2092,12 @@ const previewName = (title: unknown, dependency: number | true | undefined) =>
 // What a preview was forwarded as: forwarded at all, the page it's for, its
 // address's spelling and its scheme. Absent fields stay absent.
 function forwardedAs(s: Pick<ShareShown, 'tcp' | 'host' | 'scheme' | 'dependency'>): Pick<ShareShown, 'tcp' | 'host' | 'scheme' | 'dependency'> {
-  return { ...(s.tcp ? { tcp: true } : {}), ...(s.host ? { host: s.host } : {}), ...(s.scheme ? { scheme: s.scheme } : {}), ...(s.dependency !== undefined ? { dependency: s.dependency } : {}) }
+  return {
+    ...(s.tcp ? { tcp: true } : {}),
+    ...(s.host ? { host: s.host } : {}),
+    ...(s.scheme ? { scheme: s.scheme } : {}),
+    ...(s.dependency !== undefined ? { dependency: s.dependency } : {}),
+  }
 }
 
 // What an artifact event shows in the Room panel.
@@ -1982,7 +2154,8 @@ function roomPreviewOf(value: unknown): RoomPreview | null {
 // first in Shown (its artifact older, or out of the room's history), until
 // its artifact says more.
 function listedShown(list: readonly ShareShown[], listed: ReadonlyMap<string, RoomPreview>, now: number): { next: readonly ShareShown[]; ended: ShareShown[] } {
-  const ended: ShareShown[] = [], known = new Set<string>()
+  const ended: ShareShown[] = [],
+    known = new Set<string>()
   let changed = false
   const kept = list.map(x => {
     if (x.kind !== 'preview' || !x.pid) return x
@@ -1998,7 +2171,17 @@ function listedShown(list: readonly ShareShown[], listed: ReadonlyMap<string, Ro
     if (!said.tcp) delete moved.tcp
     return moved
   })
-  const fresh = [...listed.values()].filter(p => !known.has(p.pid)).map((p): ShareShown => ({ key: `preview:${p.pid}`, kind: 'preview', name: previewName(p.title ?? `localhost:${p.port}`, undefined), ts: now, pid: p.pid, port: p.port, ...(p.tcp ? { tcp: true } : {}) }))
+  const fresh = [...listed.values()]
+    .filter(p => !known.has(p.pid))
+    .map((p): ShareShown => ({
+      key: `preview:${p.pid}`,
+      kind: 'preview',
+      name: previewName(p.title ?? `localhost:${p.port}`, undefined),
+      ts: now,
+      pid: p.pid,
+      port: p.port,
+      ...(p.tcp ? { tcp: true } : {}),
+    }))
   return { next: fresh.length ? keptShown([...fresh, ...kept]) : changed ? kept : list, ended }
 }
 
@@ -2056,8 +2239,10 @@ async function forwardedNow($: $): Promise<Forwarded[]> {
 // What a page uses beside it: what the host forwarded for its port, or for
 // every page (`dependency: true`); and the other way, the pages a
 // dependency is for. One rule, read both ways.
-const dependenciesOf = (forwarded: readonly Forwarded[], page: { pid: string; port: number }) => forwarded.filter(f => f.pid !== page.pid && (f.dependency === true || f.dependency === page.port))
-const pagesOf = (forwarded: readonly Forwarded[], dependency: Pick<ShareShown, 'dependency'>) => forwarded.filter(f => f.dependency === undefined && (dependency.dependency === true || f.port === dependency.dependency))
+const dependenciesOf = (forwarded: readonly Forwarded[], page: { pid: string; port: number }) =>
+  forwarded.filter(f => f.pid !== page.pid && (f.dependency === true || f.dependency === page.port))
+const pagesOf = (forwarded: readonly Forwarded[], dependency: Pick<ShareShown, 'dependency'>) =>
+  forwarded.filter(f => f.dependency === undefined && (dependency.dependency === true || f.port === dependency.dependency))
 // Where a forwarded page opens: the host's own address, as the host spelled it.
 const pageUrl = (page: Forwarded) => previewUrl(page.host, page.port, page.path, page.scheme)
 // The room beside the transcript: every turn, the files Claude changed,
@@ -2214,7 +2399,8 @@ async function setPrefs($: $, change: Partial<SharePrefs>) {
 }
 
 // The update command (or either half of it), as the "is out" line gives it.
-const UPDATE_TYPED = /^\s*claude\s+plugin\s+(?:marketplace\s+update\s+claude-share|update\s+shared-session(?:@claude-share)?)(?:\s*(?:&&|;)\s*claude\s+plugin\s+(?:marketplace\s+update\s+claude-share|update\s+shared-session(?:@claude-share)?))*\s*$/
+const UPDATE_TYPED =
+  /^\s*claude\s+plugin\s+(?:marketplace\s+update\s+claude-share|update\s+shared-session(?:@claude-share)?)(?:\s*(?:&&|;)\s*claude\s+plugin\s+(?:marketplace\s+update\s+claude-share|update\s+shared-session(?:@claude-share)?))*\s*$/
 
 // Guest (or anyone who typed it here): the update, run on this computer with
 // its own Claude Code (\`claude\` on the PATH, else Claude Desktop's newest),
@@ -2239,7 +2425,11 @@ async function updateHere($: $): Promise<{ ok: boolean; text: string }> {
       '',
     ].join('\n'),
   )
-  if (code !== 0) return say(false, `Couldn't update Shared Sessions here (${out.trim().split('\n').pop() || 'no output'}). In a terminal on this computer, run: ${UPDATE_COMMAND}`)
+  if (code !== 0)
+    return say(
+      false,
+      `Couldn't update Shared Sessions here (${out.trim().split('\n').pop() || 'no output'}). In a terminal on this computer, run: ${UPDATE_COMMAND}`,
+    )
   let installed = ''
   try {
     const list = JSON.parse(await $.fs.read(`${(await configDirOf($)) ?? `${home}/.claude`}/plugins/installed_plugins.json`))
@@ -2250,7 +2440,11 @@ async function updateHere($: $): Promise<{ ok: boolean; text: string }> {
     await catchUpFromInstalled($)
     return say(true, `Shared Sessions ${installed} is installed here and loads into this session in place.`)
   }
-  if (installed && newerThan(installed, mine)) return say(true, `Shared Sessions ${installed} is installed here. Start a new session to use it (in Claude Desktop, quit and reopen the app); with Updates on in the Room, later releases load in place.`)
+  if (installed && newerThan(installed, mine))
+    return say(
+      true,
+      `Shared Sessions ${installed} is installed here. Start a new session to use it (in Claude Desktop, quit and reopen the app); with Updates on in the Room, later releases load in place.`,
+    )
   return say(true, `Shared Sessions is up to date here (${installed || mine}).`)
 }
 
@@ -2281,14 +2475,28 @@ async function updateRow($: $, el: UI, compact: boolean) {
   const updates = await read($, updatesA)
   const updating = await read($, updatingA)
   const now = await $.clock.now()
-  if (updating?.state === 'running') return <Text key="updating" dimColor>Updating Shared Sessions…</Text>
+  if (updating?.state === 'running')
+    return (
+      <Text key="updating" dimColor>
+        Updating Shared Sessions…
+      </Text>
+    )
   if (updating?.state === 'done' && now - updating.at < 120_000) {
     return (
       <Box key="updated" flexDirection="row" gap={1} alignItems="center" justifyContent="space-between">
         <Box flexShrink={1} minWidth={0}>
-          <Text color={updating.ok ? 'success' : 'error'} wrap={compact ? 'truncate-end' : 'wrap'}>{updating.text}</Text>
+          <Text color={updating.ok ? 'success' : 'error'} wrap={compact ? 'truncate-end' : 'wrap'}>
+            {updating.text}
+          </Text>
         </Box>
-        {updating.ok || compact ? null : <Button key="copy-update" label="Copy update command" plain onPress={press => void copyText($, UPDATE_COMMAND, 'Update command copied: paste it in a terminal', press.surface)} />}
+        {updating.ok || compact ? null : (
+          <Button
+            key="copy-update"
+            label="Copy update command"
+            plain
+            onPress={press => void copyText($, UPDATE_COMMAND, 'Update command copied: paste it in a terminal', press.surface)}
+          />
+        )}
       </Box>
     )
   }
@@ -2297,7 +2505,9 @@ async function updateRow($: $, el: UI, compact: boolean) {
   return (
     <Box key="update" flexDirection="row" gap={1} alignItems="center" justifyContent="space-between">
       <Box flexShrink={1} minWidth={0}>
-        <Text color="claude" wrap="truncate-end">{compact ? `● ${newer} is out` : `● Version ${newer} is out (this session runs ${mine})`}</Text>
+        <Text color="claude" wrap="truncate-end">
+          {compact ? `● ${newer} is out` : `● Version ${newer} is out (this session runs ${mine})`}
+        </Text>
       </Box>
       <Box flexShrink={0} flexDirection="row" gap={1}>
         {[
@@ -2327,7 +2537,9 @@ async function noteBehind($: $, people: SharePerson[]) {
   for (const p of behind) {
     notedBehind.add(`${p.name}@${p.version}`)
     if (!latest || !newerThan(latest, p.version!)) continue
-    $.ui.log(`${p.name} runs Shared Sessions ${p.version}, older than ${latest}: some of what you show (pictures, pages) may not reach them as it does here. They update with: ${UPDATE_COMMAND}`)
+    $.ui.log(
+      `${p.name} runs Shared Sessions ${p.version}, older than ${latest}: some of what you show (pictures, pages) may not reach them as it does here. They update with: ${UPDATE_COMMAND}`,
+    )
   }
 }
 
@@ -2355,7 +2567,15 @@ async function receive($: $, mode: ShareMode, room: ShareRoom, page: EventsPage)
     switch (event.type) {
       case 'prompt':
         if (mode === 'host' && typeof body.text === 'string') {
-          await acceptPrompt($, event.from.name, event.from.seat ?? '', body.text, typeof body.pid === 'string' ? body.pid : '', Array.isArray(body.attachments) ? (body.attachments as ShareFileMeta[]) : [], event.from.approver === true)
+          await acceptPrompt(
+            $,
+            event.from.name,
+            event.from.seat ?? '',
+            body.text,
+            typeof body.pid === 'string' ? body.pid : '',
+            Array.isArray(body.attachments) ? (body.attachments as ShareFileMeta[]) : [],
+            event.from.approver === true,
+          )
         }
         break
       case 'stop':
@@ -2386,7 +2606,12 @@ async function receive($: $, mode: ShareMode, room: ShareRoom, page: EventsPage)
           if ((await read($, workingA))?.doing?.kind !== 'thinking') await update($, workingA, w => (w ? { ...w, doing: thinking } : w))
         } else if (body.drafting && typeof body.drafting === 'object') {
           const d = body.drafting as { tool?: unknown; target?: unknown; chars?: unknown }
-          const doing: ShareDoing = { kind: 'writing', tool: String(d.tool ?? ''), target: typeof d.target === 'string' ? d.target : '', chars: Number(d.chars) || 0 }
+          const doing: ShareDoing = {
+            kind: 'writing',
+            tool: String(d.tool ?? ''),
+            target: typeof d.target === 'string' ? d.target : '',
+            chars: Number(d.chars) || 0,
+          }
           await update($, workingA, w => (w ? { ...w, doing } : w))
         }
         break
@@ -2485,7 +2710,8 @@ let closeMark: { how: Exit; room: string } | 'down' | 'unknown' = 'unknown'
 
 function closeRoom($: $, how: Exit, opts: ExitOptions = {}): Promise<void> {
   if (closing) return untilClosed($)
-  const s = scope, live = s.live
+  const s = scope,
+    live = s.live
   // A room this session is no longer in (an old feed's news of it): nothing here.
   if (opts.room && !(live && s.key === roomIdentity(opts.room))) return Promise.resolve()
   // 1. At once, before anything waits: what runs for it (`RoomChildren`) too.
@@ -2563,7 +2789,8 @@ async function finishClose($: $, cut: { how: Exit; room: string }) {
   const room = await read($, roomA)
   // A room live here now, or another set since: only the marker goes.
   if (!scope.live && (!room || roomIdentity(room) === cut.room)) {
-    const guest = room ? room.seat !== 'host' : false, forGood = cut.how !== 'keep'
+    const guest = room ? room.seat !== 'host' : false,
+      forGood = cut.how !== 'keep'
     const w = room && guest && forGood ? await read($, previewWindowA) : null
     await update($, modeA, () => 'idle')
     if (room && (cut.how === 'leave' || cut.how === 'stop' || cut.how === 'clear')) await tellRoom($, room, guest)
@@ -2577,12 +2804,14 @@ async function finishClose($: $, cut: { how: Exit; room: string }) {
 type WindowEnd = { dir: string; profile: string; name: string; port: number }
 
 async function closeSteps($: $, s: RoomScope, live: boolean, how: Exit, opts: ExitOptions, stopping: Promise<void>) {
-  const room = await read($, roomA), stateMode = await read($, modeA)
+  const room = await read($, roomA),
+    stateMode = await read($, modeA)
   // The room as its scope knew it, else as the state has it (a reload whose
   // start hasn't taken it up yet).
   const mode = live ? s.mode : stateMode === 'idle' ? null : stateMode
   if (!room || !mode || (live && roomIdentity(room) !== s.key)) return void (await stopping)
-  const guest = mode === 'guest', forGood = how !== 'keep'
+  const guest = mode === 'guest',
+    forGood = how !== 'keep'
   // Out of the room for all the mode drives, before anything waits. The
   // marker first: a start finding it finishes the close (`finishClose`).
   const mark = (closeMark = { how, room: roomIdentity(room) })
@@ -2602,7 +2831,9 @@ async function closeSteps($: $, s: RoomScope, live: boolean, how: Exit, opts: Ex
     try {
       await writeRoomCheckpoint($, place, guest ? await joinedPlace($, room) : await hostingPlace($, room))
     } catch (error) {
-      $.ui.log(`${guest ? "Couldn't save the joined session for reopening" : "Couldn't save the shared session for reopening"}: ${String((error as Error)?.message ?? error)}`)
+      $.ui.log(
+        `${guest ? "Couldn't save the joined session for reopening" : "Couldn't save the shared session for reopening"}: ${String((error as Error)?.message ?? error)}`,
+      )
     }
   } else if (how !== 'ended') await deleteRoomCheckpoint($, place).catch(() => {})
   // 3. The window.
@@ -2745,7 +2976,11 @@ function describePolicy(policy: SharePolicy): string {
 function describePolicyCore(policy: SharePolicy): string {
   const prompts = policy.prompts === 'watch' ? 'watch-only' : 'everyone can prompt'
   const approvals =
-    policy.approvals === 'none' ? 'no approvals' : policy.approvals === 'all' ? 'every tool needs approval' : 'anything beyond reading the project needs approval'
+    policy.approvals === 'none'
+      ? 'no approvals'
+      : policy.approvals === 'all'
+        ? 'every tool needs approval'
+        : 'anything beyond reading the project needs approval'
   return `${prompts}, ${approvals}`
 }
 
@@ -2805,7 +3040,12 @@ let selfId = ''
 // unread dot), but auto mode's classifier often gives a plugin's own call to
 // them no verdict, which refuses it. Allow rules for exactly these let them
 // through; the Room offers to add them when a pin was refused.
-const DESK_TOOLS = ['mcp__ccd_sidebar__set_pinned', 'mcp__ccd_sidebar__set_unread', 'mcp__ccd_session_mgmt__get_session', 'mcp__ccd_session_mgmt__set_session_title']
+const DESK_TOOLS = [
+  'mcp__ccd_sidebar__set_pinned',
+  'mcp__ccd_sidebar__set_unread',
+  'mcp__ccd_session_mgmt__get_session',
+  'mcp__ccd_session_mgmt__set_session_title',
+]
 
 // What the plugin tried when pinning, kept in the store (the last 30, every
 // session's) and the debug log: pins fail on other people's machines.
@@ -2964,7 +3204,12 @@ let shareTurn: { done: boolean; settled: Promise<void> } = { done: true, settled
 async function inShareTurn<T>($: $, work: () => Promise<T>): Promise<T> {
   const before = shareTurn
   let settle!: () => void
-  const mine = { done: false, settled: new Promise<void>(done => { settle = done }) }
+  const mine = {
+    done: false,
+    settled: new Promise<void>(done => {
+      settle = done
+    }),
+  }
   shareTurn = mine
   try {
     while (!before.done) await Promise.race([before.settled, nap($, 250)])
@@ -3187,15 +3432,24 @@ async function makeRoom($: $, surface: RenderSurface | undefined, opts: ShareOpt
   const earlier = messages.flatMap(message => rowsFromMessage(message, name, cwd)).slice(-4000)
   // Pictures from the newest results only: a room holds 100 MB of files.
   let pictures = 0
-  const withPictures = new Set(earlier.filter(r => r.media?.length).reverse().filter(() => pictures++ < HISTORY_IMAGES))
+  const withPictures = new Set(
+    earlier
+      .filter(r => r.media?.length)
+      .reverse()
+      .filter(() => pictures++ < HISTORY_IMAGES),
+  )
   for (const row of earlier) sendRow($, row, withPictures.has(row))
   void shareLocal($, localOpens(messages)).catch(() => {})
   startFeed($)
   const copied = await $.ui.copy({ text: room.url, surface }).catch(() => ({ isCopied: false }))
   const watchOnly = opts.watch ? ', watch-only' : ''
-  $.ui.toast(copied.isCopied ? `Sharing${room.team ? ` with ${room.team.name}` : ''}${watchOnly} · link copied` : `Sharing${watchOnly} · the link is in the transcript`)
+  $.ui.toast(
+    copied.isCopied ? `Sharing${room.team ? ` with ${room.team.name}` : ''}${watchOnly} · link copied` : `Sharing${watchOnly} · the link is in the transcript`,
+  )
   const access = room.team ? ((await read($, teamsA)).teams.find(x => x.id === room.team?.id) ?? null) : null
-  $.ui.log(`Sharing${opts.history === false ? ' from now on' : ''}${room.team ? ` with ${room.team.name}` : ''}${watchOnly}. ${whoJoins(room, access, opts.watch)}: ${room.url}`)
+  $.ui.log(
+    `Sharing${opts.history === false ? ' from now on' : ''}${room.team ? ` with ${room.team.name}` : ''}${watchOnly}. ${whoJoins(room, access, opts.watch)}: ${room.url}`,
+  )
   if (room.team) void refreshTeams($).catch(() => {})
   void holdRoom($).catch(() => {})
   await markSidebar($, current => `👥 Live · ${current || room.title}`)
@@ -3271,7 +3525,14 @@ function isRoomCheckpointKey(key: string): boolean {
 
 function isRoomCheckpoint(value: unknown): value is RoomCheckpoint {
   const saved = value as Partial<RoomCheckpoint> | null
-  return Boolean(saved && typeof saved.at === 'number' && Number.isFinite(saved.at) && saved.room && typeof saved.room.token === 'string' && typeof saved.room.seat === 'string')
+  return Boolean(
+    saved &&
+    typeof saved.at === 'number' &&
+    Number.isFinite(saved.at) &&
+    saved.room &&
+    typeof saved.room.token === 'string' &&
+    typeof saved.room.seat === 'string',
+  )
 }
 
 async function readRoomCheckpoint($: $, key: string): Promise<RoomCheckpoint | undefined> {
@@ -3279,11 +3540,14 @@ async function readRoomCheckpoint($: $, key: string): Promise<RoomCheckpoint | u
   if (!(await $.fs.exists(path))) return undefined
   const text = await $.fs.read(path)
   let record: RoomCheckpointFile
-  try { record = JSON.parse(text) as RoomCheckpointFile } catch {
+  try {
+    record = JSON.parse(text) as RoomCheckpointFile
+  } catch {
     // JSON's syntax error may quote the damaged payload, which holds tokens.
     throw new Error('A saved room checkpoint is invalid; it was left untouched')
   }
-  if (record?.version !== 1 || (record.value !== null && !isRoomCheckpoint(record.value))) throw new Error('A saved room checkpoint is invalid; it was left untouched')
+  if (record?.version !== 1 || (record.value !== null && !isRoomCheckpoint(record.value)))
+    throw new Error('A saved room checkpoint is invalid; it was left untouched')
   return record.value ?? undefined
 }
 
@@ -3295,7 +3559,10 @@ async function writeRoomCheckpoint($: $, key: string, value: RoomCheckpoint) {
   const tag = fence(body)
   // Unique private temp files keep unrelated sessions independent. Credentials
   // travel on stdin, never argv, and failed writes leave the old file intact.
-  const result = await sh($, `umask 077\nset -e\nmkdir -p ${sq(dir)}\nchmod 700 ${sq(dir)}\ntmp=${sq(tmp)}\ntrap 'rm -f "$tmp"' 0\ncat > ${sq(tmp)} <<'${tag}'\n${body}\n${tag}\nchmod 600 ${sq(tmp)}\nmv ${sq(tmp)} ${sq(path)}\n`)
+  const result = await sh(
+    $,
+    `umask 077\nset -e\nmkdir -p ${sq(dir)}\nchmod 700 ${sq(dir)}\ntmp=${sq(tmp)}\ntrap 'rm -f "$tmp"' 0\ncat > ${sq(tmp)} <<'${tag}'\n${body}\n${tag}\nchmod 600 ${sq(tmp)}\nmv ${sq(tmp)} ${sq(path)}\n`,
+  )
   if (result.code !== 0) throw new Error('Could not write the private saved room checkpoint')
 }
 
@@ -3311,7 +3578,11 @@ async function roomCheckpointKeys($: $): Promise<string[]> {
   for (const entry of await $.fs.list(dir)) {
     if (entry.kind !== 'file' || !entry.name.endsWith('.json')) continue
     let key: string
-    try { key = decodeURIComponent(entry.name.slice(0, -5)) } catch { continue }
+    try {
+      key = decodeURIComponent(entry.name.slice(0, -5))
+    } catch {
+      continue
+    }
     if (isRoomCheckpointKey(key) && (await readRoomCheckpoint($, key))) keys.push(key)
   }
   return keys
@@ -3345,7 +3616,8 @@ async function savedKey($: $, prefix: string): Promise<{ key: string | null; old
 
 // What a host's place keeps, to take the room up again.
 async function hostingPlace($: $, room: ShareRoom): Promise<Hosting> {
-  const shares = Object.entries(await read($, sharesA)), memory = await read($, hostMemoryA)
+  const shares = Object.entries(await read($, sharesA)),
+    memory = await read($, hostMemoryA)
   return {
     at: await $.clock.now(),
     room,
@@ -3431,7 +3703,9 @@ const TAKE_BACK_WAIT_MS = 10_000
 
 function takeBack($: $, key: string, saved: Hosting | Joined): Reclaim {
   let settle!: () => void
-  const settled = new Promise<void>(done => { settle = done })
+  const settled = new Promise<void>(done => {
+    settle = done
+  })
   const back: Reclaim = { key, saved, deleted: deleteRoomCheckpoint($, key), settled, settle, late: false }
   reclaiming = back
   takingBack = back
@@ -3481,7 +3755,9 @@ async function takenBack($: $, opts: { keep?: boolean } = {}): Promise<Reclaim |
   const back = takingBack
   if (!back) return null
   let over = false
-  void back.settled.then(() => { over = true })
+  void back.settled.then(() => {
+    over = true
+  })
   // A waiter's own 10 s besides, should the take-back's timer never come.
   const until = (await $.clock.now()) + TAKE_BACK_WAIT_MS
   while (!over && !back.late && (await $.clock.now()) < until) await Promise.race([back.settled, nap($, 250)])
@@ -3517,7 +3793,8 @@ function roomMade($: $) {
   const over = givenUp
   if (!over) return
   givenUp = null
-  const room = over.saved.room, guest = room.seat !== 'host'
+  const room = over.saved.room,
+    guest = room.seat !== 'host'
   void tellRoomSoon($, room, guest).catch(() => {})
   const w = guest ? (over.saved as Joined).previewWindow : undefined
   if (w) void endPreviewWindow($, room, w).catch(() => {})
@@ -3531,7 +3808,11 @@ async function notMade($: $, back: Reclaim | null, error: unknown): Promise<neve
   if (back && givenUp === back) {
     givenUp = null
     const guest = back.saved.room.seat !== 'host'
-    await writeRoomCheckpoint($, back.key, back.saved).catch(e => $.ui.log(`${guest ? "Couldn't save the joined session for reopening" : "Couldn't save the shared session for reopening"}: ${String((e as Error)?.message ?? e)}`))
+    await writeRoomCheckpoint($, back.key, back.saved).catch(e =>
+      $.ui.log(
+        `${guest ? "Couldn't save the joined session for reopening" : "Couldn't save the shared session for reopening"}: ${String((e as Error)?.message ?? e)}`,
+      ),
+    )
   }
   throw error
 }
@@ -3544,7 +3825,9 @@ async function notMade($: $, back: Reclaim | null, error: unknown): Promise<neve
 async function tellRoomSoon($: $, room: ShareRoom, guest: boolean) {
   const input = `${roomConfig(room, guest ? 'leave' : 'end')}\nrequest = "POST"\n`
   const child = $.process.spawn({ argv: ['curl', '--silent', '--max-time', '15', '--output', '/dev/null', '--config', '-'], input })
-  for await (const _chunk of child) { /* Never log credentials or a server's answer. */ }
+  for await (const _chunk of child) {
+    /* Never log credentials or a server's answer. */
+  }
 }
 
 // A wait the hook's own budget doesn't pay for (a `sleep` child: its clock
@@ -3565,9 +3848,15 @@ async function nap($: $, ms: number) {
 // wrote of the room so far is cleared.
 async function settleReclaim($: $, back: Reclaim, forGood: boolean) {
   await back.deleted.catch(() => {})
-  const saved = back.saved, room = saved.room, guest = room.seat !== 'host'
+  const saved = back.saved,
+    room = saved.room,
+    guest = room.seat !== 'host'
   if (!forGood) {
-    await writeRoomCheckpoint($, back.key, saved).catch(error => $.ui.log(`${guest ? "Couldn't save the joined session for reopening" : "Couldn't save the shared session for reopening"}: ${String((error as Error)?.message ?? error)}`))
+    await writeRoomCheckpoint($, back.key, saved).catch(error =>
+      $.ui.log(
+        `${guest ? "Couldn't save the joined session for reopening" : "Couldn't save the shared session for reopening"}: ${String((error as Error)?.message ?? error)}`,
+      ),
+    )
   } else {
     await tellRoom($, room, guest)
     const w = guest ? (saved as Joined).previewWindow : undefined
@@ -3615,7 +3904,8 @@ async function resumeJoined($: $) {
       room = { ...room, seq: page.seq }
     } catch (error) {
       // Its person left it from elsewhere meanwhile (the Team panel's Leave): said as such.
-      if (error instanceof ApiError && error.status === 410 && error.data.left === true) return void (await over(`You left ${saved.room.host}'s session from the Team panel while this one was closed.`))
+      if (error instanceof ApiError && error.status === 410 && error.data.left === true)
+        return void (await over(`You left ${saved.room.host}'s session from the Team panel while this one was closed.`))
       if (error instanceof ApiError && (error.status === 404 || error.status === 410)) return void (await over())
       if (error instanceof ApiError && error.status === 401) {
         // Given up meanwhile (a room made or joined here, the session's end):
@@ -3623,12 +3913,21 @@ async function resumeJoined($: $) {
         if (!current()) return
         // The seat was let go: a new one, and what happened since the old one's last.
         try {
-          const joined = await api<{ token: string; seat: string; seq: number; title: string; history: ServerEvent[]; people: SharePerson[]; previews?: unknown; more?: boolean; historySeq?: number }>(
-            $,
-            room.server,
-            `/api/rooms/${room.id}/join?max=${PAGE_BYTES}`,
-            { method: 'POST', body: { name: await whoami($) }, account: (await signInFor($, room.server))?.token },
-          )
+          const joined = await api<{
+            token: string
+            seat: string
+            seq: number
+            title: string
+            history: ServerEvent[]
+            people: SharePerson[]
+            previews?: unknown
+            more?: boolean
+            historySeq?: number
+          }>($, room.server, `/api/rooms/${room.id}/join?max=${PAGE_BYTES}`, {
+            method: 'POST',
+            body: { name: await whoami($) },
+            account: (await signInFor($, room.server))?.token,
+          })
           // The new seat is the place's now: the session ending from here keeps it, or leaves it.
           back.saved = { ...saved, room: { ...saved.room, token: joined.token, seat: joined.seat } }
           // Only what came after the old seat's last: page from there.
@@ -3652,22 +3951,37 @@ async function resumeJoined($: $) {
     // place was given up for another room: nothing more of it here.
     if (!current()) return
     await update($, roomA, v => (reclaiming === back ? room : v))
-    await update($, policyA, v => (reclaiming === back ? ({ ...DEFAULT_POLICY, ...saved.policy }) : v))
-    await update($, autoOpenA, v => (reclaiming === back ? (saved.autoOpen !== false) : v))
+    await update($, policyA, v => (reclaiming === back ? { ...DEFAULT_POLICY, ...saved.policy } : v))
+    await update($, autoOpenA, v => (reclaiming === back ? saved.autoOpen !== false : v))
     await update($, shownA, v => (reclaiming === back ? (saved.shown ?? []) : v))
     await update($, localPreviewsA, v => (reclaiming === back ? (saved.localPreviews ?? []) : v))
     await update($, activityA, v => (reclaiming === back ? (saved.activity ?? []) : v))
     await update($, chatA, v => (reclaiming === back ? (saved.chat ?? []) : v))
     await update($, sidebarA, v => (reclaiming === back ? (saved.sidebar ?? null) : v))
-    const windowPort = saved.previewWindow?.port, windowProfile = saved.previewWindow?.profile
+    const windowPort = saved.previewWindow?.port,
+      windowProfile = saved.previewWindow?.profile
     const profile = typeof windowProfile === 'string' && PROFILE_NAME.test(windowProfile) ? { profile: windowProfile } : {}
-    await update($, previewWindowA, v => (reclaiming === back ? (windowPort === 0 || validPort(windowPort) ? { room: roomIdentity(room), port: windowPort, opened: [], ...profile } : null) : v))
-    await update($, previewNeedsOpenA, v => (reclaiming === back ? (Array.isArray(saved.previewNeedsOpen) ? saved.previewNeedsOpen.filter(p => typeof p === 'string').slice(-64) : []) : v))
-    await update($, needAskedA, v => (reclaiming === back ? ({ ports: Array.isArray(saved.needAsked) ? saved.needAsked.filter(validPort).slice(-256) : [], times: [] }) : v))
+    await update($, previewWindowA, v =>
+      reclaiming === back ? (windowPort === 0 || validPort(windowPort) ? { room: roomIdentity(room), port: windowPort, opened: [], ...profile } : null) : v,
+    )
+    await update($, previewNeedsOpenA, v =>
+      reclaiming === back ? (Array.isArray(saved.previewNeedsOpen) ? saved.previewNeedsOpen.filter(p => typeof p === 'string').slice(-64) : []) : v,
+    )
+    await update($, needAskedA, v =>
+      reclaiming === back ? { ports: Array.isArray(saved.needAsked) ? saved.needAsked.filter(validPort).slice(-256) : [], times: [] } : v,
+    )
     await update($, peerRoutesA, v => (reclaiming === back ? peerRoutesSaved(saved.peerRoutes, 'guest') : v))
     // The approver of the room's cloud host, as it was: its questions come here.
-    await update($, cloudA, v => (reclaiming === back ? (saved.cloudMine ? { state: 'running' as const, approver: saved.room.host, since: saved.at, mine: true } : null) : v))
-    await update($, cloudTrustedA, v => (reclaiming === back ? (saved.cloudMine && Array.isArray(saved.cloudTrusted) ? [...new Set(saved.cloudTrusted.filter((n): n is string => typeof n === 'string').map(n => n.slice(0, 40)))].slice(0, 64) : []) : v))
+    await update($, cloudA, v =>
+      reclaiming === back ? (saved.cloudMine ? { state: 'running' as const, approver: saved.room.host, since: saved.at, mine: true } : null) : v,
+    )
+    await update($, cloudTrustedA, v =>
+      reclaiming === back
+        ? saved.cloudMine && Array.isArray(saved.cloudTrusted)
+          ? [...new Set(saved.cloudTrusted.filter((n): n is string => typeof n === 'string').map(n => n.slice(0, 40)))].slice(0, 64)
+          : []
+        : v,
+    )
     if (!current()) return
     // Back in: the room's scope from here, and a session ending saves it as it would any room.
     reclaiming = null
@@ -3691,7 +4005,10 @@ async function resumeJoined($: $) {
     const running = starts.filter(e => !ends.has(e.body.turnId)).at(-1)
     const past = missed.filter(e => e.type === 'row' && (!running || e.seq < running.seq))
     if (running) noteHostTurn(running)
-    const caught = exchanges(past.map(e => e.body as unknown as Row), room.host)
+    const caught = exchanges(
+      past.map(e => e.body as unknown as Row),
+      room.host,
+    )
     for (const exchange of caught) laterRides.push({ text: exchange.prompt, ride: { kind: 'static', rows: exchange.rows } })
     startFeed($)
     $.ui.log(caught.length ? `Back in ${room.host}'s session. What you missed follows.` : `Back in ${room.host}'s session.`)
@@ -3716,7 +4033,8 @@ async function resumeHosting($: $) {
   for (const stale of found.older) {
     const left = (await readRoomCheckpoint($, stale)) as Hosting | undefined
     await deleteRoomCheckpoint($, stale)
-    if (left?.room?.token && left.room.seat === 'host') void api($, left.room.server, `/api/rooms/${left.room.id}/end`, { method: 'POST', token: left.room.token }).catch(() => {})
+    if (left?.room?.token && left.room.seat === 'host')
+      void api($, left.room.server, `/api/rooms/${left.room.id}/end`, { method: 'POST', token: left.room.token }).catch(() => {})
   }
   if (!found.key) return
   const saved = (await readRoomCheckpoint($, found.key)) as Hosting | undefined
@@ -3745,14 +4063,14 @@ async function resumeHosting($: $) {
     const room: ShareRoom = { ...saved.room, seq: page?.seq ?? saved.room.seq }
     const shares = sharesSaved(saved)
     await update($, roomA, v => (reclaiming === back ? room : v))
-    await update($, policyA, v => (reclaiming === back ? ({ ...DEFAULT_POLICY, ...saved.policy }) : v))
+    await update($, policyA, v => (reclaiming === back ? { ...DEFAULT_POLICY, ...saved.policy } : v))
     await update($, trustedA, v => (reclaiming === back ? (saved.trusted ?? []).filter(t => typeof t === 'object' && Boolean(t?.seat)) : v))
     await update($, sharesA, v => (reclaiming === back ? shares : v))
     await update($, shownA, v => (reclaiming === back ? (saved.shown ?? []) : v))
     await update($, activityA, v => (reclaiming === back ? (saved.activity ?? []) : v))
     await update($, chatA, v => (reclaiming === back ? (saved.chat ?? []) : v))
     await update($, sidebarA, v => (reclaiming === back ? (saved.sidebar ?? null) : v))
-    await update($, hostMemoryA, v => (reclaiming === back ? (hostMemorySaved(saved.hostMemory, roomIdentity(room))) : v))
+    await update($, hostMemoryA, v => (reclaiming === back ? hostMemorySaved(saved.hostMemory, roomIdentity(room)) : v))
     await update($, peerRoutesA, v => (reclaiming === back ? peerRoutesSaved(saved.peerRoutes, 'host') : v))
     if (!current()) return
     // Back: the room's scope from here, and a session ending saves it as it would any room.
@@ -3773,10 +4091,22 @@ async function resumeHosting($: $) {
         if (event.type === 'prompt' && event.from.role === 'guest') {
           // A cloud host taking the room up: a prompt sent while it moved runs now.
           if ((await isRunner($)) && typeof event.body.text === 'string') {
-            await acceptPrompt($, event.from.name, event.from.seat ?? '', event.body.text, typeof event.body.pid === 'string' ? event.body.pid : '', Array.isArray(event.body.attachments) ? (event.body.attachments as ShareFileMeta[]) : [], event.from.approver === true)
+            await acceptPrompt(
+              $,
+              event.from.name,
+              event.from.seat ?? '',
+              event.body.text,
+              typeof event.body.pid === 'string' ? event.body.pid : '',
+              Array.isArray(event.body.attachments) ? (event.body.attachments as ShareFileMeta[]) : [],
+              event.from.approver === true,
+            )
             continue
           }
-          send($, 'declined', { pid: typeof event.body.pid === 'string' ? event.body.pid : '', who: event.from.name, reason: `${room.host}'s Claude Code was closed when you sent this, so it didn't run. Send it again.` })
+          send($, 'declined', {
+            pid: typeof event.body.pid === 'string' ? event.body.pid : '',
+            who: event.from.name,
+            reason: `${room.host}'s Claude Code was closed when you sent this, so it didn't run. Send it again.`,
+          })
           continue
         }
         await absorb($, room, 'host', event, false)
@@ -3840,7 +4170,9 @@ async function acceptPrompt($: $, who: string, seat: string, text: string, pid: 
   // own hooks can't add context to it), and Read shows images and PDFs.
   const attached = await saveAttachments($, who, attachments)
   const cwd = await $.session.cwd()
-  const marks = attached.map(p => `📎 ${p.startsWith(`${cwd}/`) ? p.slice(cwd.length + 1) : p} (attached by ${who}; open it with the Read tool to see it)`).join('\n')
+  const marks = attached
+    .map(p => `📎 ${p.startsWith(`${cwd}/`) ? p.slice(cwd.length + 1) : p} (attached by ${who}; open it with the Read tool to see it)`)
+    .join('\n')
   // No `from=` in their words reaches Claude (`neutralize`): only an envelope
   // Claude Code frames itself carries one, a mailbox's among them.
   const words = neutralize(text)
@@ -3902,7 +4234,15 @@ function newMsgId(): string {
 function peerReceiptOf(value: Record<string, unknown>, key: 'ref' | 'id'): { handle: string; status: PeerStatus; of: string; reason?: string } | null {
   const { handle, status, reason } = value
   const of = value[key]
-  if (typeof handle !== 'string' || !PEER_ID.test(handle) || typeof status !== 'string' || !PEER_STATUS.has(status) || typeof of !== 'string' || !MSG_ID.test(of)) return null
+  if (
+    typeof handle !== 'string' ||
+    !PEER_ID.test(handle) ||
+    typeof status !== 'string' ||
+    !PEER_STATUS.has(status) ||
+    typeof of !== 'string' ||
+    !MSG_ID.test(of)
+  )
+    return null
   return { handle, status: status as PeerStatus, of, ...(status === 'dropped' && typeof reason === 'string' && PEER_DROPS.has(reason) ? { reason } : {}) }
 }
 
@@ -3913,7 +4253,8 @@ let peerPlatform: Promise<boolean> | null = null
 async function peerMissing($: $): Promise<string | null> {
   const engine = /claude-code_(\d+)-(\d+)-(\d+)/.exec((await $.env.get('AI_AGENT')) ?? '')
   const older = engine ? Number(engine[1]) * 1e6 + Number(engine[2]) * 1e3 + Number(engine[3]) < 2_001_304 : false
-  if (older || !(await $.env.get('CLAUDE_CODE_MESSAGING_SOCKET'))) return "its Claude Code can't pass messages between sessions (that needs Claude Code 2.1.304 or later)"
+  if (older || !(await $.env.get('CLAUDE_CODE_MESSAGING_SOCKET')))
+    return "its Claude Code can't pass messages between sessions (that needs Claude Code 2.1.304 or later)"
   peerPlatform ??= sh($, 'uname -s\n').then(({ out }) => /^(Darwin|Linux)\s*$/.test(out))
   if (!(await peerPlatform)) return 'messages between sessions are passed on only on macOS and Linux'
   return null
@@ -3950,9 +4291,13 @@ function mailboxOf($: $, room: ShareRoom, s: RoomScope): MailboxRun | null {
 }
 
 function finishMailbox(run: MailboxRun): Promise<void> {
-  return finishHelper(run, async () => run.end?.(), () => {
-    if (run.scope.children.mailbox === run) run.scope.children.mailbox = null
-  })
+  return finishHelper(
+    run,
+    async () => run.end?.(),
+    () => {
+      if (run.scope.children.mailbox === run) run.scope.children.mailbox = null
+    },
+  )
 }
 
 // Gone: told to, else ended as the one process its pid names (`killHelper`).
@@ -3966,7 +4311,10 @@ async function endMailbox($: $, run: MailboxRun) {
 // taken since by another process is never signalled.
 async function killHelper($: $, pid: number) {
   if (!Number.isSafeInteger(pid) || pid <= 1) return
-  await sh($, `case "$(ps -o command= -p ${pid} 2>/dev/null)" in\n  *"/relay/mailbox.cjs --serve"* | *"/relay/mailbox.mts --serve"*) kill -TERM ${pid} 2>/dev/null ;;\nesac\n`)
+  await sh(
+    $,
+    `case "$(ps -o command= -p ${pid} 2>/dev/null)" in\n  *"/relay/mailbox.cjs --serve"* | *"/relay/mailbox.mts --serve"*) kill -TERM ${pid} 2>/dev/null ;;\nesac\n`,
+  )
 }
 
 // A reload: the helper the module before this one started goes (its
@@ -3985,29 +4333,45 @@ async function runMailbox($: $, run: MailboxRun) {
     const own = await $.env.get('CLAUDE_CODE_MESSAGING_SOCKET')
     const version = await ownVersion($)
     if (!own || run.stopped || run.scope.children.mailbox !== run || !run.scope.live) return void finishMailbox(run)
-    const settings = { room: `${run.room.server}/api/rooms/${run.room.id}`, token: run.room.token, controlToken: run.controlToken, version, own, dir: own.slice(0, own.lastIndexOf('/')) }
+    const settings = {
+      room: `${run.room.server}/api/rooms/${run.room.id}`,
+      token: run.room.token,
+      controlToken: run.controlToken,
+      version,
+      own,
+      dir: own.slice(0, own.lastIndexOf('/')),
+    }
     const late = () => {
       $.ui.log("Shared session: the mailboxes' helper didn't start in 6 s", { to: 'debug' })
       return finishMailbox(run)
     }
-    await runHelper($, run, 'mailbox.mts', settings, 6_000, late, () => true, async said => {
-      if (said.state === 'error') return void (run.error = said.code === 'UNSUPPORTED' ? 'UNSUPPORTED' : 'STARTUP')
-      if (said.state !== 'ready' || !validPort(said.port) || !Number.isSafeInteger(said.pid) || (said.pid as number) <= 1 || run.control !== undefined) return
-      const pid = said.pid as number
-      helperReady(run, said.port)
-      run.pid = pid
-      // A module that replaces this one ends it by this.
-      await update($, mailboxHelperA, () => ({ room: roomIdentity(run.room), pid, port: said.port as number }))
-      $.ui.log(`Shared session: the mailboxes' helper (${pid}) is ready`, { to: 'debug' })
-      // Stopped meanwhile (the room's end, or a reload): it goes now.
-      if (run.stopped || run.scope.children.mailbox !== run || !run.scope.live) {
-        const first = !run.stopping
-        await finishMailbox(run)
-        if (!first) await endMailbox($, run)
-        return
-      }
-      run.settle(true)
-    })
+    await runHelper(
+      $,
+      run,
+      'mailbox.mts',
+      settings,
+      6_000,
+      late,
+      () => true,
+      async said => {
+        if (said.state === 'error') return void (run.error = said.code === 'UNSUPPORTED' ? 'UNSUPPORTED' : 'STARTUP')
+        if (said.state !== 'ready' || !validPort(said.port) || !Number.isSafeInteger(said.pid) || (said.pid as number) <= 1 || run.control !== undefined) return
+        const pid = said.pid as number
+        helperReady(run, said.port)
+        run.pid = pid
+        // A module that replaces this one ends it by this.
+        await update($, mailboxHelperA, () => ({ room: roomIdentity(run.room), pid, port: said.port as number }))
+        $.ui.log(`Shared session: the mailboxes' helper (${pid}) is ready`, { to: 'debug' })
+        // Stopped meanwhile (the room's end, or a reload): it goes now.
+        if (run.stopped || run.scope.children.mailbox !== run || !run.scope.live) {
+          const first = !run.stopping
+          await finishMailbox(run)
+          if (!first) await endMailbox($, run)
+          return
+        }
+        run.settle(true)
+      },
+    )
     // The launcher is gone once the helper is ready; without that, nothing runs.
     if (run.control === undefined) await finishMailbox(run)
   } catch (error) {
@@ -4025,7 +4389,13 @@ function mailboxControl($: $, run: MailboxRun, body: Record<string, unknown>): P
     $.ui.log(`Shared session: the mailboxes' helper didn't answer ${String(body.op)}, so it was ended`, { to: 'debug' })
     void finishMailbox(run)
   }
-  return helperPost($, run, () => run.scope.children.mailbox === run, async () => body, { answers: [200, 404, 409, 429], failed })
+  return helperPost(
+    $,
+    run,
+    () => run.scope.children.mailbox === run,
+    async () => body,
+    { answers: [200, 404, 409, 429], failed },
+  )
 }
 
 // Host: a mailbox listening, its helper started as need be; else why not.
@@ -4047,11 +4417,17 @@ async function keepRoute($: $, room: ShareRoom, s: RoomScope, route: SharePeerRo
   const got = { id: null as string | null, evicted: [] as string[] }
   await update($, peerRoutesA, all => {
     if (!s.live) return all
-    const same = (r: SharePeerRoute) => (r.kind === 'guest' && route.kind === 'guest' ? r.to === route.to && r.seat === route.seat : r.kind === 'host' && route.kind === 'host' && r.seat === route.seat && r.handle === route.handle)
+    const same = (r: SharePeerRoute) =>
+      r.kind === 'guest' && route.kind === 'guest'
+        ? r.to === route.to && r.seat === route.seat
+        : r.kind === 'host' && route.kind === 'host' && r.seat === route.seat && r.handle === route.handle
     const id = Object.entries(all).find(([, r]) => same(r))?.[0] ?? randomSecret().slice(0, 32)
     got.id = id
     const entries = [...Object.entries(all).filter(([k]) => k !== id), [id, route] as const]
-    got.evicted = entries.slice(0, -64).filter(([, r]) => r.kind === 'host').map(([k]) => k)
+    got.evicted = entries
+      .slice(0, -64)
+      .filter(([, r]) => r.kind === 'host')
+      .map(([k]) => k)
     return Object.fromEntries(entries.slice(-64))
   })
   const run = s.children.mailbox
@@ -4116,21 +4492,42 @@ const relayPidOf = (box: string, text: string) => relaysHere.findLast(r => r.box
 // turn for it is declined, which tells their session why.
 async function hostPeer($: $, room: ShareRoom, value: Record<string, unknown>) {
   const { seat, handle, name, mode, chain, id, pid, body } = value
-  if (typeof seat !== 'string' || !seat || typeof handle !== 'string' || !PEER_ID.test(handle) || typeof pid !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(pid) || typeof body !== 'string' || !body.trim()) return
+  if (
+    typeof seat !== 'string' ||
+    !seat ||
+    typeof handle !== 'string' ||
+    !PEER_ID.test(handle) ||
+    typeof pid !== 'string' ||
+    !/^[A-Za-z0-9_-]{1,64}$/.test(pid) ||
+    typeof body !== 'string' ||
+    !body.trim()
+  )
+    return
   const who = typeof value.who === 'string' && value.who ? tidySender(value.who) : 'A teammate'
   const decline = (reason: string) => send($, 'declined', { pid, who, reason })
   const s = scope
   if ((await read($, policyA)).prompts === 'watch') return decline(`${room.host} has this shared session on watch-only, so this didn't reach their Claude.`)
   const missing = await peerMissing($)
   if (missing) return decline(`${room.host}'s computer can't take this: ${missing}.`)
-  const route: SharePeerRoute = { kind: 'host', seat, handle, who, name: typeof name === 'string' && name ? tidySender(name.replace(/[\r\n<>"]+/g, ' ')) : 'another session', at: await $.clock.now() }
+  const route: SharePeerRoute = {
+    kind: 'host',
+    seat,
+    handle,
+    who,
+    name: typeof name === 'string' && name ? tidySender(name.replace(/[\r\n<>"]+/g, ' ')) : 'another session',
+    at: await $.clock.now(),
+  }
   const box = await keepRoute($, room, s, route)
   if (!box) return
   const run = await openMailbox($, room, s, box, route)
   if ('error' in run) {
-    return decline(run.error === 'UNSUPPORTED' ? `${room.host}'s computer can't take messages from other sessions, so this didn't reach their Claude.`
-      : run.error === 'NODE' ? `${room.host}'s computer couldn't take this in (it needs Node 22.18 or later), so this didn't reach their Claude.`
-      : `${room.host}'s computer couldn't take this in, so it didn't reach their Claude.`)
+    return decline(
+      run.error === 'UNSUPPORTED'
+        ? `${room.host}'s computer can't take messages from other sessions, so this didn't reach their Claude.`
+        : run.error === 'NODE'
+          ? `${room.host}'s computer couldn't take this in (it needs Node 22.18 or later), so this didn't reach their Claude.`
+          : `${room.host}'s computer couldn't take this in, so it didn't reach their Claude.`,
+    )
   }
   const hops = Array.isArray(chain) ? chain.filter((t): t is string => typeof t === 'string' && HOP_TOKEN.test(t)).slice(-32) : []
   // Known before it's delivered: its turn may start before the helper answers.
@@ -4139,9 +4536,13 @@ async function hostPeer($: $, room: ShareRoom, value: Record<string, unknown>) {
   relaysHere.push(relay)
   if (relaysHere.length > 32) relaysHere.shift()
   const status = await mailboxControl($, run, {
-    op: 'deliver', box, name: `${route.name} · via ${who}`,
+    op: 'deliver',
+    box,
+    name: `${route.name} · via ${who}`,
     ...(typeof mode === 'string' && /^[a-z-]{1,32}$/.test(mode) ? { mode } : {}),
-    chain: hops, ...(typeof id === 'string' && MSG_ID.test(id) ? { id } : {}), body: text,
+    chain: hops,
+    ...(typeof id === 'string' && MSG_ID.test(id) ? { id } : {}),
+    body: text,
   })
   if (status === 200) return
   relaysHere.splice(relaysHere.indexOf(relay), 1)
@@ -4157,7 +4558,14 @@ async function hostReceipt($: $, room: ShareRoom, value: Record<string, unknown>
   const found = Object.entries(await read($, peerRoutesA)).find(([, r]) => r.kind === 'host' && r.seat === value.seat && r.handle === receipt.handle)
   if (!found || found[1].kind !== 'host') return
   const run = await openMailbox($, room, scope, found[0], found[1])
-  if (!('error' in run)) await mailboxControl($, run, { op: 'receipt', box: found[0], status: receipt.status, ref: receipt.of, ...(receipt.reason ? { reason: receipt.reason } : {}) })
+  if (!('error' in run))
+    await mailboxControl($, run, {
+      op: 'receipt',
+      box: found[0],
+      status: receipt.status,
+      ref: receipt.of,
+      ...(receipt.reason ? { reason: receipt.reason } : {}),
+    })
 }
 
 // Host: whose mailbox an address is, by its id: the route and the id, else null.
@@ -4173,14 +4581,24 @@ async function mailboxOwner($: $, address: string | undefined): Promise<(Extract
 // path. Null: no text of this message came from one.
 async function mailboxRows($: $, message: { role?: string; type?: string; content: unknown }): Promise<Row[] | null> {
   if ((message.role ?? message.type) !== 'user') return null
-  const blocks = typeof message.content === 'string' ? [{ type: 'text', text: message.content }] : Array.isArray(message.content) ? (message.content as { type?: string; text?: unknown }[]) : []
+  const blocks =
+    typeof message.content === 'string'
+      ? [{ type: 'text', text: message.content }]
+      : Array.isArray(message.content)
+        ? (message.content as { type?: string; text?: unknown }[])
+        : []
   const rows: Row[] = []
   for (const block of blocks) {
     const sent = block.type === 'text' && typeof block.text === 'string' ? delivered(block.text) : null
     const owner = sent?.address ? await mailboxOwner($, sent.address) : null
     if (!owner || !sent?.text) continue
     const pid = relayPidOf(owner.box, sent.text)
-    rows.push({ kind: 'user', who: owner.who, text: `<cross-session-message from-name="${owner.name.replaceAll('"', '’')}">\n${sent.text}\n</cross-session-message>`, ...(pid ? { pid } : {}) })
+    rows.push({
+      kind: 'user',
+      who: owner.who,
+      text: `<cross-session-message from-name="${owner.name.replaceAll('"', '’')}">\n${sent.text}\n</cross-session-message>`,
+      ...(pid ? { pid } : {}),
+    })
   }
   return rows.length ? rows : null
 }
@@ -4194,7 +4612,11 @@ function hideMailboxes(row: Row, routes: Record<string, SharePeerRoute>): Row {
     const route = routes[id]
     return route?.kind === 'host' ? `${route.name} (${route.who}'s agent)`.replace(/["\\]/g, '') : 'another session'
   })
-  try { return JSON.parse(shown) as Row } catch { return row }
+  try {
+    return JSON.parse(shown) as Row
+  } catch {
+    return row
+  }
 }
 
 // Host: teammates' prompts go to Claude one at a time, each a turn of its
@@ -4207,7 +4629,11 @@ function hideMailboxes(row: Row, routes: Record<string, SharePeerRoute>): Row {
 // going idle again sends the next. A moment after idle, so a prompt of the
 // host's waiting in the engine's queue starts first rather than with it.
 function nextGuestPromptSoon($: $) {
-  $.clock.after(250, () => void nextGuestPrompt($).catch(error => $.ui.log(`Shared session: a teammate's prompt: ${String((error as Error)?.message ?? error)}`, { to: 'debug' })))
+  $.clock.after(
+    250,
+    () =>
+      void nextGuestPrompt($).catch(error => $.ui.log(`Shared session: a teammate's prompt: ${String((error as Error)?.message ?? error)}`, { to: 'debug' })),
+  )
 }
 
 async function nextGuestPrompt($: $) {
@@ -4261,7 +4687,11 @@ function watchGuestPrompt($: $, pid: string) {
 async function notTaken($: $, prompt: ShareGuestPrompt) {
   await update($, guestPromptsA, list => list.filter(p => p.pid !== prompt.pid))
   const room = await read($, roomA)
-  send($, 'declined', { pid: prompt.pid, who: prompt.who, reason: `${room?.host ?? 'The host'}'s Claude Code didn't take this prompt, so it didn't run. Send it again.` })
+  send($, 'declined', {
+    pid: prompt.pid,
+    who: prompt.who,
+    reason: `${room?.host ?? 'The host'}'s Claude Code didn't take this prompt, so it didn't run. Send it again.`,
+  })
   nextGuestPromptSoon($)
 }
 
@@ -4297,7 +4727,10 @@ async function releaseHeld($: $, media: Media[]) {
     if (meta) attachments.push(meta)
   }
   const missing = Math.max(held.names.length, media.length) - attachments.length
-  if (missing > 0) $.ui.log(`${missing === 1 ? 'An attachment' : `${missing} attachments`} didn't go with this message (over 8 MB, unreadable, or the room is full); the words did.`)
+  if (missing > 0)
+    $.ui.log(
+      `${missing === 1 ? 'An attachment' : `${missing} attachments`} didn't go with this message (over 8 MB, unreadable, or the room is full); the words did.`,
+    )
   send($, 'prompt', { text: held.text, pid: held.pid, ...(attachments.length ? { attachments } : {}) })
 }
 
@@ -4317,15 +4750,20 @@ function approvalPreview(tool: string, input: unknown, cwd: string, lines = 40):
   const str = (v: unknown) => (typeof v === 'string' ? v : '')
   const rel = (p: unknown) => (typeof p === 'string' && cwd && p.startsWith(`${cwd}/`) ? p.slice(cwd.length + 1) : str(p))
   const fence = (lang: string, body: string) => {
-    const all = body.split('\n'), more = all.length - lines
+    const all = body.split('\n'),
+      more = all.length - lines
     return `\`\`\`${lang}\n${all.slice(0, lines).join('\n')}\n\`\`\`${more > 0 ? `\n\n… ${more} more line${more === 1 ? '' : 's'}` : ''}`
   }
   switch (tool) {
     case 'Bash':
       return `${fence('bash', str(i.command))}\n\nin \`${cwd}\``
     case 'Edit': {
-      const minus = str(i.old_string).split('\n').map(l => `- ${l}`)
-      const plus = str(i.new_string).split('\n').map(l => `+ ${l}`)
+      const minus = str(i.old_string)
+        .split('\n')
+        .map(l => `- ${l}`)
+      const plus = str(i.new_string)
+        .split('\n')
+        .map(l => `+ ${l}`)
       return `\`${rel(i.file_path)}\`\n\n${fence('diff', [...minus, ...plus].join('\n'))}`
     }
     case 'Write':
@@ -4366,7 +4804,9 @@ async function showBandAsk($: $) {
   await update($, approvingA, () => {
     const row = approvals.filter(a => a.stage === 'row')
     const first = row[0]
-    return first ? { id: first.id, who: first.who, what: first.what, ...(first.extent ? { extent: first.extent } : {}), always: first.always, more: row.length - 1 } : null
+    return first
+      ? { id: first.id, who: first.who, what: first.what, ...(first.extent ? { extent: first.extent } : {}), always: first.always, more: row.length - 1 }
+      : null
   })
 }
 
@@ -4411,10 +4851,20 @@ async function takeCloudAsk($: $, event: ServerEvent, live: boolean) {
   if (b.done === true && typeof b.id === 'string') {
     await update($, cloudAsksA, list => list.filter(a => a.id !== b.id))
     const ports = (v: unknown) => (Array.isArray(v) ? v.filter(validPort).slice(0, 8) : [])
-    const shared = ports(b.shared), failed = ports(b.failed), link = b.kind === 'show'
+    const shared = ports(b.shared),
+      failed = ports(b.failed),
+      link = b.kind === 'show'
     const said = [
-      ...(shared.length ? [link ? `The cloud host is sharing ${portList(shared)} with the room through its link.` : `Teammates can reach the cloud host's ${portList(shared)} now.`] : []),
-      ...(failed.length ? [link ? `The cloud host couldn't share ${portList(failed)} with the room.` : `The cloud host couldn't forward ${portList(failed)} to teammates.`] : []),
+      ...(shared.length
+        ? [
+            link
+              ? `The cloud host is sharing ${portList(shared)} with the room through its link.`
+              : `Teammates can reach the cloud host's ${portList(shared)} now.`,
+          ]
+        : []),
+      ...(failed.length
+        ? [link ? `The cloud host couldn't share ${portList(failed)} with the room.` : `The cloud host couldn't forward ${portList(failed)} to teammates.`]
+        : []),
     ]
     if (live && said.length) $.ui.toast(said.join(' '))
     return
@@ -4426,7 +4876,18 @@ async function takeCloudAsk($: $, event: ServerEvent, live: boolean) {
   if (!local && typeof b.what !== 'string') return
   const options = Array.isArray(b.options) ? b.options.filter((o): o is string => typeof o === 'string').slice(0, 3) : []
   const ask: ShareCloudAsk = local
-    ? { id: b.id, who: local.who ?? '', kind: local.kind, port: local.port, ...(local.label ? { label: local.label } : {}), related: local.related, what: cloudHostWords(local), always: '', options: [hostAskYes(local), 'Not now'], ts: event.ts }
+    ? {
+        id: b.id,
+        who: local.who ?? '',
+        kind: local.kind,
+        port: local.port,
+        ...(local.label ? { label: local.label } : {}),
+        related: local.related,
+        what: cloudHostWords(local),
+        always: '',
+        options: [hostAskYes(local), 'Not now'],
+        ts: event.ts,
+      }
     : {
         id: b.id,
         who: typeof b.who === 'string' ? b.who : 'Someone',
@@ -4440,7 +4901,13 @@ async function takeCloudAsk($: $, event: ServerEvent, live: boolean) {
       }
   await update($, cloudAsksA, list => (list.some(a => a.id === ask.id) ? list : [...list, ask].slice(-20)))
   if (!live) return
-  $.ui.toast(local ? (ask.what.endsWith('?') ? `${ask.what} Answer above the prompt` : `${ask.what}: answer above the prompt`) : `${ask.who} wants Claude to run ${ask.what.slice(0, 80)}: answer above the prompt`)
+  $.ui.toast(
+    local
+      ? ask.what.endsWith('?')
+        ? `${ask.what} Answer above the prompt`
+        : `${ask.what}: answer above the prompt`
+      : `${ask.who} wants Claude to run ${ask.what.slice(0, 80)}: answer above the prompt`,
+  )
   void cue($, 'mention', local ? ask.what.slice(0, 80) : `${ask.who} wants Claude to run ${ask.what.slice(0, 60)}`)
   nudgeSidebar($)
 }
@@ -4451,7 +4918,13 @@ async function takeCloudAsk($: $, event: ServerEvent, live: boolean) {
 function localAskOf(b: Record<string, unknown>): ShareHostAsk | null {
   const kind = b.kind === 'show' || b.kind === 'related' || b.kind === 'mention' || b.kind === 'need' ? b.kind : null
   if (!kind || !validPort(b.port)) return null
-  const related = kind !== 'related' || !Array.isArray(b.related) ? [] : b.related.filter((r): r is { port: number; label?: unknown } => validPort(r?.port)).slice(0, ASK_PORTS).map(r => ({ port: Number(r.port), label: cleanLabel(r.label, 40) }))
+  const related =
+    kind !== 'related' || !Array.isArray(b.related)
+      ? []
+      : b.related
+          .filter((r): r is { port: number; label?: unknown } => validPort(r?.port))
+          .slice(0, ASK_PORTS)
+          .map(r => ({ port: Number(r.port), label: cleanLabel(r.label, 40) }))
   if (kind === 'related' && !related.length) return null
   const label = cleanLabel(b.label, 40)
   return { id: '', kind, port: Number(b.port), ...(label ? { label } : {}), ...(kind === 'need' ? { who: cleanLabel(b.who, 40) || 'A guest' } : {}), related }
@@ -4498,11 +4971,19 @@ async function noteCloud($: $, room: ShareRoom, mode: ShareMode, event: ServerEv
   if (mode !== 'guest') return
   const mine = (await read($, cloudA))?.mine
   const said =
-    b.state === 'starting' ? (mine ? '' : `${by} moved this session to the cloud: it keeps running when their computer sleeps.`)
-    : b.state === 'running' ? (mine ? 'Your session runs in the cloud now. Teammates’ calls come to you to approve, here and in the Room.' : '')
-    : b.state === 'stopped' ? `The cloud host stopped${b.why === 'expired' ? ' after its week' : ''}. ${mine ? 'Press Bring home in the Room to take the session back.' : `${room.host} brings it home to go on.`}`
-    : b.state === 'home' && !mine ? `${by} brought this session home.`
-    : ''
+    b.state === 'starting'
+      ? mine
+        ? ''
+        : `${by} moved this session to the cloud: it keeps running when their computer sleeps.`
+      : b.state === 'running'
+        ? mine
+          ? 'Your session runs in the cloud now. Teammates’ calls come to you to approve, here and in the Room.'
+          : ''
+        : b.state === 'stopped'
+          ? `The cloud host stopped${b.why === 'expired' ? ' after its week' : ''}. ${mine ? 'Press Bring home in the Room to take the session back.' : `${room.host} brings it home to go on.`}`
+          : b.state === 'home' && !mine
+            ? `${by} brought this session home.`
+            : ''
   if (said) $.ui.log(said)
 }
 
@@ -4522,16 +5003,25 @@ async function savedCloudToken($: $): Promise<string | null> {
   return CLOUD_TOKEN.test(token) ? token : null
 }
 async function takeCopiedToken($: $): Promise<boolean> {
-  const pasted = await sh($, 'if command -v pbpaste >/dev/null 2>&1; then pbpaste; elif command -v wl-paste >/dev/null 2>&1; then wl-paste -n; elif command -v xclip >/dev/null 2>&1; then xclip -o -selection clipboard; fi\n', 5_000)
+  const pasted = await sh(
+    $,
+    'if command -v pbpaste >/dev/null 2>&1; then pbpaste; elif command -v wl-paste >/dev/null 2>&1; then wl-paste -n; elif command -v xclip >/dev/null 2>&1; then xclip -o -selection clipboard; fi\n',
+    5_000,
+  )
   const token = pasted.out.trim()
   if (!CLOUD_TOKEN.test(token)) {
-    await update($, cloudMoveA, () => cloudMove('token', "That isn't a token from claude setup-token (it starts sk-ant-oat01-). Copy the token it printed, then press again."))
+    await update($, cloudMoveA, () =>
+      cloudMove('token', "That isn't a token from claude setup-token (it starts sk-ant-oat01-). Copy the token it printed, then press again."),
+    )
     return false
   }
   const path = await cloudTokenPath($)
   const tag = fence(token)
   const tmp = `${path}.${randomSecret()}.tmp`
-  const saved = await sh($, `umask 077\nset -e\nmkdir -p ${sq(path.slice(0, path.lastIndexOf('/')))}\ncat > ${sq(tmp)} <<'${tag}'\n${token}\n${tag}\nchmod 600 ${sq(tmp)}\nmv ${sq(tmp)} ${sq(path)}\n`)
+  const saved = await sh(
+    $,
+    `umask 077\nset -e\nmkdir -p ${sq(path.slice(0, path.lastIndexOf('/')))}\ncat > ${sq(tmp)} <<'${tag}'\n${token}\n${tag}\nchmod 600 ${sq(tmp)}\nmv ${sq(tmp)} ${sq(path)}\n`,
+  )
   if (saved.code !== 0) {
     await update($, cloudMoveA, () => cloudMove('failed', "Couldn't keep the token on this computer."))
     return false
@@ -4591,7 +5081,8 @@ async function moveToCloud($: $) {
   let packed: { path: string; dir: string; size: number } | null = null
   try {
     packed = await packSession($)
-    if (packed.size > CLOUD_BUNDLE_BYTES) throw new Error(`This project is ${Math.round(packed.size / 1024 / 1024)} MB packed; a move takes up to ${CLOUD_BUNDLE_BYTES / 1024 / 1024} MB.`)
+    if (packed.size > CLOUD_BUNDLE_BYTES)
+      throw new Error(`This project is ${Math.round(packed.size / 1024 / 1024)} MB packed; a move takes up to ${CLOUD_BUNDLE_BYTES / 1024 / 1024} MB.`)
     // What only this computer serves can't come along: its previews end first.
     for (const share of Object.values(await read($, sharesA))) await stopPreview($, share.pid)
     await update($, cloudMoveA, () => cloudMove('starting'))
@@ -4653,7 +5144,11 @@ async function bringHome($: $) {
   if (!room || (await read($, modeA)) !== 'guest' || !(await read($, cloudA))?.mine) return
   await update($, cloudMoveA, () => cloudMove('home'))
   try {
-    const home = await api<{ token: string; changes: ShareFileMeta | null }>($, room.server, `/api/rooms/${room.id}/cloud/home`, { method: 'POST', token: room.token, body: {} })
+    const home = await api<{ token: string; changes: ShareFileMeta | null }>($, room.server, `/api/rooms/${room.id}/cloud/home`, {
+      method: 'POST',
+      token: room.token,
+      body: {},
+    })
     const now = await $.clock.now()
     const place: Hosting = {
       at: now,
@@ -4699,7 +5194,8 @@ async function applyCloudChanges($: $, room: ShareRoom, changes: ShareFileMeta) 
   )
   const applied = /applied=(\d+)/.exec(r.out)?.[1]
   if (applied) $.ui.log(`Back home, with the cloud host's changes to ${applied} file${applied === '1' ? '' : 's'} in your project (also kept in ${rel}).`)
-  else if (/kept/.test(r.out)) $.ui.log(`Back home. The cloud host's changes don't apply cleanly over your files, so they're kept in ${rel}: apply them with git apply --3way ${rel}`)
+  else if (/kept/.test(r.out))
+    $.ui.log(`Back home. The cloud host's changes don't apply cleanly over your files, so they're kept in ${rel}: apply them with git apply --3way ${rel}`)
   else $.ui.log("Back home. The cloud host's changes couldn't be downloaded; they're in the Room's files for a while.")
 }
 
@@ -4720,7 +5216,9 @@ function wakeApprovals() {
 async function approvalWait($: $, ask: Approval, answered: Promise<string>, done: () => boolean) {
   while (!done()) {
     let wake!: () => void
-    const woken = new Promise<void>(resolve => { wake = resolve })
+    const woken = new Promise<void>(resolve => {
+      wake = resolve
+    })
     approvalWaiters.add(wake)
     try {
       await Promise.race([answered, woken, nap($, 1_000)])
@@ -4794,7 +5292,8 @@ function trusts(trusted: readonly ShareTrust[], owner: ShareOwner, people: reado
 }
 
 // The account a seat belongs to, as the room's people say.
-const seatAccount = (seat: string, people: readonly SharePerson[]): string | undefined => (seat ? people.find(p => p.seats?.includes(seat))?.account : undefined)
+const seatAccount = (seat: string, people: readonly SharePerson[]): string | undefined =>
+  seat ? people.find(p => p.seats?.includes(seat))?.account : undefined
 
 // Whether the host always allows this person (the Room's list of people).
 const trustsPerson = (trusted: readonly ShareTrust[], p: SharePerson): boolean =>
@@ -4823,11 +5322,13 @@ async function noteAnswered($: $, id: string) {
 // being the new module's; else the row is drawn again from what waits here.
 async function takeBackAsk($: $, what: string, isReplaced: boolean) {
   const still = isReplaced ? undefined : approvals[0]
-  if ((await read($, workingA).catch(() => null))?.waitingFor === what) await update($, workingA, w => (w?.waitingFor === what ? { ...w, waitingFor: still?.what ?? null } : w)).catch(() => {})
+  if ((await read($, workingA).catch(() => null))?.waitingFor === what)
+    await update($, workingA, w => (w?.waitingFor === what ? { ...w, waitingFor: still?.what ?? null } : w)).catch(() => {})
   send($, 'approval', { pending: false })
   if (still) send($, 'approval', { pending: true, what: still.what })
   if (!isReplaced) await showBandAsk($).catch(() => {})
-  else if (madeHere.has((await read($, approvingA).catch(() => null))?.id ?? '')) await update($, approvingA, a => (a && madeHere.has(a.id) ? null : a)).catch(() => {})
+  else if (madeHere.has((await read($, approvingA).catch(() => null))?.id ?? ''))
+    await update($, approvingA, a => (a && madeHere.has(a.id) ? null : a)).catch(() => {})
 }
 
 // A module a reload replaced is unloaded as its last hook returns, its
@@ -4879,15 +5380,29 @@ async function peerRow($: $, sent: { text: string; address: string }): Promise<{
     const { out } = await sh($, `tail -n 200 ${sq(file)} | grep -F '"kind":"peer"'\n`)
     for (const line of out.split('\n').reverse()) {
       let row: { message?: { content?: unknown }; origin?: { kind?: unknown; from?: unknown; msg_id?: unknown; hopChain?: unknown } }
-      try { row = JSON.parse(line) } catch { continue }
+      try {
+        row = JSON.parse(line)
+      } catch {
+        continue
+      }
       const origin = row?.origin
-      if (origin?.kind !== 'peer' || origin.from !== sent.address || typeof origin.msg_id !== 'string' || !MSG_ID.test(origin.msg_id) || rowsTaken.has(origin.msg_id)) continue
+      if (
+        origin?.kind !== 'peer' ||
+        origin.from !== sent.address ||
+        typeof origin.msg_id !== 'string' ||
+        !MSG_ID.test(origin.msg_id) ||
+        rowsTaken.has(origin.msg_id)
+      )
+        continue
       const content = row.message?.content
       const text = typeof content === 'string' ? content : Array.isArray(content) ? content.map(b => (typeof b?.text === 'string' ? b.text : '')).join('') : ''
       if (delivered(text)?.text !== sent.text) continue
       rowsTaken.add(origin.msg_id)
       if (rowsTaken.size > 256) rowsTaken.delete(rowsTaken.values().next().value as string)
-      return { id: origin.msg_id, chain: Array.isArray(origin.hopChain) ? origin.hopChain.filter((t): t is string => typeof t === 'string' && HOP_TOKEN.test(t)).slice(-32) : [] }
+      return {
+        id: origin.msg_id,
+        chain: Array.isArray(origin.hopChain) ? origin.hopChain.filter((t): t is string => typeof t === 'string' && HOP_TOKEN.test(t)).slice(-32) : [],
+      }
     }
     await pause($, 100)
   }
@@ -4920,8 +5435,18 @@ async function relayQueued($: $, room: ShareRoom, s: RoomScope, pid: string, sen
   if (!handle) return
   const id = row?.id ?? newMsgId()
   const at = await $.clock.now()
-  await update($, peerRelaysA, list => (s.live ? [...list.filter(r => r.id !== id), { id, pid, handle, to: sent.address, native: Boolean(row), at }].slice(-64) : list))
-  const result = await postPeer($, room, { handle, name, ...(sent.mode && /^[a-z-]{1,32}$/.test(sent.mode) ? { mode: sent.mode } : {}), chain: row?.chain ?? [], id, pid, body: sent.text.slice(0, 32_000) })
+  await update($, peerRelaysA, list =>
+    s.live ? [...list.filter(r => r.id !== id), { id, pid, handle, to: sent.address, native: Boolean(row), at }].slice(-64) : list,
+  )
+  const result = await postPeer($, room, {
+    handle,
+    name,
+    ...(sent.mode && /^[a-z-]{1,32}$/.test(sent.mode) ? { mode: sent.mode } : {}),
+    chain: row?.chain ?? [],
+    id,
+    pid,
+    body: sent.text.slice(0, 32_000),
+  })
   lastActivity = await $.clock.now()
   if (result === 'delivered') {
     $.clock.after(RELAY_WAIT_MS, () => endRelay(pid, `Passed on to **${room.host}**'s session; their Claude hasn't taken it up yet.`))
@@ -4957,7 +5482,9 @@ async function guestPeer($: $, room: ShareRoom, value: Record<string, unknown>) 
 // Delivered means queued: a session in another permission mode class than
 // this one holds it until its person lets it in.
 async function sendPeer($: $, to: string, text: string, reply?: { handle: string; ref: string }): Promise<boolean> {
-  const sent = await $.session.send({ to, text }).catch((error: unknown) => ({ isDelivered: false as const, reason: String((error as Error)?.message ?? error) }))
+  const sent = await $.session
+    .send({ to, text })
+    .catch((error: unknown) => ({ isDelivered: false as const, reason: String((error as Error)?.message ?? error) }))
   if (!sent.isDelivered) {
     $.ui.log(`Shared session: a message to another session here didn't go: ${sent.reason}`, { to: 'debug' })
     return false
@@ -4979,8 +5506,11 @@ function tellPeer($: $, to: string, text: string) {
 // host's Claude Code said it: only for the id that session gave it, and a
 // release only after a hold.
 const DROP_WORDS: Record<string, string> = {
-  'rate-limited': 'too many messages too fast', duplicate: 'it repeated the one before', 'hop-loop': 'a relay loop between sessions was cut',
-  'hop-runaway': 'a relay loop between sessions was cut', 'queue-full': 'too many messages were waiting there',
+  'rate-limited': 'too many messages too fast',
+  duplicate: 'it repeated the one before',
+  'hop-loop': 'a relay loop between sessions was cut',
+  'hop-runaway': 'a relay loop between sessions was cut',
+  'queue-full': 'too many messages were waiting there',
 }
 async function guestReceipt($: $, room: ShareRoom, value: Record<string, unknown>) {
   const receipt = peerReceiptOf(value, 'id')
@@ -4988,7 +5518,8 @@ async function guestReceipt($: $, room: ShareRoom, value: Record<string, unknown
   const relay = (await update($, peerRelaysA, list => list)).find(r => r.id === receipt.of && r.handle === receipt.handle)
   if (!relay) return
   if (receipt.status === 'held') endRelay(relay.pid, `**${room.host}**'s Claude Code is holding this until ${room.host} lets it in.`)
-  else if (receipt.status === 'dropped') endRelay(relay.pid, `**${room.host}**'s Claude Code dropped this${receipt.reason ? ` (${DROP_WORDS[receipt.reason]})` : ''}.`)
+  else if (receipt.status === 'dropped')
+    endRelay(relay.pid, `**${room.host}**'s Claude Code dropped this${receipt.reason ? ` (${DROP_WORDS[receipt.reason]})` : ''}.`)
   else if (receipt.status === 'refused') endRelay(relay.pid, `**${room.host}**'s Claude Code isn't taking messages from other sessions.`)
   if (!relay.native || !relay.to.startsWith('uds:') || (receipt.status === 'delivered' && !relay.held)) return
   if (receipt.status === 'held') await update($, peerRelaysA, list => list.map(r => (r.id === relay.id ? { ...r, held: true as const } : r)))
@@ -4998,7 +5529,8 @@ async function guestReceipt($: $, room: ShareRoom, value: Record<string, unknown
   const child = $.process.spawn({ argv: ['/bin/sh', '-c', FIND_NODE, 'sh', `${$.plugin.root}/relay/receipt.mts`], input: JSON.stringify(input) })
   let out = ''
   for await (const chunk of child) if (chunk.stream === 'stdout') out += chunk.text
-  if (!out.includes('"sent"')) $.ui.log(`Shared session: a receipt didn't reach the session it's for (${out.trim().slice(0, 80) || 'no Node'})`, { to: 'debug' })
+  if (!out.includes('"sent"'))
+    $.ui.log(`Shared session: a receipt didn't reach the session it's for (${out.trim().slice(0, 80) || 'no Node'})`, { to: 'debug' })
 }
 
 // A delivery notice Claude Code gives this session about what it sent
@@ -5007,12 +5539,18 @@ async function guestReceipt($: $, room: ShareRoom, value: Record<string, unknown
 // gave them, which a plugin's send never learns.
 const NOTICE = '[Cross-session delivery notice] '
 const NOTICE_STATUS: [RegExp, PeerStatus][] = [
-  [/ dropped at that session's inbox/, 'dropped'], [/ held by that session/, 'held'], [/ denied by the recipient user/, 'denied'],
-  [/ not approved before expiry/, 'expired'], [/ approved and released to that session/, 'delivered'], [/ (?:was|were) refused/, 'refused'],
+  [/ dropped at that session's inbox/, 'dropped'],
+  [/ held by that session/, 'held'],
+  [/ denied by the recipient user/, 'denied'],
+  [/ not approved before expiry/, 'expired'],
+  [/ approved and released to that session/, 'delivered'],
+  [/ (?:was|were) refused/, 'refused'],
 ]
 const DROP_TEXTS: [string, string][] = [
-  ['you sent faster than that session accepts', 'rate-limited'], ['it repeated your previous message', 'duplicate'],
-  ['a relay loop between sessions was cut', 'hop-loop'], ['its queue of undelivered peer messages was full', 'queue-full'],
+  ['you sent faster than that session accepts', 'rate-limited'],
+  ['it repeated your previous message', 'duplicate'],
+  ['a relay loop between sessions was cut', 'hop-loop'],
+  ['its queue of undelivered peer messages was full', 'queue-full'],
 ]
 function noticeOf(text: string): { status: PeerStatus; to: string[]; ids: string[]; reason?: string } | null {
   if (!text.startsWith(NOTICE)) return null
@@ -5057,7 +5595,8 @@ async function takeNotice($: $, text: string) {
     return next
   })
   for (const sent of matched) {
-    if (sent.handle && sent.ref) await postPeer($, room, { handle: sent.handle, status: notice.status, ref: sent.ref, ...(notice.reason ? { reason: notice.reason } : {}) })
+    if (sent.handle && sent.ref)
+      await postPeer($, room, { handle: sent.handle, status: notice.status, ref: sent.ref, ...(notice.reason ? { reason: notice.reason } : {}) })
   }
 }
 
@@ -5078,8 +5617,10 @@ function peerRoutesSaved(value: unknown, kind: SharePeerRoute['kind']): Record<s
   for (const [id, r] of Object.entries(value as Record<string, Record<string, unknown> | null>)) {
     if (!PEER_ID.test(id) || !r || typeof r !== 'object' || r.kind !== kind || !Number.isFinite(r.at)) continue
     const at = r.at as number
-    if (kind === 'guest' && text(r.to) && /^(?:uds|bridge):\S/.test(r.to as string) && (r.to as string).length <= 512 && text(r.seat)) kept.push([id, { kind, to: r.to as string, name: tidySender(String(r.name ?? '')), seat: r.seat as string, at }])
-    if (kind === 'host' && text(r.seat) && typeof r.handle === 'string' && PEER_ID.test(r.handle) && text(r.who)) kept.push([id, { kind, seat: r.seat as string, handle: r.handle, who: r.who as string, name: tidySender(String(r.name ?? '')), at }])
+    if (kind === 'guest' && text(r.to) && /^(?:uds|bridge):\S/.test(r.to as string) && (r.to as string).length <= 512 && text(r.seat))
+      kept.push([id, { kind, to: r.to as string, name: tidySender(String(r.name ?? '')), seat: r.seat as string, at }])
+    if (kind === 'host' && text(r.seat) && typeof r.handle === 'string' && PEER_ID.test(r.handle) && text(r.who))
+      kept.push([id, { kind, seat: r.seat as string, handle: r.handle, who: r.who as string, name: tidySender(String(r.name ?? '')), at }])
   }
   return Object.fromEntries(kept.slice(-64))
 }
@@ -5177,7 +5718,10 @@ async function joinRoom($: $, server: string, id: string) {
     await markSidebar($, () => `👥 ${room.host} · ${room.title}`)
     return {
       room,
-      history: exchanges(past.map(e => e.body as unknown as Row), joined.host),
+      history: exchanges(
+        past.map(e => e.body as unknown as Row),
+        joined.host,
+      ),
       // One preview opens: they share one host name, so a browser holds one at a
       // time (the newest page); the rest are in the Room, a press of Open away.
       open: pages.slice(-1),
@@ -5218,14 +5762,34 @@ async function eventsSince($: $, room: { server: string; id: string; token: stri
 // prompt the way a $.http.fetch in flight does.
 
 const MIME: Record<string, string> = {
-  html: 'text/html', htm: 'text/html', svg: 'image/svg+xml', png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif',
-  webp: 'image/webp', pdf: 'application/pdf', md: 'text/markdown', txt: 'text/plain', csv: 'text/csv', json: 'application/json',
-  js: 'text/javascript', css: 'text/css', mp4: 'video/mp4', mov: 'video/quicktime', webm: 'video/webm', mmd: 'text/plain',
+  html: 'text/html',
+  htm: 'text/html',
+  svg: 'image/svg+xml',
+  png: 'image/png',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  gif: 'image/gif',
+  webp: 'image/webp',
+  pdf: 'application/pdf',
+  md: 'text/markdown',
+  txt: 'text/plain',
+  csv: 'text/csv',
+  json: 'application/json',
+  js: 'text/javascript',
+  css: 'text/css',
+  mp4: 'video/mp4',
+  mov: 'video/quicktime',
+  webm: 'video/webm',
+  mmd: 'text/plain',
 }
 const mimeOf = (path: string) => MIME[(path.split('.').pop() ?? '').toLowerCase()] ?? 'application/octet-stream'
 const baseName = (path: string) => path.split('/').filter(Boolean).at(-1) ?? 'file'
 // A value inside a curl config file's double quotes.
-const cfg = (value: string) => `"${value.replace(/[\r\n]/g, ' ').replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`
+const cfg = (value: string) =>
+  `"${value
+    .replace(/[\r\n]/g, ' ')
+    .replace(/\\/g, '\\\\')
+    .replace(/"/g, '\\"')}"`
 // A string inside a shell script's single quotes.
 const sq = (value: string) => `'${value.replace(/'/g, `'\\''`)}'`
 // A here-document delimiter that the body can't contain.
@@ -5264,7 +5828,12 @@ async function spawned($: $, argv: string[], input?: string, within?: number): P
   })()
   if (within === undefined) return run
   let timer: Timer | undefined
-  const answer = await Promise.race([run, new Promise<null>(done => { timer = $.clock.after(within, () => done(null)) })])
+  const answer = await Promise.race([
+    run,
+    new Promise<null>(done => {
+      timer = $.clock.after(within, () => done(null))
+    }),
+  ])
   timer?.cancel()
   if (answer) return answer
   void child?.return(undefined as never).catch(() => {})
@@ -5274,12 +5843,18 @@ async function spawned($: $, argv: string[], input?: string, within?: number): P
 // A room address taken as it is (`globoff`): curl reads [1-9] and {a,b} in
 // a URL as a pattern, one request into many.
 function roomConfig(room: ShareRoom, path: string): string {
-  return [`url = ${cfg(`${room.server}/api/rooms/${room.id}/${path}`)}`, `header = ${cfg(`Authorization: Bearer ${room.token}`)}`, 'silent', 'globoff'].join('\n')
+  return [`url = ${cfg(`${room.server}/api/rooms/${room.id}/${path}`)}`, `header = ${cfg(`Authorization: Bearer ${room.token}`)}`, 'silent', 'globoff'].join(
+    '\n',
+  )
 }
 
 // Host: one file to the room. Returns its id, name, type and size.
 async function uploadFile($: $, room: ShareRoom, path: string, name = baseName(path)): Promise<ShareFileMeta | null> {
-  const config = [roomConfig(room, 'files'), `header = ${cfg(`x-file-name: ${encodeURIComponent(name)}`)}`, `header = ${cfg(`content-type: ${mimeOf(name)}`)}`].join('\n')
+  const config = [
+    roomConfig(room, 'files'),
+    `header = ${cfg(`x-file-name: ${encodeURIComponent(name)}`)}`,
+    `header = ${cfg(`content-type: ${mimeOf(name)}`)}`,
+  ].join('\n')
   const tag = fence(config)
   const { out } = await sh($, `[ -f ${sq(path)} ] || exit 1\ncurl -K - -X POST --data-binary @${sq(path)} <<'${tag}'\n${config}\n${tag}\n`)
   try {
@@ -5292,7 +5867,12 @@ async function uploadFile($: $, room: ShareRoom, path: string, name = baseName(p
 
 // Host: a picture's bytes (base64, as the transcript holds them) to the room.
 async function uploadImage($: $, room: ShareRoom, media: Media, name: string): Promise<ShareFileMeta | null> {
-  const config = [roomConfig(room, 'files'), `header = ${cfg(`x-file-name: ${encodeURIComponent(name)}`)}`, `header = ${cfg(`content-type: ${media.type}`)}`, 'max-time = 60'].join('\n')
+  const config = [
+    roomConfig(room, 'files'),
+    `header = ${cfg(`x-file-name: ${encodeURIComponent(name)}`)}`,
+    `header = ${cfg(`content-type: ${media.type}`)}`,
+    'max-time = 60',
+  ].join('\n')
   const b64 = (media.data.replace(/[^A-Za-z0-9+/=]/g, '').match(/.{1,76}/g) ?? []).join('\n')
   const data = fence(b64)
   const tag = fence(config)
@@ -5344,7 +5924,7 @@ async function withImages($: $, room: ShareRoom, text: string, images: RoomImage
     const data = await downloadImage($, room, image)
     if (data) blocks.push({ type: 'image', source: { type: 'base64', media_type: image.type, data } })
   }
-  return blocks.length ? blocks : text || '(the picture didn\'t come through)'
+  return blocks.length ? blocks : text || "(the picture didn't come through)"
 }
 
 // Host: text (a widget too big for an event) to the room, as a file.
@@ -5357,7 +5937,12 @@ async function uploadText($: $, room: ShareRoom, text: string, name: string): Pr
 // A person's name as their folder in .shared-session/: one part of a path,
 // never `.`, `..` or hidden. A room's names are whatever its people chose.
 function personDir(name: string, fallback: string): string {
-  return name.replace(/[^\w.-]+/g, '-').replace(/^\.+/, '').slice(0, 40) || fallback
+  return (
+    name
+      .replace(/[^\w.-]+/g, '-')
+      .replace(/^\.+/, '')
+      .slice(0, 40) || fallback
+  )
 }
 
 // Guest: a room file into .shared-session/<host>/ in this session's folder
@@ -5370,7 +5955,8 @@ async function downloadFile($: $, room: ShareRoom, meta: ShareFileMeta, into?: s
   const clean = meta.name.replace(/[^\w.\- ()]+/g, '-').replace(/^\.+/, '') || 'file'
   const owner = savedNames.get(`${dir}/${clean}`)
   const dot = clean.lastIndexOf('.')
-  const name = !owner || owner === meta.id ? clean : dot > 0 ? `${clean.slice(0, dot)}-${meta.id.slice(0, 6)}${clean.slice(dot)}` : `${clean}-${meta.id.slice(0, 6)}`
+  const name =
+    !owner || owner === meta.id ? clean : dot > 0 ? `${clean.slice(0, dot)}-${meta.id.slice(0, 6)}${clean.slice(dot)}` : `${clean}-${meta.id.slice(0, 6)}`
   const path = into ?? `${dir}/${name}`
   const box = `${cwd}/.shared-session/`
   if (!dir.startsWith(box)) return null
@@ -5509,7 +6095,14 @@ async function writeShare($: $, s: RoomScope, port: number, change: (share: Host
 function shareOver(old: HostShare | undefined, pid: string, said: Omit<HostShare, 'pid'>, made: boolean): HostShare | undefined {
   const base: HostShare | undefined = old?.pid === pid ? old : made ? { pid } : undefined
   if (!base) return undefined
-  if (said.tcp) return { pid, tcp: true, ...(said.host ? { host: said.host } : {}), ...(said.scheme ? { scheme: said.scheme } : {}), ...(said.dependency !== undefined ? { dependency: said.dependency } : {}) }
+  if (said.tcp)
+    return {
+      pid,
+      tcp: true,
+      ...(said.host ? { host: said.host } : {}),
+      ...(said.scheme ? { scheme: said.scheme } : {}),
+      ...(said.dependency !== undefined ? { dependency: said.dependency } : {}),
+    }
   if (base.tcp && base.scheme) return base
   const next: HostShare = { ...base }
   delete next.scheme
@@ -5543,7 +6136,14 @@ async function ensurePreview($: $, room: ShareRoom, port: number, title: string,
     const known = (await read($, sharesA))[String(port)]
     let pid = known && (!said.tcp || known.tcp) ? known.pid : ''
     const made = !pid
-    if (made) pid = (await api<{ pid: string }>($, room.server, `/api/rooms/${room.id}/previews`, { method: 'POST', token: room.token, body: { port, title, ...(said.tcp ? { tcp: true } : {}) } })).pid
+    if (made)
+      pid = (
+        await api<{ pid: string }>($, room.server, `/api/rooms/${room.id}/previews`, {
+          method: 'POST',
+          token: room.token,
+          body: { port, title, ...(said.tcp ? { tcp: true } : {}) },
+        })
+      ).pid
     if (!sameRoom(room, s)) return null
     const share = await writeShare($, s, port, old => shareOver(old, pid, said, made))
     return share && sameRoom(room, s) ? share : null
@@ -5586,8 +6186,15 @@ function sharedAs(share: HostShare, host?: PreviewHost): Pick<ShareShown, 'tcp' 
 function shareOf(value: unknown): HostShare | null {
   const s = value as Partial<HostShare> | null
   if (!s || typeof s !== 'object' || typeof s.pid !== 'string' || !PREVIEW_ID.test(s.pid)) return null
-  const host = previewHost(s.host), dependency = dependencyOf(s.dependency)
-  return { pid: s.pid, ...(s.tcp === true ? { tcp: true } : {}), ...(host ? { host } : {}), ...(s.scheme === 'https' ? { scheme: 'https' } : {}), ...(dependency !== undefined ? { dependency } : {}) }
+  const host = previewHost(s.host),
+    dependency = dependencyOf(s.dependency)
+  return {
+    pid: s.pid,
+    ...(s.tcp === true ? { tcp: true } : {}),
+    ...(host ? { host } : {}),
+    ...(s.scheme === 'https' ? { scheme: 'https' } : {}),
+    ...(dependency !== undefined ? { dependency } : {}),
+  }
 }
 
 // A place's shares, each checked.
@@ -5608,22 +6215,34 @@ async function allowForwarding($: $, item: ShareShown) {
   if (!room || !hostHere(room) || !validPort(item.port)) return
   const port = item.port
   // Forwarding again keeps what it was shared as (a page, or a page's dependency).
-  const forwarded = await hostForwards($, room, { port, title: shownTitle(item), path: item.path ?? '/', host: item.host, scheme: item.scheme, dependency: item.dependency }, { offerRelated: 8_000 })
-  if (hostHere(room)) $.ui.toast(forwarded && 'pid' in forwarded ? forwardedSaid([port]) : (forwarded?.refused ?? `Couldn't allow forwarding localhost:${port}`))
+  const forwarded = await hostForwards(
+    $,
+    room,
+    { port, title: shownTitle(item), path: item.path ?? '/', host: item.host, scheme: item.scheme, dependency: item.dependency },
+    { offerRelated: 8_000 },
+  )
+  if (hostHere(room))
+    $.ui.toast(forwarded && 'pid' in forwarded ? forwardedSaid([port]) : (forwarded?.refused ?? `Couldn't allow forwarding localhost:${port}`))
 }
 
 async function stopPreview($: $, pid: string) {
-  const s = scope, room = await read($, roomA)
+  const s = scope,
+    room = await read($, roomA)
   if (!room || !sameRoom(room, s)) return
   // Stopped on purpose: a guest's window asking for it right after asks
   // nothing, and Claude mentioning it again (after a reload, or a reopened
   // session looking back) doesn't share it again.
-  const port = Number(Object.entries(await read($, sharesA)).find(([, share]) => share.pid === pid)?.[0] ?? (await read($, shownA)).find(x => x.pid === pid)?.port)
+  const port = Number(
+    Object.entries(await read($, sharesA)).find(([, share]) => share.pid === pid)?.[0] ?? (await read($, shownA)).find(x => x.pid === pid)?.port,
+  )
   if (validPort(port)) await stopPorts($, room, [port])
   // Nothing reaches it through this session from now on, whatever the server hears.
   await unshare($, room, pid)
   if (!sameRoom(room, s) || (await endPreview($, room, s, pid, port))) return
-  if (sameRoom(room, s)) $.ui.toast(`Stopped sharing ${validPort(port) ? `localhost:${port}` : 'that preview'}. The server couldn't be told yet, so guests may still see it listed, but nothing reaches it. The server is told again when this session reconnects, or when you press Stop again.`)
+  if (sameRoom(room, s))
+    $.ui.toast(
+      `Stopped sharing ${validPort(port) ? `localhost:${port}` : 'that preview'}. The server couldn't be told yet, so guests may still see it listed, but nothing reaches it. The server is told again when this session reconnects, or when you press Stop again.`,
+    )
 }
 
 // Host: the room told a preview stopped here has ended. It ends in Shown
@@ -5843,7 +6462,8 @@ async function lookAtPage($: $, page: LocalPage): Promise<PageLook> {
 async function shareOpened($: $, room: ShareRoom, page: LocalPage, opts: { title?: string; turnId?: string }) {
   if (!(await read($, sharesA))[String(page.port)]) {
     if ((await hostMemoryOf($, room)).stopped.includes(page.port)) return
-    if (await relayedHere($, page.port)) return void $.ui.log(`Not sharing localhost:${page.port}: another shared session's preview forwarded here`, { to: 'debug' })
+    if (await relayedHere($, page.port))
+      return void $.ui.log(`Not sharing localhost:${page.port}: another shared session's preview forwarded here`, { to: 'debug' })
     if ((await lookAtPage($, { ...page, opened: true })) === 'not') return
     // A new one goes once the host says so (never waited on here, in a tool's hook).
     return void offerShow($, room, page, opts).catch(() => {})
@@ -5868,7 +6488,8 @@ async function captureShown($: $, e: Record<string, unknown>, result: unknown) {
 
   if (tool === 'SendUserFile') {
     const files = await uploads((Array.isArray(input.files) ? input.files : []).filter((f): f is string => typeof f === 'string').slice(0, 10))
-    if (files.length) send($, 'artifact', { kind: 'send', turnId, files, display: input.display === 'attach' ? 'attach' : 'render', caption: str(input.caption).slice(0, 300) })
+    if (files.length)
+      send($, 'artifact', { kind: 'send', turnId, files, display: input.display === 'attach' ? 'attach' : 'render', caption: str(input.caption).slice(0, 300) })
   } else if (tool.endsWith('__show_widget')) {
     const code = str(input.widget_code)
     if (!code) return
@@ -5929,7 +6550,9 @@ async function pageEvent($: $, room: ShareRoom, input: Record<string, unknown>, 
   const root = str(input.root) ? abs(str(input.root)) : cwd
   const listed = Array.isArray(input.files)
     ? (input.files as unknown[]).map(f => (f && typeof f === 'object' ? str((f as { path?: unknown }).path) : '')).map(p => [p, p] as const)
-    : Object.entries((input.files ?? {}) as Record<string, unknown>).map(([to, from]) => [to, typeof from === 'string' ? from : from && typeof from === 'object' ? str((from as { from?: unknown }).from) : ''] as const)
+    : Object.entries((input.files ?? {}) as Record<string, unknown>).map(
+        ([to, from]) => [to, typeof from === 'string' ? from : from && typeof from === 'object' ? str((from as { from?: unknown }).from) : ''] as const,
+      )
   const beside: ShareFileMeta[] = []
   for (const [to, from] of listed.slice(0, PAGE_FILES)) {
     const path = pagePath(to)
@@ -5954,9 +6577,17 @@ async function earlierPage($: $, room: ShareRoom, id: string, cwd: string): Prom
   let found: Record<string, unknown> | null = null
   for (const message of await sessionHistory($)) {
     if (!Array.isArray(message.content)) continue
-    for (const block of message.content as { type?: string; id?: string; name?: string; input?: Record<string, unknown>; tool_use_id?: string; content?: unknown }[]) {
+    for (const block of message.content as {
+      type?: string
+      id?: string
+      name?: string
+      input?: Record<string, unknown>
+      tool_use_id?: string
+      content?: unknown
+    }[]) {
       if (block.type === 'tool_use' && block.name === 'Artifact' && block.id && typeof block.input?.file_path === 'string') calls.set(block.id, block.input)
-      if (block.type === 'tool_result' && block.tool_use_id && calls.has(block.tool_use_id) && JSON.stringify(block.content ?? '').includes(id)) found = calls.get(block.tool_use_id)!
+      if (block.type === 'tool_result' && block.tool_use_id && calls.has(block.tool_use_id) && JSON.stringify(block.content ?? '').includes(id))
+        found = calls.get(block.tool_use_id)!
     }
   }
   const body = found ? await pageEvent($, room, found, cwd) : null
@@ -5967,7 +6598,10 @@ async function earlierPage($: $, room: ShareRoom, id: string, cwd: string): Prom
 const PAGE_FILES = 60
 // A page's file's place beside it, relative and inside: no `..`, no root.
 function pagePath(raw: string): string {
-  const parts = raw.split(/[\\/]+/).filter(p => p && p !== '.' && p !== '..').map(p => p.replace(/[^\w.\- ()]+/g, '-').replace(/^\.+/, '') || 'file')
+  const parts = raw
+    .split(/[\\/]+/)
+    .filter(p => p && p !== '.' && p !== '..')
+    .map(p => p.replace(/[^\w.\- ()]+/g, '-').replace(/^\.+/, '') || 'file')
   return parts.join('/')
 }
 
@@ -5984,7 +6618,9 @@ async function replayOf($: $, room: ShareRoom, event: ServerEvent): Promise<Repl
   const paths = await downloadShown($, room, shown.files ?? [])
   const cwd = await $.session.cwd()
   const rel = (p: string) => (p.startsWith(`${cwd}/`) ? p.slice(cwd.length + 1) : p)
-  const savedNote = paths.length ? `saved to ${(shown.files ?? []).some(f => f.path) ? `\`${rel(paths[0]!)}\`, with its files` : paths.map(p => `\`${rel(p)}\``).join(', ')}` : ''
+  const savedNote = paths.length
+    ? `saved to ${(shown.files ?? []).some(f => f.path) ? `\`${rel(paths[0]!)}\`, with its files` : paths.map(p => `\`${rel(p)}\``).join(', ')}`
+    : ''
   const label = `◧ **${host}'s Claude showed** ${shown.name}`
   switch (shown.kind) {
     case 'send':
@@ -5994,7 +6630,12 @@ async function replayOf($: $, room: ShareRoom, event: ServerEvent): Promise<Repl
         label,
         call: {
           name: 'SendUserFile',
-          input: { files: paths, display: body.display === 'attach' ? 'attach' : 'render', status: 'normal', caption: `From ${host}'s session${typeof body.caption === 'string' && body.caption ? `: ${body.caption}` : ''}` },
+          input: {
+            files: paths,
+            display: body.display === 'attach' ? 'attach' : 'render',
+            status: 'normal',
+            caption: `From ${host}'s session${typeof body.caption === 'string' && body.caption ? `: ${body.caption}` : ''}`,
+          },
         },
       }
     case 'widget': {
@@ -6003,12 +6644,21 @@ async function replayOf($: $, room: ShareRoom, event: ServerEvent): Promise<Repl
       const tool = code ? await widgetTool($) : null
       if (!tool) return { label, note: code ? 'this Claude Code has no widget viewer' : "the widget didn't come through" }
       const loading = Array.isArray(body.loading) && body.loading.length ? body.loading : [`Drawing what ${host} saw`]
-      return { label, call: { name: tool, input: { title: typeof body.title === 'string' && body.title ? body.title : 'shared_widget', loading_messages: loading, widget_code: code } } }
+      return {
+        label,
+        call: {
+          name: tool,
+          input: { title: typeof body.title === 'string' && body.title ? body.title : 'shared_widget', loading_messages: loading, widget_code: code },
+        },
+      }
     }
     case 'file':
       if (!paths[0]) return { label, note: "the file didn't come through" }
       if (!(await hasTool($, 'mcp__ccd_view__show_pane'))) return { label, note: savedNote }
-      return { label, call: { name: 'mcp__ccd_view__show_pane', input: { pane: 'file', path: paths[0], ...(typeof body.line === 'number' ? { line: body.line } : {}) } } }
+      return {
+        label,
+        call: { name: 'mcp__ccd_view__show_pane', input: { pane: 'file', path: paths[0], ...(typeof body.line === 'number' ? { line: body.line } : {}) } },
+      }
     case 'page':
       if (!paths[0]) return { label, note: "the page didn't come through" }
       if (!(await hasTool($, 'mcp__Claude_Browser__preview_start'))) return { label, note: savedNote }
@@ -6023,12 +6673,17 @@ async function replayOf($: $, room: ShareRoom, event: ServerEvent): Promise<Repl
       // Forwarded only when the guest says so: Open preview above the
       // prompt, or Open in the Room, never a replay.
       if (shown.tcp) {
-        if (validPort(shown.port)) return { label, note: `press **Open preview** above the prompt (or **Open** in the Room) to open it at ${previewUrl(shown.host, shown.port, shown.path, shown.scheme)}` }
+        if (validPort(shown.port))
+          return {
+            label,
+            note: `press **Open preview** above the prompt (or **Open** in the Room) to open it at ${previewUrl(shown.host, shown.port, shown.path, shown.scheme)}`,
+          }
         return { label, note: 'press **Open** in the Room to open it' }
       }
       const url = await previewTicket($, room, shown.pid, shown.path)
       if (!url) return { label, note: 'the preview could not be opened' }
-      if (!(await hasTool($, 'mcp__Claude_Browser__preview_start'))) return { label, note: `open it in a browser within 10 minutes (the link opens in one browser): ${url}` }
+      if (!(await hasTool($, 'mcp__Claude_Browser__preview_start')))
+        return { label, note: `open it in a browser within 10 minutes (the link opens in one browser): ${url}` }
       return { label, call: { name: 'mcp__Claude_Browser__preview_start', input: { url } } }
     }
     case 'link':
@@ -6045,7 +6700,8 @@ async function refusedNote($: $, room: ShareRoom, event: ServerEvent, reason: st
   const why = /auto mode/i.test(reason) ? 'auto mode only opens what you asked for' : 'it was not allowed'
   if (shown?.kind === 'preview' && shown.pid && !shown.tcp) {
     const url = await previewTicket($, room, shown.pid, shown.path)
-    if (url) return `\n\n> This session didn't open it in the browser pane (${why}). [Open the preview](${url}) in your browser within 10 minutes (the link opens in one browser), or press **Open** in the Room panel.\n\n`
+    if (url)
+      return `\n\n> This session didn't open it in the browser pane (${why}). [Open the preview](${url}) in your browser within 10 minutes (the link opens in one browser), or press **Open** in the Room panel.\n\n`
   }
   return `\n\n> This session didn't open it (${why}). Press **Open** in the Room panel${shown?.files?.length ? `, or find it in \`.shared-session/\`` : ''}.\n\n`
 }
@@ -6053,7 +6709,13 @@ async function refusedNote($: $, room: ShareRoom, event: ServerEvent, reason: st
 // A link (ten minutes, one browser) that opens a preview on the preview host name.
 async function previewTicket($: $, room: ShareRoom, pid: string, path?: string): Promise<string | null> {
   try {
-    return (await api<{ url: string }>($, room.server, `/api/rooms/${room.id}/previews/${pid}/ticket`, { method: 'POST', token: room.token, body: { path: path ?? '/' } })).url
+    return (
+      await api<{ url: string }>($, room.server, `/api/rooms/${room.id}/previews/${pid}/ticket`, {
+        method: 'POST',
+        token: room.token,
+        body: { path: path ?? '/' },
+      })
+    ).url
   } catch {
     return null
   }
@@ -6123,11 +6785,19 @@ async function helperEnded(child: Child): Promise<'NODE' | undefined> {
 type ControlPolicy = { answers: readonly number[]; failed: () => void }
 async function controlPost($: $, port: number, token: string, body: Record<string, unknown>, policy: ControlPolicy): Promise<number> {
   let timeout!: () => void
-  const expired = new Promise<null>(done => { timeout = () => done(null) })
+  const expired = new Promise<null>(done => {
+    timeout = () => done(null)
+  })
   const timer = $.clock.after(2_000, () => timeout())
   try {
     const response = await Promise.race([
-      $.http.fetch(`http://127.0.0.1:${port}/`, { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: JSON.stringify(body) }).catch(() => null),
+      $.http
+        .fetch(`http://127.0.0.1:${port}/`, {
+          method: 'POST',
+          headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+          body: JSON.stringify(body),
+        })
+        .catch(() => null),
       expired,
     ])
     const status = response?.status ?? 0
@@ -6165,7 +6835,9 @@ type Helper = {
 
 function newHelper(scope: RoomScope): Helper {
   let settle!: (ready: boolean) => void
-  const ready = new Promise<boolean>(done => { settle = done })
+  const ready = new Promise<boolean>(done => {
+    settle = done
+  })
   return { scope, controlToken: randomSecret(), ready, settle, queue: lane(), stopped: false }
 }
 
@@ -6177,7 +6849,9 @@ function finishHelper(h: Helper, end: () => Promise<unknown>, after?: () => void
   h.timer?.cancel()
   h.settle(false)
   h.stopping = (async () => {
-    try { await end() } catch {}
+    try {
+      await end()
+    } catch {}
     after?.()
   })()
   return h.stopping
@@ -6187,7 +6861,16 @@ function finishHelper(h: Helper, end: () => Promise<unknown>, after?: () => void
 // a JSON line at a time, goes to `take` (which throws for a line it
 // shouldn't say) until it ends or `still` says no more; not ready in
 // `startMs`, it's over (`finish`). How it ended is kept (`error`).
-async function runHelper($: $, h: Helper, file: string, settings: Record<string, unknown>, startMs: number, finish: () => unknown, still: () => boolean, take: (said: Record<string, unknown>) => unknown) {
+async function runHelper(
+  $: $,
+  h: Helper,
+  file: string,
+  settings: Record<string, unknown>,
+  startMs: number,
+  finish: () => unknown,
+  still: () => boolean,
+  take: (said: Record<string, unknown>) => unknown,
+) {
   const child = $.process.spawn({ argv: ['/bin/sh', '-c', FIND_NODE, 'sh', `${$.plugin.root}/relay/${file}`], input: JSON.stringify(settings) })
   h.child = child
   h.timer = $.clock.after(startMs, () => void finish())
@@ -6195,7 +6878,11 @@ async function runHelper($: $, h: Helper, file: string, settings: Record<string,
   for await (const line of helperLines(child)) {
     if (!still()) break
     let said: unknown
-    try { said = JSON.parse(line) } catch { continue }
+    try {
+      said = JSON.parse(line)
+    } catch {
+      continue
+    }
     if (said && typeof said === 'object' && !Array.isArray(said)) await take(said as Record<string, unknown>)
   }
   // Only a known end: a mailbox's open tells its failure by `error` being there.
@@ -6268,7 +6955,8 @@ type LocalPreviewReady = { url?: string; error?: string; run?: LocalPreviewRun; 
 // The window's own tunnel for a preview serves the window now: up, and the
 // room's window proxy with it (a page in the window uses it, or is it).
 function windowServes(s: RoomScope, pid: string): boolean {
-  const run = s.children.listeners.get(pid), proxy = s.children.windowProxy
+  const run = s.children.listeners.get(pid),
+    proxy = s.children.windowProxy
   return Boolean(run?.owner === 'window' && run.started && !run.failed && !run.stopping && proxy && !proxy.stopped)
 }
 
@@ -6281,36 +6969,49 @@ function refusedRun(s: RoomScope, pid: string): boolean {
 }
 
 async function ensureLocalPreview($: $, room: ShareRoom, s: RoomScope, shown: ShareShown, ask: LocalPreviewAsk): Promise<LocalPreviewReady> {
-  const port = shown.port, path = shown.path ?? '/', pid = shown.pid
+  const port = shown.port,
+    path = shown.path ?? '/',
+    pid = shown.pid
   const epoch = pid ? s.epoch(pid) : 0
   if (!sameRoom(room, s) || s.mode !== 'guest') return { error: 'This shared session is no longer open.' }
-  if (!pid || !PREVIEW_ID.test(pid) || shown.closed || !validPort(port) || !path.startsWith('/') || /[\x00-\x20\\]/.test(path)) return { error: 'That preview has ended or has no valid localhost address.' }
-  const owner: RunOwner = 'window' in ask ? 'window' : 'listener', runs = s.children.listeners
+  if (!pid || !PREVIEW_ID.test(pid) || shown.closed || !validPort(port) || !path.startsWith('/') || /[\x00-\x20\\]/.test(path))
+    return { error: 'That preview has ended or has no valid localhost address.' }
+  const owner: RunOwner = 'window' in ask ? 'window' : 'listener',
+    runs = s.children.listeners
   const bind: LocalBind = 'window' in ask ? { port: 0, strict: false } : ask.bind
   // Still one run per pid: the window uses any current one; a listener asked
   // for replaces the window's own (routes follow it), and one that isn't (or
   // won't be) where this asks it to bind exactly. Not, for an Open that
   // could go to the window, a tunnel that serves the window.
   const fits = (run: LocalPreviewRun) =>
-    !run.stopping && !run.failed && run.port === port && (owner === 'window' || (run.owner === 'listener' && (!bind.strict || (run.started ? run.localPort === bind.port : run.bind.strict && run.bind.port === bind.port))))
+    !run.stopping &&
+    !run.failed &&
+    run.port === port &&
+    (owner === 'window' ||
+      (run.owner === 'listener' && (!bind.strict || (run.started ? run.localPort === bind.port : run.bind.strict && run.bind.port === bind.port))))
   for (let run = runs.get(pid); run && !fits(run); run = runs.get(pid)) {
     if ('keepWindow' in ask && ask.keepWindow && windowServes(s, pid)) return { error: "It's open in the preview window.", inWindow: true }
     await stopLocalPreview($, pid, false, s)
     if (!localRequestCurrent(room, s, pid, epoch)) return { error: 'The local mapping was cancelled.' }
   }
-  if (owner === 'window' && (!(await windowInterest($, pid, s)) || !localRequestCurrent(room, s, pid, epoch))) return { error: 'The preview window closed, or the host no longer shares this preview.' }
-  let run = runs.get(pid), made: LocalPreviewRun | undefined
+  if (owner === 'window' && (!(await windowInterest($, pid, s)) || !localRequestCurrent(room, s, pid, epoch)))
+    return { error: 'The preview window closed, or the host no longer shares this preview.' }
+  let run = runs.get(pid),
+    made: LocalPreviewRun | undefined
   // Another start meanwhile, for somewhere else: not this one's to take over.
   if (run && !fits(run)) return { error: 'The local mapping was cancelled.' }
   if (!run) {
     let settle!: (ready: boolean) => void
-    const ready = new Promise<boolean>(done => { settle = done })
+    const ready = new Promise<boolean>(done => {
+      settle = done
+    })
     run = made = { scope: s, port, bind, epoch, ready, settle, started: false, failed: false, error: SAY[owner].unreachable(room.host, port), owner }
     runs.set(pid, run)
     void startLocalPreview($, room, pid, run)
   }
   const ready = await run.ready
-  if (!ready || !run.localPort || run.failed || !(await localRunCurrent($, pid, run)) || !localRequestCurrent(room, s, pid, epoch)) return { error: run.error, ...(made ? { made } : {}), ...(run.refused ? { refused: run.refused } : {}) }
+  if (!ready || !run.localPort || run.failed || !(await localRunCurrent($, pid, run)) || !localRequestCurrent(room, s, pid, epoch))
+    return { error: run.error, ...(made ? { made } : {}), ...(run.refused ? { refused: run.refused } : {}) }
   return { url: listenerUrl(shown, run), run, ...(made ? { made } : {}) }
 }
 
@@ -6328,7 +7029,10 @@ async function startLocalPreview($: $, room: ShareRoom, pid: string, run: LocalP
     if (!(await localRunCurrent($, pid, run)) || !sameRoom(room, run.scope)) return
     const url = `${room.server}/api/rooms/${room.id}/previews/${pid}/tunnel`
     // Where its caller asked (the window's tunnel: a port the system picks).
-    child = $.process.spawn({ argv: ['/bin/sh', '-c', FIND_NODE, 'sh', `${$.plugin.root}/relay/local-preview.mts`], input: JSON.stringify({ port: run.bind.port, strict: run.bind.strict, url, token: room.token }) })
+    child = $.process.spawn({
+      argv: ['/bin/sh', '-c', FIND_NODE, 'sh', `${$.plugin.root}/relay/local-preview.mts`],
+      input: JSON.stringify({ port: run.bind.port, strict: run.bind.strict, url, token: room.token }),
+    })
     run.child = child
     // An unresponsive child doesn't hold an Open, a restore or the window's
     // page for long: eight seconds to say it's listening, then it's stopped.
@@ -6342,7 +7046,11 @@ async function startLocalPreview($: $, room: ShareRoom, pid: string, run: LocalP
     for await (const line of helperLines(child)) {
       if (runs.get(pid) !== run || run.stopping || !run.scope.live) break
       let message: { state?: string; code?: string; port?: number; ipv6?: boolean }
-      try { message = JSON.parse(line) } catch { continue }
+      try {
+        message = JSON.parse(line)
+      } catch {
+        continue
+      }
       if (message.state === 'ready') {
         if (run.started || !validPort(message.port) || (run.bind.strict && message.port !== run.bind.port)) {
           run.error = 'The local preview did not report a valid listening port. Press Open in the Room to retry.'
@@ -6378,11 +7086,12 @@ async function startLocalPreview($: $, room: ShareRoom, pid: string, run: LocalP
         await runTrouble($, room, pid, run, 'channel', message.code)
       } else if (message.state === 'error') {
         if (message.code === 'EADDRINUSE' || message.code === 'DENIED') run.refused = message.code === 'DENIED' ? 'denied' : 'taken'
-        run.error = message.code === 'EADDRINUSE'
-          ? `localhost:${run.bind.port} is already in use on this computer. Nothing of yours was stopped.`
-          : message.code === 'DENIED'
-            ? `This computer doesn't let Claude Code listen on localhost:${run.bind.port}${run.bind.port < 1024 ? ' (on Linux, ports below 1024 need administrator rights)' : ''}.`
-            : `Couldn't forward the host's localhost:${run.port}. Check the host is connected, then press Open in the Room to retry.`
+        run.error =
+          message.code === 'EADDRINUSE'
+            ? `localhost:${run.bind.port} is already in use on this computer. Nothing of yours was stopped.`
+            : message.code === 'DENIED'
+              ? `This computer doesn't let Claude Code listen on localhost:${run.bind.port}${run.bind.port < 1024 ? ' (on Linux, ports below 1024 need administrator rights)' : ''}.`
+              : `Couldn't forward the host's localhost:${run.port}. Check the host is connected, then press Open in the Room to retry.`
         if (run.started) {
           run.failed = true
           await runTrouble($, room, pid, run, 'failed')
@@ -6391,7 +7100,8 @@ async function startLocalPreview($: $, room: ShareRoom, pid: string, run: LocalP
         }
       }
     }
-    if ((await ended) === 'NODE') run.error = 'Local previews need Node 22.18 or later on this computer. Install it and press Open in the Room, or choose Public link.'
+    if ((await ended) === 'NODE')
+      run.error = 'Local previews need Node 22.18 or later on this computer. Install it and press Open in the Room, or choose Public link.'
   } catch {
     // Never echo child diagnostics or credentials: the run's own words stand.
   } finally {
@@ -6413,7 +7123,8 @@ async function startLocalPreview($: $, room: ShareRoom, pid: string, run: LocalP
 async function runTrouble($: $, room: ShareRoom, pid: string, run: LocalPreviewRun, what: 'channel' | 'failed' | 'stopped', code?: string) {
   const say = SAY[run.owner]
   if (what !== 'channel') {
-    if (run.owner === 'listener') $.ui.toast(what === 'stopped' ? `Local preview on localhost:${run.localPort} stopped. Press Open in the Room to reconnect.` : run.error)
+    if (run.owner === 'listener')
+      $.ui.toast(what === 'stopped' ? `Local preview on localhost:${run.localPort} stopped. Press Open in the Room to reconnect.` : run.error)
     return
   }
   const error = code === 'BUSY' ? say.busy : code === 'AUTH' ? say.refused : code === 'CONNECT' ? say.connect(room.host, run.port) : ''
@@ -6456,7 +7167,9 @@ function windowChannel($: $, room: ShareRoom, pid: string, run: LocalPreviewRun,
 async function finishLocalPreview(pid: string, run: LocalPreviewRun) {
   run.timer?.cancel()
   run.settle(false)
-  try { await run.child?.return(undefined as never) } catch {}
+  try {
+    await run.child?.return(undefined as never)
+  } catch {}
   if (run.scope.children.listeners.get(pid) === run) run.scope.children.listeners.delete(pid)
 }
 
@@ -6480,9 +7193,11 @@ async function stopLocalPreview($: $, pid: string, forget = true, s: RoomScope =
 // listeners of what only that page uses (`onlyUsedBy`). The window's own
 // tunnel isn't a mapping: a page open there stays open.
 async function closeLocalPreview($: $, pid: string) {
-  const s = scope, room = await read($, roomA)
+  const s = scope,
+    room = await read($, roomA)
   if (!room || !stillInRoom(room, s) || s.mode !== 'guest') return
-  const forwarded = await forwardedNow($), saved = await read($, localPreviewsA)
+  const forwarded = await forwardedNow($),
+    saved = await read($, localPreviewsA)
   const port = forwarded.find(f => f.pid === pid)?.port ?? saved.find(p => p.pid === pid)?.port ?? 0
   for (const p of [pid, ...(await onlyUsedBy($, s, { pid, port }))]) await closeMapping($, s, p)
   await $.ui.invalidate('ui.render')
@@ -6494,12 +7209,17 @@ async function closeLocalPreview($: $, pid: string) {
 // `dependency: true`, stays while another page listens), and not opened by
 // its own Open (`own`, or one opening now): that one the person wanted.
 async function onlyUsedBy($: $, s: RoomScope, page: { pid: string; port: number }): Promise<string[]> {
-  const forwarded = await forwardedNow($), saved = await read($, localPreviewsA)
+  const forwarded = await forwardedNow($),
+    saved = await read($, localPreviewsA)
   const dependencies = new Set(forwarded.filter(f => f.dependency !== undefined).map(f => f.pid))
-  const others = [...s.children.listeners.keys(), ...s.previewOpens.keys()].some(p => p !== page.pid && !dependencies.has(p) && (Boolean(listening(p, s)) || s.previewOpens.has(p)))
+  const others = [...s.children.listeners.keys(), ...s.previewOpens.keys()].some(
+    p => p !== page.pid && !dependencies.has(p) && (Boolean(listening(p, s)) || s.previewOpens.has(p)),
+  )
   const mapped = (pid: string) => saved.some(x => x.pid === pid) || Boolean(listening(pid, s))
   const own = (pid: string) => saved.some(x => x.pid === pid && x.own) || s.previewOpens.has(pid)
-  return dependenciesOf(forwarded, page).filter(f => mapped(f.pid) && !own(f.pid) && (f.dependency !== true || !others)).map(f => f.pid)
+  return dependenciesOf(forwarded, page)
+    .filter(f => mapped(f.pid) && !own(f.pid) && (f.dependency !== true || !others))
+    .map(f => f.pid)
 }
 
 // A mapping closed for good: its listener stops and isn't saved; the
@@ -6535,10 +7255,13 @@ async function commitMappings($: $, bound: readonly { pid: string; run: LocalPre
 // forwards stays closed, as the window and the Room know it: Shown's, which
 // the room's list keeps (and the room checks each connection again).
 async function restoreLocalPreviews($: $) {
-  const s = scope, room = await read($, roomA)
+  const s = scope,
+    room = await read($, roomA)
   if (!room || !sameRoom(room, s) || s.mode !== 'guest') return
   const shown = await read($, shownA)
-  const failed: number[] = [], busy: number[] = [], denied: number[] = []
+  const failed: number[] = [],
+    busy: number[] = [],
+    denied: number[] = []
   for (const preview of await read($, localPreviewsA)) {
     if (!sameRoom(room, s)) return
     const item = shown.find(x => x.kind === 'preview' && x.pid === preview.pid)
@@ -6558,8 +7281,13 @@ async function restoreLocalPreviews($: $) {
   const why = [
     busy.length ? `${portsSaid(busy)} ${busy.length === 1 ? 'is' : 'are'} in use here now` : '',
     denied.length ? `this computer doesn't let Claude Code listen on ${portsSaid(denied)}` : '',
-  ].filter(Boolean).join(', and ')
-  if (failed.length) $.ui.toast(`${portsSaid(failed)} of ${room.host}'s ${failed.length === 1 ? "wasn't" : "weren't"} forwarded again${why ? `: ${why}` : ''}. Press Open in the Room when ready.`)
+  ]
+    .filter(Boolean)
+    .join(', and ')
+  if (failed.length)
+    $.ui.toast(
+      `${portsSaid(failed)} of ${room.host}'s ${failed.length === 1 ? "wasn't" : "weren't"} forwarded again${why ? `: ${why}` : ''}. Press Open in the Room when ready.`,
+    )
 }
 
 // The public origin is an explicit alternative, never an automatic fallback
@@ -6567,14 +7295,19 @@ async function restoreLocalPreviews($: $) {
 // opens where a page does (`showPage`): Claude's browser in Desktop, else
 // the person's own, else its link is copied.
 async function openPublicPreview($: $, shown: ShareShown, surface?: RenderSurface) {
-  const s = scope, room = await read($, roomA)
+  const s = scope,
+    room = await read($, roomA)
   if (!room || !shown.pid || shown.closed) return
-  const pid = shown.pid, epoch = s.epoch(pid)
+  const pid = shown.pid,
+    epoch = s.epoch(pid)
   const live = async () => localRequestCurrent(room, s, pid, epoch)
   if (!(await live())) return
   const url = await previewTicket($, room, pid, shown.path)
   if (!url) return void $.ui.toast('That preview has ended or is not reachable')
-  await showPage($, room, url, surface, live, { copied: 'Public preview link copied: open it within 10 minutes', said: `Public preview link, for 10 minutes: ${url}` })
+  await showPage($, room, url, surface, live, {
+    copied: 'Public preview link copied: open it within 10 minutes',
+    said: `Public preview link, for 10 minutes: ${url}`,
+  })
 }
 
 // ---------------------------------------------------------------------------
@@ -6594,7 +7327,9 @@ async function openPublicPreview($: $, shown: ShareShown, surface?: RenderSurfac
 // over SSH, the page opens elsewhere instead (`bindForOpen`, no window).
 
 // Without a window: why not, and when it's that no browser here could open one (`none`) or one needs updating (`update`).
-type WindowChoice = { window: true; platform: WindowPlatform; browser: string; name: string; family: BrowserFamily; isDefault?: true } | { window: false; reason: string; none?: true; update?: string }
+type WindowChoice =
+  | { window: true; platform: WindowPlatform; browser: string; name: string; family: BrowserFamily; isDefault?: true }
+  | { window: false; reason: string; none?: true; update?: string }
 // Said once a session, by key: the notes about the person's proxy, Claude's
 // browser refused, and the like. A room's own (a preview's first Open and
 // its cost, the window's welcome) are said once in that room (its scope's).
@@ -6604,7 +7339,8 @@ const WINDOW_CLOSING = 'The preview window is still closing. Open the preview ag
 // at a profile, its settings, a close (which waits up to 3 s) and a profile's
 // cleanup all answer well inside it; the browser look can ask a Firefox
 // wrapper's --version under `timeout 10`, so it gets longer.
-const WINDOW_STEP_MS = 15_000, BROWSER_LOOK_MS = 30_000
+const WINDOW_STEP_MS = 15_000,
+  BROWSER_LOOK_MS = 30_000
 // This session closed its own window as its proxy ended under it (routes the proxy refused, looks that failed).
 const windowLost = (host: string) => `The preview window closed: its connection to ${host}'s previews stopped working. Press Open preview to open it again.`
 
@@ -6644,25 +7380,37 @@ async function sessionBus($: $): Promise<boolean> {
 // meanwhile, and the rows draw again once it's known.
 async function windowChoice($: $, wait = true, s: RoomScope = scope): Promise<WindowChoice | null> {
   if ((await $.env.get('SHARED_SESSION_NO_BROWSER')) === '1') return { window: false, reason: 'SHARED_SESSION_NO_BROWSER=1 opens no browser' }
-  if ((await $.env.get('SSH_CONNECTION')) || (await $.env.get('SSH_TTY'))) return { window: false, reason: "this is an SSH session, so a window wouldn't open on your screen" }
+  if ((await $.env.get('SSH_CONNECTION')) || (await $.env.get('SSH_TTY')))
+    return { window: false, reason: "this is an SSH session, so a window wouldn't open on your screen" }
   if (!wait && !s.window.detection.done) {
     // Drawn again once known. After a look that failed, a drawing doesn't look again: the next Open does.
-    if (!s.window.detection.failed) void detectBrowser($, s).then(found => (found.failed ? undefined : $.ui.invalidate('ui.render'))).catch(() => {})
+    if (!s.window.detection.failed)
+      void detectBrowser($, s)
+        .then(found => (found.failed ? undefined : $.ui.invalidate('ui.render')))
+        .catch(() => {})
     return null
   }
   const found = await detectBrowser($, s)
   if (found.failed) return { window: false, reason: "looking for a browser here didn't work (it's tried again at the next Open)" }
   if (found.platform === 'unsupported') return { window: false, reason: 'preview windows work on macOS and Linux' }
-  if (found.platform === 'linux' && !(await $.env.get('DISPLAY')) && !(await $.env.get('WAYLAND_DISPLAY'))) return { window: false, reason: 'there is no display for a window here (DISPLAY and WAYLAND_DISPLAY are unset)' }
-  if (!found.browser) return { window: false, reason: 'no Chrome, Edge, Brave, Chromium, Firefox, Vivaldi or Opera was found (a snap one cannot be used)', none: true }
-  const name = browserName(found.browser), family = browserFamily(found.browser, found)
+  if (found.platform === 'linux' && !(await $.env.get('DISPLAY')) && !(await $.env.get('WAYLAND_DISPLAY')))
+    return { window: false, reason: 'there is no display for a window here (DISPLAY and WAYLAND_DISPLAY are unset)' }
+  if (!found.browser)
+    return { window: false, reason: 'no Chrome, Edge, Brave, Chromium, Firefox, Vivaldi or Opera was found (a snap one cannot be used)', none: true }
+  const name = browserName(found.browser),
+    family = browserFamily(found.browser, found)
   // Launched as the other kind, a browser could open the address in the person's own profile.
   if (!family) return { window: false, reason: `${name} can't be used for preview windows, which need a Chromium-family browser or Firefox`, none: true }
   // Firefox's hand-off of a second address goes only to the window's own profile from 67 on; the settings are tested from FIREFOX_MIN.
-  if (family === 'firefox' && (found.gecko ?? 0) < FIREFOX_MIN) return found.gecko
-    ? { window: false, reason: `${name} ${found.gecko} is too old for preview windows, which need Firefox ${FIREFOX_MIN} or newer`, update: name }
-    : { window: false, reason: `${name}'s version couldn't be read, and preview windows need Firefox ${FIREFOX_MIN} or newer` }
-  if (family === 'firefox' && found.platform === 'linux' && (await firefoxTooDeep($))) return { window: false, reason: `the preview window's profile folder is too deep for Firefox on Linux (${FIREFOX_PATH_MAX} bytes at most; set CLAUDE_CONFIG_DIR to a shorter path)` }
+  if (family === 'firefox' && (found.gecko ?? 0) < FIREFOX_MIN)
+    return found.gecko
+      ? { window: false, reason: `${name} ${found.gecko} is too old for preview windows, which need Firefox ${FIREFOX_MIN} or newer`, update: name }
+      : { window: false, reason: `${name}'s version couldn't be read, and preview windows need Firefox ${FIREFOX_MIN} or newer` }
+  if (family === 'firefox' && found.platform === 'linux' && (await firefoxTooDeep($)))
+    return {
+      window: false,
+      reason: `the preview window's profile folder is too deep for Firefox on Linux (${FIREFOX_PATH_MAX} bytes at most; set CLAUDE_CONFIG_DIR to a shorter path)`,
+    }
   return { window: true, platform: found.platform, browser: found.browser, name, family, ...(found.isDefault ? { isDefault: true as const } : {}) }
 }
 
@@ -6729,7 +7477,13 @@ async function windowProbe($: $, profile: string): Promise<WindowSeen | null | u
 async function windowLook($: $, profile: string): Promise<{ seen: WindowSeen | null } | { why: string }> {
   const { out, code, late } = await sh($, lockScript(profile), WINDOW_STEP_MS)
   if (code === 0) return { seen: windowOf(out, profile) }
-  return { why: late ? 'the look at its profile took too long' : code === null ? "the look at its profile didn't run" : `the look at its profile ended with code ${code}` }
+  return {
+    why: late
+      ? 'the look at its profile took too long'
+      : code === null
+        ? "the look at its profile didn't run"
+        : `the look at its profile ended with code ${code}`,
+  }
 }
 
 // A window just started is there once a process holds its profile, which
@@ -6810,8 +7564,14 @@ async function upstreamProxy($: $): Promise<Upstream | null> {
     NO_PROXY: await $.env.get('NO_PROXY'),
     no_proxy: await $.env.get('no_proxy'),
   })
-  if (env.userinfo) noteOnce($, 'userinfo', "Your proxy setting has a user name or password, which the preview window's proxy doesn't use: sign-ins in the window may fail.")
-  if (env.unsupported) noteOnce($, 'unsupported', "The preview window doesn't use your https:// or socks4:// proxy setting: its proxy goes on only through http:// and socks5:// proxies.")
+  if (env.userinfo)
+    noteOnce($, 'userinfo', "Your proxy setting has a user name or password, which the preview window's proxy doesn't use: sign-ins in the window may fail.")
+  if (env.unsupported)
+    noteOnce(
+      $,
+      'unsupported',
+      "The preview window doesn't use your https:// or socks4:// proxy setting: its proxy goes on only through http:// and socks5:// proxies.",
+    )
   if (env.invalid) noteOnce($, 'invalid', UPSTREAM_NOT_TAKEN)
   if (env.upstream) return env.upstream
   if ((await detectBrowser($)).platform !== 'darwin') return null
@@ -6822,7 +7582,17 @@ async function upstreamProxy($: $): Promise<Upstream | null> {
 }
 
 function startBrowserProxy($: $, room: ShareRoom, port: number, s: RoomScope): BrowserProxy {
-  const proxy: BrowserProxy = { ...newHelper(s), room, key: roomIdentity(room), asked: port, failures: 0, lan: false, seen: new Set(), asks: new Set(), wants: new Map() }
+  const proxy: BrowserProxy = {
+    ...newHelper(s),
+    room,
+    key: roomIdentity(room),
+    asked: port,
+    failures: 0,
+    lan: false,
+    seen: new Set(),
+    asks: new Set(),
+    wants: new Map(),
+  }
   s.children.windowProxy = proxy
   void runBrowserProxy($, proxy)
   return proxy
@@ -6847,37 +7617,55 @@ async function runBrowserProxy($: $, proxy: BrowserProxy) {
     proxy.lan = (await $.env.get('SHARED_SESSION_PREVIEW_LAN')) === '1'
     if (proxy.stopped || proxy.scope.children.windowProxy !== proxy || !proxy.scope.live) return
     const settings = { port: proxy.asked, controlToken: proxy.controlToken, lan: proxy.lan, upstream }
-    await runHelper($, proxy, 'browser-proxy.mts', settings, 5_000, () => finishBrowserProxy(proxy), () => !proxy.stopped && proxy.scope.children.windowProxy === proxy, async said => {
-      const line = proxyLine(said)
-      if (!line) return
-      if (line.state === 'ready') {
-        if (proxy.port || (proxy.asked && line.port !== proxy.asked)) throw new Error('Invalid preview proxy readiness')
-        const port = line.port
-        proxy.port = port
-        helperReady(proxy, line.control)
-        await update($, previewWindowA, w => (proxy.stopped || !proxy.scope.live ? w : { room: proxy.key, port, opened: w?.room === proxy.key && w.port === port ? w.opened : [], ...(w?.room === proxy.key && w.profile ? { profile: w.profile } : {}) }))
-        proxy.settle(true)
-        void syncBrowserRoutes($, proxy.scope)
-      } else if (line.state === 'error') {
-        proxy.error = line.code
-        throw new Error('Preview proxy failed')
-      } else if (!proxy.port) return
-      // It left the person's own proxy out (a host it can't take) and goes on without it.
-      else if (line.state === 'upstream') {
-        if (line.reason === 'INVALID_UPSTREAM') noteOnce($, 'invalid', UPSTREAM_NOT_TAKEN)
-      } else if (line.state === 'lan') void lanRefused($, proxy).catch(() => {})
-      else if (line.state === 'want') void wantPort($, proxy, line.port).catch(() => {})
-      else if (line.state === 'blocked') void blockedPort($, proxy, line.port).catch(() => {})
-      else {
-        proxy.seen.add(line.port)
-        for (const asks of [...proxy.asks]) {
-          if (asks.port !== line.port) continue
-          asks.seen = true
-          proxy.asks.delete(asks)
-          if (asks.late) void asks.late().catch(() => {})
+    await runHelper(
+      $,
+      proxy,
+      'browser-proxy.mts',
+      settings,
+      5_000,
+      () => finishBrowserProxy(proxy),
+      () => !proxy.stopped && proxy.scope.children.windowProxy === proxy,
+      async said => {
+        const line = proxyLine(said)
+        if (!line) return
+        if (line.state === 'ready') {
+          if (proxy.port || (proxy.asked && line.port !== proxy.asked)) throw new Error('Invalid preview proxy readiness')
+          const port = line.port
+          proxy.port = port
+          helperReady(proxy, line.control)
+          await update($, previewWindowA, w =>
+            proxy.stopped || !proxy.scope.live
+              ? w
+              : {
+                  room: proxy.key,
+                  port,
+                  opened: w?.room === proxy.key && w.port === port ? w.opened : [],
+                  ...(w?.room === proxy.key && w.profile ? { profile: w.profile } : {}),
+                },
+          )
+          proxy.settle(true)
+          void syncBrowserRoutes($, proxy.scope)
+        } else if (line.state === 'error') {
+          proxy.error = line.code
+          throw new Error('Preview proxy failed')
+        } else if (!proxy.port) return
+        // It left the person's own proxy out (a host it can't take) and goes on without it.
+        else if (line.state === 'upstream') {
+          if (line.reason === 'INVALID_UPSTREAM') noteOnce($, 'invalid', UPSTREAM_NOT_TAKEN)
+        } else if (line.state === 'lan') void lanRefused($, proxy).catch(() => {})
+        else if (line.state === 'want') void wantPort($, proxy, line.port).catch(() => {})
+        else if (line.state === 'blocked') void blockedPort($, proxy, line.port).catch(() => {})
+        else {
+          proxy.seen.add(line.port)
+          for (const asks of [...proxy.asks]) {
+            if (asks.port !== line.port) continue
+            asks.seen = true
+            proxy.asks.delete(asks)
+            if (asks.late) void asks.late().catch(() => {})
+          }
         }
-      }
-    })
+      },
+    )
   } catch {
     // Never echo the child's diagnostics: they can name hosts the window asked for.
   } finally {
@@ -6896,13 +7684,22 @@ async function runBrowserProxy($: $, proxy: BrowserProxy) {
     // open and the next Open take it for another session's.
     // As the room closes, its state goes with it: nothing more here.
     try {
-      const next = proxy.scope.children.windowProxy, successor = next && !next.stopped
+      const next = proxy.scope.children.windowProxy,
+        successor = next && !next.stopped
       if (!successor && proxy.scope.live) {
         for (const [pid, run] of [...proxy.scope.children.listeners]) if (run.owner === 'window') await stopLocalPreview($, pid, false, proxy.scope)
         const forget = (w: SharePreviewWindow) => ended && w.port === proxy.port
         const was = await read($, previewWindowA)
-        if (was?.room === proxy.key && forget(was) && (await killWindow($, (await profileOf($, proxy.room, was.profile)).profile, true, proxy.port)) && proxy.scope.live) $.ui.toast(windowLost(proxy.room.host))
-        await update($, previewWindowA, w => (proxy.scope.live && w?.room === proxy.key && (w.opened.length || forget(w)) ? { ...w, opened: [], ...(forget(w) ? { port: 0 } : {}) } : w))
+        if (
+          was?.room === proxy.key &&
+          forget(was) &&
+          (await killWindow($, (await profileOf($, proxy.room, was.profile)).profile, true, proxy.port)) &&
+          proxy.scope.live
+        )
+          $.ui.toast(windowLost(proxy.room.host))
+        await update($, previewWindowA, w =>
+          proxy.scope.live && w?.room === proxy.key && (w.opened.length || forget(w)) ? { ...w, opened: [], ...(forget(w) ? { port: 0 } : {}) } : w,
+        )
       }
       await $.ui.invalidate('ui.render')
     } catch {}
@@ -6916,7 +7713,11 @@ async function runBrowserProxy($: $, proxy: BrowserProxy) {
 async function lanRefused($: $, proxy: BrowserProxy) {
   const room = proxy.room
   if (proxy.lan || proxy.stopped || proxy.scope.children.windowProxy !== proxy || !stillInRoom(room, proxy.scope) || proxy.scope.mode !== 'guest') return
-  noteOnce($, 'lan', `The preview window refused a request to your local network (a private address). Pages from ${room.host} can't reach your network; set SHARED_SESSION_PREVIEW_LAN=1 where Claude Code starts to allow it.`)
+  noteOnce(
+    $,
+    'lan',
+    `The preview window refused a request to your local network (a private address). Pages from ${room.host} can't reach your network; set SHARED_SESSION_PREVIEW_LAN=1 where Claude Code starts to allow it.`,
+  )
 }
 
 // The room's proxy, started if need be (on `port`: the open window's own),
@@ -6955,40 +7756,47 @@ async function windowInterest($: $, pid: string, s: RoomScope): Promise<boolean>
 async function syncBrowserRoutes($: $, s: RoomScope = scope) {
   const proxy = s.children.windowProxy
   if (!proxy || proxy.stopped) return
-  await proxy.queue.run(async () => {
-    if (!(await proxy.ready) || proxy.stopped || s.children.windowProxy !== proxy || !s.live || s.mode !== 'guest') return
-    const routes: Record<string, number> = {}
-    for (const run of s.children.listeners.values()) {
-      if (Object.keys(routes).length >= 128) break
-      if (run.started && !run.failed && !run.stopping && validPort(run.localPort)) routes[String(run.port)] = run.localPort
-    }
-    const now = await $.clock.now()
-    const refused = new Set(await read($, previewNeedsOpenA))
-    const startable = [...(await browserAuthority($))].filter(([port, a]) => routes[String(port)] === undefined && !refused.has(a.pid) && (s.window.backoff.get(a.pid)?.until ?? 0) <= now).map(([port]) => port).slice(0, 128)
-    const body = { op: 'routes', routes, startable }
-    const text = JSON.stringify(body)
-    if (text === proxy.sent || proxy.stopped || !proxy.control) return
-    // Not taken (no answer in two seconds included): sent again in a second;
-    // three in a row, and the proxy is ended.
-    const status = await controlPost($, proxy.control, proxy.controlToken, body, {
-      answers: [200],
-      failed: () => {
-        if (++proxy.failures >= 3) void finishBrowserProxy(proxy)
-        else $.clock.after(1_000, () => void syncBrowserRoutes($, s))
-      },
+  await proxy.queue
+    .run(async () => {
+      if (!(await proxy.ready) || proxy.stopped || s.children.windowProxy !== proxy || !s.live || s.mode !== 'guest') return
+      const routes: Record<string, number> = {}
+      for (const run of s.children.listeners.values()) {
+        if (Object.keys(routes).length >= 128) break
+        if (run.started && !run.failed && !run.stopping && validPort(run.localPort)) routes[String(run.port)] = run.localPort
+      }
+      const now = await $.clock.now()
+      const refused = new Set(await read($, previewNeedsOpenA))
+      const startable = [...(await browserAuthority($))]
+        .filter(([port, a]) => routes[String(port)] === undefined && !refused.has(a.pid) && (s.window.backoff.get(a.pid)?.until ?? 0) <= now)
+        .map(([port]) => port)
+        .slice(0, 128)
+      const body = { op: 'routes', routes, startable }
+      const text = JSON.stringify(body)
+      if (text === proxy.sent || proxy.stopped || !proxy.control) return
+      // Not taken (no answer in two seconds included): sent again in a second;
+      // three in a row, and the proxy is ended.
+      const status = await controlPost($, proxy.control, proxy.controlToken, body, {
+        answers: [200],
+        failed: () => {
+          if (++proxy.failures >= 3) void finishBrowserProxy(proxy)
+          else $.clock.after(1_000, () => void syncBrowserRoutes($, s))
+        },
+      })
+      if (status !== 200) return
+      proxy.sent = text
+      proxy.failures = 0
     })
-    if (status !== 200) return
-    proxy.sent = text
-    proxy.failures = 0
-  }).catch(() => {})
+    .catch(() => {})
 }
 
 // The window asked for a port the host shares and no tunnel serves yet.
 async function wantPort($: $, proxy: BrowserProxy, port: number) {
-  const s = proxy.scope, room = await read($, roomA)
+  const s = proxy.scope,
+    room = await read($, roomA)
   if (proxy.stopped || s.children.windowProxy !== proxy || !room || !stillInRoom(room, s) || s.mode !== 'guest') return
   const authority = (await browserAuthority($)).get(port)
-  if (!authority || (await read($, previewNeedsOpenA)).includes(authority.pid) || (s.window.backoff.get(authority.pid)?.until ?? 0) > (await $.clock.now())) return void syncBrowserRoutes($, s)
+  if (!authority || (await read($, previewNeedsOpenA)).includes(authority.pid) || (s.window.backoff.get(authority.pid)?.until ?? 0) > (await $.clock.now()))
+    return void syncBrowserRoutes($, s)
   const pid = authority.pid
   if (proxy.wants.has(pid)) return
   const task = (async () => {
@@ -7022,7 +7830,8 @@ async function noteNeedAsked($: $, s: RoomScope, port: number) {
 // answered, is asked again later. One
 // the host stopped isn't asked about (`previewEnded`).
 async function blockedPort($: $, proxy: BrowserProxy, port: number) {
-  const s = proxy.scope, room = await read($, roomA)
+  const s = proxy.scope,
+    room = await read($, roomA)
   if (!room || roomIdentity(room) !== proxy.key) return
   const live = () => !proxy.stopped && s.children.windowProxy === proxy && stillInRoom(room, s) && s.mode === 'guest'
   if (!live()) return
@@ -7044,7 +7853,11 @@ async function blockedPort($: $, proxy: BrowserProxy, port: number) {
     if (!slot) return
     let answer: { delivered?: boolean; shared?: boolean }
     try {
-      answer = await api<{ delivered?: boolean; shared?: boolean }>($, room.server, `/api/rooms/${room.id}/need`, { method: 'POST', token: room.token, body: { port } })
+      answer = await api<{ delivered?: boolean; shared?: boolean }>($, room.server, `/api/rooms/${room.id}/need`, {
+        method: 'POST',
+        token: room.token,
+        body: { port },
+      })
     } catch {
       return
     }
@@ -7082,7 +7895,8 @@ function refusedWords(host: string, port: number, r: Refused, promised: boolean)
 // What the toast for a refusal says: computed when it's said, so it names
 // what the band's Open preview opens then.
 async function refusalSaid($: $, room: ShareRoom, pid: string, port: number): Promise<string> {
-  const refused = await refusedOf($, pid), band = await bandEntry($)
+  const refused = await refusedOf($, pid),
+    band = await bandEntry($)
   return refusedWords(room.host, port, refused, Boolean(band && refused.entries.has(band.pid)))
 }
 
@@ -7097,10 +7911,11 @@ async function needsOpen($: $, room: ShareRoom, pid: string, run: LocalPreviewRu
   const refused = await refusedOf($, pid)
   await update($, previewWindowA, w => (w && s.live ? { ...w, opened: w.opened.filter(p => p !== pid && !refused.entries.has(p)) } : w))
   if (s.children.listeners.get(pid) === run) await stopLocalPreview($, pid, false, s)
-  if (first && stillInRoom(room, s)) sayWindowLater($, room, pid, run, 'AUTH', async () => {
-    if (!(await read($, previewNeedsOpenA)).includes(pid)) return
-    $.ui.toast(await refusalSaid($, room, pid, run.port))
-  })
+  if (first && stillInRoom(room, s))
+    sayWindowLater($, room, pid, run, 'AUTH', async () => {
+      if (!(await read($, previewNeedsOpenA)).includes(pid)) return
+      $.ui.toast(await refusalSaid($, room, pid, run.port))
+    })
   void syncBrowserRoutes($, s)
 }
 
@@ -7112,20 +7927,23 @@ async function needsOpen($: $, room: ShareRoom, pid: string, run: LocalPreviewRu
 function sayWindowLater($: $, room: ShareRoom, pid: string, run: LocalPreviewRun, code: string, say: () => Promise<void>) {
   const saying = (run.saying ??= new Map())
   if (saying.has(code)) return
-  saying.set(code, $.clock.after(1_500, () => {
-    saying.delete(code)
-    void (async () => {
-      const s = run.scope
-      if (!stillInRoom(room, s) || s.mode !== 'guest') return
-      const authority = await browserAuthority($)
-      if (![...authority.values()].some(a => a.pid === pid)) {
-        if (authority.has(run.port) || s.window.stopSaid.has(pid)) return
-        s.window.stopSaid.add(pid)
-        return void $.ui.toast(`${room.host} stopped sharing localhost:${run.port}.`)
-      }
-      await say()
-    })().catch(() => {})
-  }))
+  saying.set(
+    code,
+    $.clock.after(1_500, () => {
+      saying.delete(code)
+      void (async () => {
+        const s = run.scope
+        if (!stillInRoom(room, s) || s.mode !== 'guest') return
+        const authority = await browserAuthority($)
+        if (![...authority.values()].some(a => a.pid === pid)) {
+          if (authority.has(run.port) || s.window.stopSaid.has(pid)) return
+          s.window.stopSaid.add(pid)
+          return void $.ui.toast(`${room.host} stopped sharing localhost:${run.port}.`)
+        }
+        await say()
+      })().catch(() => {})
+    }),
+  )
 }
 
 // What a person's Open clears of the host's refusals before: the page's own,
@@ -7164,7 +7982,8 @@ async function previewEntries($: $): Promise<Forwarded[]> {
 async function bandEntry($: $): Promise<Forwarded | null> {
   const entries = await previewEntries($)
   if (!entries.length) return null
-  const room = await read($, roomA), w = await read($, previewWindowA)
+  const room = await read($, roomA),
+    w = await read($, previewWindowA)
   const opened = new Set(room && w?.room === roomIdentity(room) ? w.opened : [])
   const free = (e: Forwarded) => !opened.has(e.pid) && !listening(e.pid)
   for (const pid of await read($, previewNeedsOpenA)) {
@@ -7192,10 +8011,20 @@ async function bandEntry($: $): Promise<Forwarded | null> {
 type WindowWhy = { always: true } | { again: true } | RefusedPort
 type WindowOutcome = 'opened' | 'done' | { failed: string }
 
-async function openInWindow($: $, room: ShareRoom, s: RoomScope, choice: Extract<WindowChoice, { window: true }>, page: Forwarded, why: WindowWhy): Promise<WindowOutcome> {
+async function openInWindow(
+  $: $,
+  room: ShareRoom,
+  s: RoomScope,
+  choice: Extract<WindowChoice, { window: true }>,
+  page: Forwarded,
+  why: WindowWhy,
+): Promise<WindowOutcome> {
   const win = s.window
   const task = win.opens.run(async (): Promise<WindowOutcome> => (s.live ? openWindow($, room, s, choice, page, why) : 'done'))
-  const opening = task.then(() => {}, () => {})
+  const opening = task.then(
+    () => {},
+    () => {},
+  )
   win.openings.add(opening)
   try {
     return await task
@@ -7269,7 +8098,14 @@ const PROFILE_UNMADE = "its private profile couldn't be made"
 // proxy and tunnel that reach the host, the browser, and what's said. Left
 // meanwhile, nothing more starts, and what it made goes (`abandonWindow`); a
 // host's profile taken for it is let go however it ends.
-async function openWindow($: $, room: ShareRoom, s: RoomScope, choice: Extract<WindowChoice, { window: true }>, page: Forwarded, why: WindowWhy): Promise<WindowOutcome> {
+async function openWindow(
+  $: $,
+  room: ShareRoom,
+  s: RoomScope,
+  choice: Extract<WindowChoice, { window: true }>,
+  page: Forwarded,
+  why: WindowWhy,
+): Promise<WindowOutcome> {
   const open: WindowOpen = { room, s, choice, page, why, key: roomIdentity(room), url: pageUrl(page), launched: false, epoch: s.epoch(page.pid) }
   try {
     const chosen = await chooseProfile($, open)
@@ -7322,7 +8158,15 @@ async function chooseProfile($: $, open: WindowOpen): Promise<true | WindowOutco
   // its looks, and Leave, still find it. The room's own is named in its
   // place once a window opens there (`windowOpened`); never opened, it goes
   // in a start's sweep a day on (`gcPreviewProfiles`).
-  await update($, previewWindowA, w => (!s.live ? w : w?.room === key ? (w.profile === name || w.port ? w : { ...w, port: 0, opened: [], profile: name }) : { room: key, port: 0, opened: [], profile: name }))
+  await update($, previewWindowA, w =>
+    !s.live
+      ? w
+      : w?.room === key
+        ? w.profile === name || w.port
+          ? w
+          : { ...w, port: 0, opened: [], profile: name }
+        : { room: key, port: 0, opened: [], profile: name },
+  )
   return true
 }
 
@@ -7382,7 +8226,7 @@ async function letProfileGo($: $, open: WindowOpen) {
 async function readyProxy($: $, open: WindowOpen): Promise<BrowserProxy | WindowOutcome> {
   const { room, s, page, choice } = open
   const profile = open.profile!
-  const onPort = () => (hostProfile(open.name!) ? open.alive?.port ?? undefined : undefined)
+  const onPort = () => (hostProfile(open.name!) ? (open.alive?.port ?? undefined) : undefined)
   // The room's proxy as it was: one this open finds running serves the
   // windows open already, whatever comes of this page (`idleProxy`).
   open.had = s.children.windowProxy
@@ -7424,7 +8268,7 @@ async function readyProxy($: $, open: WindowOpen): Promise<BrowserProxy | Window
   // started, and nothing else, may go with it (`idleProxy`).
   if (!tunnel.run) {
     await idleProxy(open, proxy)
-    $.ui.toast(reseated ? RESEATED : tunnel.error ?? 'That preview could not be opened.')
+    $.ui.toast(reseated ? RESEATED : (tunnel.error ?? 'That preview could not be opened.'))
     return 'done'
   }
   await windowStep(open, syncBrowserRoutes($, s))
@@ -7451,7 +8295,9 @@ async function idleProxy(open: WindowOpen, proxy: BrowserProxy) {
 // meanwhile.
 async function launchWindow($: $, open: WindowOpen, proxy: BrowserProxy): Promise<'seen' | WindowOutcome> {
   const { room, s, choice, page, url } = open
-  const profile = open.profile!, alive = open.alive, port = proxy.port!
+  const profile = open.profile!,
+    alive = open.alive,
+    port = proxy.port!
   open.port = port
   // After a definite failure, or the page stopped: what this open started may go.
   const idle = () => idleProxy(open, proxy)
@@ -7467,9 +8313,11 @@ async function launchWindow($: $, open: WindowOpen, proxy: BrowserProxy): Promis
     if (pageStopped(open)) return 'done'
     await windowOpened($, open, port)
     const copied = await $.ui.copy({ text: url }).catch(() => ({ isCopied: false }))
-    $.ui.toast(copied.isCopied
-      ? `${room.host}'s localhost:${page.port} is ready in the ${choice.name} preview window. Its address is copied: paste it into that window's address bar (${url}).`
-      : `${room.host}'s localhost:${page.port} is ready in the ${choice.name} preview window: type ${url} into that window's address bar.`)
+    $.ui.toast(
+      copied.isCopied
+        ? `${room.host}'s localhost:${page.port} is ready in the ${choice.name} preview window. Its address is copied: paste it into that window's address bar (${url}).`
+        : `${room.host}'s localhost:${page.port} is ready in the ${choice.name} preview window: type ${url} into that window's address bar.`,
+    )
     return 'opened'
   }
   if (!alive && !(await windowStep(open, windowSettings($, open, port)))) return fail(PROFILE_UNMADE)
@@ -7479,7 +8327,11 @@ async function launchWindow($: $, open: WindowOpen, proxy: BrowserProxy): Promis
     await idle()
     return 'done'
   }
-  const argv = launchArgv(choice.platform, choice.browser, choice.family === 'firefox' ? firefoxFlags(profile, url) : chromeFlags(profile, port, choice.platform, url))
+  const argv = launchArgv(
+    choice.platform,
+    choice.browser,
+    choice.family === 'firefox' ? firefoxFlags(profile, url) : chromeFlags(profile, port, choice.platform, url),
+  )
   // The page reaching the proxy says the window is there as well as its lock
   // does; listened for from before the start, so a quick one isn't missed.
   const asks: Asked = { port: page.port, seen: false, late: null }
@@ -7488,9 +8340,19 @@ async function launchWindow($: $, open: WindowOpen, proxy: BrowserProxy): Promis
   let came: 'failed' | 'seen' | 'unseen' | undefined
   try {
     open.launched = true
-    const started = await windowStep(open, $.process.run(argv, { timeoutMs: 15_000 }).catch(() => null))
+    const started = await windowStep(
+      open,
+      $.process.run(argv, { timeoutMs: 15_000 }).catch(() => null),
+    )
     if (!started || started.exitCode !== 0) came = 'failed'
-    else came = (await windowStep(open, windowAppears($, profile, 10_000, () => asks.seen))) || asks.seen ? 'seen' : 'unseen'
+    else
+      came =
+        (await windowStep(
+          open,
+          windowAppears($, profile, 10_000, () => asks.seen),
+        )) || asks.seen
+          ? 'seen'
+          : 'unseen'
   } finally {
     // Listened for no more, unless a window slow to show may still open the page.
     if (came !== 'unseen') proxy.asks.delete(asks)
@@ -7512,7 +8374,9 @@ async function launchWindow($: $, open: WindowOpen, proxy: BrowserProxy): Promis
 // settings, its proxy's port among them (`firefoxProfileScript`), or
 // Chrome's WebRTC setting (`setChromePrefs`).
 async function windowSettings($: $, open: WindowOpen, port: number): Promise<boolean> {
-  return open.choice.family === 'firefox' ? (await sh($, firefoxProfileScript(open.profile!, port), WINDOW_STEP_MS)).code === 0 : setChromePrefs($, open.profile!)
+  return open.choice.family === 'firefox'
+    ? (await sh($, firefoxProfileScript(open.profile!, port), WINDOW_STEP_MS)).code === 0
+    : setChromePrefs($, open.profile!)
 }
 
 // Open: the window's this session's, on its proxy's port, with the page in
@@ -7530,13 +8394,25 @@ async function announceWindow($: $, open: WindowOpen, proxy: BrowserProxy): Prom
   await windowOpened($, open, proxy.port!)
   if (open.alive) return 'opened'
   // The only browser that could be is the person's default: macOS can hand it links from other apps.
-  const links = choice.isDefault ? ` ${choice.name} is your default browser, so links you open in other apps may go to this window while it's open: quit it (⌘Q) when you're done.` : ''
-  noteOnce($, 'welcome', `Opened ${room.host}'s localhost:${page.port} in a separate ${choice.name} window. In it, localhost reaches only what ${room.host} shares; your own servers aren't touched.${links}`, s)
+  const links = choice.isDefault
+    ? ` ${choice.name} is your default browser, so links you open in other apps may go to this window while it's open: quit it (⌘Q) when you're done.`
+    : ''
+  noteOnce(
+    $,
+    'welcome',
+    `Opened ${room.host}'s localhost:${page.port} in a separate ${choice.name} window. In it, localhost reaches only what ${room.host} shares; your own servers aren't touched.${links}`,
+    s,
+  )
   if (!proxy.seen.has(page.port)) {
     const remedy = await windowRemedy($, open.why, false)
     $.clock.after(15_000, () => {
       if (s.children.windowProxy !== proxy || proxy.stopped || proxy.seen.has(page.port)) return
-      noteOnce($, 'ignored', `The preview window doesn't seem to use its proxy (a browser your organization manages can ignore it), so it may not reach ${room.host}'s localhost:${page.port}.${remedy ? ` ${remedy}` : ''}`, s)
+      noteOnce(
+        $,
+        'ignored',
+        `The preview window doesn't seem to use its proxy (a browser your organization manages can ignore it), so it may not reach ${room.host}'s localhost:${page.port}.${remedy ? ` ${remedy}` : ''}`,
+        s,
+      )
     })
   }
   return 'opened'
@@ -7548,7 +8424,16 @@ async function announceWindow($: $, open: WindowOpen, proxy: BrowserProxy): Prom
 async function windowOpened($: $, open: WindowOpen, port: number, withPage = true) {
   const { s, key, page } = open
   // What's open in it: what the record had for this same window (profile and port), and the page.
-  await update($, previewWindowA, w => (!s.live ? w : { room: key, port, opened: [...new Set([...(w?.room === key && w.port === port && w.profile === open.name ? w.opened : []), ...(withPage ? [page.pid] : [])])], profile: open.name }))
+  await update($, previewWindowA, w =>
+    !s.live
+      ? w
+      : {
+          room: key,
+          port,
+          opened: [...new Set([...(w?.room === key && w.port === port && w.profile === open.name ? w.opened : []), ...(withPage ? [page.pid] : [])])],
+          profile: open.name,
+        },
+  )
   watchWindow($, s, open.profile!)
 }
 
@@ -7567,7 +8452,12 @@ async function windowsSettled($: $, s: RoomScope, ms: number) {
   const openings = s.window.openings
   if (!openings.size) return
   let timer: Timer | undefined
-  await Promise.race([Promise.all([...openings]), new Promise<void>(done => { timer = $.clock.after(ms, done) })])
+  await Promise.race([
+    Promise.all([...openings]),
+    new Promise<void>(done => {
+      timer = $.clock.after(ms, done)
+    }),
+  ])
   timer?.cancel()
 }
 
@@ -7581,7 +8471,8 @@ function watchWindow($: $, s: RoomScope, profile: string) {
 }
 
 async function checkWindow($: $, s: RoomScope, profile: string) {
-  const w = await read($, previewWindowA), win = s.window
+  const w = await read($, previewWindowA),
+    win = s.window
   if (!s.live || s.mode !== 'guest' || w?.room !== s.key) return void win.stopWatching()
   const seen = await windowProbe($, profile)
   if (!s.live || (seen === undefined && ++win.misses < 3)) return
@@ -7604,7 +8495,9 @@ async function checkWindow($: $, s: RoomScope, profile: string) {
 // it comes back on that same port, never opening a browser. Taken meanwhile,
 // the window can't be reached again: it's closed, and said.
 async function restorePreviewWindow($: $) {
-  const s = scope, room = await read($, roomA), w = await read($, previewWindowA)
+  const s = scope,
+    room = await read($, roomA),
+    w = await read($, previewWindowA)
   if (!room || !stillInRoom(room, s) || s.mode !== 'guest' || !w || w.room !== roomIdentity(room)) return
   const { profile, name } = await profileOf($, room)
   const alive = await windowProbe($, profile)
@@ -7612,7 +8505,8 @@ async function restorePreviewWindow($: $) {
   // Closed meanwhile: its port is no window of this session's any more. A
   // look that failed can't tell: the window is taken to be there still, on
   // its own port, and the looks from now on settle it (`checkWindow`).
-  if (alive === null || (alive === undefined && !w.port)) return void (await update($, previewWindowA, x => (s.live && x?.room === w.room ? { ...x, port: 0, opened: [] } : x)))
+  if (alive === null || (alive === undefined && !w.port))
+    return void (await update($, previewWindowA, x => (s.live && x?.room === w.room ? { ...x, port: 0, opened: [] } : x)))
   const proxy = alive === undefined || alive.port === w.port ? await ensureBrowserProxy($, room, w.port, s) : { error: 'MOVED' }
   if (!stillInRoom(room, s)) return
   if ('error' in proxy) {
@@ -7623,7 +8517,11 @@ async function restorePreviewWindow($: $) {
     await update($, previewWindowA, x => (s.live && x?.room === w.room ? { ...x, port: 0, opened: [] } : x))
     // Nor where a look that failed took one to be there and there was none to close.
     if (another || (alive === undefined && !closed)) return
-    $.ui.toast(proxy.error === 'EADDRINUSE' ? `The preview window closed: its proxy's port (${w.port}) was taken while the plugin reloaded. Press Open preview to open it again.` : "The preview window closed: its proxy couldn't start again. Press Open preview to open it again.")
+    $.ui.toast(
+      proxy.error === 'EADDRINUSE'
+        ? `The preview window closed: its proxy's port (${w.port}) was taken while the plugin reloaded. Press Open preview to open it again.`
+        : "The preview window closed: its proxy couldn't start again. Press Open preview to open it again.",
+    )
     return
   }
   watchWindow($, s, profile)
@@ -7665,7 +8563,9 @@ async function gcPreviewProfiles($: $) {
 // already asked about stay asked. What the host forwards goes in its Shown.
 async function windowCheckpoint($: $, room: ShareRoom): Promise<Pick<Joined, 'previewWindow' | 'previewNeedsOpen' | 'needAsked'>> {
   const key = roomIdentity(room)
-  const w = await read($, previewWindowA), refused = await read($, previewNeedsOpenA), asked = await read($, needAskedA)
+  const w = await read($, previewWindowA),
+    refused = await read($, previewNeedsOpenA),
+    asked = await read($, needAskedA)
   return {
     ...(w?.room === key ? { previewWindow: { port: w.port, ...(w.profile ? { profile: w.profile } : {}) } } : {}),
     ...(refused.length ? { previewNeedsOpen: refused.slice(-64) } : {}),
@@ -7718,25 +8618,36 @@ async function rememberHost($: $, room: ShareRoom, change: (memory: ShareHostMem
   await update($, hostMemoryA, m => {
     if (!s.live) return m
     const next = change(m ? { ...m, stopped: m.stopped ?? [] } : NO_MEMORY)
-    return { declined: [...new Set(next.declined)].slice(-256), stopped: [...new Set(next.stopped)].slice(-256), askedAt: Object.fromEntries(Object.entries(next.askedAt).slice(-256)) }
+    return {
+      declined: [...new Set(next.declined)].slice(-256),
+      stopped: [...new Set(next.stopped)].slice(-256),
+      askedAt: Object.fromEntries(Object.entries(next.askedAt).slice(-256)),
+    }
   })
 }
 
-const declinePorts = ($: $, room: ShareRoom, ports: number[]) => rememberHost($, room, m => ({ ...m, declined: [...m.declined.filter(p => !ports.includes(p)), ...ports] }))
+const declinePorts = ($: $, room: ShareRoom, ports: number[]) =>
+  rememberHost($, room, m => ({ ...m, declined: [...m.declined.filter(p => !ports.includes(p)), ...ports] }))
 // Stopped by the host: asked about no more, and its link not shared again
 // for Claude's mention (`shareLocal`, a reopened session's look back too).
 const stopPorts = ($: $, room: ShareRoom, ports: number[]) =>
-  rememberHost($, room, m => ({ ...m, declined: [...m.declined.filter(p => !ports.includes(p)), ...ports], stopped: [...m.stopped.filter(p => !ports.includes(p)), ...ports] }))
+  rememberHost($, room, m => ({
+    ...m,
+    declined: [...m.declined.filter(p => !ports.includes(p)), ...ports],
+    stopped: [...m.stopped.filter(p => !ports.includes(p)), ...ports],
+  }))
 // Shared again on purpose (`hostForwards`): asked about again, and shared
 // again for Claude's mention.
-const undeclinePorts = ($: $, room: ShareRoom, ports: number[]) => rememberHost($, room, m => ({ ...m, declined: m.declined.filter(p => !ports.includes(p)), stopped: m.stopped.filter(p => !ports.includes(p)) }))
+const undeclinePorts = ($: $, room: ShareRoom, ports: number[]) =>
+  rememberHost($, room, m => ({ ...m, declined: m.declined.filter(p => !ports.includes(p)), stopped: m.stopped.filter(p => !ports.includes(p)) }))
 const askedLately = (memory: ShareHostMemory, port: number, now: number) => now - (memory.askedAt[String(port)] ?? -Infinity) < 10 * 60_000
 
 // Of these ports, those to ask about now (not declined, and not asked about
 // in the last ten minutes), marked asked in the same write: two asks at
 // once never both get a port.
 async function claimAsks($: $, room: ShareRoom, ports: readonly number[]): Promise<number[]> {
-  const now = await $.clock.now(), s = scope
+  const now = await $.clock.now(),
+    s = scope
   if (await isRunner($)) ports = ports.filter(p => p !== RUNNER_PORT)
   let claimed: number[] = []
   await rememberHost($, room, m => {
@@ -7753,7 +8664,14 @@ function hostMemorySaved(value: unknown, key: string): ShareHostMemory | null {
   const m = value as Partial<ShareHostMemory & { room: string }> | null
   if (!m || typeof m !== 'object' || m.room !== key) return null
   const ports = (list: unknown) => (Array.isArray(list) ? list.filter(validPort).slice(-256) : [])
-  const askedAt = m.askedAt && typeof m.askedAt === 'object' ? Object.fromEntries(Object.entries(m.askedAt).filter(([p, t]) => validPort(Number(p)) && Number.isFinite(t)).slice(-256)) : {}
+  const askedAt =
+    m.askedAt && typeof m.askedAt === 'object'
+      ? Object.fromEntries(
+          Object.entries(m.askedAt)
+            .filter(([p, t]) => validPort(Number(p)) && Number.isFinite(t))
+            .slice(-256),
+        )
+      : {}
   return { declined: ports(m.declined), stopped: ports(m.stopped), askedAt }
 }
 
@@ -7803,7 +8721,9 @@ async function pumpHostAsks($: $) {
         continue
       }
       let answer!: (answer: HostAnswer) => void
-      const answered = new Promise<HostAnswer>(done => { answer = done })
+      const answered = new Promise<HostAnswer>(done => {
+        answer = done
+      })
       // Known before it shows: Stop sharing, or a new room, answers it at once.
       hostAskActive = { id: current.ask.id, answer, ...(runner ? { yes: hostAskYes(current.ask) } : {}) }
       const timer = $.clock.after(10 * 60_000, () => answer('later'))
@@ -7854,7 +8774,14 @@ const approverAsk = (ask: ShareHostAsk) => ({
 // shared now (through the link, or forwarded), and those that couldn't be,
 // as its shares say, whatever the yes said (`takeCloudAsk`).
 // `asked`: once the question is in the row, or waiting for it.
-async function offer($: $, room: ShareRoom, ask: Omit<ShareHostAsk, 'id'>, ports: readonly number[], forward: () => Promise<{ shared: number[]; refused: string[] }>, asked?: () => void): Promise<HostAnswer> {
+async function offer(
+  $: $,
+  room: ShareRoom,
+  ask: Omit<ShareHostAsk, 'id'>,
+  ports: readonly number[],
+  forward: () => Promise<{ shared: number[]; refused: string[] }>,
+  asked?: () => void,
+): Promise<HostAnswer> {
   const id = newId()
   const answering = askHost($, room, ask, id)
   asked?.()
@@ -7878,12 +8805,17 @@ async function offer($: $, room: ShareRoom, ask: Omit<ShareHostAsk, 'id'>, ports
 // keeps its role, never made another page's dependency): 64 of those go to
 // discovery (all it takes), the rest are left out of what it found after.
 async function discoverPort($: $, port: number, deadlineMs = 8_000): Promise<Discovered | null> {
-  const shared = Object.keys(await read($, sharesA)).map(Number).filter(p => validPort(p) && p !== port)
+  const shared = Object.keys(await read($, sharesA))
+    .map(Number)
+    .filter(p => validPort(p) && p !== port)
   const exclude = [...((await isRunner($)) ? [RUNNER_PORT] : []), ...shared].slice(-64)
   let child: Child | undefined
   let timer: Timer | undefined
   try {
-    child = $.process.spawn({ argv: ['/bin/sh', '-c', FIND_NODE, 'sh', `${$.plugin.root}/relay/discover.mts`], input: JSON.stringify({ port, pluginRoot: $.plugin.root, exclude, deadlineMs }) })
+    child = $.process.spawn({
+      argv: ['/bin/sh', '-c', FIND_NODE, 'sh', `${$.plugin.root}/relay/discover.mts`],
+      input: JSON.stringify({ port, pluginRoot: $.plugin.root, exclude, deadlineMs }),
+    })
     const running = child
     timer = $.clock.after(deadlineMs + 2_000, () => void running.return(undefined as never).catch(() => {}))
     // Its one line: what it found. A line past the bound throws, and is nothing found.
@@ -7897,7 +8829,9 @@ async function discoverPort($: $, port: number, deadlineMs = 8_000): Promise<Dis
     return null
   } finally {
     timer?.cancel()
-    try { await child?.return(undefined as never) } catch {}
+    try {
+      await child?.return(undefined as never)
+    } catch {}
   }
 }
 
@@ -7923,7 +8857,8 @@ const RELAYED_KEPT = 64
 const relayedSeen = new Map<number, { at: number; answer?: boolean; done: boolean; look: Promise<boolean | undefined> }>()
 async function relayedHere($: $, port: number, noMs = RELAYED_NO_MS): Promise<boolean | undefined> {
   if (!validPort(port)) return undefined
-  const now = await $.clock.now(), seen = relayedSeen.get(port)
+  const now = await $.clock.now(),
+    seen = relayedSeen.get(port)
   if (seen && (!seen.done || now - seen.at < (seen.answer === true ? RELAYED_YES_MS : noMs))) return seen.look
   const entry: { at: number; answer?: boolean; done: boolean; look: Promise<boolean | undefined> } = { at: now, done: false, look: Promise.resolve(undefined) }
   entry.look = ownerLook($, port).then(line => {
@@ -7944,7 +8879,10 @@ async function ownerLook($: $, port: number, web = false): Promise<string | null
   let child: Child | undefined
   let timer: Timer | undefined
   try {
-    child = $.process.spawn({ argv: ['/bin/sh', '-c', FIND_NODE, 'sh', `${$.plugin.root}/relay/discover.mts`], input: JSON.stringify({ port, pluginRoot: $.plugin.root, owner: true, deadlineMs: RELAYED_LOOK_MS, ...(web ? { web: true } : {}) }) })
+    child = $.process.spawn({
+      argv: ['/bin/sh', '-c', FIND_NODE, 'sh', `${$.plugin.root}/relay/discover.mts`],
+      input: JSON.stringify({ port, pluginRoot: $.plugin.root, owner: true, deadlineMs: RELAYED_LOOK_MS, ...(web ? { web: true } : {}) }),
+    })
     const running = child
     timer = $.clock.after(RELAYED_LOOK_MS + 2_000, () => void running.return(undefined as never).catch(() => {}))
     for await (const line of helperLines(running)) return line
@@ -7953,7 +8891,9 @@ async function ownerLook($: $, port: number, web = false): Promise<string | null
     return null
   } finally {
     timer?.cancel()
-    try { await child?.return(undefined as never) } catch {}
+    try {
+      await child?.return(undefined as never)
+    } catch {}
   }
 }
 
@@ -7969,7 +8909,12 @@ type ShareRefused = { refused: string }
 async function relayedNow($: $, s: RoomScope, port: number): Promise<boolean> {
   if ((await relayedHere($, port, RELAYED_NOW_MS)) !== true) return false
   $.ui.log(`localhost:${port} is held by a shared session's own helper: teammates' connections to it are refused`, { to: 'debug' })
-  noteOnce($, `relayed-${port}`, `Teammates' connections to localhost:${port} are refused: it's another shared session's preview forwarded to this computer now, so it can't be shared on. Stop it in Room → Shown.`, s)
+  noteOnce(
+    $,
+    `relayed-${port}`,
+    `Teammates' connections to localhost:${port} are refused: it's another shared session's preview forwarded to this computer now, so it can't be shared on. Stop it in Room → Shown.`,
+    s,
+  )
   return true
 }
 
@@ -7987,24 +8932,37 @@ async function relayedNow($: $, s: RoomScope, port: number): Promise<boolean> {
 // (`offerRelated`), and `related` says what was put to the host and what
 // was left out.
 type ForwardPage = { port: number; title: string; path?: string; host?: PreviewHost; scheme?: 'https'; dependency?: number | true }
-async function hostForwards($: $, room: ShareRoom, page: ForwardPage, opts: { offerRelated?: number } = {}): Promise<{ pid: string; related: Promise<RelatedOffer> } | ShareRefused | null> {
+async function hostForwards(
+  $: $,
+  room: ShareRoom,
+  page: ForwardPage,
+  opts: { offerRelated?: number } = {},
+): Promise<{ pid: string; related: Promise<RelatedOffer> } | ShareRefused | null> {
   const s = scope
   // Another session's preview forwarded here: nothing is shared, and a Not now or a Stop of it stands.
   if (await relayedHere($, page.port)) return { refused: relayedSaid(page.port) }
   if (!sameRoom(room, s)) return null
   await undeclinePorts($, room, [page.port])
-  const share = await ensurePreview($, room, page.port, page.title, { tcp: true, ...(page.host ? { host: page.host } : {}), ...(page.scheme ? { scheme: page.scheme } : {}), ...(page.dependency !== undefined ? { dependency: page.dependency } : {}) })
+  const share = await ensurePreview($, room, page.port, page.title, {
+    tcp: true,
+    ...(page.host ? { host: page.host } : {}),
+    ...(page.scheme ? { scheme: page.scheme } : {}),
+    ...(page.dependency !== undefined ? { dependency: page.dependency } : {}),
+  })
   if (!share || !sameRoom(room, s)) return null
   send($, 'artifact', { kind: 'preview', pid: share.pid, port: page.port, title: page.title, path: page.path ?? '/', ...sharedAs(share) })
   const deadline = opts.offerRelated
   const related: Promise<RelatedOffer> =
-    deadline === undefined ? Promise.resolve(NO_OFFER) : discoverPort($, page.port, deadline).then(found => (found?.related.length ? offerRelated($, room, page.port, found.related) : NO_OFFER))
+    deadline === undefined
+      ? Promise.resolve(NO_OFFER)
+      : discoverPort($, page.port, deadline).then(found => (found?.related.length ? offerRelated($, room, page.port, found.related) : NO_OFFER))
   return { pid: share.pid, related }
 }
 
 // A Shown entry's title: as its artifact gave it, else its name without
 // what Shown adds to it.
-const shownTitle = (item: ShareShown) => (typeof item.title === 'string' && item.title ? item.title : item.name.replace(/ \(preview\)$| · used by (?:previews|localhost:\d+)$/, ''))
+const shownTitle = (item: ShareShown) =>
+  typeof item.title === 'string' && item.title ? item.title : item.name.replace(/ \(preview\)$| · used by (?:previews|localhost:\d+)$/, '')
 
 // Host: a port forwarded for a page's sake (`dependency`: that page's host
 // port, or true for a guest's window), as Share too and a guest's need do.
@@ -8017,7 +8975,14 @@ async function forwardFor($: $, room: ShareRoom, port: number, label: string, de
   const page = share ? (await read($, shownA)).find(s => s.kind === 'preview' && s.pid === share.pid) : undefined
   const forwarded = !share
     ? await hostForwards($, room, { port, title: dependencyTitle(port, label), host: 'localhost', dependency })
-    : await hostForwards($, room, { port, title: page ? shownTitle(page) : `localhost:${port}`, path: page?.path ?? '/', host: page?.host, scheme: page?.scheme ?? share.scheme, ...(page?.dependency !== undefined ? { dependency: page.dependency } : {}) })
+    : await hostForwards($, room, {
+        port,
+        title: page ? shownTitle(page) : `localhost:${port}`,
+        path: page?.path ?? '/',
+        host: page?.host,
+        scheme: page?.scheme ?? share.scheme,
+        ...(page?.dependency !== undefined ? { dependency: page.dependency } : {}),
+      })
   return !forwarded ? null : 'refused' in forwarded ? forwarded : forwarded.pid
 }
 
@@ -8025,8 +8990,14 @@ async function forwardFor($: $, room: ShareRoom, port: number, label: string, de
 // forwarded (as a page of its own, say) stays as it is; one shared through
 // its link keeps its role (`forwardFor`). `refused`: why one wasn't
 // (another session's preview holds it here).
-async function shareRelated($: $, room: ShareRoom, related: readonly { port: number; label: string }[], entry: number): Promise<{ shared: number[]; refused: string[] }> {
-  const shared: number[] = [], refused: string[] = []
+async function shareRelated(
+  $: $,
+  room: ShareRoom,
+  related: readonly { port: number; label: string }[],
+  entry: number,
+): Promise<{ shared: number[]; refused: string[] }> {
+  const shared: number[] = [],
+    refused: string[] = []
   for (const s of related.slice(0, 6)) {
     if (await forwardedPort($, s.port)) continue
     const forwarded = await forwardFor($, room, s.port, s.label, entry)
@@ -8069,14 +9040,20 @@ const NO_OFFER: RelatedOffer = { asked: [], left: [] }
 // the row (or none can be).
 function offerRelated($: $, room: ShareRoom, port: number, related: readonly DiscoveredService[]): Promise<RelatedOffer> {
   let said!: (offer: RelatedOffer) => void
-  const offered = new Promise<RelatedOffer>(done => { said = done })
-  void askRelated($, room, port, related, said).catch(() => {}).finally(() => said(NO_OFFER))
+  const offered = new Promise<RelatedOffer>(done => {
+    said = done
+  })
+  void askRelated($, room, port, related, said)
+    .catch(() => {})
+    .finally(() => said(NO_OFFER))
   return offered
 }
 
 async function askRelated($: $, room: ShareRoom, port: number, related: readonly DiscoveredService[], said: (offer: RelatedOffer) => void) {
-  const key = roomIdentity(room), flight = (s: DiscoveredService) => `${key} ${s.port}`
-  const memory = await hostMemoryOf($, room), now = await $.clock.now()
+  const key = roomIdentity(room),
+    flight = (s: DiscoveredService) => `${key} ${s.port}`
+  const memory = await hostMemoryOf($, room),
+    now = await $.clock.now()
   const left: RelatedOffer['left'] = []
   const leave = (list: readonly DiscoveredService[], declined = false) => void left.push(...list.map(service => ({ service, declined })))
   let ask: DiscoveredService[] = []
@@ -8085,7 +9062,8 @@ async function askRelated($: $, room: ShareRoom, port: number, related: readonly
     if (memory.declined.includes(s.port)) leave([s], true)
     else ask.push(s)
   }
-  if (!ask.length || !hostHere(room) || !(await canAskHost($))) return said({ asked: [], left: [...left, ...ask.map(service => ({ service, declined: false }))] })
+  if (!ask.length || !hostHere(room) || !(await canAskHost($)))
+    return said({ asked: [], left: [...left, ...ask.map(service => ({ service, declined: false }))] })
   // Held from here, each until it's answered: no other question takes one
   // while it waits its turn. One asked about lately, or being asked about
   // already, is left.
@@ -8114,7 +9092,11 @@ async function askRelated($: $, room: ShareRoom, port: number, related: readonly
         if (!told) leave([open, ...questions.slice(i + 1)].flat())
         break
       }
-      const claimed = await claimAsks($, room, open.map(s => s.port))
+      const claimed = await claimAsks(
+        $,
+        room,
+        open.map(s => s.port),
+      )
       const asking = open.filter(s => claimed.includes(s.port))
       const out = open.filter(s => !asking.includes(s))
       if (out.length) {
@@ -8129,7 +9111,14 @@ async function askRelated($: $, room: ShareRoom, port: number, related: readonly
         break
       }
       const ask = { kind: 'related' as const, port, related: asking.map(s => ({ port: s.port, label: s.label })) }
-      const answer = await offer($, room, ask, asking.map(s => s.port), () => shareRelated($, room, asking, port), () => tell([asking, ...questions.slice(i + 1)]))
+      const answer = await offer(
+        $,
+        room,
+        ask,
+        asking.map(s => s.port),
+        () => shareRelated($, room, asking, port),
+        () => tell([asking, ...questions.slice(i + 1)]),
+      )
       for (const s of asking) release(s)
       if (!hostHere(room) || (answer !== 'yes' && answer !== 'no')) break
     }
@@ -8153,7 +9142,8 @@ function relatedSaid({ asked, left }: RelatedOffer): string {
   if (!left.length && !split) return ` It looks like it also uses ${alsoUses(asked.flat())}: share ${one(asked.length, 'it', 'them')}${inRow}.`
   const ports = (list: readonly DiscoveredService[]) => portList(list.map(s => s.port))
   const commands = (list: readonly DiscoveredService[]) => everyName(list.map(s => `/share-preview ${s.port}`))
-  const declined = left.filter(l => l.declined).map(l => l.service), other = left.filter(l => !l.declined).map(l => l.service)
+  const declined = left.filter(l => l.declined).map(l => l.service),
+    other = left.filter(l => !l.declined).map(l => l.service)
   const found = [...asked.flat(), ...left.map(l => l.service)].sort((a, b) => a.port - b.port)
   return [
     ` It looks like it also uses ${alsoUses(found)}.`,
@@ -8184,7 +9174,9 @@ async function offerSameAddress($: $, room: ShareRoom, port: number, path: strin
     await offer($, room, { kind: 'mention', port, ...(found?.target?.label ? { label: found.target.label } : {}), related: [] }, [port], async () => {
       const forwarded = await hostForwards($, room, { port, title: `localhost:${port}`, path, host, scheme })
       allowed = Boolean(forwarded && 'pid' in forwarded)
-      return allowed ? { shared: [port], refused: [] } : { shared: [], refused: [(forwarded && 'refused' in forwarded && forwarded.refused) || `Couldn't allow forwarding localhost:${port}`] }
+      return allowed
+        ? { shared: [port], refused: [] }
+        : { shared: [], refused: [(forwarded && 'refused' in forwarded && forwarded.refused) || `Couldn't allow forwarding localhost:${port}`] }
     })
     if (allowed && hostHere(room)) beside = found?.related ?? []
   } finally {
@@ -8206,7 +9198,8 @@ async function hostNeed($: $, room: ShareRoom, need: Record<string, unknown>) {
   const flight = `${roomIdentity(room)} ${port}`
   if (!validPort(port) || !hostHere(room) || hostAsking.has(flight)) return
   if ((await read($, policyA)).files === 'off' || (await forwardedPort($, port))) return
-  const memory = await hostMemoryOf($, room), now = await $.clock.now()
+  const memory = await hostMemoryOf($, room),
+    now = await $.clock.now()
   if (memory.declined.includes(port) || askedLately(memory, port, now) || hostAsking.has(flight) || !(await canAskHost($))) return
   hostAsking.add(flight)
   try {
@@ -8294,7 +9287,12 @@ async function paneAllowed($: $): Promise<boolean> {
 async function inPane($: $, url: string, what: string, instead: string): Promise<boolean> {
   if (!(await isDesktop($))) return false
   const refused = await read($, paneRefusedA)
-  const say = () => noteOnce($, `pane-refused ${what}`, `Auto mode doesn't let the plugin open ${what} in Claude's browser, so they open ${instead}. Press Allow previews in Claude, in Room → Settings, to let it.`)
+  const say = () =>
+    noteOnce(
+      $,
+      `pane-refused ${what}`,
+      `Auto mode doesn't let the plugin open ${what} in Claude's browser, so they open ${instead}. Press Allow previews in Claude, in Room → Settings, to let it.`,
+    )
   if (refused && !(await paneAllowed($))) {
     say()
     return false
@@ -8328,14 +9326,25 @@ async function allowPane($: $) {
 // address is copied. `live`: still the request it was; `words`: what's
 // said when it's copied, or not even that.
 type PageShown = 'pane' | 'browser' | 'copied' | 'said'
-async function showPage($: $, room: ShareRoom, url: string, surface: RenderSurface | undefined, live: () => Promise<boolean>, words?: { copied: string; said: string }): Promise<PageShown | null> {
+async function showPage(
+  $: $,
+  room: ShareRoom,
+  url: string,
+  surface: RenderSurface | undefined,
+  live: () => Promise<boolean>,
+  words?: { copied: string; said: string },
+): Promise<PageShown | null> {
   if (!(await live())) return null
   if ((await shownIn($)) === 'pane' && (await inPane($, url, 'previews', 'in your browser'))) return 'pane'
   if (!(await live())) return null
   if (await openExternal($, url)) return 'browser'
   if (!(await live())) return null
   const copied = await $.ui.copy({ text: url, surface }).catch(() => ({ isCopied: false }))
-  $.ui.toast(copied.isCopied ? words?.copied ?? `${room.host}'s preview is ready at ${url}: the address is copied.` : words?.said ?? `${room.host}'s preview is ready at ${url}.`)
+  $.ui.toast(
+    copied.isCopied
+      ? (words?.copied ?? `${room.host}'s preview is ready at ${url}: the address is copied.`)
+      : (words?.said ?? `${room.host}'s preview is ready at ${url}.`),
+  )
   return copied.isCopied ? 'copied' : 'said'
 }
 
@@ -8369,16 +9378,28 @@ function listening(pid: string, s: RoomScope = scope): LocalPreviewRun | null {
 type Bound = { url: string; run: LocalPreviewRun; taken: number[]; denied: number[]; failed: string[] }
 type BindResult = Bound | RefusedPort | { inWindow: true } | { error: string }
 const RESEATED = 'The room reconnected you while the preview was opening. Press Open again.'
-async function bindForOpen($: $, room: ShareRoom, s: RoomScope, page: Forwarded, uses: readonly Forwarded[], policy: 'same' | 'elsewhere', keepWindow = false): Promise<BindResult> {
+async function bindForOpen(
+  $: $,
+  room: ShareRoom,
+  s: RoomScope,
+  page: Forwarded,
+  uses: readonly Forwarded[],
+  policy: 'same' | 'elsewhere',
+  keepWindow = false,
+): Promise<BindResult> {
   const seat = { ...room, token: s.token }
   const saved = await read($, localPreviewsA)
-  const made: { pid: string; run: LocalPreviewRun }[] = [], bound: { pid: string; run: LocalPreviewRun; own?: true }[] = []
-  const taken: number[] = [], denied: number[] = [], failed: string[] = []
+  const made: { pid: string; run: LocalPreviewRun }[] = [],
+    bound: { pid: string; run: LocalPreviewRun; own?: true }[] = []
+  const taken: number[] = [],
+    denied: number[] = [],
+    failed: string[] = []
   const undo = async (result: BindResult): Promise<BindResult> => {
     for (const { pid, run } of made) if (s.children.listeners.get(pid) === run) await stopLocalPreview($, pid, false, s)
     return result
   }
-  const up = (want: Forwarded, run: LocalPreviewRun) => bound.push({ pid: want.pid, run, ...(want.pid === page.pid && page.dependency !== undefined ? { own: true as const } : {}) })
+  const up = (want: Forwarded, run: LocalPreviewRun) =>
+    bound.push({ pid: want.pid, run, ...(want.pid === page.pid && page.dependency !== undefined ? { own: true as const } : {}) })
   for (const want of [...uses, page]) {
     // Only the page, with no window here, may move.
     const flexible = policy === 'elsewhere' && want.pid === page.pid
@@ -8417,12 +9438,20 @@ function elsewhereNote(room: ShareRoom, page: Forwarded, bound: Bound, why: Refu
   const moved = bound.run.localPort !== page.port
   const refused = why.refused === 'denied' && why.port === page.port
   return [
-    moved ? `${room.host}'s preview opened at localhost:${bound.run.localPort} here, not localhost:${page.port}, ${refused ? "which this computer doesn't let Claude Code listen on" : 'which is in use on this computer'}, so sign-ins registered for localhost:${page.port} won't work.` : `${room.host}'s preview opened at localhost:${page.port} here.`,
-    bound.taken.length ? `${portsSaid(bound.taken)}, which it uses, ${bound.taken.length === 1 ? 'is' : 'are'} in use here too: the page may reach your own ${bound.taken.length === 1 ? 'server' : 'servers'} there.` : '',
-    bound.denied.length ? `This computer doesn't let Claude Code listen on ${portsSaid(bound.denied)}, which it uses: the page can't reach ${bound.denied.length === 1 ? 'it' : 'them'} here.` : '',
+    moved
+      ? `${room.host}'s preview opened at localhost:${bound.run.localPort} here, not localhost:${page.port}, ${refused ? "which this computer doesn't let Claude Code listen on" : 'which is in use on this computer'}, so sign-ins registered for localhost:${page.port} won't work.`
+      : `${room.host}'s preview opened at localhost:${page.port} here.`,
+    bound.taken.length
+      ? `${portsSaid(bound.taken)}, which it uses, ${bound.taken.length === 1 ? 'is' : 'are'} in use here too: the page may reach your own ${bound.taken.length === 1 ? 'server' : 'servers'} there.`
+      : '',
+    bound.denied.length
+      ? `This computer doesn't let Claude Code listen on ${portsSaid(bound.denied)}, which it uses: the page can't reach ${bound.denied.length === 1 ? 'it' : 'them'} here.`
+      : '',
     ...bound.failed,
     `A separate window would keep ${room.host}'s addresses, but ${noWindow}.`,
-  ].filter(Boolean).join(' ')
+  ]
+    .filter(Boolean)
+    .join(' ')
 }
 
 // A forwarded preview's Open: Always a separate window, or the page open in
@@ -8435,8 +9464,11 @@ function elsewhereNote(room: ShareRoom, page: Forwarded, bound: Bound, why: Refu
 async function openForwarded($: $, room: ShareRoom, s: RoomScope, shown: ShareShown, surface?: RenderSurface, without?: string): Promise<void> {
   if (!isForwarded(shown)) return void $.ui.toast('That preview has ended or has no valid localhost address.')
   // The host away: nothing of theirs answers now, so nothing is bound or opened.
-  if ((await read($, peopleA)).some(p => p.role === 'host' && !p.online)) return void $.ui.toast(`${room.host} is offline, so their previews can't open now. Press Open again once they're back.`)
-  const page = shown, pid = page.pid, epoch = s.epoch(pid)
+  if ((await read($, peopleA)).some(p => p.role === 'host' && !p.online))
+    return void $.ui.toast(`${room.host} is offline, so their previews can't open now. Press Open again once they're back.`)
+  const page = shown,
+    pid = page.pid,
+    epoch = s.epoch(pid)
   // Still this Open: its room's scope, and no Stop, Close or Leave of the
   // preview since. A reseat isn't one: what the Open asks for goes with the
   // seat held as it's asked (`bindForOpen`, the window's `readyProxy`), and
@@ -8462,7 +9494,10 @@ async function openForwarded($: $, room: ShareRoom, s: RoomScope, shown: ShareSh
   // Always a separate window, and none opened (one failed, or none can open
   // here): nothing else opens it (the person's cookies and own servers stay
   // apart from the host's); their Previews setting does, changed.
-  const alwaysFailed = (reason: string) => void $.ui.toast(`Couldn't open the preview window: ${reason}. To open ${room.host}'s localhost:${page.port} without one, change Previews in Room → Settings.`)
+  const alwaysFailed = (reason: string) =>
+    void $.ui.toast(
+      `Couldn't open the preview window: ${reason}. To open ${room.host}'s localhost:${page.port} without one, change Previews in Room → Settings.`,
+    )
   const viaWindow = async (c: Extract<WindowChoice, { window: true }>, why: WindowWhy): Promise<void> => {
     const outcome = await openInWindow($, room, s, c, page, why)
     if (typeof outcome !== 'object' || !(await live())) return
@@ -8506,8 +9541,18 @@ async function openForwarded($: $, room: ShareRoom, s: RoomScope, shown: ShareSh
     // Said once a room: what the host's numbers here cost.
     const ports = [page.port, ...uses.filter(u => listening(u.pid, s)?.localPort === u.port).map(u => u.port)]
     const them = ports.length === 1 ? 'it' : 'them'
-    const opened = where === 'pane' ? `Opened ${room.host}'s localhost:${page.port} in Claude's browser.` : where === 'browser' ? `Opened ${room.host}'s localhost:${page.port} in your browser.` : `${room.host}'s localhost:${page.port} is forwarded here, at the same address.`
-    noteOnce($, 'same', `${opened} While you're in the room, ${portsSaid(ports)} here ${ports.length === 1 ? 'reaches' : 'reach'} ${room.host}'s, your cookies for ${them} included; Close in Room → Shown, or Leave, frees ${them}.`, s)
+    const opened =
+      where === 'pane'
+        ? `Opened ${room.host}'s localhost:${page.port} in Claude's browser.`
+        : where === 'browser'
+          ? `Opened ${room.host}'s localhost:${page.port} in your browser.`
+          : `${room.host}'s localhost:${page.port} is forwarded here, at the same address.`
+    noteOnce(
+      $,
+      'same',
+      `${opened} While you're in the room, ${portsSaid(ports)} here ${ports.length === 1 ? 'reaches' : 'reach'} ${room.host}'s, your cookies for ${them} included; Close in Room → Shown, or Leave, frees ${them}.`,
+      s,
+    )
     return
   }
   const c = await windowHere()
@@ -8520,7 +9565,8 @@ async function openForwarded($: $, room: ShareRoom, s: RoomScope, shown: ShareSh
 // one runs waits for it and opens nothing more (no second tab, and nothing of
 // a failed attempt saved over the first's mapping).
 async function openShownPreview($: $, shown: ShareShown, surface?: RenderSurface) {
-  const s = scope, room = await read($, roomA)
+  const s = scope,
+    room = await read($, roomA)
   if (!room || !shown.pid || !stillInRoom(room, s)) return
   const pid = shown.pid
   const running = s.previewOpens.get(pid)
@@ -8575,7 +9621,8 @@ async function answerProxy($: $, room: ShareRoom, ask: Record<string, unknown>) 
   const at = await $.clock.now()
   // No await from here to its place in a run or the queue. The same ask
   // read twice (a stream that delivered it again) runs once.
-  const s = scope, { fetches, waiting } = s.children
+  const s = scope,
+    { fetches, waiting } = s.children
   if (!sameRoom(room, s) || [...fetches, ...waiting].some(r => r.id === id)) return
   const run: ProxyRun = { room, id, pid, ask, scope: s, at, stopped: false }
   if (fetches.size < PROXY_RUNS) return startProxy($, run)
@@ -8583,8 +9630,10 @@ async function answerProxy($: $, room: ShareRoom, ask: Record<string, unknown>) 
   if (proxyBusy >= PROXY_BUSY) return
   proxyBusy += 1
   try {
-    if (sameRoom(room, s) && (await read($, sharesA))[String(ask.port)]?.pid === pid) await answerPage($, run, 503, 'The preview is busy', 'Too many requests at once. Reload in a moment.')
-  } catch {} finally {
+    if (sameRoom(room, s) && (await read($, sharesA))[String(ask.port)]?.pid === pid)
+      await answerPage($, run, 503, 'The preview is busy', 'Too many requests at once. Reload in a moment.')
+  } catch {
+  } finally {
     proxyBusy -= 1
   }
 }
@@ -8610,7 +9659,8 @@ async function proxyOnce($: $, run: ProxyRun) {
   const method = typeof ask.method === 'string' && /^[A-Z]{3,7}$/.test(ask.method) ? ask.method : 'GET'
   // Still this room's, and the port still shared as this preview, not being
   // stopped (`unshare` takes the share away a step after it says so): before each step.
-  const shared = async () => (!run.stopped && sameRoom(room, s) && s.mode === 'host' && !s.revoking.has(pid) ? (await read($, sharesA))[String(port)] : undefined)
+  const shared = async () =>
+    !run.stopped && sameRoom(room, s) && s.mode === 'host' && !s.revoking.has(pid) ? (await read($, sharesA))[String(port)] : undefined
   const live = async () => (await shared())?.pid === pid
   // Waited past the room's own deadline: its browser has the room's page already.
   if (!validPort(port) || (await $.clock.now()) - run.at >= PROXY_ASK_MS) return
@@ -8620,12 +9670,20 @@ async function proxyOnce($: $, run: ProxyRun) {
     // didn't hear, whose link it still sends here): ended, said at once, not
     // at the room's own deadline.
     const stopped = s.revoking.has(pid) || (await read($, shownA)).some(x => x.kind === 'preview' && x.pid === pid)
-    if (stopped && !run.stopped && sameRoom(room, s) && s.mode === 'host') await answerPage($, run, 404, 'This preview has ended', `${room.host} is no longer sharing it.`)
+    if (stopped && !run.stopped && sameRoom(room, s) && s.mode === 'host')
+      await answerPage($, run, 404, 'This preview has ended', `${room.host} is no longer sharing it.`)
     return
   }
   // Another session's preview holds the port now: its app is never fetched for this room.
   if (await relayedNow($, s, port)) {
-    if (await live()) await answerPage($, run, 403, "This preview isn't available", `localhost:${port} is another shared session's preview, forwarded to ${room.host}'s computer, so it can't be shared on.`)
+    if (await live())
+      await answerPage(
+        $,
+        run,
+        403,
+        "This preview isn't available",
+        `localhost:${port} is another shared session's preview, forwarded to ${room.host}'s computer, so it can't be shared on.`,
+      )
     return
   }
   const local = `${share.scheme === 'https' ? 'https' : 'http'}://localhost:${port}`
@@ -8739,7 +9797,8 @@ async function proxyStep($: $, run: ProxyRun, script: string): Promise<string | 
     const child = $.process.spawn({ argv: ['/bin/sh', '-s'], input: script })
     run.child = child
     for await (const chunk of child) if (chunk.stream === 'stdout' && out.length < PROXY_SAID_MAX) out += chunk.text
-  } catch {} finally {
+  } catch {
+  } finally {
     run.child = undefined
   }
   return out
@@ -8763,13 +9822,18 @@ async function answerPage($: $, run: ProxyRun, status: number, title: string, te
   ].join('\n')
   try {
     const child = $.process.spawn({ argv: ['curl', '--silent', '--output', '/dev/null', '--config', '-'], input: `${config}\n` })
-    for await (const _chunk of child) { /* Never log credentials or a server's answer. */ }
+    for await (const _chunk of child) {
+      /* Never log credentials or a server's answer. */
+    }
   } catch {}
 }
 
 // A child ended now, without waiting on it (`RoomChildren.closePublic`).
 function endChild(child: Child | undefined) {
-  if (child) void Promise.resolve().then(() => child.return(undefined as never)).catch(() => {})
+  if (child)
+    void Promise.resolve()
+      .then(() => child.return(undefined as never))
+      .catch(() => {})
 }
 
 // Host: a guest's browser opened a WebSocket on a preview. A relay (Node, as
@@ -8790,7 +9854,9 @@ async function relaySocket($: $, room: ShareRoom, ask: Record<string, unknown>) 
   const pid = typeof ask.pid === 'string' && PREVIEW_ID.test(ask.pid) ? ask.pid : ''
   const port = Number(ask.port)
   const path = typeof ask.path === 'string' && ask.path.startsWith('/') ? ask.path : '/'
-  const protocols = (Array.isArray(ask.protocols) ? ask.protocols : []).filter((p): p is string => typeof p === 'string' && /^[\w.-]{1,64}$/.test(p)).slice(0, 4)
+  const protocols = (Array.isArray(ask.protocols) ? ask.protocols : [])
+    .filter((p): p is string => typeof p === 'string' && /^[\w.-]{1,64}$/.test(p))
+    .slice(0, 4)
   const s = scope
   if (!id || !pid || !validPort(port) || !sameRoom(room, s)) return
   const share = (await read($, sharesA))[String(port)]
@@ -8800,7 +9866,8 @@ async function relaySocket($: $, room: ShareRoom, ask: Record<string, unknown>) 
   // Another session's preview holds the port now: its socket is refused, never relayed.
   if (await relayedNow($, s, port)) return void (sameRoom(room, s) && rejectSocket($, room, id, 'CONNECT'))
   if (!sameRoom(room, s) || s.revoking.has(pid)) return
-  const key = tcpKey(room, id), relays = s.children.relays
+  const key = tcpKey(room, id),
+    relays = s.children.relays
   if (relays.has(key)) return
   if (relays.size >= PUBLIC_RELAYS) return void rejectSocket($, room, id, 'BUSY')
   const relay: PublicRelay = { pid, stopped: false }
@@ -8824,7 +9891,8 @@ async function relaySocket($: $, room: ShareRoom, ask: Record<string, unknown>) 
     relay.child = child
     for await (const chunk of child) if (chunk.stream === 'stderr') $.ui.log(chunk.text.trim(), { to: 'debug' })
     exit = (await child.result.catch(() => null))?.code ?? null
-  } catch {} finally {
+  } catch {
+  } finally {
     if (relays.get(key) === relay) relays.delete(key)
   }
   // A relay that failed, not one stopped here: no Node to relay with (127),
@@ -8846,8 +9914,11 @@ async function rejectSocket($: $, room: ShareRoom, id: string, code: 'BUSY' | 'C
   try {
     const input = `${roomConfig(room, `ws/${id}/reject`)}\nrequest = "POST"\nheader = "content-type: application/json"\ndata = ${cfg(JSON.stringify({ code }))}\n`
     const child = $.process.spawn({ argv: ['curl', '--silent', '--max-time', '2', '--output', '/dev/null', '--config', '-'], input })
-    for await (const _chunk of child) { /* Never log credentials or a server's answer. */ }
-  } catch {} finally {
+    for await (const _chunk of child) {
+      /* Never log credentials or a server's answer. */
+    }
+  } catch {
+  } finally {
     tcpRejecting.delete(key)
   }
 }
@@ -8863,7 +9934,14 @@ function tcpKey(room: ShareRoom, id: string): string {
 // being unshared, its worker the one running, and still the one for its id.
 function tcpCurrent(run: TcpRelayRun): boolean {
   const s = run.scope
-  return s.live && !run.worker.stopped && s.children.worker === run.worker && run.worker.scope === s && !s.revoking.has(run.pid) && s.children.connections.get(tcpKey(run.worker.room, run.id)) === run
+  return (
+    s.live &&
+    !run.worker.stopped &&
+    s.children.worker === run.worker &&
+    run.worker.scope === s &&
+    !s.revoking.has(run.pid) &&
+    s.children.connections.get(tcpKey(run.worker.room, run.id)) === run
+  )
 }
 
 // …and still forwarded: its port shared as its preview, which the host
@@ -8898,16 +9976,26 @@ async function runTcpWorker($: $, worker: TcpWorkerRun) {
     const version = await ownVersion($)
     if (!tcpWorking(worker)) return
     const settings = { room: `${worker.room.server}/api/rooms/${worker.room.id}`, token: worker.room.token, controlToken: worker.controlToken, version }
-    await runHelper($, worker, 'tcp-worker.mts', settings, 5_000, () => finishTcpWorker(worker), () => tcpWorking(worker), said => {
-      if (said.state === 'closed' && typeof said.id === 'string' && /^[A-Za-z0-9_-]{8,40}$/.test(said.id)) {
-        const key = tcpKey(worker.room, said.id), { connections } = worker.scope.children
-        if (connections.get(key)?.worker === worker) connections.delete(key)
-      } else if (said.state === 'ready') {
-        if (worker.control !== undefined || !validPort(said.port)) throw new Error('Invalid TCP worker readiness')
-        helperReady(worker, said.port)
-        worker.settle(true)
-      }
-    })
+    await runHelper(
+      $,
+      worker,
+      'tcp-worker.mts',
+      settings,
+      5_000,
+      () => finishTcpWorker(worker),
+      () => tcpWorking(worker),
+      said => {
+        if (said.state === 'closed' && typeof said.id === 'string' && /^[A-Za-z0-9_-]{8,40}$/.test(said.id)) {
+          const key = tcpKey(worker.room, said.id),
+            { connections } = worker.scope.children
+          if (connections.get(key)?.worker === worker) connections.delete(key)
+        } else if (said.state === 'ready') {
+          if (worker.control !== undefined || !validPort(said.port)) throw new Error('Invalid TCP worker readiness')
+          helperReady(worker, said.port)
+          worker.settle(true)
+        }
+      },
+    )
   } catch {
     // Owned sockets fail. Only a new independent request may start another
     // worker; no open command or application bytes are replayed.
@@ -8932,7 +10020,8 @@ async function relayTcp($: $, room: ShareRoom, ask: Record<string, unknown>) {
   // Never let it install an unstarted worker for the room that replaced it.
   const s = scope
   if (!id || !pid || !validPort(port) || !sameRoom(room, s) || s.mode !== 'host') return
-  const key = tcpKey(room, id), { connections } = s.children
+  const key = tcpKey(room, id),
+    { connections } = s.children
   if (connections.has(key)) return
   if (connections.size >= TCP_RELAYS) return void rejectSocket($, room, id, 'BUSY')
   let worker = s.children.worker
@@ -8947,7 +10036,8 @@ async function relayTcp($: $, room: ShareRoom, ask: Record<string, unknown>) {
   if (worker.scope !== s || !sameRoomId(worker.room, room)) return
   const run: TcpRelayRun = { id, pid, port, scope: s, worker }
   connections.set(key, run) // No await since the capacity check: queued + connecting + active.
-  let accepted = false, refused = false
+  let accepted = false,
+    refused = false
   try {
     // Another session's preview holding the port now is refused (CONNECT), as a port not shared is.
     if (!(await tcpAllowed($, run)) || (await relayedNow($, s, port)) || !tcpCurrent(run)) return
@@ -8958,14 +10048,21 @@ async function relayTcp($: $, room: ShareRoom, ask: Record<string, unknown>) {
     const status = await tcpControl($, worker, { op: 'open', id, pid, port }, run)
     accepted = status === 200
     refused = status === 429 // The worker already sent BUSY, not CONNECT.
-  } catch {} finally {
+  } catch {
+  } finally {
     if (!accepted) {
       if (connections.get(key) === run) connections.delete(key)
       if (!worker.started && s.children.worker === worker && ![...connections.values()].some(r => r.worker === worker)) await finishTcpWorker(worker)
       if (!refused && s.live) void rejectSocket($, room, id, 'CONNECT')
       // No Node here to run the worker: the host hears it, once a room (the
       // next connection starts one again, so installing Node is enough).
-      if (worker.error === 'NODE') noteOnce($, 'tcp-node', `Forwarding localhost:${port} to teammates needs Node 22.18 or later on this computer, and none was found. Install it; their next connection tries again.`, s)
+      if (worker.error === 'NODE')
+        noteOnce(
+          $,
+          'tcp-node',
+          `Forwarding localhost:${port} to teammates needs Node 22.18 or later on this computer, and none was found. Install it; their next connection tries again.`,
+          s,
+        )
     }
   }
 }
@@ -8977,7 +10074,7 @@ async function stopTcpRelays($: $, s: RoomScope, pid: string) {
   for (const [key, run] of connections) if (run.pid === pid) connections.delete(key)
   const worker = s.children.worker
   if (!worker?.started) return
-  if (await tcpControl($, worker, { op: 'close-preview', pid }) !== 200) await finishTcpWorker(worker)
+  if ((await tcpControl($, worker, { op: 'close-preview', pid })) !== 200) await finishTcpWorker(worker)
 }
 
 // Host: a preview unshared (its Stop here, or its closed event from the
@@ -9014,20 +10111,43 @@ function startedBy(text: string): string {
 function terminalName(tool: string): string {
   const mcp = /^mcp__(.+?)__(.+)$/.exec(tool)
   if (mcp) return `${mcp[1]} - ${mcp[2]} (MCP)`
-  return ({ Edit: 'Update', MultiEdit: 'Update', NotebookEdit: 'Update', Grep: 'Search', Glob: 'Search', WebFetch: 'Fetch', WebSearch: 'Web Search', TodoWrite: 'Update Todos', Task: 'Agent' } as Record<string, string>)[tool] ?? tool
+  return (
+    (
+      {
+        Edit: 'Update',
+        MultiEdit: 'Update',
+        NotebookEdit: 'Update',
+        Grep: 'Search',
+        Glob: 'Search',
+        WebFetch: 'Fetch',
+        WebSearch: 'Web Search',
+        TodoWrite: 'Update Todos',
+        Task: 'Agent',
+      } as Record<string, string>
+    )[tool] ?? tool
+  )
 }
 
 // A replayed call's result as text, whatever shape the row kept it in.
 function outputText(output: unknown): string {
   if (typeof output === 'string') return output
-  const blocks = Array.isArray(output) ? output : output && typeof output === 'object' && Array.isArray((output as { content?: unknown }).content) ? (output as { content: unknown[] }).content : null
-  if (blocks) return blocks.map(b => (b && typeof b === 'object' && typeof (b as { text?: unknown }).text === 'string' ? (b as { text: string }).text : '')).join('\n')
+  const blocks = Array.isArray(output)
+    ? output
+    : output && typeof output === 'object' && Array.isArray((output as { content?: unknown }).content)
+      ? (output as { content: unknown[] }).content
+      : null
+  if (blocks)
+    return blocks.map(b => (b && typeof b === 'object' && typeof (b as { text?: unknown }).text === 'string' ? (b as { text: string }).text : '')).join('\n')
   return output === undefined || output === null ? '' : JSON.stringify(output)
 }
 
 // How many pictures a result holds (image blocks).
 function imageCount(output: unknown): number {
-  const blocks = Array.isArray(output) ? output : output && typeof output === 'object' && Array.isArray((output as { content?: unknown }).content) ? (output as { content: unknown[] }).content : []
+  const blocks = Array.isArray(output)
+    ? output
+    : output && typeof output === 'object' && Array.isArray((output as { content?: unknown }).content)
+      ? (output as { content: unknown[] }).content
+      : []
   return blocks.filter(b => b && typeof b === 'object' && (b as { type?: unknown }).type === 'image').length
 }
 
@@ -9038,7 +10158,10 @@ function replayLines(tool: string, input: Record<string, unknown>, out: string, 
   const count = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`
   if (errored) return [`Error: ${all[0] ?? 'failed'}`]
   // A picture the host's Claude looked at: said as the terminal says its own.
-  if (pictures) return tool === 'Read' ? [pictures === 1 ? 'Read image' : `Read ${count(pictures, 'image')}`] : [...(all.length ? [all[0]!] : []), pictures === 1 ? '[Image]' : `[${count(pictures, 'image')}]`]
+  if (pictures)
+    return tool === 'Read'
+      ? [pictures === 1 ? 'Read image' : `Read ${count(pictures, 'image')}`]
+      : [...(all.length ? [all[0]!] : []), pictures === 1 ? '[Image]' : `[${count(pictures, 'image')}]`]
   const first = (n: number) => (all.length <= n ? all : [...all.slice(0, n), `… +${count(all.length - n, 'line')}`])
   switch (tool) {
     case 'Read': {
@@ -9055,7 +10178,9 @@ function replayLines(tool: string, input: Record<string, unknown>, out: string, 
       const lines = (v: unknown) => (typeof v === 'string' && v ? v.split('\n').length : 0)
       const added = edits.reduce((n, x) => n + lines(x.new_string ?? x.new_source), 0)
       const removed = edits.reduce((n, x) => n + lines(x.old_string), 0)
-      const file = String(input.file_path ?? input.notebook_path ?? '').split('/').pop()
+      const file = String(input.file_path ?? input.notebook_path ?? '')
+        .split('/')
+        .pop()
       const parts = [added ? count(added, 'addition') : '', removed ? count(removed, 'removal') : ''].filter(Boolean)
       return [`Updated${file ? ` ${file}` : ''}${parts.length ? ` with ${parts.join(' and ')}` : ''}`]
     }
@@ -9223,7 +10348,8 @@ function joinRun(run: ReplayRun | null, id: string, tool: string): ReplayRun | n
 // Kept in the session's state, so a reload (an update in place) draws the
 // rows it redraws the same: each call's row reads its own member.
 async function saveRun($: $, run: ReplayRun) {
-  for (const id of run.ids) await $.state.set({ plugin: 'shared-session', key: 'replayRun', id }, id === run.first ? { tools: [...run.tools] } : { hidden: true })
+  for (const id of run.ids)
+    await $.state.set({ plugin: 'shared-session', key: 'replayRun', id }, id === run.first ? { tools: [...run.tools] } : { hidden: true })
 }
 
 // In the terminal's own words: "Searched for 2 patterns, read 3 files".
@@ -9267,7 +10393,12 @@ function historyBlocks(rows: Row[]): { blocks: HistoryBlock[]; tail: string; run
       run = joinRun(run, id, row.tool)
       if (run) runs.add(run)
       const res = results.get(row.id)
-      hostCalls.set(id, { hostId: row.id, seq: 0, result: res ? `${res.isError ? 'Error: ' : ''}${stripLineNumbers(res.text)}` : '(no result)', images: res?.images })
+      hostCalls.set(id, {
+        hostId: row.id,
+        seq: 0,
+        result: res ? `${res.isError ? 'Error: ' : ''}${stripLineNumbers(res.text)}` : '(no result)',
+        images: res?.images,
+      })
       if (hostCalls.size > 3000) hostCalls.delete(hostCalls.keys().next().value as string)
       blocks.push({ id, input: { tool: row.tool, summary: row.text, input: row.input } })
       replayed.add(row.id)
@@ -9510,7 +10641,12 @@ function shareChoice($: $, el: UI, asking: ShareAsking, where: 'band' | 'room', 
     : [
         `${who} will see its ${prompts} earlier prompt${prompts === 1 ? '' : 's'} and Claude's replies.${keeps}${teammates === 'watch' ? ' They can watch and chat, not prompt Claude.' : ''}`,
         <Box flexDirection="row" gap={1} flexShrink={0}>
-          <Button key="share-all" label="Share everything" variant="primary" onPress={press => go({ history: true, watch: teammates === 'watch' }, press.surface)} />
+          <Button
+            key="share-all"
+            label="Share everything"
+            variant="primary"
+            onPress={press => go({ history: true, watch: teammates === 'watch' }, press.surface)}
+          />
           <Button key="share-new" label="Only from now on" onPress={press => go({ history: false, watch: teammates === 'watch' }, press.surface)} />
           {cancel}
         </Box>,
@@ -9559,7 +10695,7 @@ function joinFailure(error: unknown, server: string): string {
       ? `This session is for **${error.data.team}**. Sign in with an account in that team in the **Team** panel (it just opened, or \`/team\`), then paste the link again.`
       : `${error.message} Once you're in, paste the link again.`
   }
-  if (isGone(error)) return "That shared session has ended: the host stopped sharing, or the room expired. Ask them for a new link."
+  if (isGone(error)) return 'That shared session has ended: the host stopped sharing, or the room expired. Ask them for a new link.'
   if (error instanceof ApiError) return `Couldn't join that shared session: ${error.message}`
   // Only a request that got no answer is the network; anything else says what it was.
   if (error instanceof NetworkError) return `Couldn't reach the share server at ${server}. Check your connection, then paste the link again.`
@@ -9570,7 +10706,11 @@ function joinFailure(error: unknown, server: string): string {
 function rulesLine(policy: SharePolicy, host: string): string {
   if (policy.prompts === 'watch') return `◎ Watch-only: you follow along and chat; ${host} prompts Claude`
   const asks =
-    policy.approvals === 'none' ? 'nothing asks first' : policy.approvals === 'all' ? `every tool asks ${host} first` : `anything beyond reading the project asks ${host} first`
+    policy.approvals === 'none'
+      ? 'nothing asks first'
+      : policy.approvals === 'all'
+        ? `every tool asks ${host} first`
+        : `anything beyond reading the project asks ${host} first`
   return `✎ Everyone can prompt · ${asks}`
 }
 
@@ -9681,10 +10821,28 @@ function doingLine(d: ShareDoing): string {
   if (d.kind === 'thinking') return 'Thinking'
   if (d.kind === 'writing') {
     const size = d.chars && d.chars >= 1000 ? ` · ${Math.round(d.chars / 1000)}k characters` : ''
-    const verb = d.tool === 'Write' ? 'Writing' : d.tool === 'Edit' || d.tool === 'MultiEdit' || d.tool === 'NotebookEdit' ? 'Editing' : d.tool === 'Bash' ? 'Writing a command:' : `Preparing ${d.tool}`
+    const verb =
+      d.tool === 'Write'
+        ? 'Writing'
+        : d.tool === 'Edit' || d.tool === 'MultiEdit' || d.tool === 'NotebookEdit'
+          ? 'Editing'
+          : d.tool === 'Bash'
+            ? 'Writing a command:'
+            : `Preparing ${d.tool}`
     return `${verb}${what && what !== d.tool ? ` ${what}` : ''}${size}`
   }
-  const verb = d.tool === 'Bash' ? 'Running' : d.tool === 'Read' ? 'Reading' : d.tool === 'Grep' || d.tool === 'Glob' ? 'Searching' : d.tool === 'WebFetch' || d.tool === 'WebSearch' ? 'Looking up' : d.tool === 'Agent' || d.tool === 'Task' ? 'An agent is on' : `Running ${d.tool}`
+  const verb =
+    d.tool === 'Bash'
+      ? 'Running'
+      : d.tool === 'Read'
+        ? 'Reading'
+        : d.tool === 'Grep' || d.tool === 'Glob'
+          ? 'Searching'
+          : d.tool === 'WebFetch' || d.tool === 'WebSearch'
+            ? 'Looking up'
+            : d.tool === 'Agent' || d.tool === 'Task'
+              ? 'An agent is on'
+              : `Running ${d.tool}`
   return `${verb}${what && what !== d.tool ? ` ${what}` : ''}`
 }
 
@@ -9704,7 +10862,12 @@ function nowOf(el: UI, v: View, colors: Map<string, string>) {
       {name}
     </Text>
   )
-  if (v.connection === 'reconnecting') return <Text dimColor wrap="truncate-end">what you send goes out once it's back</Text>
+  if (v.connection === 'reconnecting')
+    return (
+      <Text dimColor wrap="truncate-end">
+        what you send goes out once it's back
+      </Text>
+    )
   if (w && (v.mode === 'guest' || w.byGuest)) {
     if (w.waitingFor) {
       return v.mode === 'host' ? (
@@ -9716,8 +10879,18 @@ function nowOf(el: UI, v: View, colors: Map<string, string>) {
         <Text dimColor wrap="truncate-end">{`waiting for ${host} to allow ${w.waitingFor}`}</Text>
       )
     }
-    if (v.mode === 'guest' && w.doing) return <Text color="claude" wrap="truncate-end">{doingLine(w.doing)}</Text>
-    if (v.mode === 'guest' && w.by === myName) return <Text color="claude" wrap="truncate-end">Claude is working on your prompt</Text>
+    if (v.mode === 'guest' && w.doing)
+      return (
+        <Text color="claude" wrap="truncate-end">
+          {doingLine(w.doing)}
+        </Text>
+      )
+    if (v.mode === 'guest' && w.by === myName)
+      return (
+        <Text color="claude" wrap="truncate-end">
+          Claude is working on your prompt
+        </Text>
+      )
     return (
       <Text wrap="truncate-end">
         <Text color="claude">Claude is working for </Text>
@@ -9725,9 +10898,18 @@ function nowOf(el: UI, v: View, colors: Map<string, string>) {
       </Text>
     )
   }
-  if (v.policy.prompts === 'watch') return <Text dimColor wrap="truncate-end">{v.mode === 'host' ? 'watch-only' : `watch-only: ${host} prompts, you chat`}</Text>
+  if (v.policy.prompts === 'watch')
+    return (
+      <Text dimColor wrap="truncate-end">
+        {v.mode === 'host' ? 'watch-only' : `watch-only: ${host} prompts, you chat`}
+      </Text>
+    )
   const here = presence(v)
-  return here ? <Text dimColor wrap="truncate-end">{here}</Text> : null
+  return here ? (
+    <Text dimColor wrap="truncate-end">
+      {here}
+    </Text>
+  ) : null
 }
 
 // ---------------------------------------------------------------------------
@@ -9781,7 +10963,10 @@ async function writeSignIns($: $, path: string, all: Record<string, SavedSignIn>
   const body = JSON.stringify({ servers: all }, null, 2)
   const tag = fence(body)
   const tmp = `${path}.tmp`
-  await sh($, `umask 077\nmkdir -p ${sq(path.replace(/\/[^/]+$/, ''))}\ncat > ${sq(tmp)} <<'${tag}'\n${body}\n${tag}\nchmod 600 ${sq(tmp)}\nmv ${sq(tmp)} ${sq(path)}\n`)
+  await sh(
+    $,
+    `umask 077\nmkdir -p ${sq(path.replace(/\/[^/]+$/, ''))}\ncat > ${sq(tmp)} <<'${tag}'\n${body}\n${tag}\nchmod 600 ${sq(tmp)}\nmv ${sq(tmp)} ${sq(path)}\n`,
+  )
 }
 
 function randomSecret(): string {
@@ -9803,7 +10988,10 @@ async function sha256Hex(text: string): Promise<string> {
 async function openExternal($: $, url: string): Promise<boolean> {
   if ((await $.env.get('SHARED_SESSION_NO_BROWSER')) === '1') return false
   if ((await $.env.get('SSH_CONNECTION')) || (await $.env.get('SSH_TTY'))) return false
-  const { code } = await sh($, `u=${sq(url)}\nif [ "$(uname)" = Darwin ]; then open "$u"\nelif [ -n "$DISPLAY$WAYLAND_DISPLAY" ] && command -v xdg-open >/dev/null 2>&1; then xdg-open "$u" >/dev/null 2>&1 &\nelse exit 1\nfi\n`)
+  const { code } = await sh(
+    $,
+    `u=${sq(url)}\nif [ "$(uname)" = Darwin ]; then open "$u"\nelif [ -n "$DISPLAY$WAYLAND_DISPLAY" ] && command -v xdg-open >/dev/null 2>&1; then xdg-open "$u" >/dev/null 2>&1 &\nelse exit 1\nfi\n`,
+  )
   return code === 0
 }
 
@@ -9893,7 +11081,13 @@ async function refreshTeams($: $) {
       await update($, teamsA, () => ({ ...NO_TEAMS, server, providers, loaded: now, error: 'Your sign-in ended. Sign in again.' }))
       return
     }
-    await update($, teamsA, t => ({ ...t, server, providers, loaded: now, error: `Couldn't reach the share server: ${String((error as Error)?.message ?? error)}` }))
+    await update($, teamsA, t => ({
+      ...t,
+      server,
+      providers,
+      loaded: now,
+      error: `Couldn't reach the share server: ${String((error as Error)?.message ?? error)}`,
+    }))
   }
 }
 
@@ -9927,7 +11121,10 @@ async function startSignIn($: $, provider: string, opts: { said?: boolean } = {}
       await update($, teamsA, x => ({ ...x, signingIn: null }))
       return
     }
-    const r = await api<{ status: string; token?: string; account?: ShareAccount; joined?: string | null }>($, server, '/api/auth/poll', { method: 'POST', body: { verifier } }).catch(() => null)
+    const r = await api<{ status: string; token?: string; account?: ShareAccount; joined?: string | null }>($, server, '/api/auth/poll', {
+      method: 'POST',
+      body: { verifier },
+    }).catch(() => null)
     if (run !== signInRun) return
     if (r?.status === 'done' && r.token && r.account) {
       signInRun++
@@ -9952,7 +11149,9 @@ async function signOut($: $, opts: { deleteAccount?: boolean } = {}) {
   const server = await serverOf($)
   const saved = await signInFor($, server)
   if (saved) {
-    await api($, server, opts.deleteAccount ? '/api/me' : '/api/auth/logout', { method: opts.deleteAccount ? 'DELETE' : 'POST', token: saved.token }).catch(() => {})
+    await api($, server, opts.deleteAccount ? '/api/me' : '/api/auth/logout', { method: opts.deleteAccount ? 'DELETE' : 'POST', token: saved.token }).catch(
+      () => {},
+    )
     await saveSignIn($, server, null)
   }
   await update($, teamsA, t => ({ ...NO_TEAMS, server, providers: t.providers }))
@@ -10054,7 +11253,15 @@ async function holdRoom($: $) {
   const mine = room && mode !== 'idle' ? `${LIVE_KEY}${room.id}:${session}` : ''
   for (const key of await $.store.keys()) if (key.startsWith(LIVE_KEY) && key.endsWith(`:${session}`) && key !== mine) await $.store.delete(key)
   if (!room || mode === 'idle') return
-  await $.store.set(mine, { room: room.id, session, place: await placeOf($), mode, title: room.title, host: room.host, at: await $.clock.now() } satisfies LiveHold)
+  await $.store.set(mine, {
+    room: room.id,
+    session,
+    place: await placeOf($),
+    mode,
+    title: room.title,
+    host: room.host,
+    at: await $.clock.now(),
+  } satisfies LiveHold)
 }
 
 // Every room another live session here is in (`only`: just that one).
@@ -10082,7 +11289,10 @@ async function openHeld($: $, hold: LiveHold): Promise<boolean> {
 
 // What's said when a join finds a session here already in that room.
 function alreadyIn(hold: LiveHold, opened: boolean): string {
-  const where = hold.mode === 'host' ? "That's your own shared session, open in another Claude Code session" : `You're already in ${hold.host}'s session, in another Claude Code session`
+  const where =
+    hold.mode === 'host'
+      ? "That's your own shared session, open in another Claude Code session"
+      : `You're already in ${hold.host}'s session, in another Claude Code session`
   return `${where}${opened ? ': it just opened' : ` (“${tidyTitle(hold.title)}”)`}.`
 }
 
@@ -10114,9 +11324,15 @@ async function joinFromTeam($: $, sessions: ShareTeamSession[], surface?: Render
   if (!first) return
   const fresh = (await read($, modeA)) === 'idle' && !localTurnActive && (await earlierPrompts($)) === 0
   const desktop = (await $.env.get('CLAUDE_CODE_ENTRYPOINT')) === 'claude-desktop'
-  if (desktop) await $.store.set(JOIN_QUEUE, { current: first.id, rest: rest.map(s => ({ id: s.id, url: s.url })), at: await $.clock.now() } satisfies JoinQueue)
+  if (desktop)
+    await $.store.set(JOIN_QUEUE, { current: first.id, rest: rest.map(s => ({ id: s.id, url: s.url })), at: await $.clock.now() } satisfies JoinQueue)
   const commands = (list: ShareTeamSession[]) =>
-    copyText($, list.map(s => `claude ${sq(s.url)}`).join('\n'), list.length === 1 ? 'Command copied: run it in a new terminal to join' : `${list.length} commands copied: run each in its own terminal`, surface)
+    copyText(
+      $,
+      list.map(s => `claude ${sq(s.url)}`).join('\n'),
+      list.length === 1 ? 'Command copied: run it in a new terminal to join' : `${list.length} commands copied: run each in its own terminal`,
+      surface,
+    )
   if (fresh) {
     await $.ui.close({ id: TEAM }).catch(() => {})
     await joinHere($, first.url)
@@ -10124,7 +11340,11 @@ async function joinFromTeam($: $, sessions: ShareTeamSession[], surface?: Render
     return
   }
   if (desktop && (await openExternal($, deepLink(first.url)))) {
-    $.ui.toast(rest.length ? `Opened ${first.host}'s session: press Enter there to join. The other ${rest.length} open one after another as each joins` : `Opened ${first.host}'s session: press Enter there to join`)
+    $.ui.toast(
+      rest.length
+        ? `Opened ${first.host}'s session: press Enter there to join. The other ${rest.length} open one after another as each joins`
+        : `Opened ${first.host}'s session: press Enter there to join`,
+    )
     return
   }
   await commands([first, ...rest])
@@ -10211,7 +11431,10 @@ async function joinHere($: $, url: string) {
   if (!link?.[1] || !link[2]) return
   try {
     const joined = await join($, link[1], link[2])
-    laterRides.unshift({ text: `Join ${joined.room.host}'s session`, ride: { kind: 'note', text: await joinedNote($, joined), then: joined.history, open: joined.open } })
+    laterRides.unshift({
+      text: `Join ${joined.room.host}'s session`,
+      ride: { kind: 'note', text: await joinedNote($, joined), then: joined.history, open: joined.open },
+    })
     scheduleRides($)
     void continueJoins($, joined.room.id).catch(() => {})
   } catch (error) {
@@ -10241,7 +11464,7 @@ async function takeInvite($: $, server: string, code: string): Promise<string> {
   }
   await update($, teamsA, t => ({ ...t, invite: { server, code } }))
   await openTeam($)
-  return 'To join this team, sign in with GitHub or Google in the **Team** panel (it just opened, or `/team`). You join the team as soon as you\'re signed in.'
+  return "To join this team, sign in with GitHub or Google in the **Team** panel (it just opened, or `/team`). You join the team as soon as you're signed in."
 }
 
 // Host: who an open room is shared with, a team or the link alone. Everyone already in stays.
@@ -10250,7 +11473,12 @@ async function setRoomTeam($: $, teamId: string | null) {
   if (!room || (await read($, modeA)) !== 'host') return
   const saved = await signInFor($, room.server)
   try {
-    const r = await api<{ team: { id: string; name: string } | null }>($, room.server, `/api/rooms/${room.id}/team`, { method: 'POST', token: room.token, account: saved?.token, body: { team: teamId } })
+    const r = await api<{ team: { id: string; name: string } | null }>($, room.server, `/api/rooms/${room.id}/team`, {
+      method: 'POST',
+      token: room.token,
+      account: saved?.token,
+      body: { team: teamId },
+    })
     await update($, roomA, rm => (rm ? { ...rm, team: r.team } : rm))
     $.ui.toast(r.team ? `Shared with ${r.team.name}` : 'Shared by link alone now')
     void refreshTeams($).catch(() => {})
@@ -10280,10 +11508,16 @@ async function teamCommand($: $, args: string): Promise<{ text: string }> {
         if (t.account) return { text: `Signed in as ${t.account.name}. /team signout to sign out.` }
         const provider = arg.toLowerCase() || (t.providers.length === 1 ? t.providers[0]?.id : '')
         if (!provider || !t.providers.some(p => p.id === provider)) {
-          return { text: t.providers.length ? `Sign in with: ${t.providers.map(p => `/team signin ${p.id}`).join(' or ')}` : "This share server doesn't offer sign-in." }
+          return {
+            text: t.providers.length
+              ? `Sign in with: ${t.providers.map(p => `/team signin ${p.id}`).join(' or ')}`
+              : "This share server doesn't offer sign-in.",
+          }
         }
         const { url, code } = await startSignIn($, provider, { said: true })
-        return { text: `Sign in with ${t.providers.find(p => p.id === provider)?.label ?? provider} in your browser; this session picks it up when you're done. ${codeSaid(code)} If no browser opened: ${url}` }
+        return {
+          text: `Sign in with ${t.providers.find(p => p.id === provider)?.label ?? provider} in your browser; this session picks it up when you're done. ${codeSaid(code)} If no browser opened: ${url}`,
+        }
       }
       case 'signout':
       case 'logout':
@@ -10311,7 +11545,14 @@ async function teamCommand($: $, args: string): Promise<{ text: string }> {
         if (!t.account) return { text: 'Sign in first: /team signin' }
         if (!team) return { text: 'No team yet: /team create <name>, or paste an invite link.' }
         if (!t.sessions.length) return { text: `Nothing is shared with ${team.name} right now.` }
-        return { text: [`Shared with ${team.name}:`, ...t.sessions.map((s, i) => `${i + 1}. ${s.title} (${s.host}${s.hostOnline ? '' : ', away'}): ${s.url}`), '', 'Paste a link to join, or /team join all.'].join('\n') }
+        return {
+          text: [
+            `Shared with ${team.name}:`,
+            ...t.sessions.map((s, i) => `${i + 1}. ${s.title} (${s.host}${s.hostOnline ? '' : ', away'}): ${s.url}`),
+            '',
+            'Paste a link to join, or /team join all.',
+          ].join('\n'),
+        }
       }
       case 'invites': {
         const server = await serverOf($)
@@ -10320,7 +11561,9 @@ async function teamCommand($: $, args: string): Promise<{ text: string }> {
         const list = (await api<{ invites: ShareInvite[] }>($, server, '/api/me/invites', { token: saved.token })).invites
         await update($, invitesA, () => list)
         if (!list.length) return { text: 'No invites right now.' }
-        return { text: ['Invited:', ...list.map((i, n) => `${n + 1}. ${i.room.title} (from ${i.from.name}): ${i.room.url}`), '', 'Paste a link to join.'].join('\n') }
+        return {
+          text: ['Invited:', ...list.map((i, n) => `${n + 1}. ${i.room.title} (from ${i.from.name}): ${i.room.url}`), '', 'Paste a link to join.'].join('\n'),
+        }
       }
       case 'join': {
         await refreshTeams($)
@@ -10344,21 +11587,28 @@ async function teamCommand($: $, args: string): Promise<{ text: string }> {
       }
       case 'access': {
         const access = arg.toLowerCase()
-        if (access !== 'members' && access !== 'link') return { text: '/team access members (only people in the team join its sessions) or /team access link (anyone with a link)' }
+        if (access !== 'members' && access !== 'link')
+          return { text: '/team access members (only people in the team join its sessions) or /team access link (anyone with a link)' }
         await changeTeam($, { access })
-        return { text: access === 'members' ? 'Only people in the team join its sessions now.' : 'Anyone with a link joins the team\'s sessions now.' }
+        return { text: access === 'members' ? 'Only people in the team join its sessions now.' : "Anyone with a link joins the team's sessions now." }
       }
       case 'domains':
         await changeTeam($, { domains: arg })
         return { text: arg ? `People who sign in with a verified email at ${arg} join by themselves.` : 'No email domain joins by itself now.' }
       case 'orgs':
         await changeTeam($, { githubOrgs: arg })
-        return { text: arg ? `People in the GitHub organization${rest.length > 1 ? 's' : ''} ${arg} join by themselves when they sign in with GitHub.` : 'No GitHub organization joins by itself now.' }
+        return {
+          text: arg
+            ? `People in the GitHub organization${rest.length > 1 ? 's' : ''} ${arg} join by themselves when they sign in with GitHub.`
+            : 'No GitHub organization joins by itself now.',
+        }
       case 'leave':
         await leaveTeam($)
         return { text: 'Left the team.' }
       default:
-        return { text: '/team opens the Team panel. Also: /team signin [github|google], /team create <name>, /team invite, /team invites, /team sessions, /team join <n|all>, /team use <name|link>, /team access members|link, /team domains <a.com …>, /team orgs <org …>, /team leave, /team signout, /team delete-account' }
+        return {
+          text: '/team opens the Team panel. Also: /team signin [github|google], /team create <name>, /team invite, /team invites, /team sessions, /team join <n|all>, /team use <name|link>, /team access members|link, /team domains <a.com …>, /team orgs <org …>, /team leave, /team signout, /team delete-account',
+        }
     }
   } catch (error) {
     return { text: `Couldn't: ${String((error as Error)?.message ?? error)}` }
@@ -10382,7 +11632,12 @@ const inviteKey = (i: ShareInvite) => `${i.room.id}@${i.at}`
 // "[Pasted text #1 +40 lines]") or tags.
 function promptWords(text: string): string {
   const clean = text.replace(/\[(?:Image|Pasted text|image)[^\]]*\]/g, ' ').replace(/<[^>\n]{1,200}>/g, ' ')
-  return (clean.split('\n').map(line => line.replace(/\s+/g, ' ').trim()).find(Boolean) ?? '').trim()
+  return (
+    clean
+      .split('\n')
+      .map(line => line.replace(/\s+/g, ' ').trim())
+      .find(Boolean) ?? ''
+  ).trim()
 }
 
 // A session title for a narrow row: such notes left out, and an absolute path
@@ -10478,7 +11733,11 @@ async function joinInvited($: $, invite: ShareInvite, surface?: RenderSurface) {
   // Before anything's read, as the Team panel's Join waits.
   await takenBack($, { keep: true })
   await dropInvite($, invite.room.id)
-  await joinFromTeam($, [{ id: invite.room.id, url: invite.room.url, title: invite.room.title, host: invite.room.host, hostOnline: true, people: [], createdAt: invite.at }], surface)
+  await joinFromTeam(
+    $,
+    [{ id: invite.room.id, url: invite.room.url, title: invite.room.title, host: invite.room.host, hostOnline: true, people: [], createdAt: invite.at }],
+    surface,
+  )
 }
 
 // Host: invite teammates (account ids) to this session.
@@ -10487,10 +11746,17 @@ async function inviteToRoom($: $, ids: string[]): Promise<string> {
   if (!room || (await read($, modeA)) !== 'host') return 'Share this session first: press Share or type /share-session.'
   const saved = await signInFor($, room.server)
   if (!saved) return 'Sign in first to invite teammates: press Team above the prompt, or /team signin.'
-  const r = await api<{ invited: string[]; refused: string[] }>($, room.server, `/api/rooms/${room.id}/invite`, { method: 'POST', token: room.token, account: saved.token, body: { to: ids } })
+  const r = await api<{ invited: string[]; refused: string[] }>($, room.server, `/api/rooms/${room.id}/invite`, {
+    method: 'POST',
+    token: room.token,
+    account: saved.token,
+    body: { to: ids },
+  })
   const now = await $.clock.now()
   await update($, invitedA, m => ({ ...m, ...Object.fromEntries(ids.filter(id => !r.refused.includes(id)).map(id => [id, now])) }))
-  return r.invited.length ? `Invited ${listNames(r.invited)}: it shows in their Claude Code within a minute.` : "Couldn't invite them: you can invite people who share a team with you."
+  return r.invited.length
+    ? `Invited ${listNames(r.invited)}: it shows in their Claude Code within a minute.`
+    : "Couldn't invite them: you can invite people who share a team with you."
 }
 
 // /invite <name>: by name or GitHub login, a teammate's or several.
@@ -10500,9 +11766,21 @@ async function inviteCommand($: $, args: string): Promise<{ text: string }> {
     const t = await read($, teamsA)
     if (!t.account) return { text: 'Sign in first to invite teammates: press Team above the prompt, or /team signin.' }
     const mates = t.teammates ?? []
-    const wanted = args.split(/[,\s]+/).map(w => w.trim().toLowerCase().replace(/^@/, '')).filter(Boolean)
-    if (!wanted.length) return { text: mates.length ? `Invite whom? ${mates.map(m => m.name).join(', ')}. /invite <name>` : 'No teammates to invite yet: make a team in /team and send its invite link.' }
-    const picks = wanted.map(w => mates.find(m => m.name.toLowerCase() === w || m.login?.toLowerCase() === w) ?? mates.find(m => m.name.toLowerCase().startsWith(w) || m.login?.toLowerCase().startsWith(w)))
+    const wanted = args
+      .split(/[,\s]+/)
+      .map(w => w.trim().toLowerCase().replace(/^@/, ''))
+      .filter(Boolean)
+    if (!wanted.length)
+      return {
+        text: mates.length
+          ? `Invite whom? ${mates.map(m => m.name).join(', ')}. /invite <name>`
+          : 'No teammates to invite yet: make a team in /team and send its invite link.',
+      }
+    const picks = wanted.map(
+      w =>
+        mates.find(m => m.name.toLowerCase() === w || m.login?.toLowerCase() === w) ??
+        mates.find(m => m.name.toLowerCase().startsWith(w) || m.login?.toLowerCase().startsWith(w)),
+    )
     const missing = wanted.filter((_, i) => !picks[i])
     if (missing.length) return { text: `No teammate called ${missing.join(', ')}. You can invite: ${mates.map(m => m.name).join(', ') || 'nobody yet'}.` }
     return { text: await inviteToRoom($, [...new Set(picks.map(m => m!.id))]) }
@@ -10521,7 +11799,7 @@ async function shareAnswer($: $): Promise<string> {
     return `This session is already shared (${room.url})${here.length ? `, with ${listNames(here)} here` : ''}. Everything that happens in it reaches them live, so there's nothing to share again. To show someone something again, show it again: publish or open the page, send the file, or open the page or preview; each of those goes to everyone in the room by itself.`
   }
   if (mode === 'guest' && room) return `This session joined ${room.host}'s shared session; only ${room.host} shares it. What's typed here runs there.`
-  return 'Sharing starts only when the person chooses it: they type /share-session or press Share above the prompt. It sends this session\'s prompts, replies and tool calls to everyone with the link, so tell them that and let them start it; don\'t start it yourself.'
+  return "Sharing starts only when the person chooses it: they type /share-session or press Share above the prompt. It sends this session's prompts, replies and tool calls to everyone with the link, so tell them that and let them start it; don't start it yourself."
 }
 
 async function shareCommand($: $, e: { args: string }): Promise<{ text: string }> {
@@ -10561,9 +11839,11 @@ async function shareAsked($: $, choice: string, byLink: boolean, watch: boolean)
       }
     }
     const room = await share($, undefined, { history: choice !== 'new', team: !byLink, watch })
-    const team = room.team ? (await read($, teamsA)).teams.find(t => t.id === room.team?.id) ?? null : null
+    const team = room.team ? ((await read($, teamsA)).teams.find(t => t.id === room.team?.id) ?? null) : null
     const kept = (await serverKeeps($)) ? ` ${keptNote(room.team?.name ?? null)}` : ''
-    return { text: `Sharing this session${choice === 'new' ? ' from now on' : ''}${room.team ? ` with ${room.team.name}` : ''}${watch ? ', watch-only: teammates watch and chat, and only you prompt Claude' : ''}. ${whoJoins(room, team, watch)}: ${room.url}${kept}` }
+    return {
+      text: `Sharing this session${choice === 'new' ? ' from now on' : ''}${room.team ? ` with ${room.team.name}` : ''}${watch ? ', watch-only: teammates watch and chat, and only you prompt Claude' : ''}. ${whoJoins(room, team, watch)}: ${room.url}${kept}`,
+    }
   } catch (error) {
     return { text: `Couldn't share: ${String((error as Error)?.message ?? error)}` }
   }
@@ -10593,13 +11873,19 @@ export const register: Register = (on, options) => {
       }
     }
     // Not /share: Claude has its own. Every name here is the plugin's alone.
-    await $.command.register({ name: 'share-session', description: 'Share this session (with your team when signed in): /share-session [all | new] [link] [watch]' })
+    await $.command.register({
+      name: 'share-session',
+      description: 'Share this session (with your team when signed in): /share-session [all | new] [link] [watch]',
+    })
     await $.command.register({ name: 'team', description: "Your team's shared sessions, one click to join: /team [signin | create <name> | invite | signout]" })
     await $.command.register({ name: 'invite', description: 'Invite a teammate into this shared session, in their Claude Code: /invite <name>' })
     await $.command.register({ name: 'stop-sharing', description: 'Stop sharing this session, or leave the one you joined' })
     await $.command.register({ name: 'room', description: 'Open the Room: who is here, activity, side chat' })
     await $.command.register({ name: 'share-file', description: 'Show a file to everyone in the shared session: /share-file <path>' })
-    await $.command.register({ name: 'share-preview', description: "Let teammates open this machine's localhost: /share-preview <port|http://localhost:port/path> [title]" })
+    await $.command.register({
+      name: 'share-preview',
+      description: "Let teammates open this machine's localhost: /share-preview <port|http://localhost:port/path> [title]",
+    })
     await $.command.register({ name: 'who', description: "Who's in this shared session and what each is doing" })
     void readUpdates($)
     // Signed in: the team and what's shared with it, for Share and the Team button.
@@ -10637,7 +11923,8 @@ export const register: Register = (on, options) => {
     // room being left is neither: its close ends first (the same module
     // started again), or is finished here (one a reload cut short).
     await roomClosed($, { start: true })
-    const room = await read($, roomA), mode = await read($, modeA)
+    const room = await read($, roomA),
+      mode = await read($, modeA)
     // A guest's reload (an update in place included): what the room shares
     // now first, as its next page lists it (a preview it ended or forwarded
     // meanwhile, or one forwarded before the update that Shown lost a sign
@@ -10669,7 +11956,9 @@ export const register: Register = (on, options) => {
     void gcPreviewProfiles($).catch(() => {})
     // The host's mailboxes listen again at the paths they had: a reload's
     // helper goes first (the module it was started by is gone).
-    void endOldHelper($).then(() => restoreMailboxes($)).catch(() => {})
+    void endOldHelper($)
+      .then(() => restoreMailboxes($))
+      .catch(() => {})
     void holdRoom($).catch(() => {})
     void refreshStatus($).catch(() => {})
     $.clock.after(2_000, () => void repinMarked($).catch(() => {}))
@@ -10761,7 +12050,8 @@ export const register: Register = (on, options) => {
     const [first, ...rest] = e.args.trim().split(/\s+/)
     const url = LOCAL_URL.exec(first ?? '')
     const port = Number(url?.[1] ?? first)
-    if (!Number.isInteger(port) || port < 1 || port > 65535) return { text: 'Which port? /share-preview <port|http://localhost:port/path> [title], e.g. /share-preview 3000' }
+    if (!Number.isInteger(port) || port < 1 || port > 65535)
+      return { text: 'Which port? /share-preview <port|http://localhost:port/path> [title], e.g. /share-preview 3000' }
     const title = rest.join(' ') || `localhost:${port}`
     // What the page uses beside it, in the same project: asked about above
     // the prompt, a service a question, and named here, with how to share
@@ -10776,7 +12066,9 @@ export const register: Register = (on, options) => {
   on('command.run', { command: 'stop-sharing' }, async $ => {
     const mode = await read($, modeA)
     if (mode !== 'idle') await closeRoom($, mode === 'host' ? 'stop' : 'leave')
-    return { text: mode === 'idle' ? 'This session is not shared.' : mode === 'host' ? 'Stopped sharing. The link no longer works.' : 'Left the shared session.' }
+    return {
+      text: mode === 'idle' ? 'This session is not shared.' : mode === 'host' ? 'Stopped sharing. The link no longer works.' : 'Left the shared session.',
+    }
   })
 
   on('ui.close', async ($, e, next) => {
@@ -10879,13 +12171,18 @@ export const register: Register = (on, options) => {
     if (late && (typed || e.attachments?.length) && !typed.startsWith('/')) {
       // Another of their sessions' message: that session hears it too.
       const peer = fromPeer ? delivered(typed) : null
-      if (peer?.address && (await prefsOf($)).relayPeers) tellPeer($, peer.address, `Still getting back into ${late.host}'s session, so this didn't reach their Claude. Send it again in a moment.`)
+      if (peer?.address && (await prefsOf($)).relayPeers)
+        tellPeer($, peer.address, `Still getting back into ${late.host}'s session, so this didn't reach their Claude. Send it again in a moment.`)
       return keepHere(`Still getting back into **${late.host}**'s session, so this didn't go to Claude. Send it again in a moment.`)
     }
     // The update command, typed here by a guest (the "is out" line names it):
     // run on this computer, never sent to the host's Claude to run there.
     if (mode === 'guest' && UPDATE_TYPED.test(typed)) {
-      answerWith({ kind: 'note', text: `Updating Shared Sessions on this computer (this didn't go to ${(await read($, roomA))?.host ?? 'the host'}). A line below says when it's done.`, then: [] })
+      answerWith({
+        kind: 'note',
+        text: `Updating Shared Sessions on this computer (this didn't go to ${(await read($, roomA))?.host ?? 'the host'}). A line below says when it's done.`,
+        then: [],
+      })
       void updateHere($)
       return next(e)
     }
@@ -10897,7 +12194,10 @@ export const register: Register = (on, options) => {
     if (fromOwn) {
       const room = await read($, roomA)
       const name = tidySender(fromOwn.from)
-      if (!(await prefsOf($)).relayPeers) return keepHere(`A message from **${name}** stayed here: your **Room**'s Settings keep your other sessions' messages from ${room?.host ?? 'the host'}'s Claude.`)
+      if (!(await prefsOf($)).relayPeers)
+        return keepHere(
+          `A message from **${name}** stayed here: your **Room**'s Settings keep your other sessions' messages from ${room?.host ?? 'the host'}'s Claude.`,
+        )
       if (!fromOwn.address || !fromOwn.text) return keepHere(`A message from **${name}** stayed here: it didn't say where an answer would go.`)
       const refusal = room ? await relayRefusal($, room) : "This session isn't in a shared session any more, so this didn't reach anyone's Claude."
       if (!room || refusal) {
@@ -10914,21 +12214,34 @@ export const register: Register = (on, options) => {
       const entered = await next(e)
       if (entered.drop !== undefined) {
         ownPending.delete(pid)
-        ridesByText.set(typed, (ridesByText.get(typed) ?? []).filter(r => r !== ride))
+        ridesByText.set(
+          typed,
+          (ridesByText.get(typed) ?? []).filter(r => r !== ride),
+        )
         return entered
       }
       const sent = { from: fromOwn.from, text: fromOwn.text, address: fromOwn.address, ...(fromOwn.mode ? { mode: fromOwn.mode } : {}) }
-      $.clock.after(0, () => void relayQueued($, room, s, pid, sent).catch(error => $.ui.log(`Shared session: relaying a message: ${String((error as Error)?.message ?? error)}`, { to: 'debug' })))
+      $.clock.after(
+        0,
+        () =>
+          void relayQueued($, room, s, pid, sent).catch(error =>
+            $.ui.log(`Shared session: relaying a message: ${String((error as Error)?.message ?? error)}`, { to: 'debug' }),
+          ),
+      )
       lastActivity = await $.clock.now()
       return entered
     }
     if (mode === 'guest' && fromPerson && (typed || e.attachments?.length) && !typed.startsWith('/')) {
       const room = await read($, roomA)
       if ((await read($, policyA)).prompts === 'watch') {
-        return keepHere(`**${room?.host}** has this session on watch-only, so this didn't go to Claude. You can still follow every turn and talk to everyone in the **Room** panel.`)
+        return keepHere(
+          `**${room?.host}** has this session on watch-only, so this didn't go to Claude. You can still follow every turn and talk to everyone in the **Room** panel.`,
+        )
       }
       if ((await read($, peopleA)).some(p => p.role === 'host' && !p.online)) {
-        return keepHere(`**${room?.host}**'s Claude Code is closed right now, so this didn't go to Claude. The room stays open and carries on when they're back (the **Room** shows them here again); send it then.`)
+        return keepHere(
+          `**${room?.host}**'s Claude Code is closed right now, so this didn't go to Claude. The room stays open and carries on when they're back (the **Room** shows them here again); send it then.`,
+        )
       }
       const pid = newId()
       ownPending.add(pid)
@@ -10979,7 +12292,11 @@ export const register: Register = (on, options) => {
     const named = known ? undefined : people.find(p => p.role !== 'host' && p.name && said.startsWith(`${p.name}: `))?.name
     // Its seat, when one person has that name; else none (never always allowed).
     const namesake = named ? people.filter(p => p.role !== 'host' && p.name === named) : []
-    const guest = known ?? (named ? { who: named, seat: namesake.length === 1 ? (namesake[0]!.seats?.[0] ?? namesake[0]!.id) : '', text: said.slice(named.length + 2), pid: '' } : null)
+    const guest =
+      known ??
+      (named
+        ? { who: named, seat: namesake.length === 1 ? (namesake[0]!.seats?.[0] ?? namesake[0]!.id) : '', text: said.slice(named.length + 2), pid: '' }
+        : null)
     // A prompt another session delivered is shown as its text, not its markup;
     // one from a teammate's session's mailbox as their agent's (the host's
     // turn all the same: its calls are the mode's, as any peer's are), with
@@ -10987,13 +12304,27 @@ export const register: Register = (on, options) => {
     const sent = guest ? null : delivered(said)
     const agent = sent ? await mailboxOwner($, sent.address) : null
     const relayPid = agent && sent ? relayPidOf(agent.box, sent.text) : undefined
-    const by = guest?.who ?? (agent ? `${agent.who}'s agent` : room?.host ?? 'host')
+    const by = guest?.who ?? (agent ? `${agent.who}'s agent` : (room?.host ?? 'host'))
     const startedAt = await $.clock.now()
-    await update($, workingA, () => ({ turnId: e.turnId, by, byGuest: Boolean(guest), ...(guest ? { seat: guest.seat } : {}), startedAt, tail: '', waitingFor: null }))
+    await update($, workingA, () => ({
+      turnId: e.turnId,
+      by,
+      byGuest: Boolean(guest),
+      ...(guest ? { seat: guest.seat } : {}),
+      startedAt,
+      tail: '',
+      waitingFor: null,
+    }))
     const relayed = guest ? delivered(guest.text) : null
     const guestPrompt = guest ? (relayed ? `(from ${relayed.from}) ${relayed.text}` : guest.text) : undefined
     const agentPrompt = agent && sent ? `(from ${agent.name}) ${sent.text}` : undefined
-    send($, 'turn', { state: 'start', turnId: e.turnId, by: agent ? by : sent?.from ?? by, prompt: guestPrompt ?? agentPrompt ?? sent?.text ?? (said || startedBy(e.text)), pid: guest?.pid ?? relayPid ?? '' })
+    send($, 'turn', {
+      state: 'start',
+      turnId: e.turnId,
+      by: agent ? by : (sent?.from ?? by),
+      prompt: guestPrompt ?? agentPrompt ?? sent?.text ?? (said || startedBy(e.text)),
+      pid: guest?.pid ?? relayPid ?? '',
+    })
     void refreshStatus($)
     return next(e)
   })
@@ -11192,7 +12523,11 @@ export const register: Register = (on, options) => {
           ridesInStep.set(e.turnId, run)
           const id = `toolu_${newId()}${newId()}`
           if (run.lastCall) run.lastCall.id = id
-          rideCalls.set(id, { name: call.name, input: JSON.stringify(call.input), approve: shownOf(run.lastCall?.event ?? ({ body: {} } as ServerEvent))?.kind !== 'link' })
+          rideCalls.set(id, {
+            name: call.name,
+            input: JSON.stringify(call.input),
+            approve: shownOf(run.lastCall?.event ?? ({ body: {} } as ServerEvent))?.kind !== 'link',
+          })
           if (call.name === REPLAY_TOOL && run.lastCall) {
             const hostId = (run.lastCall.event.body as unknown as Row).id ?? ''
             hostCalls.set(id, { hostId, seq: run.lastCall.event.seq, turnId: state.current?.turnId })
@@ -11290,7 +12625,9 @@ export const register: Register = (on, options) => {
     if (run?.hidden) return <Box />
     if (run?.tools) return <Text dimColor>{`  ${runLine({ tools: run.tools })}`}</Text>
     const summary = typeof input.summary === 'string' ? input.summary.split('\n')[0]!.slice(0, 160) : ''
-    const lines = e.props.isRunning ? [] : replayLines(input.tool, (input.input ?? {}) as Record<string, unknown>, outputText(e.props.output), e.props.isErrored, imageCount(e.props.output))
+    const lines = e.props.isRunning
+      ? []
+      : replayLines(input.tool, (input.input ?? {}) as Record<string, unknown>, outputText(e.props.output), e.props.isErrored, imageCount(e.props.output))
     return (
       <Box flexDirection="column">
         <Box flexDirection="row">
@@ -11371,7 +12708,11 @@ export const register: Register = (on, options) => {
       }
       const room = await read($, roomA)
       const watching = [...new Set((await read($, peopleA)).filter(p => p.online && p.role === 'guest' && !(room && isMe(p, room.seat))).map(p => p.name))]
-      const line = working?.byGuest ? `${working.by}'s prompt asked for this${watching.length ? ` · ${listNames(watching)} watching` : ''}` : watching.length ? `${listNames(watching)} ${watching.length === 1 ? 'is' : 'are'} watching this session` : ''
+      const line = working?.byGuest
+        ? `${working.by}'s prompt asked for this${watching.length ? ` · ${listNames(watching)} watching` : ''}`
+        : watching.length
+          ? `${listNames(watching)} ${watching.length === 1 ? 'is' : 'are'} watching this session`
+          : ''
       if (line) {
         try {
           $.ui.notice(e.tool_use_id, line)
@@ -11398,7 +12739,14 @@ export const register: Register = (on, options) => {
       // A page it publishes or opens reaches everyone here as a copy of its
       // own: said to Claude, so it doesn't send people after the link.
       const action = String((e as { action?: unknown }).action ?? 'publish')
-      if (e.tool === 'Artifact' && (action === 'publish' || action === 'open') && result && typeof result === 'object' && !('deny' in result && result.deny) && (await read($, policyA)).files !== 'off') {
+      if (
+        e.tool === 'Artifact' &&
+        (action === 'publish' || action === 'open') &&
+        result &&
+        typeof result === 'object' &&
+        !('deny' in result && result.deny) &&
+        (await read($, policyA)).files !== 'off'
+      ) {
         const room = await read($, roomA)
         const note = `Shared Sessions: this page also went to everyone in ${room?.host ?? 'this'}'s shared session, with its pictures and files; it opens in their own Claude Code (the browser pane, or Open in their Room). They don't need the claude.ai link, which stays private unless it's shared on claude.ai.`
         return { ...result, context: [...((result as { context?: readonly string[] }).context ?? []), note] } as typeof result
@@ -11428,9 +12776,14 @@ export const register: Register = (on, options) => {
     const id = started.agentId
     if (!id || (await read($, modeA)) === 'guest') return started
     const working = await read($, workingA)
-    const who = e.parentAgentId !== undefined ? ownerOf((await read($, agentsA))[e.parentAgentId]) : (ownerOf((await read($, ownersA))[e.tool_use_id]) ?? turnOwner(working) ?? { who: '', seat: '' })
+    const who =
+      e.parentAgentId !== undefined
+        ? ownerOf((await read($, agentsA))[e.parentAgentId])
+        : (ownerOf((await read($, ownersA))[e.tool_use_id]) ?? turnOwner(working) ?? { who: '', seat: '' })
     if (who === undefined) return started
-    await update($, agentsA, agents => Object.fromEntries([...Object.entries(agents).filter(([agent]) => agent !== id), [id, who] as [string, ShareOwner]].slice(-200)))
+    await update($, agentsA, agents =>
+      Object.fromEntries([...Object.entries(agents).filter(([agent]) => agent !== id), [id, who] as [string, ShareOwner]].slice(-200)),
+    )
     return started
   })
 
@@ -11465,7 +12818,12 @@ export const register: Register = (on, options) => {
     const policy = await read($, policyA)
     // A cloud host holds its approver's Claude sign-in: a teammate's call is never let through unasked there.
     if (policy.approvals === 'none' && !(await isRunner($))) return verdict
-    if (policy.approvals === 'edits' && READ_ONLY.has(e.tool) && (await readsInsideReally($, e.tool, (e.input ?? {}) as Record<string, unknown>, await $.session.cwd()))) return verdict
+    if (
+      policy.approvals === 'edits' &&
+      READ_ONLY.has(e.tool) &&
+      (await readsInsideReally($, e.tool, (e.input ?? {}) as Record<string, unknown>, await $.session.cwd()))
+    )
+      return verdict
     // "Always allow" is the host's answer for this person's later calls too, so
     // it settles them the way "Allow once" settles one, not back to the host's
     // own permission prompt.
@@ -11484,7 +12842,9 @@ export const register: Register = (on, options) => {
     await noteAsked($, id, what)
     let over = false
     let settle!: (label: string) => void
-    const answered = new Promise<string>(resolve => { settle = resolve })
+    const answered = new Promise<string>(resolve => {
+      settle = resolve
+    })
     const account = seatAccount(owner.seat, await read($, peopleA))
     const ask: Approval = {
       id: newId(),
@@ -11535,7 +12895,16 @@ export const register: Register = (on, options) => {
       if (!over && (await isRunner($))) {
         ask.stage = 'row'
         timer = $.clock.after(10 * 60_000, giveUp)
-        send($, 'ask', { id: ask.id, who, ...(owner.seat ? { seat: owner.seat } : {}), what, ...(extent ? { extent } : {}), preview: ask.whole.slice(0, 4000), always, options: ['Allow once', always, 'Decline'] })
+        send($, 'ask', {
+          id: ask.id,
+          who,
+          ...(owner.seat ? { seat: owner.seat } : {}),
+          what,
+          ...(extent ? { extent } : {}),
+          preview: ask.whole.slice(0, 4000),
+          always,
+          options: ['Allow once', always, 'Decline'],
+        })
         await approvalWait($, ask, answered, () => over)
       } else if (!over) {
         ask.stage = 'dialog'
@@ -11593,14 +12962,21 @@ export const register: Register = (on, options) => {
       await takeBackAsk($, what, true)
       await noteAnswered($, id)
       await flushOut($)
-      return { decision: 'deny', reason: `${host} hadn't answered this ${e.tool} call from the shared session when the plugin reloaded, so it didn't run; try again if it's still needed.` }
+      return {
+        decision: 'deny',
+        reason: `${host} hadn't answered this ${e.tool} call from the shared session when the plugin reloaded, so it didn't run; try again if it's still needed.`,
+      }
     }
     // The room it was asked in is over (Stop sharing, its end) by its answer:
     // no, as the row's calls are. Its teammate may be gone too.
     if (!(await askedRoomOpen($, ask.room))) answer = 'Decline'
     const allowed = answer === 'Allow once' || (always !== '' && answer === always)
     if (allowed && answer === always) {
-      if (owner.seat) await update($, trustedA, list => [...list.filter(t => typeof t === 'object' && t.seat !== owner.seat), { who, seat: owner.seat, ...(account ? { account } : {}) }])
+      if (owner.seat)
+        await update($, trustedA, list => [
+          ...list.filter(t => typeof t === 'object' && t.seat !== owner.seat),
+          { who, seat: owner.seat, ...(account ? { account } : {}) },
+        ])
       // Given in the dialog too: their calls still waiting go with it.
       answerFor(ask, always)
     }
@@ -11634,7 +13010,10 @@ export const register: Register = (on, options) => {
     await noteAnswered($, id)
     await takeBackAsk($, what, false)
     const host = (await read($, roomA).catch(() => null))?.host ?? 'The host'
-    return { decision: 'deny', reason: `${host} hadn't answered this ${e.tool} call from the shared session, so it didn't run; try again if it's still needed.` }
+    return {
+      decision: 'deny',
+      reason: `${host} hadn't answered this ${e.tool} call from the shared session, so it didn't run; try again if it's still needed.`,
+    }
   })
 
   // -------------------------------------------------------------------------
@@ -11655,7 +13034,11 @@ export const register: Register = (on, options) => {
     const el = $.ui.resolve(e)
     const { Box, Text, Markdown } = el
     // Their color in this room (a name keeps it after its person leaves).
-    const color = roomColors(await read($, peopleA), (await read($, activityA)).map(a => a.who)).get(said.who) ?? colorFor(said.who)
+    const color =
+      roomColors(
+        await read($, peopleA),
+        (await read($, activityA)).map(a => a.who),
+      ).get(said.who) ?? colorFor(said.who)
     const avatar = faceOf(el, e.surface, { name: said.who, online: true, color })
     if (relayed) {
       // A message another session sent them, which they passed on: who passed
@@ -11755,7 +13138,13 @@ export const register: Register = (on, options) => {
     const unreacted = counts.filter(c => !c.who.length)
     const seenBy = [...new Set([...seen, ...reacted.flatMap(c => c.who)])].filter(n => n !== me)
     const shows = reacted.length > 0 || seenBy.length > 0
-    const stack = seenBy.length && Svg ? stackSvg(seenBy.map(n => ({ name: n, online: true, color: colorOf(n) })), { size: 16, max: 6 }) : null
+    const stack =
+      seenBy.length && Svg
+        ? stackSvg(
+            seenBy.map(n => ({ name: n, online: true, color: colorOf(n) })),
+            { size: 16, max: 6 },
+          )
+        : null
     const chip = (r: string, who: string[], mine: boolean) => (
       <Button key={`react-${r}`} plain onPress={() => void react($, key, r, !mine)}>
         {r}
@@ -11821,12 +13210,18 @@ export const register: Register = (on, options) => {
   on('ui.render', { component: 'CommandOutput', props: { command: 'who' } }, async ($, e, next) => {
     const v = await view($)
     if (v.mode === 'idle' || !v.room) return next(e)
-    return fit(whoCard($.ui.resolve(e), e.surface, v, await read($, turnsA), await $.clock.now(), () => void openRoom($)), modern)
+    return fit(
+      whoCard($.ui.resolve(e), e.surface, v, await read($, turnsA), await $.clock.now(), () => void openRoom($)),
+      modern,
+    )
   })
   on('ui.render', { component: 'CommandOutput', props: { command: 'shared-session:who' } }, async ($, e, next) => {
     const v = await view($)
     if (v.mode === 'idle' || !v.room) return next(e)
-    return fit(whoCard($.ui.resolve(e), e.surface, v, await read($, turnsA), await $.clock.now(), () => void openRoom($)), modern)
+    return fit(
+      whoCard($.ui.resolve(e), e.surface, v, await read($, turnsA), await $.clock.now(), () => void openRoom($)),
+      modern,
+    )
   })
 
   // Host: a tool call Claude made for a teammate says for whom.
@@ -11866,7 +13261,10 @@ export const register: Register = (on, options) => {
     const v = await view($)
     if (v.mode === 'idle') return next(e)
     const here = presence(v)
-    const label = v.mode === 'host' ? `shared${here.startsWith('with') ? ` ${here}` : ''}` : `in ${v.room?.host}'s session${here ? ` ${here.startsWith('with') ? here : `· ${here}`}` : ''}`
+    const label =
+      v.mode === 'host'
+        ? `shared${here.startsWith('with') ? ` ${here}` : ''}`
+        : `in ${v.room?.host}'s session${here ? ` ${here.startsWith('with') ? here : `· ${here}`}` : ''}`
     return next({ ...e, props: { ...e.props, modes: [...e.props.modes, label] } })
   })
 
@@ -11896,7 +13294,9 @@ export const register: Register = (on, options) => {
       // The host: who sees what they send.
       const others = [...new Set(v.everyone.filter(p => p.online && p.role === 'guest' && !isMe(p, v.me)).map(p => p.name))]
       if (!others.length) return next(e)
-      const hint = e.props.isWorking ? `${listNames(others)} ${others.length === 1 ? 'sees' : 'see'} this turn as it happens` : `${listNames(others)} will see what you send · @name mentions someone`
+      const hint = e.props.isWorking
+        ? `${listNames(others)} ${others.length === 1 ? 'sees' : 'see'} this turn as it happens`
+        : `${listNames(others)} will see what you send · @name mentions someone`
       return next({ ...e, props: { ...e.props, hint } })
     }
     if (v.mode !== 'guest') return next(e)
@@ -11946,7 +13346,12 @@ export const register: Register = (on, options) => {
           ) : t.providers.length ? (
             <Box flexDirection="row" gap={1} marginTop={1}>
               {t.providers.map((p, i) => (
-                <Button key={`signin-${p.id}`} label={`Sign in with ${p.label}`} variant={i === 0 ? 'primary' : undefined} onPress={() => void startSignIn($, p.id).catch(fail('sign in'))} />
+                <Button
+                  key={`signin-${p.id}`}
+                  label={`Sign in with ${p.label}`}
+                  variant={i === 0 ? 'primary' : undefined}
+                  onPress={() => void startSignIn($, p.id).catch(fail('sign in'))}
+                />
               ))}
             </Box>
           ) : t.loaded ? (
@@ -11986,7 +13391,10 @@ export const register: Register = (on, options) => {
     }
     const accountRow = (
       <Box flexDirection="row" gap={1} alignItems="center" justifyContent="space-between">
-        <Text dimColor wrap="truncate-end">{`Signed in as ${account.name}${account.login && account.login !== account.name ? ` (${account.login})` : ''} · ${providerName(account.provider)}`}</Text>
+        <Text
+          dimColor
+          wrap="truncate-end"
+        >{`Signed in as ${account.name}${account.login && account.login !== account.name ? ` (${account.login})` : ''} · ${providerName(account.provider)}`}</Text>
         <Button key="signout" label="Sign out" plain dimColor onPress={() => void signOut($)} />
       </Box>
     )
@@ -11997,7 +13405,11 @@ export const register: Register = (on, options) => {
           placeholder="Team name"
           submitLabel="Create team"
           autoFocus={autoFocus || undefined}
-          onSubmit={(value: string) => void createTeam($, value).then(() => update($, teamsA, x => ({ ...x, creating: false }))).catch(fail('make the team'))}
+          onSubmit={(value: string) =>
+            void createTeam($, value)
+              .then(() => update($, teamsA, x => ({ ...x, creating: false })))
+              .catch(fail('make the team'))
+          }
         />
       ) : (
         <Text dimColor>/team create &lt;name&gt;</Text>
@@ -12093,7 +13505,12 @@ export const register: Register = (on, options) => {
             ) : here[s.id] ? (
               <Button key={`open-${s.id}`} label="Open" plain onPress={() => void openHere($, s.id)} />
             ) : canJoin ? (
-              <Button key={`join-${s.id}`} label="Join" variant={joinable.length === 1 ? 'primary' : undefined} onPress={press => void joinFromTeam($, [s], press.surface)} />
+              <Button
+                key={`join-${s.id}`}
+                label="Join"
+                variant={joinable.length === 1 ? 'primary' : undefined}
+                onPress={press => void joinFromTeam($, [s], press.surface)}
+              />
             ) : (
               <Button key={`join-${s.id}`} label="Join" plain dimColor onPress={press => void joinFromTeam($, [s], press.surface)} />
             )}
@@ -12109,7 +13526,12 @@ export const register: Register = (on, options) => {
       <Box flexDirection="column" gap={1}>
         <Box flexDirection="row" gap={1} justifyContent="space-between" alignItems="center">
           {t.teams.length > 1 && Select ? (
-            <Select key="team-pick" value={team.id} options={t.teams.map(x => ({ value: x.id, label: x.name }))} onSelect={(value: string) => void setCurrentTeam($, value)} />
+            <Select
+              key="team-pick"
+              value={team.id}
+              options={t.teams.map(x => ({ value: x.id, label: x.name }))}
+              onSelect={(value: string) => void setCurrentTeam($, value)}
+            />
           ) : (
             <Text bold>{team.name}</Text>
           )}
@@ -12130,7 +13552,9 @@ export const register: Register = (on, options) => {
           : null}
         {room && mode === 'host' ? (
           <Box flexDirection="row" gap={1} alignItems="center" justifyContent="space-between">
-            <Text dimColor wrap="truncate-end">{room.team ? `This session: shared with ${room.team.name}` : 'This session: shared by link'}</Text>
+            <Text dimColor wrap="truncate-end">
+              {room.team ? `This session: shared with ${room.team.name}` : 'This session: shared by link'}
+            </Text>
             {room.team ? (
               <Button key="room-unteam" label="Link only" plain onPress={() => void setRoomTeam($, null)} />
             ) : (
@@ -12166,11 +13590,19 @@ export const register: Register = (on, options) => {
           {headingOf(
             el,
             'Live now',
-            joinable.length > 1 ? <Button key="join-all" label="Join all" variant="primary" onPress={press => void joinFromTeam($, joinable, press.surface)} /> : t.sessions.length ? `${t.sessions.length} shared` : '',
+            joinable.length > 1 ? (
+              <Button key="join-all" label="Join all" variant="primary" onPress={press => void joinFromTeam($, joinable, press.surface)} />
+            ) : t.sessions.length ? (
+              `${t.sessions.length} shared`
+            ) : (
+              ''
+            ),
           )}
           {t.sessions.map(sessionRow)}
           {t.sessions.length ? null : <Text dimColor>{`Nothing is shared with ${team.name} right now. A session someone shares with it shows up here.`}</Text>}
-          {joinable.length > 1 ? <Text dimColor>{mode === 'idle' ? 'Join all: the first joins here, the rest in new sessions.' : 'Join all: each opens in a new session.'}</Text> : null}
+          {joinable.length > 1 ? (
+            <Text dimColor>{mode === 'idle' ? 'Join all: the first joins here, the rest in new sessions.' : 'Join all: each opens in a new session.'}</Text>
+          ) : null}
         </Box>
       </Box>
     )
@@ -12236,17 +13668,32 @@ export const register: Register = (on, options) => {
               ? settingOf(
                   el,
                   'Join by email domain',
-                  <Input key={`team-domains-${(team.domains ?? []).join(',')}`} value={(team.domains ?? []).join(', ')} placeholder="example.com" submitLabel="Save" onSubmit={(value: string) => void changeTeam($, { domains: value }).catch(fail('save it'))} />,
+                  <Input
+                    key={`team-domains-${(team.domains ?? []).join(',')}`}
+                    value={(team.domains ?? []).join(', ')}
+                    placeholder="example.com"
+                    submitLabel="Save"
+                    onSubmit={(value: string) => void changeTeam($, { domains: value }).catch(fail('save it'))}
+                  />,
                 )
               : null}
             {Input
               ? settingOf(
                   el,
                   'Join by GitHub org',
-                  <Input key={`team-orgs-${(team.githubOrgs ?? []).join(',')}`} value={(team.githubOrgs ?? []).join(', ')} placeholder="your-org" submitLabel="Save" onSubmit={(value: string) => void changeTeam($, { githubOrgs: value }).catch(fail('save it'))} />,
+                  <Input
+                    key={`team-orgs-${(team.githubOrgs ?? []).join(',')}`}
+                    value={(team.githubOrgs ?? []).join(', ')}
+                    placeholder="your-org"
+                    submitLabel="Save"
+                    onSubmit={(value: string) => void changeTeam($, { githubOrgs: value }).catch(fail('save it'))}
+                  />,
                 )
               : null}
-            <Text dimColor>People who sign in with a verified email at the domain, or with GitHub as a member of the org, join by themselves. You can add your own email's domain (not a public one like gmail.com) and orgs you're in.</Text>
+            <Text dimColor>
+              People who sign in with a verified email at the domain, or with GitHub as a member of the org, join by themselves. You can add your own email's
+              domain (not a public one like gmail.com) and orgs you're in.
+            </Text>
           </Box>
         ) : null}
         <Box flexDirection="column" gap={1}>
@@ -12270,7 +13717,12 @@ export const register: Register = (on, options) => {
           {t.creating ? newTeam(true) : null}
           {t.error ? <Text color="error">{t.error}</Text> : null}
           <Box flexDirection="row" gap={1} justifyContent="space-between">
-            <Button key="team-create" label={t.creating ? 'Cancel' : 'New team'} plain onPress={() => void update($, teamsA, x => ({ ...x, creating: !x.creating }))} />
+            <Button
+              key="team-create"
+              label={t.creating ? 'Cancel' : 'New team'}
+              plain
+              onPress={() => void update($, teamsA, x => ({ ...x, creating: !x.creating }))}
+            />
             <Button key="team-leave" label={`Leave ${team.name}`} plain dimColor onPress={() => void leaveTeam($).catch(fail('leave'))} />
           </Box>
         </Box>
@@ -12382,32 +13834,48 @@ export const register: Register = (on, options) => {
                 <Text wrap="truncate-end">{ask.what}</Text>
                 <Text dimColor>{cloudAskMeans(ask)}</Text>
                 <Box flexDirection="row" gap={1}>
-                  <Button key={`cloud-ask-yes-${ask.id}`} label={ask.options[0] ?? 'Share'} variant="primary" onPress={() => void answerCloudAsk($, ask.id, ask.options[0] ?? 'Share')} />
+                  <Button
+                    key={`cloud-ask-yes-${ask.id}`}
+                    label={ask.options[0] ?? 'Share'}
+                    variant="primary"
+                    onPress={() => void answerCloudAsk($, ask.id, ask.options[0] ?? 'Share')}
+                  />
                   <Button key={`cloud-ask-not-now-${ask.id}`} label="Not now" plain dimColor onPress={() => void answerCloudAsk($, ask.id, 'Not now')} />
                 </Box>
               </Box>
             ) : (
-            <Box key={`cloud-ask-${ask.id}`} flexDirection="column" gap={1}>
-              <Text wrap="truncate-end">
-                <Text bold color={colorOf(ask.who)}>
-                  {ask.who}
+              <Box key={`cloud-ask-${ask.id}`} flexDirection="column" gap={1}>
+                <Text wrap="truncate-end">
+                  <Text bold color={colorOf(ask.who)}>
+                    {ask.who}
+                  </Text>
+                  <Text>{' wants the cloud host to run '}</Text>
+                  <Text bold>{ask.what}</Text>
                 </Text>
-                <Text>{' wants the cloud host to run '}</Text>
-                <Text bold>{ask.what}</Text>
-              </Text>
-              {ask.preview ? <Markdown key={`cloud-ask-whole-${ask.id}`} text={ask.preview} /> : null}
-              <Box flexDirection="row" gap={1}>
-                <Button key={`cloud-ask-once-${ask.id}`} label="Allow once" variant="primary" onPress={() => void answerCloudAsk($, ask.id, 'Allow once')} />
-                {ask.always ? <Button key={`cloud-ask-always-${ask.id}`} label={ask.always} plain onPress={() => void answerCloudAsk($, ask.id, ask.always)} /> : null}
-                <Button key={`cloud-ask-no-${ask.id}`} label="Decline" plain dimColor onPress={() => void answerCloudAsk($, ask.id, 'Decline')} />
+                {ask.preview ? <Markdown key={`cloud-ask-whole-${ask.id}`} text={ask.preview} /> : null}
+                <Box flexDirection="row" gap={1}>
+                  <Button key={`cloud-ask-once-${ask.id}`} label="Allow once" variant="primary" onPress={() => void answerCloudAsk($, ask.id, 'Allow once')} />
+                  {ask.always ? (
+                    <Button key={`cloud-ask-always-${ask.id}`} label={ask.always} plain onPress={() => void answerCloudAsk($, ask.id, ask.always)} />
+                  ) : null}
+                  <Button key={`cloud-ask-no-${ask.id}`} label="Decline" plain dimColor onPress={() => void answerCloudAsk($, ask.id, 'Decline')} />
+                </Box>
               </Box>
-            </Box>
             ),
           )}
           <Box flexDirection="row" gap={1} alignItems="center">
-            <Button key="cloud-home" label={cloudMove?.stage === 'home' ? 'Bringing it home…' : 'Bring home'} variant={cloudAsks.length ? 'secondary' : 'primary'} onPress={() => void bringHome($)} />
+            <Button
+              key="cloud-home"
+              label={cloudMove?.stage === 'home' ? 'Bringing it home…' : 'Bring home'}
+              variant={cloudAsks.length ? 'secondary' : 'primary'}
+              onPress={() => void bringHome($)}
+            />
             <Box flexShrink={1} minWidth={0}>
-              {cloudMove?.stage === 'failed' ? <Text color="error">{cloudMove.note ?? "Couldn't bring it home."}</Text> : <Text dimColor>Takes the session back here, with the cloud host's changes to your files.</Text>}
+              {cloudMove?.stage === 'failed' ? (
+                <Text color="error">{cloudMove.note ?? "Couldn't bring it home."}</Text>
+              ) : (
+                <Text dimColor>Takes the session back here, with the cloud host's changes to your files.</Text>
+              )}
             </Box>
           </Box>
         </Box>
@@ -12420,13 +13888,26 @@ export const register: Register = (on, options) => {
             <Box flexShrink={1} minWidth={0}>
               <Text>1. In a terminal, run claude setup-token and approve it in your browser.</Text>
             </Box>
-            <Button key="cloud-copy-command" label="Copy command" plain onPress={press => void copyText($, 'claude setup-token', 'Command copied: run it in a terminal', press.surface)} />
+            <Button
+              key="cloud-copy-command"
+              label="Copy command"
+              plain
+              onPress={press => void copyText($, 'claude setup-token', 'Command copied: run it in a terminal', press.surface)}
+            />
           </Box>
           <Text>2. Copy the token it prints, then press Use copied token.</Text>
-          <Text dimColor>The token stays on this computer and goes to the cloud host when you move; it's never shown. Teammates' prompts there use your Claude plan, and every call of theirs asks you first. Revoke it any time at claude.ai.</Text>
+          <Text dimColor>
+            The token stays on this computer and goes to the cloud host when you move; it's never shown. Teammates' prompts there use your Claude plan, and
+            every call of theirs asks you first. Revoke it any time at claude.ai.
+          </Text>
           {cloudMove.note ? <Text color="error">{cloudMove.note}</Text> : null}
           <Box flexDirection="row" gap={1}>
-            <Button key="cloud-use-token" label="Use copied token" variant="primary" onPress={() => void takeCopiedToken($).then(ok => (ok ? moveToCloud($) : undefined))} />
+            <Button
+              key="cloud-use-token"
+              label="Use copied token"
+              variant="primary"
+              onPress={() => void takeCopiedToken($).then(ok => (ok ? moveToCloud($) : undefined))}
+            />
             <Button key="cloud-cancel" label="Cancel" plain dimColor onPress={() => void update($, cloudMoveA, () => null)} />
           </Box>
         </Box>
@@ -12525,7 +14006,12 @@ export const register: Register = (on, options) => {
             </Text>
           </Box>
           <Box flexDirection="row" gap="xs" flexShrink={0}>
-            <Button key="room-copy" label={copied ? 'Copied ✓' : 'Copy link'} plain onPress={press => void copyLink($, room.url, press.surface).then(() => flashCopied($))} />
+            <Button
+              key="room-copy"
+              label={copied ? 'Copied ✓' : 'Copy link'}
+              plain
+              onPress={press => void copyLink($, room.url, press.surface).then(() => flashCopied($))}
+            />
             {isHost ? <Button key="room-invite" label="Invite" variant="primary" onPress={() => pick('people')} /> : null}
           </Box>
         </Box>
@@ -12553,7 +14039,15 @@ export const register: Register = (on, options) => {
               key="room-live"
               module="./live.tsx"
               flexGrow={1}
-              props={{ variant: 'room', who: { name: w.by, color: colorOf(w.by) }, mine: w.by === me, doing: w.doing ? doingLine(w.doing) : '', elapsedMs: Math.max(0, now - w.startedAt), claude: 'claude', modern }}
+              props={{
+                variant: 'room',
+                who: { name: w.by, color: colorOf(w.by) },
+                mine: w.by === me,
+                doing: w.doing ? doingLine(w.doing) : '',
+                elapsedMs: Math.max(0, now - w.startedAt),
+                claude: 'claude',
+                modern,
+              }}
             />
           </Box>
         ) : (
@@ -12592,7 +14086,11 @@ export const register: Register = (on, options) => {
         <Text color="warning">{`on ${p.version}, needs an update`}</Text>
       ) : (
         <Text dimColor wrap="truncate-end">
-          {[joined && !p.note?.includes('host') ? `joined ${ago(joined, now)}` : '', asked ? `${asked} prompt${asked === 1 ? '' : 's'}` : '', v.everyone.some(person => person.name === p.name && trustsPerson(trusted, person)) ? 'always allowed' : '']
+          {[
+            joined && !p.note?.includes('host') ? `joined ${ago(joined, now)}` : '',
+            asked ? `${asked} prompt${asked === 1 ? '' : 's'}` : '',
+            v.everyone.some(person => person.name === p.name && trustsPerson(trusted, person)) ? 'always allowed' : '',
+          ]
             .filter(Boolean)
             .join(' · ')}
         </Text>
@@ -12602,7 +14100,13 @@ export const register: Register = (on, options) => {
         <Box key={`person-${p.name}`} flexDirection="row" gap={1} alignItems="center" justifyContent="space-between">
           <Box flexDirection="row" gap={1} alignItems="center" flexShrink={1} minWidth={0}>
             {faceOf(el, e.surface, p, 22)}
-            <Text weight="semibold" color={p.online ? p.color : undefined} dimColor={!p.online} wrap="truncate-end" hover={{ scope: `person-${p.name}`, inverse: true }}>
+            <Text
+              weight="semibold"
+              color={p.online ? p.color : undefined}
+              dimColor={!p.online}
+              wrap="truncate-end"
+              hover={{ scope: `person-${p.name}`, inverse: true }}
+            >
               {` ${p.name} `}
             </Text>
             {roles(p) ? (
@@ -12613,13 +14117,25 @@ export const register: Register = (on, options) => {
           </Box>
           <Box flexShrink={0}>{doing}</Box>
           {/* Hovered: who they are, over the rows above; and @ to mention them. */}
-          <Box position="absolute" top={-4} left={4} display="none" hover={{ display: 'flex' }} flexDirection="column" borderStyle="round" borderColor={p.color} paddingX={1} backgroundColor="inverseText">
+          <Box
+            position="absolute"
+            top={-4}
+            left={4}
+            display="none"
+            hover={{ display: 'flex' }}
+            flexDirection="column"
+            borderStyle="round"
+            borderColor={p.color}
+            paddingX={1}
+            backgroundColor="inverseText"
+          >
             <Box flexDirection="row" gap={1}>
               <Text weight="semibold" color={p.color}>
                 {p.name}
               </Text>
               <Text size="caption" dimColor>
-                {[roles(p), joined && !p.note?.includes('host') ? `joined ${ago(joined, now)}` : ''].filter(Boolean).join(' · ') || (p.online ? 'here' : 'away')}
+                {[roles(p), joined && !p.note?.includes('host') ? `joined ${ago(joined, now)}` : ''].filter(Boolean).join(' · ') ||
+                  (p.online ? 'here' : 'away')}
               </Text>
             </Box>
             <Text size="footnote">{`${asked ? `${asked} prompt${asked === 1 ? '' : 's'}` : 'No prompts yet'}${v.working?.by === p.name ? ' · Claude is working for them' : ''}`}</Text>
@@ -12643,7 +14159,9 @@ export const register: Register = (on, options) => {
     const shownTeam = teamsNow?.teams.find(x => x.id === teamsNow.current) ?? null
     const inviteBlock = !isHost ? null : !teamsNow?.account ? (
       <Box flexDirection="row" gap={1} alignItems="center" justifyContent="space-between">
-        <Text dimColor wrap="truncate-end">Sign in to invite teammates into this session.</Text>
+        <Text dimColor wrap="truncate-end">
+          Sign in to invite teammates into this session.
+        </Text>
         <Button key="room-invite-signin" label="Team" plain onPress={() => void openTeam($)} />
       </Box>
     ) : mates.length ? (
@@ -12678,9 +14196,20 @@ export const register: Register = (on, options) => {
     ) : (
       <Box flexDirection="column" gap={1}>
         {headingOf(el, 'Invite teammates')}
-        <Text dimColor>{shownTeam ? `Nobody else is in ${shownTeam.name} yet. Send them its invite link; once they're in, invite them here.` : 'Make a team first, then invite teammates straight into this session.'}</Text>
+        <Text dimColor>
+          {shownTeam
+            ? `Nobody else is in ${shownTeam.name} yet. Send them its invite link; once they're in, invite them here.`
+            : 'Make a team first, then invite teammates straight into this session.'}
+        </Text>
         <Box flexDirection="row" gap={1}>
-          {shownTeam && teamsNow ? <Button key="room-team-invite" label="Copy team invite link" plain onPress={press => void copyText($, inviteUrl(teamsNow, shownTeam), 'Team invite link copied', press.surface)} /> : null}
+          {shownTeam && teamsNow ? (
+            <Button
+              key="room-team-invite"
+              label="Copy team invite link"
+              plain
+              onPress={press => void copyText($, inviteUrl(teamsNow, shownTeam), 'Team invite link copied', press.surface)}
+            />
+          ) : null}
           <Button key="room-open-team" label="Team" plain dimColor onPress={() => void openTeam($)} />
         </Box>
       </Box>
@@ -12689,7 +14218,10 @@ export const register: Register = (on, options) => {
     const stats: [string, string][] = [
       ['Turns', String(turns.length)],
       ['Tool calls', String(calls)],
-      ['Files changed', changes.length ? `${changes.length} · +${changes.reduce((n, c) => n + c.added, 0)} −${changes.reduce((n, c) => n + c.removed, 0)}` : '0'],
+      [
+        'Files changed',
+        changes.length ? `${changes.length} · +${changes.reduce((n, c) => n + c.added, 0)} −${changes.reduce((n, c) => n + c.removed, 0)}` : '0',
+      ],
       ...(longest ? [['Longest turn', took(longest)] as [string, string]] : []),
     ]
     const peoplePage = (
@@ -12724,11 +14256,22 @@ export const register: Register = (on, options) => {
           <Client
             key="timeline"
             module="./timeline.tsx"
-            props={{ turns: strip.map(t => ({ who: t.who, color: colorOf(t.who), prompt: t.prompt.slice(0, 200), seconds: t.ms === undefined ? null : Math.round(t.ms / 1000) })), claude: 'claude', modern }}
+            props={{
+              turns: strip.map(t => ({
+                who: t.who,
+                color: colorOf(t.who),
+                prompt: t.prompt.slice(0, 200),
+                seconds: t.ms === undefined ? null : Math.round(t.ms / 1000),
+              })),
+              claude: 'claude',
+              modern,
+            }}
           />
         ) : null}
         <Text size="footnote" dimColor>
-          {turns.length ? 'Hover a bar to read it; click it to go to that prompt, then ←/→ to walk.' : 'No turns yet. Every prompt shows here, in the color of whoever asked.'}
+          {turns.length
+            ? 'Hover a bar to read it; click it to go to that prompt, then ←/→ to walk.'
+            : 'No turns yet. Every prompt shows here, in the color of whoever asked.'}
         </Text>
         <Box flexDirection="column" gap="xs">
           {turns
@@ -12765,7 +14308,7 @@ export const register: Register = (on, options) => {
           {label(`${changes.length} file${changes.length === 1 ? '' : 's'} changed`)}
           <Text size="caption" tabular>
             <Text color="success">{`+${changes.reduce((n, c) => n + c.added, 0)}`}</Text>
-            <Text>{' '}</Text>
+            <Text> </Text>
             <Text color="error">{`−${changes.reduce((n, c) => n + c.removed, 0)}`}</Text>
           </Text>
         </Box>
@@ -12774,11 +14317,17 @@ export const register: Register = (on, options) => {
             <Box key={`change-${c.path}`} flexDirection="row" gap={1} alignItems="center" justifyContent="space-between">
               <Box flexDirection="row" gap={1} flexShrink={1} minWidth={0}>
                 <Text color={colorOf(c.who)}>▎</Text>
-                <Button key={`open-change-${c.path}`} label={c.path} plain dimColor={c.path !== opened?.path} onPress={() => void update($, changeOpenA, () => c.path)} />
+                <Button
+                  key={`open-change-${c.path}`}
+                  label={c.path}
+                  plain
+                  dimColor={c.path !== opened?.path}
+                  onPress={() => void update($, changeOpenA, () => c.path)}
+                />
               </Box>
               <Text size="caption" tabular>
                 <Text color="success">{`+${c.added}`}</Text>
-                <Text>{' '}</Text>
+                <Text> </Text>
                 <Text color="error">{`−${c.removed}`}</Text>
               </Text>
             </Box>
@@ -12842,9 +14391,18 @@ export const register: Register = (on, options) => {
     )
     const chatPage = (
       <Box flexDirection="column" gap={1}>
-        {lines.length ? lines.map((l, i) => (l.chat ? chatRow(l.chat, i) : l.event ? eventRow(l.event, i) : null)) : <Text dimColor>Nothing yet. Say hi: everyone here sees it, and Claude doesn't.</Text>}
+        {lines.length ? (
+          lines.map((l, i) => (l.chat ? chatRow(l.chat, i) : l.event ? eventRow(l.event, i) : null))
+        ) : (
+          <Text dimColor>Nothing yet. Say hi: everyone here sees it, and Claude doesn't.</Text>
+        )}
         {Input ? (
-          <Input key={`chat-input-${chat.length}`} placeholder="Message everyone (Claude doesn't read this)" submitLabel="Send" onSubmit={(value: string) => void postChat($, value)} />
+          <Input
+            key={`chat-input-${chat.length}`}
+            placeholder="Message everyone (Claude doesn't read this)"
+            submitLabel="Send"
+            onSubmit={(value: string) => void postChat($, value)}
+          />
         ) : (
           <Text dimColor>Chat from Claude Code on desktop or in a terminal.</Text>
         )}
@@ -12876,35 +14434,59 @@ export const register: Register = (on, options) => {
               <Box key={`shown-${item.key}`} flexDirection="column" gap={1}>
                 <Box flexDirection="row" gap={1} alignItems="center" justifyContent="space-between">
                   <Box flexDirection="row" gap={1} flexShrink={1} minWidth={0}>
-                    <Text color={item.closed ? undefined : 'claude'} dimColor={item.closed}>{shownGlyph(item)}</Text>
+                    <Text color={item.closed ? undefined : 'claude'} dimColor={item.closed}>
+                      {shownGlyph(item)}
+                    </Text>
                     <Text wrap="truncate-end" dimColor={item.closed}>{`${item.name}${item.closed ? ' · ended' : ''}`}</Text>
                   </Box>
                   <Box flexDirection="row" gap={1} alignItems="center" flexShrink={0}>
                     <Text dimColor>{ago(item.ts, now)}</Text>
-                    {!isHost && !item.closed && !usedBy && item.kind !== 'widget' && item.kind !== 'link' ? <Button key={`open-${item.key}`} label="Open" plain onPress={press => void openShown($, item, press.surface)} /> : null}
-                    {forwarded && !usedBy ? <Button key={`public-${item.key}`} label="Public link" plain onPress={press => void openPublicPreview($, item, press.surface)} /> : null}
-                    {isHost && item.kind === 'preview' && item.pid && !item.closed && !item.tcp ? <Button key={`forward-${item.key}`} label="Allow forwarding" plain dimColor onPress={() => void allowForwarding($, item)} /> : null}
-                    {isHost && item.kind === 'preview' && item.pid && !item.closed ? <Button key={`stop-${item.key}`} label="Stop" plain onPress={() => void stopPreview($, item.pid as string)} /> : null}
+                    {!isHost && !item.closed && !usedBy && item.kind !== 'widget' && item.kind !== 'link' ? (
+                      <Button key={`open-${item.key}`} label="Open" plain onPress={press => void openShown($, item, press.surface)} />
+                    ) : null}
+                    {forwarded && !usedBy ? (
+                      <Button key={`public-${item.key}`} label="Public link" plain onPress={press => void openPublicPreview($, item, press.surface)} />
+                    ) : null}
+                    {isHost && item.kind === 'preview' && item.pid && !item.closed && !item.tcp ? (
+                      <Button key={`forward-${item.key}`} label="Allow forwarding" plain dimColor onPress={() => void allowForwarding($, item)} />
+                    ) : null}
+                    {isHost && item.kind === 'preview' && item.pid && !item.closed ? (
+                      <Button key={`stop-${item.key}`} label="Stop" plain onPress={() => void stopPreview($, item.pid as string)} />
+                    ) : null}
                   </Box>
                 </Box>
-                {forwarded && item.dependency === undefined && validPort(item.port) && !local?.localPort ? <Text key={`address-${item.key}`} dimColor>{`Opens ${previewUrl(item.host, item.port, item.path, item.scheme)}${inWindow}`}</Text> : null}
+                {forwarded && item.dependency === undefined && validPort(item.port) && !local?.localPort ? (
+                  <Text key={`address-${item.key}`} dimColor>{`Opens ${previewUrl(item.host, item.port, item.path, item.scheme)}${inWindow}`}</Text>
+                ) : null}
                 {item.kind === 'preview' && !item.closed && item.tcp && item.dependency !== undefined && validPort(item.port) ? (
                   <Text key={`dependency-${item.key}`} dimColor>
                     {`${isHost ? 'Shared' : 'Used'} ${dependencyFor(item.dependency)}`}
                   </Text>
                 ) : null}
-                {forwarded && refusedHere.includes(item.pid!) ? <Text key={`refused-${item.key}`} color="warning">{`${room.host}'s side refused the preview window's connection. Press Open to reconnect.`}</Text> : null}
+                {forwarded && refusedHere.includes(item.pid!) ? (
+                  <Text
+                    key={`refused-${item.key}`}
+                    color="warning"
+                  >{`${room.host}'s side refused the preview window's connection. Press Open to reconnect.`}</Text>
+                ) : null}
                 {forwarded && local?.localPort ? (
                   <Box key={`mapping-${item.key}`} flexDirection="row" gap={1} alignItems="center" justifyContent="space-between">
                     <Box flexDirection="row" flexShrink={1} minWidth={0}>
-                      <Text dimColor wrap="truncate-end">{`${mapped ? '' : 'Last: '}localhost:${local.localPort} here → ${room.host}'s localhost:${item.port}`}</Text>
+                      <Text
+                        dimColor
+                        wrap="truncate-end"
+                      >{`${mapped ? '' : 'Last: '}localhost:${local.localPort} here → ${room.host}'s localhost:${item.port}`}</Text>
                     </Box>
                     <Box flexDirection="row" flexShrink={0}>
                       <Button key={`close-${item.key}`} label="Close" plain onPress={() => void closeLocalPreview($, item.pid as string)} />
                     </Box>
                   </Box>
                 ) : null}
-                {forwarded && active && run?.channelError ? <Text key={`connection-${item.key}`} color="warning">{run.channelError}</Text> : null}
+                {forwarded && active && run?.channelError ? (
+                  <Text key={`connection-${item.key}`} color="warning">
+                    {run.channelError}
+                  </Text>
+                ) : null}
               </Box>
             )
           })}
@@ -12930,7 +14512,13 @@ export const register: Register = (on, options) => {
       : null
     const liveUpdates = await read($, liveUpdatesA)
     const switchTo = liveUpdates === 'pinned' ? await switchCommand($) : ''
-    const updatesNote = switchTo ? null : updates && liveUpdates === 'running' ? 'This session updates itself: a release loads in place.' : updates && liveUpdates === 'next' ? 'From your next new session on, a release loads in place, no restart.' : null
+    const updatesNote = switchTo
+      ? null
+      : updates && liveUpdates === 'running'
+        ? 'This session updates itself: a release loads in place.'
+        : updates && liveUpdates === 'next'
+          ? 'From your next new session on, a release loads in place, no restart.'
+          : null
     const versionRow = await updateRow($, el, false)
     const settingsPage = (
       <Box flexDirection="column" gap={2}>
@@ -12996,7 +14584,12 @@ export const register: Register = (on, options) => {
             {(cloudSettings ? cloudTrusted : trusted).length ? (
               <Box flexDirection="row" gap={1} alignItems="center" justifyContent="space-between">
                 <Text dimColor wrap="truncate-end">{`Always allowed: ${listNames(cloudSettings ? cloudTrusted : [...new Set(trusted.map(t => t.who))])}`}</Text>
-                <Button key="untrust" label="Ask again" plain onPress={() => void (cloudSettings ? setCloudPolicy($, { untrust: true }) : update($, trustedA, () => []))} />
+                <Button
+                  key="untrust"
+                  label="Ask again"
+                  plain
+                  onPress={() => void (cloudSettings ? setCloudPolicy($, { untrust: true }) : update($, trustedA, () => []))}
+                />
               </Box>
             ) : null}
           </Box>
@@ -13038,7 +14631,10 @@ export const register: Register = (on, options) => {
           {paneRefused ? (
             <Box flexDirection="row" gap={1} alignItems="center" justifyContent="space-between">
               <Box flexShrink={1} minWidth={0}>
-                <Text dimColor>Auto mode doesn't let the plugin open previews in Claude's browser, so they open in your browser. Allowing it adds a rule to your settings that also lets your own Claude open pages in Claude's browser without auto mode's review.</Text>
+                <Text dimColor>
+                  Auto mode doesn't let the plugin open previews in Claude's browser, so they open in your browser. Allowing it adds a rule to your settings
+                  that also lets your own Claude open pages in Claude's browser without auto mode's review.
+                </Text>
               </Box>
               <Box flexShrink={0}>
                 <Button key="allow-pane" label="Allow previews in Claude" plain onPress={() => void allowPane($)} />
@@ -13125,9 +14721,17 @@ export const register: Register = (on, options) => {
           {switchTo ? (
             <Box flexDirection="row" gap={1} alignItems="center" justifyContent="space-between">
               <Box flexShrink={1} minWidth={0}>
-                <Text dimColor>Claude Desktop runs the copy installed from your local marketplace folder, so a release loads only when you quit and reopen it. Add the marketplace from GitHub to update in place.</Text>
+                <Text dimColor>
+                  Claude Desktop runs the copy installed from your local marketplace folder, so a release loads only when you quit and reopen it. Add the
+                  marketplace from GitHub to update in place.
+                </Text>
               </Box>
-              <Button key="copy-switch" label="Copy command" plain onPress={press => void copyText($, switchTo, 'Command copied: run it in a terminal, then quit and reopen Claude', press.surface)} />
+              <Button
+                key="copy-switch"
+                label="Copy command"
+                plain
+                onPress={press => void copyText($, switchTo, 'Command copied: run it in a terminal, then quit and reopen Claude', press.surface)}
+              />
             </Box>
           ) : updatesNote ? (
             <Text dimColor>{updatesNote}</Text>
@@ -13136,7 +14740,12 @@ export const register: Register = (on, options) => {
         {cloudMoveBlock}
         {isHost ? (
           <Box flexDirection="row" gap={1} alignItems="center">
-            <Button key="room-stop" label={v.confirming === 'stop' ? 'Stop for everyone' : 'Stop sharing'} variant={v.confirming === 'stop' ? 'primary' : 'secondary'} onPress={() => void confirmStop($)} />
+            <Button
+              key="room-stop"
+              label={v.confirming === 'stop' ? 'Stop for everyone' : 'Stop sharing'}
+              variant={v.confirming === 'stop' ? 'primary' : 'secondary'}
+              onPress={() => void confirmStop($)}
+            />
             {v.confirming === 'stop' ? <Text color="error">Press again to end the room. The link stops working.</Text> : null}
           </Box>
         ) : (
@@ -13153,7 +14762,17 @@ export const register: Register = (on, options) => {
         {cloudBlock}
         {approvalBlock ?? nowBlock}
         {tabs}
-        {tab === 'chat' ? chatPage : tab === 'timeline' ? timelinePage : tab === 'changes' ? changesPage : tab === 'shown' ? shownPage : tab === 'settings' ? settingsPage : peoplePage}
+        {tab === 'chat'
+          ? chatPage
+          : tab === 'timeline'
+            ? timelinePage
+            : tab === 'changes'
+              ? changesPage
+              : tab === 'shown'
+                ? shownPage
+                : tab === 'settings'
+                  ? settingsPage
+                  : peoplePage}
       </Box>,
       modern,
     )
@@ -13208,7 +14827,14 @@ export const register: Register = (on, options) => {
           ],
           [
             // No Join while this session's own room is being taken back (its first 10 s).
-            takingBackNow() ? null : <Button key="invite-join" label="Join" variant="primary" onPress={press => void joinInvited($, invite, press.surface).catch(error => $.ui.toast(`Couldn't join: ${String(error?.message ?? error)}`))} />,
+            takingBackNow() ? null : (
+              <Button
+                key="invite-join"
+                label="Join"
+                variant="primary"
+                onPress={press => void joinInvited($, invite, press.surface).catch(error => $.ui.toast(`Couldn't join: ${String(error?.message ?? error)}`))}
+              />
+            ),
             <Button key="invite-dismiss" label="Dismiss" plain dimColor onPress={() => void dropInvite($, invite.room.id)} />,
           ],
         )
@@ -13223,12 +14849,7 @@ export const register: Register = (on, options) => {
       return (
         <Box flexDirection="row" justifyContent="flex-end" gap={1} paddingRight={e.surface === 'terminal' ? 4 : 0}>
           <Button key="team" label={live ? `Team · ${live} live` : 'Team'} plain dimColor={!live} onPress={() => void openTeam($)}>
-            {live
-              ? [
-                  <Text key="name">Team </Text>,
-                  <Text key="count" bold color="claude">{`● ${live} live`}</Text>,
-                ]
-              : null}
+            {live ? [<Text key="name">Team </Text>, <Text key="count" bold color="claude">{`● ${live} live`}</Text>] : null}
           </Button>
           {leaving ? null : (
             <Button
@@ -13247,7 +14868,10 @@ export const register: Register = (on, options) => {
       )
     }
 
-    const colors = roomColors(v.everyone, (await read($, chatA)).map(c => c.who))
+    const colors = roomColors(
+      v.everyone,
+      (await read($, chatA)).map(c => c.who),
+    )
     const people = faces(v, colors)
     const isHost = v.mode === 'host'
     const live = v.connection === 'live'
@@ -13338,7 +14962,9 @@ export const register: Register = (on, options) => {
         [
           ...(cloudAsk.extent ? [<Button key="cloud-whole" label={cloudAsk.extent} plain dimColor onPress={() => void openRoom($)} />] : []),
           <Button key="cloud-once" label="Allow once" variant="primary" onPress={() => void answerCloudAsk($, cloudAsk.id, 'Allow once')} />,
-          ...(cloudAsk.always ? [<Button key="cloud-always" label={cloudAsk.always} plain onPress={() => void answerCloudAsk($, cloudAsk.id, cloudAsk.always)} />] : []),
+          ...(cloudAsk.always
+            ? [<Button key="cloud-always" label={cloudAsk.always} plain onPress={() => void answerCloudAsk($, cloudAsk.id, cloudAsk.always)} />]
+            : []),
           <Button key="cloud-no" label="Decline" plain dimColor onPress={() => void answerCloudAsk($, cloudAsk.id, 'Decline')} />,
         ],
       )
@@ -13348,26 +14974,30 @@ export const register: Register = (on, options) => {
     // window asking): below a teammate's approval, the row while it lasts.
     const hostAsk = isHost && !stopping ? await read($, hostAskA) : null
     if (hostAsk) {
-      const who = hostAsk.kind === 'need' ? hostAsk.who ?? 'A guest' : ''
-      const color = who ? colors.get(who) ?? colorFor(who) : undefined
+      const who = hostAsk.kind === 'need' ? (hostAsk.who ?? 'A guest') : ''
+      const color = who ? (colors.get(who) ?? colorFor(who)) : undefined
       const words = hostAskWords(hostAsk)
       return row(
         [
           // A terminal says Reconnecting here by its dot alone: the words
           // keep at least the 41 columns of an 80-column row (`ASK_PORTS`),
           // so no port a yes forwards is cut.
-          e.surface === 'terminal' && !live ? <Text key="live" bold color="warning">●</Text> : liveMark,
+          e.surface === 'terminal' && !live ? (
+            <Text key="live" bold color="warning">
+              ●
+            </Text>
+          ) : (
+            liveMark
+          ),
           <Text key="what" wrap="truncate-end">
-            {who && words.startsWith(who) ? (
-              [
-                <Text key="who" bold color={color}>
-                  {who}
-                </Text>,
-                <Text key="rest">{words.slice(who.length)}</Text>,
-              ]
-            ) : (
-              words
-            )}
+            {who && words.startsWith(who)
+              ? [
+                  <Text key="who" bold color={color}>
+                    {who}
+                  </Text>,
+                  <Text key="rest">{words.slice(who.length)}</Text>,
+                ]
+              : words}
           </Text>,
         ],
         [
@@ -13393,7 +15023,15 @@ export const register: Register = (on, options) => {
             key="band-live"
             module="./live.tsx"
             flexGrow={1}
-            props={{ variant: 'band', who: { name: w.by, color: colors.get(w.by) ?? colorFor(w.by) }, mine: v.mode === 'guest' && w.by === (await meIn($, v.room!)), doing: w.doing ? doingLine(w.doing) : '', elapsedMs: Math.max(0, (await $.clock.now()) - w.startedAt), claude: 'claude', modern }}
+            props={{
+              variant: 'band',
+              who: { name: w.by, color: colors.get(w.by) ?? colorFor(w.by) },
+              mine: v.mode === 'guest' && w.by === (await meIn($, v.room!)),
+              doing: w.doing ? doingLine(w.doing) : '',
+              elapsedMs: Math.max(0, (await $.clock.now()) - w.startedAt),
+              claude: 'claude',
+              modern,
+            }}
           />
         </Box>
       ) : null
@@ -13403,66 +15041,71 @@ export const register: Register = (on, options) => {
     // room): a button in the row, in place of the two it can spare.
     const invites = stopping ? [] : await read($, invitesA)
     const invite = invites[0]
-    return fit(row(
-      [
-        liveMark,
-        Svg ? (
-          <Svg key="faces" source={stack.source} alt={`With ${people.map(p => p.name).join(', ')}`} width={stack.width} height={24} />
-        ) : (
-          // A terminal: a dot per person, in their colors.
-          <Text key="faces">
-            {people.slice(0, 8).map(p => (
-              <Text key={p.name} color={p.color}>
-                {p.online ? '●' : '○'}
-              </Text>
-            ))}
-          </Text>
-        ),
-        <Text key="what" bold wrap="truncate-end">
-          {isHost ? (v.room?.team ? `Sharing with ${v.room.team.name}` : 'Sharing') : `${v.room?.host}'s session`}
-        </Text>,
-        stopping ? (
-          <Text key="now" color="error" wrap="truncate-end">
-            Press again to end the room for everyone
-          </Text>
-        ) : (
-          (ticking ?? nowOf(el, v, colors))
-        ),
-      ],
-      [
-        invite ? (
-          <Button key="invite-open" label={`${invite.from.name} invites you${invites.length > 1 ? ` · ${invites.length}` : ''}`} plain onPress={() => void openTeam($, 'live')}>
-            {[
-              <Text key="who" bold color={colorFor(invite.from.name)}>
-                {invite.from.name}
-              </Text>,
-              <Text key="what" color="claude">{` invites you${invites.length > 1 ? ` · ${invites.length}` : ''}`}</Text>,
-            ]}
-          </Button>
-        ) : null,
-        pin ? <Button key="band-allow-pin" label="Pin" plain onPress={() => void allowDeskTools($)} /> : null,
-        openable ? <Button key="open-preview" label="Open preview" plain onPress={press => void openShown($, openable, press.surface)} /> : null,
-        signedIn && !stopping && !invite ? <Button key="invite" label="Invite" plain onPress={() => void openRoom($, 'people')} /> : null,
-        isHost && !stopping && !invite ? <Button key="copy" label="Copy link" plain dimColor onPress={press => void (v.room ? copyLink($, v.room.url, press.surface) : undefined)} /> : null,
-        <Button key="room" label={roomLabel} plain dimColor={!v.unread} onPress={() => void openRoom($)}>
-          {v.unread
-            ? [
-                <Text key="name">Room </Text>,
-                <Text key="count" bold color="claude">{`● ${v.unread} new`}</Text>,
-              ]
-            : null}
-        </Button>,
-        isHost ? (
-          stopping ? (
-            <Button key="stop-sharing" label="Stop for everyone?" variant="primary" onPress={() => void confirmStop($)} />
+    return fit(
+      row(
+        [
+          liveMark,
+          Svg ? (
+            <Svg key="faces" source={stack.source} alt={`With ${people.map(p => p.name).join(', ')}`} width={stack.width} height={24} />
           ) : (
-            <Button key="stop-sharing" label="Stop sharing" plain dimColor onPress={() => void confirmStop($)} />
-          )
-        ) : (
-          <Button key="leave" label="Leave" plain dimColor onPress={() => void closeRoom($, 'leave')} />
-        ),
-      ],
-    ), modern)
+            // A terminal: a dot per person, in their colors.
+            <Text key="faces">
+              {people.slice(0, 8).map(p => (
+                <Text key={p.name} color={p.color}>
+                  {p.online ? '●' : '○'}
+                </Text>
+              ))}
+            </Text>
+          ),
+          <Text key="what" bold wrap="truncate-end">
+            {isHost ? (v.room?.team ? `Sharing with ${v.room.team.name}` : 'Sharing') : `${v.room?.host}'s session`}
+          </Text>,
+          stopping ? (
+            <Text key="now" color="error" wrap="truncate-end">
+              Press again to end the room for everyone
+            </Text>
+          ) : (
+            (ticking ?? nowOf(el, v, colors))
+          ),
+        ],
+        [
+          invite ? (
+            <Button
+              key="invite-open"
+              label={`${invite.from.name} invites you${invites.length > 1 ? ` · ${invites.length}` : ''}`}
+              plain
+              onPress={() => void openTeam($, 'live')}
+            >
+              {[
+                <Text key="who" bold color={colorFor(invite.from.name)}>
+                  {invite.from.name}
+                </Text>,
+                <Text key="what" color="claude">{` invites you${invites.length > 1 ? ` · ${invites.length}` : ''}`}</Text>,
+              ]}
+            </Button>
+          ) : null,
+          pin ? <Button key="band-allow-pin" label="Pin" plain onPress={() => void allowDeskTools($)} /> : null,
+          openable ? <Button key="open-preview" label="Open preview" plain onPress={press => void openShown($, openable, press.surface)} /> : null,
+          signedIn && !stopping && !invite ? <Button key="invite" label="Invite" plain onPress={() => void openRoom($, 'people')} /> : null,
+          isHost && !stopping && !invite ? (
+            <Button key="copy" label="Copy link" plain dimColor onPress={press => void (v.room ? copyLink($, v.room.url, press.surface) : undefined)} />
+          ) : null,
+          <Button key="room" label={roomLabel} plain dimColor={!v.unread} onPress={() => void openRoom($)}>
+            {v.unread ? [<Text key="name">Room </Text>, <Text key="count" bold color="claude">{`● ${v.unread} new`}</Text>] : null}
+          </Button>,
+          isHost ? (
+            stopping ? (
+              <Button key="stop-sharing" label="Stop for everyone?" variant="primary" onPress={() => void confirmStop($)} />
+            ) : (
+              <Button key="stop-sharing" label="Stop sharing" plain dimColor onPress={() => void confirmStop($)} />
+            )
+          ) : (
+            <Button key="leave" label="Leave" plain dimColor onPress={() => void closeRoom($, 'leave')} />
+          ),
+        ],
+      ),
+      modern,
+    )
   })
 }
 
@@ -13491,7 +15134,13 @@ function whoCard(el: UI, surface: RenderSurface, v: View, turns: ShareTurn[], no
   const stack = stackSvg(here, { size: 24, max: 7 })
   const asked = (name: string) => turns.filter(t => t.who === name).length
   const doing = (p: Face) =>
-    v.working?.by === p.name ? 'Claude is working for them' : !p.online ? 'away' : [p.note?.includes('host') ? 'hosting' : 'here', asked(p.name) ? `${asked(p.name)} prompt${asked(p.name) === 1 ? '' : 's'}` : ''].filter(Boolean).join(' · ')
+    v.working?.by === p.name
+      ? 'Claude is working for them'
+      : !p.online
+        ? 'away'
+        : [p.note?.includes('host') ? 'hosting' : 'here', asked(p.name) ? `${asked(p.name)} prompt${asked(p.name) === 1 ? '' : 's'}` : '']
+            .filter(Boolean)
+            .join(' · ')
   return (
     <Box flexDirection="column" gap="sm" borderStyle="round" borderDimColor paddingX={1}>
       <Box flexDirection="row" alignItems="center" gap={1}>

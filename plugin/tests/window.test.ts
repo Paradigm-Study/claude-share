@@ -62,7 +62,14 @@ test('macOS opens a new instance of the app; Linux and a bare binary start detac
   const flags = ['--new-window', 'http://localhost:3000/']
   expect(launchArgv('darwin', '/Applications/Google Chrome.app', flags)).toEqual(['open', '-n', '-a', '/Applications/Google Chrome.app', '--args', ...flags])
   // A binary inside a bundle opens as its bundle, so -n applies.
-  expect(launchArgv('darwin', '/Applications/Brave Browser.app/Contents/MacOS/Brave Browser', flags)).toEqual(['open', '-n', '-a', '/Applications/Brave Browser.app', '--args', ...flags])
+  expect(launchArgv('darwin', '/Applications/Brave Browser.app/Contents/MacOS/Brave Browser', flags)).toEqual([
+    'open',
+    '-n',
+    '-a',
+    '/Applications/Brave Browser.app',
+    '--args',
+    ...flags,
+  ])
   expect(launchArgv('linux', '/usr/bin/google-chrome', flags)).toEqual(['/bin/sh', '-c', DETACHED, 'sh', '/usr/bin/google-chrome', ...flags])
   expect(launchArgv('darwin', '/opt/chromium/chrome', flags)[0]).toBe('/bin/sh')
   expect(DETACHED).toContain('setsid -f "$@"')
@@ -91,14 +98,22 @@ test('browsers are named as people say them', () => {
 })
 
 test('Firefox and the browsers built on it are told apart from Chromium, and a browser of neither kind is neither', () => {
-  for (const path of ['/Applications/Firefox.app', '/Applications/Firefox Nightly.app/Contents/MacOS/firefox', '/usr/bin/firefox-esr', '/usr/lib/librewolf/librewolf']) expect(browserFamily(path)).toBe('firefox')
-  for (const path of ['/Applications/Google Chrome.app', '/usr/bin/chromium', '/usr/bin/vivaldi', '/Applications/Opera.app', '/opt/brave/brave']) expect(browserFamily(path)).toBe('chromium')
+  for (const path of [
+    '/Applications/Firefox.app',
+    '/Applications/Firefox Nightly.app/Contents/MacOS/firefox',
+    '/usr/bin/firefox-esr',
+    '/usr/lib/librewolf/librewolf',
+  ])
+    expect(browserFamily(path)).toBe('firefox')
+  for (const path of ['/Applications/Google Chrome.app', '/usr/bin/chromium', '/usr/bin/vivaldi', '/Applications/Opera.app', '/opt/brave/brave'])
+    expect(browserFamily(path)).toBe('chromium')
   // What its files say decides: a Gecko version is Firefox's kind, whatever the name.
   expect(browserFamily('/Applications/Zen.app', { gecko: 158 })).toBe('firefox')
   expect(browserFamily('/Applications/Mullvad Browser.app', { gecko: 140 })).toBe('firefox')
   expect(browserFamily('/Applications/Arc.app', { family: 'chromium' })).toBe('chromium')
   // Neither by its files nor its name: no window (as the other kind it could open the person's own profile).
-  for (const path of ['/Applications/Safari.app', '/Applications/Zen.app', '/Applications/Tor Browser.app', '/usr/bin/epiphany']) expect(browserFamily(path)).toBeNull()
+  for (const path of ['/Applications/Safari.app', '/Applications/Zen.app', '/Applications/Tor Browser.app', '/usr/bin/epiphany'])
+    expect(browserFamily(path)).toBeNull()
 })
 
 test("a Firefox window's flags: its own profile, whose window alone takes the address, then the address", () => {
@@ -129,7 +144,12 @@ test("a Firefox window's settings send everything through its proxy, localhost t
     'app.shield.optoutstudies.enabled': false,
   })
   // Every line is a setting or the header; nothing else gets in.
-  expect(text.split('\n').filter(Boolean).every(line => line.startsWith('user_pref(') || line.startsWith('// shared-session:'))).toBe(true)
+  expect(
+    text
+      .split('\n')
+      .filter(Boolean)
+      .every(line => line.startsWith('user_pref(') || line.startsWith('// shared-session:')),
+  ).toBe(true)
   expect(Object.keys(prefs)).toHaveLength(FIREFOX_PREFS.length + 2)
   const write = firefoxProfileScript(PROFILE, 47100)
   expect(write.startsWith('# shared-session: settings for a preview window')).toBe(true)
@@ -157,12 +177,20 @@ test('detection says the platform and a browser, never a snap one', () => {
   expect(script).toContain('Milestone=')
   expect(script).toContain('*Framework.framework')
   expect(script).toContain('resources.pak')
-  expect(script).toContain("s/^Mozilla Firefox ")
+  expect(script).toContain('s/^Mozilla Firefox ')
   // A binary inside an app is read as that app (its Resources, its Frameworks).
   expect(script).toContain('*.app|*.app/|*.app/Contents/MacOS/*)')
   expect(script).toContain('firefox|firefox-*)')
-  expect(parseDetect('platform=Darwin\nbrowser=/Applications/Firefox.app\ngecko=158\n')).toEqual({ platform: 'darwin', browser: '/Applications/Firefox.app', gecko: 158 })
-  expect(parseDetect('platform=Darwin\nbrowser=/Applications/Google Chrome.app\nchromium=1\n')).toEqual({ platform: 'darwin', browser: '/Applications/Google Chrome.app', family: 'chromium' })
+  expect(parseDetect('platform=Darwin\nbrowser=/Applications/Firefox.app\ngecko=158\n')).toEqual({
+    platform: 'darwin',
+    browser: '/Applications/Firefox.app',
+    gecko: 158,
+  })
+  expect(parseDetect('platform=Darwin\nbrowser=/Applications/Google Chrome.app\nchromium=1\n')).toEqual({
+    platform: 'darwin',
+    browser: '/Applications/Google Chrome.app',
+    family: 'chromium',
+  })
   expect(parseDetect('platform=Linux\nbrowser=/usr/bin/firefox\ngecko=x\n')).toEqual({ platform: 'linux', browser: '/usr/bin/firefox' })
   expect(parseDetect('platform=Darwin\nbrowser=/Applications/Google Chrome.app\n')).toEqual({ platform: 'darwin', browser: '/Applications/Google Chrome.app' })
   expect(parseDetect('platform=Linux\nbrowser=/usr/bin/chromium\n')).toEqual({ platform: 'linux', browser: '/usr/bin/chromium' })
@@ -193,10 +221,17 @@ test("detection lists every browser found, and on macOS says which is the person
   // One binary under two names (google-chrome, google-chrome-stable) once.
   expect(script).toContain('case "|$seen|" in *"|$r|"*) continue;; esac; seen="$seen|$r"')
   // A test's own folders in place of /Applications and ~/Applications, quoted.
-  expect(detectScript('', ["/tmp/a b", "/tmp/x'y"])).toContain(`for d in ${shellQuote('/tmp/a b')} ${shellQuote("/tmp/x'y")}; do`)
+  expect(detectScript('', ['/tmp/a b', "/tmp/x'y"])).toContain(`for d in ${shellQuote('/tmp/a b')} ${shellQuote("/tmp/x'y")}; do`)
   expect(script).toContain('for d in /Applications "$HOME/Applications"; do')
-  const out = 'platform=Darwin\nbrowser=/Applications/Google Chrome.app\nchromium=1\ndefault=1\nbrowser=/Applications/Firefox.app\ngecko=158\nbrowser=/snap/bin/x\ngecko=150\n'
-  expect(detectedBrowsers(out)).toEqual({ platform: 'darwin', candidates: [{ browser: '/Applications/Google Chrome.app', family: 'chromium', isDefault: true }, { browser: '/Applications/Firefox.app', gecko: 158 }] })
+  const out =
+    'platform=Darwin\nbrowser=/Applications/Google Chrome.app\nchromium=1\ndefault=1\nbrowser=/Applications/Firefox.app\ngecko=158\nbrowser=/snap/bin/x\ngecko=150\n'
+  expect(detectedBrowsers(out)).toEqual({
+    platform: 'darwin',
+    candidates: [
+      { browser: '/Applications/Google Chrome.app', family: 'chromium', isDefault: true },
+      { browser: '/Applications/Firefox.app', gecko: 158 },
+    ],
+  })
   expect(detectedBrowsers('platform=Linux\ngecko=158\n')).toEqual({ platform: 'linux', candidates: [] })
   expect(detectedBrowsers('platform=Plan9\nbrowser=/bin/x\n')).toEqual({ platform: 'unsupported', candidates: [] })
   expect(parseDetect(out)).toEqual({ platform: 'darwin', browser: '/Applications/Firefox.app', gecko: 158 })
@@ -223,10 +258,22 @@ test("the window's browser is the first that can open one, one that isn't the de
   expect(pickBrowser([safari])).toBe(safari)
   expect(pickBrowser([])).toBeNull()
   // Linux: the path's fit counts only there.
-  expect(parseDetect('platform=Linux\nbrowser=/usr/bin/firefox\ngecko=158\nbrowser=/usr/bin/vivaldi\n', false)).toEqual({ platform: 'linux', browser: '/usr/bin/vivaldi' })
-  expect(parseDetect('platform=Darwin\nbrowser=/Applications/Firefox.app\ngecko=158\nbrowser=/Applications/Vivaldi.app\n', false)).toEqual({ platform: 'darwin', browser: '/Applications/Firefox.app', gecko: 158 })
+  expect(parseDetect('platform=Linux\nbrowser=/usr/bin/firefox\ngecko=158\nbrowser=/usr/bin/vivaldi\n', false)).toEqual({
+    platform: 'linux',
+    browser: '/usr/bin/vivaldi',
+  })
+  expect(parseDetect('platform=Darwin\nbrowser=/Applications/Firefox.app\ngecko=158\nbrowser=/Applications/Vivaldi.app\n', false)).toEqual({
+    platform: 'darwin',
+    browser: '/Applications/Firefox.app',
+    gecko: 158,
+  })
   expect(parseDetect('platform=Linux\nbrowser=/usr/bin/firefox\ngecko=158\n', false)).toEqual({ platform: 'linux', browser: '/usr/bin/firefox', gecko: 158 })
-  expect(parseDetect('platform=Darwin\nbrowser=/Applications/Google Chrome.app\nchromium=1\ndefault=1\n')).toEqual({ platform: 'darwin', browser: '/Applications/Google Chrome.app', family: 'chromium', isDefault: true })
+  expect(parseDetect('platform=Darwin\nbrowser=/Applications/Google Chrome.app\nchromium=1\ndefault=1\n')).toEqual({
+    platform: 'darwin',
+    browser: '/Applications/Google Chrome.app',
+    family: 'chromium',
+    isDefault: true,
+  })
 })
 
 test("a room's profile is named by a hash of its server, its id and the session's lasting place", async () => {
@@ -279,11 +326,22 @@ test("a Firefox window is the process holding its profile's lock, its proxy port
   expect(windowOf(`pid=5151\nport=47100\n${command}\n`, PROFILE)).toEqual({ pid: 5151, port: 47100, family: 'firefox' })
   expect(windowOf(`pid=5151\nport=\n${command}\n`, PROFILE)).toEqual({ pid: 5151, port: null, family: 'firefox' })
   // Ending the command line, too.
-  expect(windowOf(`pid=5151\nport=47100\n/usr/lib/firefox/firefox -profile ${PROFILE}/firefox\n`, PROFILE)).toEqual({ pid: 5151, port: 47100, family: 'firefox' })
+  expect(windowOf(`pid=5151\nport=47100\n/usr/lib/firefox/firefox -profile ${PROFILE}/firefox\n`, PROFILE)).toEqual({
+    pid: 5151,
+    port: 47100,
+    family: 'firefox',
+  })
   // One of its child processes (Linux's -contentproc; macOS's plugin-container, which carries -profile too), or a Firefox on another profile, isn't the window.
   expect(windowOf(`pid=5152\nport=47100\n/usr/lib/firefox/firefox -contentproc -profile ${PROFILE}/firefox -childID 1 tab\n`, PROFILE)).toBeNull()
-  expect(windowOf(`pid=5153\nport=47100\n/Applications/Firefox.app/Contents/MacOS/plugin-container.app/Contents/MacOS/plugin-container -isForBrowser -prefsLen 31000 -parentBuildID 20261001000000 -profile ${PROFILE}/firefox 5151 tab\n`, PROFILE)).toBeNull()
-  expect(windowOf(`pid=5154\nport=47100\n/Applications/Firefox.app/Contents/MacOS/firefox -parentBuildID 20261001000000 -profile ${PROFILE}/firefox gpu\n`, PROFILE)).toBeNull()
+  expect(
+    windowOf(
+      `pid=5153\nport=47100\n/Applications/Firefox.app/Contents/MacOS/plugin-container.app/Contents/MacOS/plugin-container -isForBrowser -prefsLen 31000 -parentBuildID 20261001000000 -profile ${PROFILE}/firefox 5151 tab\n`,
+      PROFILE,
+    ),
+  ).toBeNull()
+  expect(
+    windowOf(`pid=5154\nport=47100\n/Applications/Firefox.app/Contents/MacOS/firefox -parentBuildID 20261001000000 -profile ${PROFILE}/firefox gpu\n`, PROFILE),
+  ).toBeNull()
   expect(windowOf(`pid=5151\nport=47100\n/usr/lib/firefox/firefox -profile ${PROFILE}-old/firefox http://localhost:3000/\n`, PROFILE)).toBeNull()
   // Cleaning up asks the same of every profile it would remove.
   const gc = gcScript('/home/scott/.claude/shared-session/browser', '')
@@ -337,7 +395,11 @@ test("a Chromium window's WebRTC goes only through the proxy: its profile's own 
   const policy = { ip_handling_policy: 'disable_non_proxied_udp' }
   expect(JSON.parse(chromePrefs(null)!)).toEqual({ webrtc: policy })
   const used = JSON.stringify({ profile: { name: 'Person 1' }, webrtc: { multiple_routes_enabled: false }, intl: { selected_languages: 'en' } })
-  expect(JSON.parse(chromePrefs(used)!)).toEqual({ profile: { name: 'Person 1' }, webrtc: { multiple_routes_enabled: false, ...policy }, intl: { selected_languages: 'en' } })
+  expect(JSON.parse(chromePrefs(used)!)).toEqual({
+    profile: { name: 'Person 1' },
+    webrtc: { multiple_routes_enabled: false, ...policy },
+    intl: { selected_languages: 'en' },
+  })
   expect(chromePrefs(JSON.stringify({ webrtc: policy, x: 1 }))).toBeNull()
   // A file that isn't an object of JSON is one Chrome would set aside: just the setting.
   for (const broken of ['{', '[]', 'null', '"text"']) expect(JSON.parse(chromePrefs(broken)!)).toEqual({ webrtc: policy })
@@ -349,9 +411,12 @@ test("a Chromium window's WebRTC goes only through the proxy: its profile's own 
 })
 
 // The glob in `case` as a regular expression: only bracket classes and plain characters appear in it.
-const globRegex = (glob: string) => new RegExp(`^${glob.replace(/\[([^\]]+)\]|([^[])/g, (_, set: string | undefined, ch: string | undefined) => (set ? `[${set.replace(/[\\^\]-]/g, '\\$&')}]` : ch!.replace(/[.*+?^${}()|\\/]/g, '\\$&')))}$`)
+const globRegex = (glob: string) =>
+  new RegExp(
+    `^${glob.replace(/\[([^\]]+)\]|([^[])/g, (_, set: string | undefined, ch: string | undefined) => (set ? `[${set.replace(/[\\^\]-]/g, '\\$&')}]` : ch!.replace(/[.*+?^${}()|\\/]/g, '\\$&')))}$`,
+  )
 
-test("cleaning up touches only what the plugin makes there: .trash-*, 16-hex-digit profiles and h- ones", () => {
+test('cleaning up touches only what the plugin makes there: .trash-*, 16-hex-digit profiles and h- ones', () => {
   const gc = gcScript('/home/scott/.claude/shared-session/browser', '0123456789abcdef')
   const lines = gc.split('\n')
   const filter = lines.findIndex(line => line.includes('case "$n" in'))
@@ -361,34 +426,52 @@ test("cleaning up touches only what the plugin makes there: .trash-*, 16-hex-dig
   expect(filter).toBeLessThan(remove)
   expect(lines[filter]!.trim()).toBe(`case "$n" in ${PROFILE_GLOB}) m=1440;; ${HOST_PROFILE_GLOB}) m=43200;; *) continue;; esac`)
   // Every rm in the script removes trash or a folder past that check, nothing else.
-  expect(lines.filter(line => line.includes('rm -rf')).map(line => line.trim())).toEqual(['for d in "$b"/.trash-*; do [ -e "$d" ] && rm -rf "$d"; done', 'rm -rf "$d"'])
+  expect(lines.filter(line => line.includes('rm -rf')).map(line => line.trim())).toEqual([
+    'for d in "$b"/.trash-*; do [ -e "$d" ] && rm -rf "$d"; done',
+    'rm -rf "$d"',
+  ])
   const profile = globRegex(PROFILE_GLOB)
   for (const name of ['0123456789abcdef', 'ffffffffffffffff', '00000000000000a9']) expect(profile.test(name)).toBe(true)
-  for (const name of ['my-notes', 'ABCDEF0123456789x', '0123456789abcdef0', 'ABCDEF0123456789', '0123456789abcde', '0123456789abcdeg', '.trash-0123456789abcdef', '0123456789abcde-']) expect(profile.test(name)).toBe(false)
+  for (const name of [
+    'my-notes',
+    'ABCDEF0123456789x',
+    '0123456789abcdef0',
+    'ABCDEF0123456789',
+    '0123456789abcde',
+    '0123456789abcdeg',
+    '.trash-0123456789abcdef',
+    '0123456789abcde-',
+  ])
+    expect(profile.test(name)).toBe(false)
   const host = globRegex(HOST_PROFILE_GLOB)
   expect(host.test('h-0123456789abcdef')).toBe(true)
-  for (const name of ['h-0123456789abcde', 'h-0123456789abcdef0', 'H-0123456789abcdef', 'hh-0123456789abcdef', 'h_0123456789abcdef', '0123456789abcdef']) expect(host.test(name)).toBe(false)
+  for (const name of ['h-0123456789abcde', 'h-0123456789abcdef0', 'H-0123456789abcdef', 'hh-0123456789abcdef', 'h_0123456789abcdef', '0123456789abcdef'])
+    expect(host.test(name)).toBe(false)
 })
 
 test("a window's two settings files are written by one private writer: a private folder, a new file renamed over the old", () => {
   // Each says what it writes on its first line (the shell's own name for it), then the same steps.
-  const steps = (what: string, dir: string, name: string, text: string) => [
-    `# shared-session: ${what}`,
-    'umask 077',
-    `f=${shellQuote(dir)}`,
-    'mkdir -p "$f" && chmod 700 "$f" || exit 1',
-    `t="$f/.${name}.$$"`,
-    `printf '%s' ${shellQuote(text)} > "$t" && mv -f "$t" "$f/${name}" || { rm -f "$t"; exit 1; }`,
-    '',
-  ].join('\n')
+  const steps = (what: string, dir: string, name: string, text: string) =>
+    [
+      `# shared-session: ${what}`,
+      'umask 077',
+      `f=${shellQuote(dir)}`,
+      'mkdir -p "$f" && chmod 700 "$f" || exit 1',
+      `t="$f/.${name}.$$"`,
+      `printf '%s' ${shellQuote(text)} > "$t" && mv -f "$t" "$f/${name}" || { rm -f "$t"; exit 1; }`,
+      '',
+    ].join('\n')
   expect(firefoxProfileScript(PROFILE, 47100)).toBe(steps('settings for a preview window', `${PROFILE}/firefox`, 'user.js', firefoxUserJs(47100)))
-  expect(chromePrefsScript(PROFILE, '{"webrtc":{}}')).toBe(steps('chrome preferences for a preview window', `${PROFILE}/chrome/Default`, 'Preferences', '{"webrtc":{}}'))
+  expect(chromePrefsScript(PROFILE, '{"webrtc":{}}')).toBe(
+    steps('chrome preferences for a preview window', `${PROFILE}/chrome/Default`, 'Preferences', '{"webrtc":{}}'),
+  )
   // What it writes is quoted: a profile path or settings text can't run as script.
   expect(chromePrefsScript("/tmp/x'; rm -rf ~; '", "'; echo pwned; '")).toContain(shellQuote("'; echo pwned; '"))
 })
 
 test("a host's profile is taken before its window is looked for and started: one session of two makes the lock, its own secret in it", () => {
-  const dir = '/home/scott/.claude/shared-session/browser', host = `${dir}/h-0123456789abcdef`
+  const dir = '/home/scott/.claude/shared-session/browser',
+    host = `${dir}/h-0123456789abcdef`
   const take = launchLockScript(dir, host, 'secret-a')
   expect(take.startsWith('# shared-session: take a preview profile to start its window\numask 077\n')).toBe(true)
   expect(take).toContain(`b=${shellQuote(dir)}; p=${shellQuote(host)}; l="$p/.launching"`)

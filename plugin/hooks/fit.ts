@@ -26,7 +26,25 @@ export function isModern(agent: string | undefined): boolean {
 
 // Named steps as cells, for an engine that counts only cells.
 const STEP: Record<string, number> = { xs: 0, sm: 1, md: 1, lg: 2, xl: 3 }
-const SPACE = ['gap', 'columnGap', 'rowGap', 'margin', 'marginX', 'marginY', 'marginTop', 'marginBottom', 'marginLeft', 'marginRight', 'padding', 'paddingX', 'paddingY', 'paddingTop', 'paddingBottom', 'paddingLeft', 'paddingRight']
+const SPACE = [
+  'gap',
+  'columnGap',
+  'rowGap',
+  'margin',
+  'marginX',
+  'marginY',
+  'marginTop',
+  'marginBottom',
+  'marginLeft',
+  'marginRight',
+  'padding',
+  'paddingX',
+  'paddingY',
+  'paddingTop',
+  'paddingBottom',
+  'paddingLeft',
+  'paddingRight',
+]
 const TYPE = new Set(['size', 'weight', 'mono', 'tabular', 'dir'])
 
 type Node = { type?: unknown; props?: Record<string, unknown>; children?: unknown[] } & Record<string, unknown>

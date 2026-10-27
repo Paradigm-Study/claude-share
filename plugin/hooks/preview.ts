@@ -66,7 +66,9 @@ export function discoverResult(line: string): Discovered | null {
     return null
   }
   if (!v || typeof v !== 'object' || v.state !== 'done') return null
-  const related = (Array.isArray(v.related) ? v.related : []).map(serviceOf).filter((s): s is DiscoveredService => Boolean(s) && s!.web !== 'no' && !s!.devtools)
+  const related = (Array.isArray(v.related) ? v.related : [])
+    .map(serviceOf)
+    .filter((s): s is DiscoveredService => Boolean(s) && s!.web !== 'no' && !s!.devtools)
   const seen = new Set<number>()
   return {
     platform: typeof v.platform === 'string' ? v.platform : 'unsupported',
@@ -199,7 +201,9 @@ export function servicesOf<T extends { port: number; label?: string; pid?: numbe
  * comes before the last "and" once a service has several ports.
  */
 export function everyService(services: readonly (readonly { port: number; label?: string }[])[], labels = true): string {
-  const names = services.map(service => `localhost:${everyName(service.map(s => String(s.port)))}${labels && service[0]?.label ? ` · ${service[0].label}` : ''}`)
+  const names = services.map(
+    service => `localhost:${everyName(service.map(s => String(s.port)))}${labels && service[0]?.label ? ` · ${service[0].label}` : ''}`,
+  )
   return names.length > 1 && services.some(service => service.length > 1) ? `${names.slice(0, -1).join(', ')}, and ${names.at(-1)}` : everyName(names)
 }
 

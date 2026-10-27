@@ -3,7 +3,31 @@
 // `claude plugin test plugin`.
 
 import { expect, test } from 'claude-code/testing'
-import { alsoUses, ASK_PORTS, cleanLabel, debuggerAnswer, dependencyFor, dependencyOf, dependencyTitle, discoverResult, everyName, everyService, heldResult, pageLook, previewHost, previewScheme, previewUrl, questionsOf, relayedResult, rootMissing, serviceName, servicesOf, shareTooWords, urlHost, urlScheme } from '../hooks/preview'
+import {
+  alsoUses,
+  ASK_PORTS,
+  cleanLabel,
+  debuggerAnswer,
+  dependencyFor,
+  dependencyOf,
+  dependencyTitle,
+  discoverResult,
+  everyName,
+  everyService,
+  heldResult,
+  pageLook,
+  previewHost,
+  previewScheme,
+  previewUrl,
+  questionsOf,
+  relayedResult,
+  rootMissing,
+  serviceName,
+  servicesOf,
+  shareTooWords,
+  urlHost,
+  urlScheme,
+} from '../hooks/preview'
 
 test("the host's spelling of loopback is kept; 0.0.0.0 opens as localhost", () => {
   expect(previewHost('localhost')).toBe('localhost')
@@ -21,7 +45,7 @@ test("the host's spelling of loopback is kept; 0.0.0.0 opens as localhost", () =
   expect(previewUrl('evil.test', 3000, 'javascript:alert(1)')).toBe('http://localhost:3000/')
 })
 
-test("an https preview keeps its scheme; anything else is http", () => {
+test('an https preview keeps its scheme; anything else is http', () => {
   expect(urlScheme('https://localhost:3000/app')).toBe('https')
   expect(urlScheme('HTTPS://127.0.0.1:3000')).toBe('https')
   expect(urlScheme('http://localhost:3000/')).toBeUndefined()
@@ -34,17 +58,39 @@ test("an https preview keeps its scheme; anything else is http", () => {
 
 test("discovery's answer: web servers beside the shared one, six at most, labels made safe", () => {
   const related = Array.from({ length: 9 }, (_, i) => ({ port: 3600 + i, label: `svc-${i}`, web: i === 1 ? 'no' : 'yes', devtools: i === 2 }))
-  const found = discoverResult(JSON.stringify({ state: 'done', platform: 'darwin', target: { port: 3000, label: 'next-server\u202e', web: 'yes', devtools: false }, related: [...related, related[0]] }))
+  const found = discoverResult(
+    JSON.stringify({
+      state: 'done',
+      platform: 'darwin',
+      target: { port: 3000, label: 'next-server\u202e', web: 'yes', devtools: false },
+      related: [...related, related[0]],
+    }),
+  )
   expect(found?.target).toEqual({ port: 3000, label: 'next-server', web: 'yes', devtools: false })
   expect(found?.related.map(s => s.port)).toEqual([3600, 3603, 3604, 3605, 3606, 3607])
   expect(discoverResult('{"state":"error","code":"EPERM"}')).toBeNull()
-  expect(discoverResult(JSON.stringify({ state: 'done', platform: 'linux', target: null, related: [] }))).toEqual({ platform: 'linux', target: null, related: [] })
+  expect(discoverResult(JSON.stringify({ state: 'done', platform: 'linux', target: null, related: [] }))).toEqual({
+    platform: 'linux',
+    target: null,
+    related: [],
+  })
   expect(cleanLabel('a\nb\u0007c'.repeat(30)).length).toBeLessThanOrEqual(40)
   expect(serviceName({ port: 3610, label: 'convex-local-backend' })).toBe('localhost:3610 · convex-local-backend')
   expect(serviceName({ port: 3610, label: '' })).toBe('localhost:3610')
   // A yes forwards every one, so every one is named: never "+2 more".
-  expect(alsoUses([{ port: 3610, label: 'convex-local-backend' }, { port: 3611, label: '' }, { port: 27017, label: 'mongod' }])).toBe('localhost:3610 · convex-local-backend, localhost:3611 and localhost:27017 · mongod')
-  expect(alsoUses([{ port: 3610, label: 'convex-local-backend' }, { port: 3611, label: 'api' }])).toBe('localhost:3610 · convex-local-backend and localhost:3611 · api')
+  expect(
+    alsoUses([
+      { port: 3610, label: 'convex-local-backend' },
+      { port: 3611, label: '' },
+      { port: 27017, label: 'mongod' },
+    ]),
+  ).toBe('localhost:3610 · convex-local-backend, localhost:3611 and localhost:27017 · mongod')
+  expect(
+    alsoUses([
+      { port: 3610, label: 'convex-local-backend' },
+      { port: 3611, label: 'api' },
+    ]),
+  ).toBe('localhost:3610 · convex-local-backend and localhost:3611 · api')
   expect(alsoUses([{ port: 3610, label: 'convex-local-backend' }])).toBe('localhost:3610 · convex-local-backend')
   expect(everyName([])).toBe('')
 })
@@ -66,10 +112,24 @@ test("who holds a port: one of the plugin's helpers, something else or nothing, 
 
 test("a need's look at a port: what runs there, what it answers, and who holds it when that's known", () => {
   const said = (target: unknown) => JSON.stringify({ state: 'done', platform: 'darwin', target, related: [] })
-  expect(heldResult(said({ port: 3610, label: 'convex-local-backend', relay: false, web: 'yes', devtools: false }), 3610)).toEqual({ port: 3610, label: 'convex-local-backend', relay: false, web: 'yes', devtools: false })
-  expect(heldResult(said({ port: 3610, label: 'local-preview.cjs', relay: true, web: 'slow', devtools: false }), 3610)).toMatchObject({ relay: true, web: 'slow' })
+  expect(heldResult(said({ port: 3610, label: 'convex-local-backend', relay: false, web: 'yes', devtools: false }), 3610)).toEqual({
+    port: 3610,
+    label: 'convex-local-backend',
+    relay: false,
+    web: 'yes',
+    devtools: false,
+  })
+  expect(heldResult(said({ port: 3610, label: 'local-preview.cjs', relay: true, web: 'slow', devtools: false }), 3610)).toMatchObject({
+    relay: true,
+    web: 'slow',
+  })
   // A holder it couldn't read: no `relay`, the rest as said.
-  expect(heldResult(said({ port: 9222, label: 'Google Chrome\u202e', relay: null, web: 'yes', devtools: true }), 9222)).toEqual({ port: 9222, label: 'Google Chrome', web: 'yes', devtools: true })
+  expect(heldResult(said({ port: 9222, label: 'Google Chrome\u202e', relay: null, web: 'yes', devtools: true }), 9222)).toEqual({
+    port: 9222,
+    label: 'Google Chrome',
+    web: 'yes',
+    devtools: true,
+  })
   // Nobody there, another port, or anything else: nothing.
   expect(heldResult(said(null), 3610)).toBeNull()
   expect(heldResult(said({ port: 3611, label: 'api', relay: false, web: 'yes', devtools: false }), 3610)).toBeNull()
@@ -77,30 +137,59 @@ test("a need's look at a port: what runs there, what it answers, and who holds i
   expect(heldResult('not json', 3610)).toBeNull()
 })
 
-test("what discovery found is asked about by service: one process, else one label; every port before the label", () => {
-  const found = discoverResult(JSON.stringify({ state: 'done', platform: 'darwin', target: null, related: [{ port: 3510, label: 'convex-local-backend', web: 'yes', pid: 4242 }, { port: 3511, label: 'convex-local-backend', web: 'yes', pid: 4242 }, { port: 3512, label: 'x', web: 'yes', pid: -1 }, { port: 3513, label: 'x', web: 'yes', pid: 1.5 }] }))
+test('what discovery found is asked about by service: one process, else one label; every port before the label', () => {
+  const found = discoverResult(
+    JSON.stringify({
+      state: 'done',
+      platform: 'darwin',
+      target: null,
+      related: [
+        { port: 3510, label: 'convex-local-backend', web: 'yes', pid: 4242 },
+        { port: 3511, label: 'convex-local-backend', web: 'yes', pid: 4242 },
+        { port: 3512, label: 'x', web: 'yes', pid: -1 },
+        { port: 3513, label: 'x', web: 'yes', pid: 1.5 },
+      ],
+    }),
+  )
   // A pid discovery gives is kept, one that's no pid isn't.
   expect(found?.related.map(s => s.pid)).toEqual([4242, 4242, undefined, undefined])
   const s = (port: number, label: string, pid?: number) => ({ port, label, ...(pid ? { pid } : {}) })
   // By pid where discovery says; the same label in two processes is two services.
   expect(servicesOf([s(3510, 'server.js', 1), s(3511, 'server.js', 2), s(3512, 'server.js', 1)]).map(g => g.map(x => x.port))).toEqual([[3510, 3512], [3511]])
   // Else by label, in the order found; no label, or one discovery couldn't name, is a service alone.
-  expect(servicesOf([s(3510, 'convex-local-backend'), s(3611, 'api'), s(3511, 'convex-local-backend'), s(4000, ''), s(4001, ''), s(5000, 'unknown'), s(5001, 'unknown')]).map(g => g.map(x => x.port))).toEqual([[3510, 3511], [3611], [4000], [4001], [5000], [5001]])
+  expect(
+    servicesOf([
+      s(3510, 'convex-local-backend'),
+      s(3611, 'api'),
+      s(3511, 'convex-local-backend'),
+      s(4000, ''),
+      s(4001, ''),
+      s(5000, 'unknown'),
+      s(5001, 'unknown'),
+    ]).map(g => g.map(x => x.port)),
+  ).toEqual([[3510, 3511], [3611], [4000], [4001], [5000], [5001]])
   // Every port before the label, so a row too narrow cuts the label first.
   expect(alsoUses([s(3510, 'convex-local-backend'), s(3511, 'convex-local-backend')])).toBe('localhost:3510 and 3511 · convex-local-backend')
   expect(alsoUses([s(3510, 'x'), s(3511, 'x'), s(3512, 'x')])).toBe('localhost:3510, 3511 and 3512 · x')
   // A comma before the last "and" once a service has several ports; none needed otherwise.
-  expect(alsoUses([s(3510, 'convex-local-backend'), s(3511, 'convex-local-backend'), s(3611, 'api')])).toBe('localhost:3510 and 3511 · convex-local-backend, and localhost:3611 · api')
-  expect(everyService([[s(3510, 'convex-local-backend'), s(3511, 'convex-local-backend')], [s(3611, 'api')]], false)).toBe('localhost:3510 and 3511, and localhost:3611')
+  expect(alsoUses([s(3510, 'convex-local-backend'), s(3511, 'convex-local-backend'), s(3611, 'api')])).toBe(
+    'localhost:3510 and 3511 · convex-local-backend, and localhost:3611 · api',
+  )
+  expect(everyService([[s(3510, 'convex-local-backend'), s(3511, 'convex-local-backend')], [s(3611, 'api')]], false)).toBe(
+    'localhost:3510 and 3511, and localhost:3611',
+  )
   expect(everyService([[s(3610, 'a')], [s(3611, 'b')]], false)).toBe('localhost:3610 and localhost:3611')
 })
 
-test("a question names first every port its yes forwards, three at most, then what runs there and the page", () => {
+test('a question names first every port its yes forwards, three at most, then what runs there and the page', () => {
   const s = (port: number, label = 'convex-local-backend') => ({ port, label })
   // A service a question; one on more ports, a question each three, in order.
   expect(ASK_PORTS).toBe(3)
   expect(questionsOf([[1, 2], [3, 4, 5, 6, 7], [8]])).toEqual([[1, 2], [3, 4, 5], [6, 7], [8]])
-  expect(questionsOf([[1, 2, 3, 4, 5, 6]])).toEqual([[1, 2, 3], [4, 5, 6]])
+  expect(questionsOf([[1, 2, 3, 4, 5, 6]])).toEqual([
+    [1, 2, 3],
+    [4, 5, 6],
+  ])
   expect(questionsOf([])).toEqual([])
   expect(shareTooWords(3009, [s(3510), s(3511)])).toBe('Share localhost:3510 and 3511 too? convex-local-backend, beside localhost:3009')
   expect(shareTooWords(3009, [s(3510), s(3511), s(3512)])).toBe('Share localhost:3510, 3511 and 3512 too? convex-local-backend, beside localhost:3009')

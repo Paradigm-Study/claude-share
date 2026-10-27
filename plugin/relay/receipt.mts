@@ -37,8 +37,10 @@ export const REASONS: Readonly<Record<Status, string>> = Object.freeze({
   denied: 'The recipient user declined your message; it was not delivered to their Claude session.',
   expired: "Your held message expired without approval and was not delivered to the recipient's Claude session.",
   delivered: "Your previously-held message was approved and released to the recipient's Claude session.",
-  refused: 'The recipient session is not accepting cross-session messages (the feature is off there, or a setting or policy there refuses them); your message was not delivered to its Claude.',
-  dropped: "The recipient's session dropped your message at its inbox (rate limit, duplicate, relay loop, or full queue); it was not delivered and will not be.",
+  refused:
+    'The recipient session is not accepting cross-session messages (the feature is off there, or a setting or policy there refuses them); your message was not delivered to its Claude.',
+  dropped:
+    "The recipient's session dropped your message at its inbox (rate limit, duplicate, relay loop, or full queue); it was not delivered and will not be.",
 })
 
 const failure = (code: string) => Object.assign(new Error('Receipt failed'), { code })
@@ -65,7 +67,11 @@ export function receiptLine({ status, from, ref, reason }: Receipt): string {
 // socket now (never a file, a symlink, or what isn't there).
 export function socketPath(file: unknown): boolean {
   if (typeof file !== 'string' || !path.isAbsolute(file) || Buffer.byteLength(file) > PATH_MAX || /[\0\n]/.test(file)) return false
-  try { return fs.lstatSync(file).isSocket() } catch { return false }
+  try {
+    return fs.lstatSync(file).isSocket()
+  } catch {
+    return false
+  }
 }
 
 // One line into the socket at `file`, half-closed: true once it's written.
@@ -74,7 +80,13 @@ export function writeLine(file: string, line: string, ms = WRITE_MS): Promise<bo
   return new Promise<boolean>(resolve => {
     const s = net.createConnection({ path: file })
     let done = false
-    const finish = (ok: boolean) => { if (done) return; done = true; clearTimeout(timer); s.destroy(); resolve(ok) }
+    const finish = (ok: boolean) => {
+      if (done) return
+      done = true
+      clearTimeout(timer)
+      s.destroy()
+      resolve(ok)
+    }
     const timer = setTimeout(() => finish(false), ms)
     s.once('error', () => finish(false))
     s.once('connect', () => s.end(`${line}\n`, () => finish(true)))
@@ -87,28 +99,59 @@ export function configOf(cfg: any): { path: string; line: string } {
   const keys = Object.keys(cfg).sort().join(',')
   if (keys !== 'from,path,ref,status' && keys !== 'from,path,reason,ref,status') throw failure('INVALID_CONFIG')
   const line = receiptLine(cfg)
-  if (typeof cfg.path !== 'string' || !path.isAbsolute(cfg.path) || Buffer.byteLength(cfg.path) > PATH_MAX || /[\0\n]/.test(cfg.path)) throw failure('INVALID_CONFIG')
+  if (typeof cfg.path !== 'string' || !path.isAbsolute(cfg.path) || Buffer.byteLength(cfg.path) > PATH_MAX || /[\0\n]/.test(cfg.path))
+    throw failure('INVALID_CONFIG')
   return { path: cfg.path, line }
 }
 
 function main() {
-  const say = (row: Record<string, unknown>) => { try { process.stdout.write(`${JSON.stringify(row)}\n`) } catch {} }
+  const say = (row: Record<string, unknown>) => {
+    try {
+      process.stdout.write(`${JSON.stringify(row)}\n`)
+    } catch {}
+  }
   process.stdout.on('error', () => {})
-  if (process.platform !== 'darwin' && process.platform !== 'linux') { say({ state: 'error', code: 'UNSUPPORTED' }); process.exitCode = 1; return }
-  let input = '', tooLarge = false
+  if (process.platform !== 'darwin' && process.platform !== 'linux') {
+    say({ state: 'error', code: 'UNSUPPORTED' })
+    process.exitCode = 1
+    return
+  }
+  let input = '',
+    tooLarge = false
   process.stdin.setEncoding('utf8')
-  process.stdin.on('data', (data: string) => { if ((input += data).length > 16_384) { tooLarge = true; input = '' } })
-  process.stdin.on('error', () => { tooLarge = true })
+  process.stdin.on('data', (data: string) => {
+    if ((input += data).length > 16_384) {
+      tooLarge = true
+      input = ''
+    }
+  })
+  process.stdin.on('error', () => {
+    tooLarge = true
+  })
   // Its work is a promise that never rejects; the stream's listener doesn't wait for it.
-  process.stdin.on('end', () => void (async () => {
-    let cfg: { path: string; line: string }
-    try { if (tooLarge) throw failure('INVALID_CONFIG'); cfg = configOf(JSON.parse(input)) } catch { say({ state: 'error', code: 'INVALID_CONFIG' }); process.exitCode = 1; return }
-    const sent = await writeLine(cfg.path, cfg.line)
-    say(sent ? { state: 'sent' } : { state: 'error', code: 'CONNECT' })
-    process.exitCode = sent ? 0 : 1
-  })())
+  process.stdin.on(
+    'end',
+    () =>
+      void (async () => {
+        let cfg: { path: string; line: string }
+        try {
+          if (tooLarge) throw failure('INVALID_CONFIG')
+          cfg = configOf(JSON.parse(input))
+        } catch {
+          say({ state: 'error', code: 'INVALID_CONFIG' })
+          process.exitCode = 1
+          return
+        }
+        const sent = await writeLine(cfg.path, cfg.line)
+        say(sent ? { state: 'sent' } : { state: 'error', code: 'CONNECT' })
+        process.exitCode = sent ? 0 : 1
+      })(),
+  )
   // Bounded whatever happens: a session that never reads gets nothing more.
-  setTimeout(() => { say({ state: 'error', code: 'TIMEOUT' }); process.exit(1) }, WRITE_MS + 500).unref()
+  setTimeout(() => {
+    say({ state: 'error', code: 'TIMEOUT' })
+    process.exit(1)
+  }, WRITE_MS + 500).unref()
 }
 
 if (import.meta.main) main()
