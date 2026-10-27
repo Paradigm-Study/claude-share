@@ -515,7 +515,7 @@ async function sharing() {
   check("a file the host shares lands in the guest's project", existsSync(saved) && readFileSync(saved, 'utf8') === '<h1>Report 42</h1>\n')
 
   // A forwarded preview needs the guest's explicit Open. This headless run
-  // checks replay's instruction; band UI tests exercise Open and local-preview.mjs
+  // checks replay's instruction; band UI tests exercise Open and local-preview.ts
   // exercises TCP. Public HTTP/WS is probed separately, by an explicit ticket.
   const app = createServer((req, res) => {
     if (req.url === '/assets/app.js') return res.writeHead(200, { 'content-type': 'text/javascript' }).end('console.log("app")')

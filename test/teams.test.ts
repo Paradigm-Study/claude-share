@@ -81,7 +81,7 @@ const signIn = async (email: string, name: string, invite = '', teamName = ''): 
   return polled.data.token
 }
 // A real browser for the confirmation page's Continue, found as
-// test/local-preview.mjs finds one: SHARED_SESSION_TEST_CHROME, else Chrome,
+// test/local-preview.ts finds one: SHARED_SESSION_TEST_CHROME, else Chrome,
 // Edge, Brave or Chromium (macOS apps, Linux names on PATH), never a snap.
 const MAC_BROWSERS = ['Google Chrome', 'Microsoft Edge', 'Brave Browser', 'Chromium']
 const LINUX_BROWSERS = ['google-chrome', 'google-chrome-stable', 'chromium', 'chromium-browser', 'microsoft-edge', 'microsoft-edge-stable', 'brave-browser']
