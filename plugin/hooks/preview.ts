@@ -148,7 +148,7 @@ export function rootMissing(out: string): boolean {
   return answer?.[1] === '404' && /^(text\/html|application\/xhtml\+xml)\b/i.test((answer[2] ?? '').trim())
 }
 
-/** Chrome's `/json/version` names its socket; Node's and Deno's inspectors name a protocol (discover.cjs's `devtoolsBody`). */
+/** Chrome's `/json/version` names its socket; Node's and Deno's inspectors name a protocol (discover.mts's `devtoolsBody`). */
 export function debuggerAnswer(text: string): boolean {
   let row: unknown
   try {

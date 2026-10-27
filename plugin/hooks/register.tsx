@@ -6062,7 +6062,7 @@ async function previewTicket($: $, room: ShareRoom, pid: string, path?: string):
 // ---------------------------------------------------------------------------
 // Helpers: the plugin's own Node processes (relay/*.cjs, relay/*.mts). A guest's
 // listeners and the window's tunnels (local-preview.cjs), the window's proxy
-// (browser-proxy.cjs), discovery (discover.cjs), the host's TCP worker
+// (browser-proxy.cjs), discovery (discover.mts), the host's TCP worker
 // (tcp-worker.cjs) and its public sockets' relays (ws-relay.cjs) each run
 // under the Node a dev server would, 22.18 or later, which runs TypeScript as
 // it is (`FIND_NODE`, by its `--version`; exit 127: none here), take
@@ -7682,7 +7682,7 @@ async function setPreviewOpen($: $, value: string) {
 // Host: what a shared preview needs beside it. A page on localhost:3000 often
 // calls another server its project runs (an API, a backend on 3610), which a
 // guest's window can reach only if the host shares it too. Discovery
-// (relay/discover.cjs) finds the web servers whose process runs in the same
+// (relay/discover.mts) finds the web servers whose process runs in the same
 // project as the shared port's, and the host is asked in the row above the
 // prompt. Nothing is shared without the host's press: what discovery finds,
 // and what a guest's window asks for, are only suggestions.
@@ -7883,7 +7883,7 @@ async function discoverPort($: $, port: number, deadlineMs = 8_000): Promise<Dis
   let child: Child | undefined
   let timer: Timer | undefined
   try {
-    child = $.process.spawn({ argv: ['/bin/sh', '-c', FIND_NODE, 'sh', `${$.plugin.root}/relay/discover.cjs`], input: JSON.stringify({ port, pluginRoot: $.plugin.root, exclude, deadlineMs }) })
+    child = $.process.spawn({ argv: ['/bin/sh', '-c', FIND_NODE, 'sh', `${$.plugin.root}/relay/discover.mts`], input: JSON.stringify({ port, pluginRoot: $.plugin.root, exclude, deadlineMs }) })
     const running = child
     timer = $.clock.after(deadlineMs + 2_000, () => void running.return(undefined as never).catch(() => {}))
     // Its one line: what it found. A line past the bound throws, and is nothing found.
@@ -7902,7 +7902,7 @@ async function discoverPort($: $, port: number, deadlineMs = 8_000): Promise<Dis
 }
 
 // Whether one of this plugin's own helpers holds a localhost port on this
-// computer (discover.cjs's owner mode: this user's listeners on the port, any
+// computer (discover.mts's owner mode: this user's listeners on the port, any
 // family, by their commands): most likely a guest's listener for another
 // shared session's preview, which that session's Open forwarded here, or a
 // preview window's proxy. Such a port is never shared on: its host agreed
@@ -7944,7 +7944,7 @@ async function ownerLook($: $, port: number, web = false): Promise<string | null
   let child: Child | undefined
   let timer: Timer | undefined
   try {
-    child = $.process.spawn({ argv: ['/bin/sh', '-c', FIND_NODE, 'sh', `${$.plugin.root}/relay/discover.cjs`], input: JSON.stringify({ port, pluginRoot: $.plugin.root, owner: true, deadlineMs: RELAYED_LOOK_MS, ...(web ? { web: true } : {}) }) })
+    child = $.process.spawn({ argv: ['/bin/sh', '-c', FIND_NODE, 'sh', `${$.plugin.root}/relay/discover.mts`], input: JSON.stringify({ port, pluginRoot: $.plugin.root, owner: true, deadlineMs: RELAYED_LOOK_MS, ...(web ? { web: true } : {}) }) })
     const running = child
     timer = $.clock.after(RELAYED_LOOK_MS + 2_000, () => void running.return(undefined as never).catch(() => {}))
     for await (const line of helperLines(running)) return line
