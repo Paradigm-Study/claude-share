@@ -1,49 +1,108 @@
 # Contributing
 
-Bug reports, reproducible examples, documentation fixes, and focused pull requests are welcome. For a larger change, open an issue describing the workflow and proposed behavior so the approach can be discussed first.
+Bug reports, reproducible examples, documentation fixes, and focused pull requests are welcome. For a larger change, open an issue first. Describe the workflow and the behavior you propose, so we can agree on the approach before you write it.
 
-## Run the local checks
+## Before you send a pull request
 
-Use Node.js 22.18 or later on macOS or Linux, and run `npm install` once: the suites that need a room server run the real Workers under `wrangler dev`. They need no Claude account, model access, or Cloudflare credentials.
+You need Node.js 22.18 or later on macOS or Linux. You do not need a Claude account, model access, or Cloudflare credentials.
 
 ```sh
-npm install
-npm test
-node test/local-preview.mjs
+npm install                  # once
+npm run check                # type checks, lint, format
+npm test                     # the Vitest suites in test/
+node test/local-preview.mjs  # the preview suite, not yet on Vitest
 ```
 
-The setup suite uses a fake CLI, intercepted network requests, and a temporary home directory without changing your Claude settings. The other suites start and stop their own local servers, the room server as the two Workers under `wrangler dev` on free ports (`test/support/workerd.ts`). When Chrome, Edge, Brave or Chromium is installed (or `SHARED_SESSION_TEST_CHROME` names one), it also opens one headless with a throwaway profile, reaching no host but its own server, to press the sign-in page's Continue as a person would and as a click timed for a double-click would; without one (or as root, with only a snap browser, or when it doesn't start), that check is skipped, and a `SHARED_SESSION_TEST_CHROME` that isn't an executable fails. The TCP suites choose temporary ports. The local-preview suite also uses the system `ps` command, and when Chrome, Edge, Brave or Chromium is installed (or `SHARED_SESSION_TEST_CHROME` names one) it opens one headless with a throwaway profile to check the preview window end to end, and Firefox the same way (or `SHARED_SESSION_TEST_FIREFOX`), running the plugin's own window probe against each and the browser detection against made-up browsers; a browser that isn't there has its check skipped. It then checks WebRTC in each browser it found, holding short-lived UDP and TCP listeners on this machine's first non-loopback IPv4 address while it runs; that check is skipped without such an address or, on macOS, with the firewall on (a listener there would ask you). Its checks of an `https://` dev server use `openssl` to make a throwaway certificate, and are skipped without it. Measured on 2026-10-19, the WebRTC check took about 9 to 10 seconds per browser (Firefox 158 and 153.5 ESR on Linux, Chrome 155 on macOS), and the whole local-preview suite 44 to 48 seconds; on a runner with both browsers, expect about a minute, well inside the CI job's 5-minute limit. The discovery suite starts small servers in a temporary git project and lists this machine's listening ports read-only, and asks who holds a few of them (one named as the plugin's guest listener, on both loopbacks); on macOS it uses `lsof` and `ps`. GitHub Actions runs each suite separately on Node 22.18 and 24.
+These are the same checks CI runs. If you changed the plugin (`plugin/`), also run [the plugin's checks](#work-on-the-plugin). If you changed sharing, joining, or transcripts, also run [the end-to-end test](#the-end-to-end-test).
 
-These checks cover installer failures, server selection and the order a deploy updates the two Workers in, accounts, room access and the sign-in's confirmation page in a real browser, Worker protocol, hibernation behavior, file storage and preview links with stubs, real local TCP forwarding through the production helpers and their control ports, the public link's WebSocket relay (an `https://` dev server included), the preview window's SOCKS5 proxy and real headless Chromium and Firefox windows through it, WebRTC in those windows, same-project discovery, and the server's preview shares, who may connect to a forwarded one, Stop, needs, the public link's links, browser sessions, sockets and answers, the shared preview host name's protections, bounded requests and events, persistence, messages and receipts between a guest's own sessions and the host's session (only the other side's streams, never stored, under `wrangler dev` and with the Worker's stubs), the host's mailbox helper and its receipts through real Unix sockets (frames byte for byte, started detached, gone with its Claude Code), per-room preview host names, and the home page's statements of what the server keeps. The security suite checks what the security review asked for: where a room's files land on a teammate's computer and where a guest's reads really go, through real links in a real shell; the names a room keeps and the room page's escaping; how many streams and long polls a seat holds, and uploads against a room's quota; and with the Worker's stubs, a members-only team's removals reaching its rooms, what a room may send out a day, and the daily count of rooms per address across the gate being loaded again. They do not validate Claude's UI or a deployed Cloudflare Worker: `wrangler dev` runs the same code in workerd, with rate limits simulated and no container image.
+| You changed | Run |
+| --- | --- |
+| anything | `npm run check`, `npm test` |
+| previews, forwarding, the preview window | `node test/local-preview.mjs` |
+| `plugin/` | the plugin's checks below |
+| sharing, joining, transcripts | the end-to-end test below |
+
+To run one suite: `npx vitest run test/<name>.test.ts`.
+
+## What the suites cover
+
+Each suite starts and stops its own servers on free ports. The room server is the real pair of Workers under `wrangler dev` (`test/support/workerd.ts`). Nothing touches your Claude settings.
+
+| Suite | Covers |
+| --- | --- |
+| `setup` | the installer, with a fake CLI, a temporary home and intercepted network requests |
+| `teams` | accounts, teams, sign-in and its confirmation page |
+| `tcp-worker` | the room's Durable Object, hibernation, files and preview keys |
+| `previews` | preview shares, who may connect, Stop, needs, the public link |
+| `peer` | messages and receipts between a guest's own sessions and the host's |
+| `mailbox` | the host's mailbox helper, through real Unix sockets |
+| `browser-proxy` | the preview window's SOCKS5 proxy and its DNS-over-HTTPS |
+| `discover` | which of the project's web services are offered, and who holds a port |
+| `security` | what the security review asked for: file paths, real read paths, quotas, team removals |
+| `cloud` | the cloud host's handoff, with a stand-in container |
+| `traces` | session traces; the database part runs only when a database is set up |
+| `local-preview` | real TCP forwarding, the WebSocket relay, real headless browser windows, WebRTC |
+
+The suites do not test Claude's UI or a deployed Worker. `wrangler dev` runs the same code in workerd, but it simulates rate limits and has no container image.
+
+### Optional tools, and what is skipped without them
+
+A missing tool skips its check and prints `SKIP` with the reason. It does not fail the suite.
+
+- **A Chromium browser** (Chrome, Edge, Brave or Chromium). `teams` uses it to press the sign-in page's Continue. `local-preview` uses it for the preview window and WebRTC. Set `SHARED_SESSION_TEST_CHROME` to choose one. If that variable names a file that is not executable, the suite fails.
+- **Firefox.** `local-preview` checks the preview window and WebRTC in it too. Set `SHARED_SESSION_TEST_FIREFOX` to choose one.
+- **`openssl`.** `browser-proxy` and `local-preview` use it to make throwaway certificates.
+- **A non-loopback IPv4 address.** The WebRTC checks listen on it for a few seconds. On macOS they are skipped when the firewall is on, because a listener would make it ask you.
+- **`lsof` and `ps`** (macOS). `discover` and `local-preview` use them.
+
+The browser checks are also skipped when you run as root, or when the only browser is a snap package.
+
+`local-preview` takes about a minute on a laptop with both browsers, and 3 to 5 minutes on a CI runner.
 
 ## Work on the plugin
 
-Use a compatible Claude Code installation; see the [README](README.md) for requirements. Start a development session from the repository root:
+You need Claude Code 2.1.299 or later; see the [README](README.md). Start a development session from the repository root:
 
 ```sh
 claude --plugin-dir ./plugin
 ```
 
-In that session, run `/plugin-types plugin/.claude/types` to generate the engine's API types, from Claude Code 2.1.299 or newer (the code is type-checked against 2.1.304; older engines' types lack the type scale, and `tsc` fails). Those files are ignored by git. Then run these; `claude plugin test` runs every file in `plugin/tests/`: the UI tests for the desktop and terminal surfaces (`band.test.tsx`) and the tests of the pure modules beside `register.tsx` (`window.test.ts`, `preview.test.ts`, `proxy.test.ts`, `upstream.test.ts`):
+In that session, run `/plugin-types plugin/.claude/types` once. It writes the engine's API types, which git ignores. The code is type-checked against 2.1.304. Types from an engine older than 2.1.299 lack the type scale, and `tsc` fails.
+
+Then run:
 
 ```sh
-(cd plugin && npx -y -p typescript@5 tsc -p .)
+npm run typecheck:plugin
 claude plugin validate --strict plugin
 claude plugin test plugin
 ```
 
-Four tests in `band.test.tsx` wait in real time, 10 to 12 seconds each (about 46 seconds together), so `claude plugin test plugin` takes about 140 seconds: a hook's 10-second budget runs in real time, which the tests' mocked clock can't stand in for.
+`claude plugin test` runs every file in `plugin/tests/`. `band.test.tsx` holds the UI tests for the desktop and terminal surfaces. The other files test the pure modules beside `register.tsx`.
 
-For changes to sharing, joining, or transcript behavior, also run the real host-and-guests test with a signed-in Claude Code that can call a model:
+`claude plugin test plugin` takes about 140 seconds. Four tests in `band.test.tsx` wait 10 to 12 seconds each in real time, because a hook's 10-second budget cannot run on the tests' mocked clock.
+
+CI does not run these checks, because they need Claude Code. Run them yourself.
+
+## The end-to-end test
+
+This test needs a signed-in Claude Code that can call a model. It starts a real host and real guests, and the host runs in bypass mode.
 
 ```sh
 CLAUDE_BIN="$(command -v claude)" node test/e2e.ts
 ```
 
-This test uses model access and starts a host in bypass mode. See [AGENTS.md](AGENTS.md) for server setup and additional test options, and [docs/rules/](docs/rules/) for the interaction contracts.
+[AGENTS.md](AGENTS.md) lists more options, such as running against a deployed server. The rules each part of the code keeps are in [docs/rules/](docs/rules/).
 
-## Send a pull request
+## The pull request
 
-Explain the user-visible problem, what changes, and how you checked the result. Include a small reproduction or screenshots when they help; for behavior changes, cover the relevant regression. Say which checks you could not run and why.
+Say three things:
 
-Keep room links, tokens, private transcripts, and generated session data out of issues and commits. In particular, never commit `rooms.json`. Plugin version bumps and server deployment are release steps described in [AGENTS.md](AGENTS.md).
+1. The problem a user sees.
+2. What you changed.
+3. How you checked it, and which checks you could not run and why.
+
+Add a small reproduction or screenshots when they help. For a change in behavior, add a test that fails without it.
+
+Keep room links, tokens, private transcripts, and generated session data out of issues and commits. Never commit `rooms.json`.
+
+Do not bump the plugin's version or deploy the server. Those are release steps; [AGENTS.md](AGENTS.md) describes them.
