@@ -1,7 +1,7 @@
 // Standalone Node 22.18+ checks: no models, deps, OAuth or saved room data.
-//   node test/local-preview.mjs                 (real Room + Node + both helpers)
-//   node test/local-preview.mjs --helpers-only (parser/listener checks only)
-//   EXTERNAL_SERVER=1 SHARE_SERVER=http://127.0.0.1:8787 node test/local-preview.mjs
+//   node test/local-preview.ts                 (real Room + Node + both helpers)
+//   node test/local-preview.ts --helpers-only (parser/listener checks only)
+//   EXTERNAL_SERVER=1 SHARE_SERVER=http://127.0.0.1:8787 node test/local-preview.ts
 import assert from 'node:assert/strict'
 import http from 'node:http'
 import https from 'node:https'
@@ -20,36 +20,35 @@ import * as helper from '../plugin/relay/local-preview.mts'
 import * as wsHelper from '../plugin/relay/ws-relay.mts'
 import * as ws from '../plugin/relay/ws.mts'
 import * as tcpRelay from '../plugin/relay/tcp-relay.mts'
-import { startWorkerd } from './support/workerd.mjs'
+import { startWorkerd } from './support/workerd.ts'
 
-const ROOT = fileURLToPath(new URL('../', import.meta.url))
 const GUEST = fileURLToPath(new URL('../plugin/relay/local-preview.mts', import.meta.url))
 const HOST = fileURLToPath(new URL('../plugin/relay/tcp-worker.mts', import.meta.url))
 const PROXY = fileURLToPath(new URL('../plugin/relay/browser-proxy.mts', import.meta.url))
 const PUBLIC = fileURLToPath(new URL('../plugin/relay/ws-relay.mts', import.meta.url))
-const VERSION = JSON.parse(await readFile(new URL('../plugin/.claude-plugin/plugin.json', import.meta.url))).version
+const VERSION = JSON.parse(await readFile(new URL('../plugin/.claude-plugin/plugin.json', import.meta.url), 'utf8')).version
 const scratch = await mkdtemp(`${tmpdir()}/shared-tcp-`)
-const workerd = new Set(), children = new Set(), servers = new Set(), sockets = new Set(), running = new Set(), websockets = new Set(), requests = new Set()
+const workerd = new Set<any>(), children = new Set<any>(), servers = new Set<any>(), sockets = new Set<any>(), running = new Set<any>(), websockets = new Set<any>(), requests = new Set<any>()
 const ROOM = 'R'.repeat(24), PID = 'P'.repeat(12), CAP = 'C'.repeat(32)
-const dummy = port => ({ port, strict: true, url: `http://127.0.0.1:1/api/rooms/${ROOM}/previews/${PID}/tunnel`, token: CAP })
+const dummy = (port: number) => ({ port, strict: true, url: `http://127.0.0.1:1/api/rooms/${ROOM}/previews/${PID}/tunnel`, token: CAP })
 let ipv6 = true
 
-async function until(check, label, ms = 5000) {
+async function until(check: () => unknown, label: string, ms = 5000) {
   const end = Date.now() + ms
   while (Date.now() < end) { if (check()) return; await pause(10) }
   throw new Error(`Timed out: ${label}`)
 }
 // A promise that must settle within ms: one that never does fails, never hangs.
-function within(promise, label, ms = 5000) {
-  let timer
+function within(promise: Promise<unknown>, label: string, ms = 5000) {
+  let timer: any
   return Promise.race([promise, new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`Timed out: ${label}`)), ms) })]).finally(() => clearTimeout(timer))
 }
 // Waits for `work` while `count` keeps moving. It fails when `broken()`
 // says the channel closed, when the count stands still for `stallMs`, or
 // past `capMs`: what a long step guards is a channel that closes or stops,
 // and a slow machine (a CI runner at a third of its usual speed) is neither.
-async function moving(work, label, count, broken, { stallMs = 15_000, capMs = 300_000 } = {}) {
-  let done = false, failure = null
+async function moving(work: unknown, label: string, count: () => number, broken: () => boolean, { stallMs = 15_000, capMs = 300_000 } = {}) {
+  let done = false, failure: unknown = null
   const watched = Promise.resolve(work).then(() => { done = true }, error => { failure = error; done = true })
   const began = Date.now()
   let last = count(), lastAt = began
@@ -64,31 +63,31 @@ async function moving(work, label, count, broken, { stallMs = 15_000, capMs = 30
   await watched
   if (failure) throw failure
 }
-const listen = (server, host = '127.0.0.1', port = 0) => new Promise((resolve, reject) => {
+const listen = (server: any, host = '127.0.0.1', port = 0) => new Promise<number>((resolve, reject) => {
   server.once('error', reject)
   server.listen({ host, port, ipv6Only: host === '::1' }, () => { server.removeListener('error', reject); resolve(server.address().port) })
 })
-const close = server => new Promise(resolve => server.listening ? server.close(resolve) : resolve())
+const close = (server: any) => new Promise<void>(resolve => server.listening ? server.close(resolve) : resolve())
 // Whether nothing answers on 127.0.0.1 at this port (a refused connect).
-const refused = port => new Promise(resolve => {
+const refused = (port: number) => new Promise<boolean>(resolve => {
   const socket = net.connect({ host: '127.0.0.1', port })
   socket.once('connect', () => { socket.destroy(); resolve(false) })
   socket.once('error', () => resolve(true))
 })
-function track(server) {
+function track(server: any) {
   servers.add(server)
-  server.on('connection', socket => { sockets.add(socket); socket.on('error', () => {}); socket.on('close', () => sockets.delete(socket)) })
+  server.on('connection', (socket: any) => { sockets.add(socket); socket.on('error', () => {}); socket.on('close', () => sockets.delete(socket)) })
   return server
 }
 // Whether a port a helper held can be bound again, within `ms`: one still held then fails.
-async function rebindable(host, port, ms = 3000) {
+async function rebindable(host: string, port: number, ms = 3000) {
   const deadline = Date.now() + ms
   for (;;) {
     const server = track(net.createServer())
     try {
       await listen(server, host, port)
       return await close(server)
-    } catch (error) {
+    } catch (error: any) {
       if (error.code !== 'EADDRINUSE' || Date.now() > deadline) throw error
       await new Promise(resolve => setTimeout(resolve, 50))
     }
@@ -98,7 +97,7 @@ async function freePort() {
   for (let attempt = 0; attempt < 8; attempt++) {
     const v4 = track(net.createServer()), v6 = track(net.createServer())
     const port = await listen(v4)
-    try { await listen(v6, '::1', port); await Promise.all([close(v4), close(v6)]); return port } catch (error) {
+    try { await listen(v6, '::1', port); await Promise.all([close(v4), close(v6)]); return port } catch (error: any) {
       await close(v4)
       if (['EAFNOSUPPORT', 'EADDRNOTAVAIL', 'EPROTONOSUPPORT'].includes(error.code)) { ipv6 = false; return port }
       if (error.code !== 'EADDRINUSE') throw error
@@ -110,12 +109,12 @@ async function freePort() {
 // checked so, never by binding it again: an OS-assigned number can be held
 // meanwhile by another socket (a busy runner's, or one of this test's own
 // outgoing connections, whose source ports come from the same range).
-const answers = (host, port) => new Promise(resolve => {
+const answers = (host: string, port: number) => new Promise<boolean>(resolve => {
   const socket = net.createConnection({ host, port })
-  const done = value => { socket.destroy(); resolve(value) }
+  const done = (value: any) => { socket.destroy(); resolve(value) }
   socket.setTimeout(300, () => done(true))
   socket.once('connect', () => done(true))
-  socket.once('error', error => done(!['ECONNREFUSED', 'EADDRNOTAVAIL', 'ENETUNREACH', 'EAFNOSUPPORT'].includes(error.code)))
+  socket.once('error', (error: any) => done(!['ECONNREFUSED', 'EADDRNOTAVAIL', 'ENETUNREACH', 'EAFNOSUPPORT'].includes(error.code)))
 })
 // A free port below the usual ephemeral ranges (Linux 32768+, macOS 49152+), so
 // an OS-assigned fallback never equals it; nothing may answer there either.
@@ -128,9 +127,10 @@ async function fixedPort() {
   }
   throw new Error('Could not find a free fixed test port')
 }
-function launch(file, cfg, env = {}) {
+function launch(file: string, cfg: any, env = {}) {
   const child = spawn(process.execPath, [file], { cwd: scratch, env: { ...process.env, ...env }, stdio: ['pipe', 'pipe', 'pipe'] })
-  const log = { child, stdout: '', stderr: '', rows: [], exit: null }
+  // What a helper said (rows, its JSON lines) and how it ended; callers add what they read from it.
+  const log: any = { child, stdout: '', stderr: '', rows: [], exit: null }
   children.add(child)
   child.stdin.on('error', () => {})
   let input = ''
@@ -148,7 +148,7 @@ function launch(file, cfg, env = {}) {
   child.stdin.end(typeof cfg === 'string' ? cfg : JSON.stringify(cfg ?? {}))
   return log
 }
-async function ready(cfg) {
+async function ready(cfg: any) {
   const log = launch(GUEST, cfg)
   await until(() => log.rows.length || log.exit, 'guest listener ready')
   assert.equal(log.rows[0]?.state, 'ready', JSON.stringify(log.rows))
@@ -158,23 +158,23 @@ async function ready(cfg) {
   log.ipv6 = log.rows[0].ipv6
   return log
 }
-async function stop(log) {
+async function stop(log: any) {
   if (!log.exit) log.child.kill('SIGTERM')
   await until(() => log.exit, 'helper stopped')
   assert.equal(log.stderr, '')
   assert.equal(log.exit.code, 0)
 }
-async function startupError(cfg, code, file = GUEST) {
+async function startupError(cfg: any, code: any, file = GUEST) {
   const log = launch(file, cfg)
   await until(() => log.exit, `startup ${code}`)
   assert.deepEqual(log.rows, [{ state: 'error', code }])
   assert.notEqual(log.exit.code, 0)
   assert.equal(log.stderr, '')
 }
-async function wire(port, host = '127.0.0.1', collect = true) {
+async function wire(port: number, host = '127.0.0.1', collect = true) {
   const client = net.createConnection({ host, port, allowHalfOpen: true })
   sockets.add(client)
-  const result = { client, parts: [], closed: false, ended: false }
+  const result: any = { client, parts: [], closed: false, ended: false }
   Object.defineProperty(result, 'bytes', { get: () => Buffer.concat(result.parts) })
   if (collect) client.on('data', bytes => result.parts.push(bytes))
   client.on('error', () => {})
@@ -183,10 +183,10 @@ async function wire(port, host = '127.0.0.1', collect = true) {
   await once(client, 'connect')
   return result
 }
-function request(port, path = '/', { method = 'GET', body, headers = {}, host = '127.0.0.1', onData = () => {} } = {}) {
-  return new Promise((resolve, reject) => {
+function request(port: number, path = '/', { method = 'GET', body, headers = {}, host = '127.0.0.1', onData = () => {} }: { method?: string, body?: any, headers?: Record<string, any>, host?: string, onData?: (bytes: Buffer) => void } = {}) {
+  return new Promise<any>((resolve, reject) => {
     const req = http.request({ hostname: host, port, method, path, agent: false, headers: { host: `localhost:${port}`, ...headers } }, res => {
-      const parts = []
+      const parts: any[] = []
       res.on('data', bytes => { parts.push(bytes); onData(bytes) })
       res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: Buffer.concat(parts) }))
       res.on('error', reject)
@@ -198,7 +198,7 @@ function request(port, path = '/', { method = 'GET', body, headers = {}, host = 
     req.end(body)
   })
 }
-async function worker(room, token = CAP) {
+async function worker(room: any, token = CAP) {
   const controlToken = randomBytes(32).toString('hex')
   const log = launch(HOST, { room, token, controlToken, version: VERSION })
   await until(() => log.rows.length || log.exit, 'host worker ready')
@@ -207,15 +207,15 @@ async function worker(room, token = CAP) {
   log.controlToken = controlToken
   return log
 }
-function ipc(log, command, options = {}) {
+function ipc(log: any, command: any, options: any = {}) {
   return request(log.port, options.path ?? '/', { method: options.method ?? 'POST', body: options.body ?? JSON.stringify(command), headers: { host: `127.0.0.1:${log.port}`, authorization: `Bearer ${log.controlToken}`, 'content-type': 'application/json', ...options.headers } })
 }
-async function rss(log) {
+async function rss(log: any) {
   const { stdout } = await promisify(execFile)('ps', ['-o', 'rss=', '-p', String(log.child.pid)])
   return Number(stdout.trim()) * 1024
 }
 // Test-only wire frames, not another production parser.
-function frame(op, payload, { fin = true, mask = false, rsv = 0 } = {}) {
+function frame(op: any, payload: any, { fin = true, mask = false, rsv = 0 } = {}) {
   payload = Buffer.from(payload)
   const head = Buffer.alloc(payload.length < 126 ? 2 : payload.length < 65536 ? 4 : 10)
   head[0] = (fin ? 128 : 0) | rsv | op
@@ -226,7 +226,7 @@ function frame(op, payload, { fin = true, mask = false, rsv = 0 } = {}) {
   if (mask) for (let i = 0; i < body.length; i++) body[i] ^= key[i & 3]
   return Buffer.concat([head, ...(mask ? [key] : []), body])
 }
-function readFrames(socket, head, receive) {
+function readFrames(socket: any, head: any, receive: any) {
   let bytes = head || Buffer.alloc(0)
   function read() {
     while (bytes.length >= 2) {
@@ -241,14 +241,14 @@ function readFrames(socket, head, receive) {
       receive(op, data)
     }
   }
-  socket.on('data', data => { bytes = Buffer.concat([bytes, data]); read() })
+  socket.on('data', (data: any) => { bytes = Buffer.concat([bytes, data]); read() })
   read()
 }
-function handshake(req, socket, extra = '') {
+function handshake(req: http.IncomingMessage, socket: any, extra = '') {
   const accept = createHash('sha1').update(req.headers['sec-websocket-key'] + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').digest('base64')
   socket.write(`HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Accept: ${accept}\r\n${extra}\r\n`)
 }
-function connect(url, headers = {}, on = {}, options) {
+function connect(url: string, headers = {}, on = {}, options?: any) {
   const socket = ws.connect(url, headers, [], on, options)
   websockets.add(socket)
   return socket
@@ -258,13 +258,13 @@ function connect(url, headers = {}, on = {}, options) {
 // /Applications and ~/Applications; Linux names on PATH), or why there is none.
 const MAC_BROWSERS = ['Google Chrome', 'Microsoft Edge', 'Brave Browser', 'Chromium']
 const LINUX_BROWSERS = ['google-chrome', 'google-chrome-stable', 'chromium', 'chromium-browser', 'microsoft-edge', 'microsoft-edge-stable', 'brave-browser']
-async function executable(file) { try { await access(file, fsConstants.X_OK); return true } catch { return false } }
-async function appBinary(app) {
+async function executable(file: string) { try { await access(file, fsConstants.X_OK); return true } catch { return false } }
+async function appBinary(app: any) {
   const dir = `${app}/Contents/MacOS`, name = app.split('/').pop().replace(/\.app$/, '')
   for (const file of [`${dir}/${name}`, ...(await readdir(dir).catch(() => [])).map(entry => `${dir}/${entry}`)]) if (await executable(file)) return file
   return null
 }
-async function findChrome() {
+async function findChrome(): Promise<any> {
   const root = process.getuid?.() === 0 ? { reason: 'running as root: Chrome needs --no-sandbox there, which production never passes' } : null
   const named = process.env.SHARED_SESSION_TEST_CHROME?.replace(/\/+$/, '')
   if (named) {
@@ -288,7 +288,7 @@ async function findChrome() {
 // macOS, these names on PATH on Linux, never a snap (nor the wrapper that runs one).
 const MAC_FIREFOX = ['Firefox', 'Firefox Developer Edition', 'Firefox Nightly']
 const LINUX_FIREFOX = ['firefox', 'firefox-esr', 'firefox-developer-edition', 'firefox-nightly']
-async function findFirefox() {
+async function findFirefox(): Promise<any> {
   const named = process.env.SHARED_SESSION_TEST_FIREFOX?.replace(/\/+$/, '')
   if (named) {
     const file = named.endsWith('.app') ? `${named}/Contents/MacOS/firefox` : named
@@ -310,10 +310,10 @@ async function findFirefox() {
 }
 // The preview window's Firefox settings, read from the plugin's own list
 // (FIREFOX_PREFS in plugin/hooks/window.ts), written as `firefoxUserJs` writes them.
-async function firefoxUserJs(proxyPort) {
+async function firefoxUserJs(proxyPort: any) {
   const source = await readFile(new URL('../plugin/hooks/window.ts', import.meta.url), 'utf8')
   const list = /export const FIREFOX_PREFS[^=]*= \[\n([\s\S]*?)\n\]/.exec(source)?.[1] ?? ''
-  const prefs = list.split('\n').map(line => /^\s*\['([^']+)', ('[^']*'|-?\d+|true|false)\],$/.exec(line)).filter(Boolean).map(([, name, raw]) => [name, raw.startsWith("'") ? raw.slice(1, -1) : JSON.parse(raw)])
+  const prefs = list.split('\n').map(line => /^\s*\['([^']+)', ('[^']*'|-?\d+|true|false)\],$/.exec(line)).filter((m): m is RegExpExecArray => m !== null).map(([, name, raw]) => [name, raw.startsWith("'") ? raw.slice(1, -1) : JSON.parse(raw)])
   assert.ok(prefs.length >= 30 && prefs.length === list.split('\n').filter(l => l.trim()).length, 'every FIREFOX_PREFS line was read')
   const all = [['network.proxy.socks', '127.0.0.1'], ['network.proxy.socks_port', proxyPort], ...prefs]
   return ['// shared-session: a preview window (written before every start)', ...all.map(([name, value]) => `user_pref(${JSON.stringify(name)}, ${JSON.stringify(value)});`), ''].join('\n')
@@ -323,29 +323,29 @@ async function firefoxUserJs(proxyPort) {
 // flags (the list chromeFlags in plugin/hooks/window.ts makes), and the
 // profile's WebRTC setting written as the plugin writes it before a start
 // (where this Node loads TypeScript).
-const launchChrome = binary => async ({ socksPort, profile, url }) => {
-  if (windowScripts) await shOut(windowScripts.chromePrefsScript(profile, windowScripts.chromePrefs(null)))
+const launchChrome = (binary: string) => async ({ socksPort, profile, url }: { socksPort: number, profile: string, url: string }) => {
+  if (windowScripts) await shOut(windowScripts.chromePrefsScript(profile, windowScripts.chromePrefs(null)!))
   return spawn(binary, ['--headless=new', `--user-data-dir=${profile}/chrome`, `--proxy-server=socks5://127.0.0.1:${socksPort}`, '--proxy-bypass-list=<-loopback>', '--no-first-run', '--no-default-browser-check', '--new-window',
     ...(process.platform === 'darwin' ? ['--use-mock-keychain'] : process.platform === 'linux' ? ['--password-store=basic'] : []), url], { detached: true, stdio: ['ignore', 'pipe', 'pipe'] })
 }
 // Firefox: the production settings (user.js) and flags, --headless in front;
 // its HOME inside the throwaway profile, so nothing of a real one is touched.
-const launchFirefox = binary => async ({ socksPort, profile, url }) => {
+const launchFirefox = (binary: string) => async ({ socksPort, profile, url }: { socksPort: number, profile: string, url: string }) => {
   await mkdir(`${profile}/firefox`, { recursive: true, mode: 0o700 })
   await mkdir(`${profile}/home`, { recursive: true, mode: 0o700 })
   await writeFile(`${profile}/firefox/user.js`, await firefoxUserJs(socksPort), { mode: 0o600 })
   return spawn(binary, ['--headless', '-profile', `${profile}/firefox`, url], { detached: true, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, HOME: `${profile}/home`, MOZ_CRASHREPORTER_DISABLE: '1' } })
 }
 // Every process still naming this unique temporary profile was started by our Chrome.
-async function holdingProfile(profile) {
+async function holdingProfile(profile: string) {
   const { stdout } = await promisify(execFile)('ps', ['-eo', 'pid=,args='], { maxBuffer: 32 * 1024 * 1024 })
   return stdout.split('\n').filter(line => line.includes(profile)).map(line => Number(line.trim().split(/\s+/)[0])).filter(pid => Number.isInteger(pid) && pid > 0 && pid !== process.pid)
 }
 // The plugin's own window probes (plugin/hooks/window.ts), where this Node
 // strips TypeScript's types itself (22.18+); elsewhere those checks are skipped.
 const windowScripts = await import('../plugin/hooks/window.ts').catch(() => null)
-function shOut(script) {
-  return new Promise((resolve, reject) => {
+function shOut(script: any) {
+  return new Promise<any>((resolve, reject) => {
     const child = spawn('/bin/sh', ['-s'], { stdio: ['pipe', 'pipe', 'ignore'] })
     let out = ''
     child.stdout.on('data', bytes => { out += bytes })
@@ -354,8 +354,8 @@ function shOut(script) {
     child.stdin.end(script)
   })
 }
-async function endBrowser(browser, exited, profile) {
-  for (const [signal, wait] of [['SIGTERM', 5000], ['SIGKILL', 2000]]) {
+async function endBrowser(browser: any, exited: any, profile: string) {
+  for (const [signal, wait] of [['SIGTERM', 5000], ['SIGKILL', 2000]] as [NodeJS.Signals, number][]) {
     try { process.kill(-browser.pid, signal) } catch {}
     if (await Promise.race([exited.then(() => true), pause(wait).then(() => false)]) && !(await holdingProfile(profile)).length) break
   }
@@ -388,7 +388,7 @@ async function probeChecks() {
   // ps: -U lists them all; -p names one (none for a pid not there). lsof finds no holder.
   await writeFile(`${bin}/ps`, ['#!/bin/sh', 'want=', 'while [ $# -gt 0 ]; do [ "$1" = -p ] && want=$2; shift; done', 'if [ -z "$want" ]; then cat "$PS_LIST"; exit 0; fi', 'while read -r q x; do [ "$q" = "$want" ] && printf "%s\\n" "$x"; done < "$PS_LIST"', 'exit 0', ''].join('\n'), { mode: 0o755 })
   await writeFile(`${bin}/lsof`, '#!/bin/sh\nexit 1\n', { mode: 0o755 })
-  const probe = () => new Promise((resolve, reject) => {
+  const probe = () => new Promise<any>((resolve, reject) => {
     const child = spawn('/bin/sh', ['-s'], { stdio: ['pipe', 'pipe', 'ignore'], env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, PS_LIST: `${dir}/ps.list` } })
     let out = ''
     child.stdout.on('data', bytes => { out += bytes })
@@ -417,14 +417,14 @@ async function detectChecks() {
   await mkdir(bin)
   // Only these on PATH: the tools the script uses, and the stand-ins.
   for (const tool of ['sed', 'head', 'readlink', 'ls', 'wc', 'grep', 'tr']) {
-    const real = await new Promise(resolve => execFile('/bin/sh', ['-c', `command -v ${tool}`], (error, out) => resolve(error ? '' : out.trim())))
+    const real = await new Promise<string>(resolve => execFile('/bin/sh', ['-c', `command -v ${tool}`], (error, out) => resolve(error ? '' : out.trim())))
     assert.ok(real.startsWith('/'), `${tool} for the detection check`)
     await symlink(real, `${bin}/${tool}`)
   }
   await writeFile(`${bin}/uname`, '#!/bin/sh\necho "$FAKE_OS"\n', { mode: 0o755 })
   await writeFile(`${bin}/osascript`, '#!/bin/sh\necho ran >> "$FAKE_LOG"\n[ -n "$FAKE_DEFAULT" ] || exit 1\necho "$FAKE_DEFAULT"\n', { mode: 0o755 })
   await writeFile(`${bin}/defaults`, '#!/bin/sh\n[ "$1" = read ] && [ "$3" = CFBundleIdentifier ] || exit 1\nsed -n "s|.*<key>CFBundleIdentifier</key><string>\\(.*\\)</string>.*|\\1|p" "$2.plist"\n', { mode: 0o755 })
-  const app = async (root, name, binary, id, milestone) => {
+  const app = async (root: any, name: string, binary: string, id: string, milestone?: any) => {
     const contents = `${root}/${name}.app/Contents`
     await mkdir(`${contents}/MacOS`, { recursive: true })
     await writeFile(`${contents}/MacOS/${binary}`, '#!/bin/sh\nexit 0\n', { mode: 0o755 })
@@ -435,7 +435,7 @@ async function detectChecks() {
   await app(appsA, 'Google Chrome', 'Google Chrome', 'com.google.Chrome')
   await app(appsB, 'Firefox', 'firefox', 'org.mozilla.firefox', '158.0')
   const ran = async () => (await readFile(log, 'utf8').catch(() => '')).split('\n').filter(Boolean).length
-  const detect = (env, override = '', dirs = [appsA, appsB]) => new Promise((resolve, reject) => {
+  const detect = (env: any, override = '', dirs = [appsA, appsB]) => new Promise<string>((resolve, reject) => {
     const child = spawn('/bin/sh', ['-s'], { stdio: ['pipe', 'pipe', 'ignore'], env: { PATH: bin, HOME: `${dir}/home`, FAKE_LOG: log, ...env } })
     let out = ''
     child.stdout.on('data', bytes => { out += bytes })
@@ -483,50 +483,50 @@ async function detectChecks() {
 }
 
 async function parserChecks() {
-  let attack
+  let attack: any
   const fixture = track(http.createServer((_req, _res) => {}))
-  fixture.on('upgrade', (req, socket) => attack(req, socket))
+  fixture.on('upgrade', (req: http.IncomingMessage, socket: any) => attack(req, socket))
   const url = `ws://127.0.0.1:${await listen(fixture)}/`
-  async function rejected(run, code, options, status) {
+  async function rejected(run: any, code: any, options?: any, status?: any) {
     attack = run
-    let ended, reportedStatus
-    connect(url, {}, { close: (c, s) => { ended = c; reportedStatus = s } }, options)
+    let ended: any, reportedStatus
+    connect(url, {}, { close: (c: any, s: any) => { ended = c; reportedStatus = s } }, options)
     await until(() => ended !== undefined, `WS rejected ${code}`)
     assert.equal(ended, code)
     assert.equal(reportedStatus, status)
   }
-  for (const [status, code] of [[401, 1008], [403, 1008], [429, 1013], [500, 1011]]) await rejected((_req, s) => s.end(`HTTP/1.1 ${status} Refused\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`), code, undefined, status)
-  await rejected((_req, s) => s.end('HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Accept: wrong\r\n\r\n'), 1002)
+  for (const [status, code] of [[401, 1008], [403, 1008], [429, 1013], [500, 1011]]) await rejected((_req: any, s: any) => s.end(`HTTP/1.1 ${status} Refused\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`), code, undefined, status)
+  await rejected((_req: any, s: any) => s.end('HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Accept: wrong\r\n\r\n'), 1002)
   for (const bytes of [frame(2, 'masked', { mask: true }), frame(2, 'rsv', { rsv: 64 }), frame(3, ''), frame(0, ''), frame(9, '', { fin: false }), frame(9, Buffer.alloc(126)), Buffer.from([0x82, 126, 0, 1]), Buffer.from([0x88, 1, 0]), frame(1, Buffer.from([255])), Buffer.concat([frame(2, 'a', { fin: false }), frame(1, 'b')])]) {
     const utf8 = bytes.equals(frame(1, Buffer.from([255])))
-    await rejected((req, s) => { handshake(req, s); s.write(bytes) }, utf8 ? 1007 : 1002)
+    await rejected((req: http.IncomingMessage, s: any) => { handshake(req, s); s.write(bytes) }, utf8 ? 1007 : 1002)
   }
   for (const length of [65537n, 0x8000000000000000n]) {
     const bytes = Buffer.alloc(10); bytes[0] = 0x82; bytes[1] = 127; bytes.writeBigUInt64BE(length, 2)
-    await rejected((req, s) => { handshake(req, s); s.write(bytes) }, 1009, { maxMessage: 65536 })
+    await rejected((req: http.IncomingMessage, s: any) => { handshake(req, s); s.write(bytes) }, 1009, { maxMessage: 65536 })
   }
-  await rejected((req, s) => { handshake(req, s); s.write(frame(2, Buffer.alloc(600 * 1024), { fin: false })); s.write(frame(0, Buffer.alloc(600 * 1024))) }, 1009)
-  await rejected((_req, s) => s.end(`HTTP/1.1 101 Switching Protocols\r\nX-Large: ${'x'.repeat(17 * 1024)}\r\n\r\n`), 1006)
-  const messages = []
-  attack = (req, s) => { handshake(req, s); s.write(Buffer.concat([frame(2, [0, 255], { fin: false }), frame(9, 'ping'), frame(0, [128, 1])])) }
-  const fragmented = connect(url, {}, { message: (data, binary) => messages.push({ data, binary }) })
+  await rejected((req: http.IncomingMessage, s: any) => { handshake(req, s); s.write(frame(2, Buffer.alloc(600 * 1024), { fin: false })); s.write(frame(0, Buffer.alloc(600 * 1024))) }, 1009)
+  await rejected((_req: any, s: any) => s.end(`HTTP/1.1 101 Switching Protocols\r\nX-Large: ${'x'.repeat(17 * 1024)}\r\n\r\n`), 1006)
+  const messages: any[] = []
+  attack = (req: http.IncomingMessage, s: any) => { handshake(req, s); s.write(Buffer.concat([frame(2, [0, 255], { fin: false }), frame(9, 'ping'), frame(0, [128, 1])])) }
+  const fragmented = connect(url, {}, { message: (data: any, binary: string) => messages.push({ data, binary }) })
   await until(() => messages.length, 'fragmented WS with interleaved ping')
   assert.deepEqual(messages, [{ data: Buffer.from([0, 255, 128, 1]), binary: true }])
   fragmented.close()
   attack = () => {}
   let overflow
-  const queued = connect(url, {}, { close: code => (overflow = code) })
+  const queued = connect(url, {}, { close: (code: any) => (overflow = code) })
   for (let i = 0; i < 17; i++) queued.send(Buffer.alloc(65536), true)
   assert.equal(overflow, 1009, 'pre-handshake queue is bounded')
-  attack = (req, s) => { handshake(req, s); s.pause() }
+  attack = (req: http.IncomingMessage, s: any) => { handshake(req, s); s.pause() }
   let sendingCode, opened = false
-  const sending = connect(url, {}, { open: () => (opened = true), close: code => (sendingCode = code) })
+  const sending = connect(url, {}, { open: () => (opened = true), close: (code: any) => (sendingCode = code) })
   await until(() => opened, 'send buffer fixture')
   for (let i = 0; i < 1024 && sendingCode === undefined; i++) sending.send(Buffer.alloc(65536), true)
   assert.equal(sendingCode, 1009, 'WS sending cannot grow without limit')
-  let handshakeTimeout
+  let handshakeTimeout: any
   attack = () => {}
-  connect(url, {}, { close: code => (handshakeTimeout = code) }, { timeoutMs: 80 })
+  connect(url, {}, { close: (code: any) => (handshakeTimeout = code) }, { timeoutMs: 80 })
   await until(() => handshakeTimeout !== undefined, 'bounded WS handshake')
   assert.equal(handshakeTimeout, 1006)
   console.log('ok WS accept, UTF-8/64-bit/RSV/opcode/mask/control/fragments, handshake/receive/send/queue limits')
@@ -542,13 +542,13 @@ async function selfSigned() {
 }
 
 async function publicRelayChecks() {
-  const messages = [], headers = new Map(), peers = new Map()
-  const roomLeg = id => `/api/rooms/${ROOM}/ws/${id}`, ROOM_LEG = roomLeg('PUBLIC000000')
+  const messages: any[] = [], headers = new Map(), peers = new Map()
+  const roomLeg = (id: string) => `/api/rooms/${ROOM}/ws/${id}`, ROOM_LEG = roomLeg('PUBLIC000000')
   const fixture = track(http.createServer())
-  fixture.on('upgrade', (req, socket, head) => {
+  fixture.on('upgrade', (req: http.IncomingMessage, socket: any, head: any) => {
     headers.set(req.url, req.headers); peers.set(req.url, socket)
     handshake(req, socket, req.url === '/local' ? 'Sec-WebSocket-Protocol: dev\r\n' : '')
-    readFrames(socket, head, (op, payload) => {
+    readFrames(socket, head, (op: any, payload: any) => {
       if (op === 8) return socket.end(frame(8, payload))
       if (req.url === '/local') socket.write(frame(op, payload))
       else messages.push({ url: req.url, op, payload })
@@ -582,19 +582,19 @@ async function publicRelayChecks() {
   // local leg with insecureLocal alone; the room leg always verifies.
   const pem = await selfSigned()
   if (!pem) return console.log('ok ordinary/public WS helper compatibility, strict settings (the old Host-TCP form refused), protocols/Origin, text/binary and graceful cleanup; SKIP the wss:// local leg (no openssl to make a certificate)')
-  const secure = track(https.createServer({ key: pem.key, cert: pem.cert })), upgrades = []
+  const secure = track(https.createServer({ key: pem.key, cert: pem.cert })), upgrades: any[] = []
   let tcpConnections = 0
   secure.on('connection', () => tcpConnections++)
-  secure.on('upgrade', (req, socket, head) => {
+  secure.on('upgrade', (req: http.IncomingMessage, socket: any, head: any) => {
     upgrades.push({ url: req.url, headers: req.headers })
     handshake(req, socket)
-    readFrames(socket, head, (op, payload) => op === 8 ? socket.end(frame(8, payload)) : socket.write(frame(op, payload)))
+    readFrames(socket, head, (op: any, payload: any) => op === 8 ? socket.end(frame(8, payload)) : socket.write(frame(op, payload)))
   })
   const tlsPort = await listen(secure)
   const tls = { ...cfg, local: `wss://localhost:${tlsPort}/_next/webpack-hmr?id=1`, origin: `https://localhost:${tlsPort}`, protocols: [] }
   // connect() itself: verifying by default, and `insecure` only when asked.
-  let verified, accepted = false
-  connect(`wss://localhost:${tlsPort}/verify`, {}, { close: code => (verified = code) })
+  let verified: any, accepted = false
+  connect(`wss://localhost:${tlsPort}/verify`, {}, { close: (code: any) => (verified = code) })
   connect(`wss://localhost:${tlsPort}/insecure`, {}, { open: () => (accepted = true) }, { insecure: true })
   await until(() => verified !== undefined && accepted, 'a self-signed certificate: refused by default, accepted with insecure')
   assert.equal(verified, 1006)
@@ -621,7 +621,7 @@ async function publicRelayChecks() {
   const fakeRoom = track(https.createServer({ key: pem.key, cert: pem.cert }))
   let roomUpgrades = 0, roomConnections = 0
   fakeRoom.on('connection', () => roomConnections++)
-  fakeRoom.on('upgrade', (_req, socket) => { roomUpgrades++; socket.destroy() })
+  fakeRoom.on('upgrade', (_req: any, socket: any) => { roomUpgrades++; socket.destroy() })
   const fakeRoomPort = await listen(fakeRoom)
   const unverified = wsHelper.start({ ...tls, insecureLocal: true, room: `wss://localhost:${fakeRoomPort}${roomLeg('ROOMLEG00000')}` })
   running.add(unverified)
@@ -638,29 +638,29 @@ async function publicRelayChecks() {
 // mid-session closes the room's leg 1011, never 1000; and the browser's whole
 // path, past 4 KiB, reaches the dev server.
 async function publicRelayFailures() {
-  const held = [], devs = new Map(), rooms = new Map()
+  const held: any[] = [], devs = new Map(), rooms = new Map()
   let roomConnections = 0
   const dev = track(http.createServer())
-  dev.on('upgrade', (req, socket, head) => {
+  dev.on('upgrade', (req: http.IncomingMessage, socket: any, head: any) => {
     if (req.url === '/refuse') return socket.end('HTTP/1.1 404 Not Found\r\nConnection: close\r\nContent-Length: 0\r\n\r\n')
     if (req.url === '/hold') return held.push({ req, socket })
     handshake(req, socket)
-    const leg = { socket, closes: [] }
+    const leg: any = { socket, closes: [] }
     devs.set(req.url, leg)
-    readFrames(socket, head, (op, payload) => { if (op === 8) { leg.closes.push(payload.readUInt16BE(0)); socket.end(frame(8, payload)) } })
+    readFrames(socket, head, (op: any, payload: any) => { if (op === 8) { leg.closes.push(payload.readUInt16BE(0)); socket.end(frame(8, payload)) } })
   })
   const devPort = await listen(dev)
   const room = track(http.createServer())
   room.on('connection', () => roomConnections++)
-  room.on('upgrade', (req, socket, head) => {
+  room.on('upgrade', (req: http.IncomingMessage, socket: any, head: any) => {
     handshake(req, socket)
-    const leg = { socket, closes: [] }
+    const leg: any = { socket, closes: [] }
     rooms.set(req.url, leg)
-    readFrames(socket, head, (op, payload) => { if (op === 8) { leg.closes.push(payload.readUInt16BE(0)); socket.end(frame(8, payload)) } })
+    readFrames(socket, head, (op: any, payload: any) => { if (op === 8) { leg.closes.push(payload.readUInt16BE(0)); socket.end(frame(8, payload)) } })
   })
   const roomPort = await listen(room)
-  const legOf = id => `/api/rooms/${ROOM}/ws/${id}`
-  const relayCfg = (path, id, port = devPort) => ({ local: `ws://localhost:${port}${path}`, origin: `http://localhost:${port}`, protocols: [], room: `ws://127.0.0.1:${roomPort}${legOf(id)}`, token: CAP, version: VERSION })
+  const legOf = (id: string) => `/api/rooms/${ROOM}/ws/${id}`
+  const relayCfg = (path: string, id: string, port = devPort) => ({ local: `ws://localhost:${port}${path}`, origin: `http://localhost:${port}`, protocols: [], room: `ws://127.0.0.1:${roomPort}${legOf(id)}`, token: CAP, version: VERSION })
 
   // The room hears of the browser's socket only once the dev server took it.
   const waiting = wsHelper.start(relayCfg('/hold', 'HOLD00000000'))
@@ -675,8 +675,8 @@ async function publicRelayFailures() {
 
   // Refused (nothing listening, or an HTTP answer): CONNECT and exit 1, the room never dialled.
   const nobody = await freePort()
-  for (const [path, port, label] of [['/x', nobody, 'nothing listening'], ['/refuse', devPort, 'an HTTP answer, not an upgrade']]) {
-    const before = roomConnections, log = launch(PUBLIC, relayCfg(path, 'DEAD00000000', port))
+  for (const [path, port, label] of [['/x', nobody, 'nothing listening'], ['/refuse', devPort, 'an HTTP answer, not an upgrade']] as [string, number, string][]) {
+    const before: number = roomConnections, log = launch(PUBLIC, relayCfg(path, 'DEAD00000000', port))
     await until(() => log.exit, `CONNECT: ${label}`)
     assert.deepEqual(log.rows, [{ state: 'error', code: 'CONNECT' }], label)
     assert.equal(log.exit.code, 1, label)
@@ -693,7 +693,7 @@ async function publicRelayFailures() {
 
   // Mid-session: a dev server that drops the socket (no close frame: a crash
   // or restart) closes the room's leg 1011; its own close code goes as it is.
-  for (const [id, end, code] of [['DROP00000000', socket => socket.destroy(), 1011], ['BYE000000000', socket => socket.write(frame(8, Buffer.from([0x03, 0xe9]))), 1001]]) {
+  for (const [id, end, code] of [['DROP00000000', (socket: any) => socket.destroy(), 1011], ['BYE000000000', (socket: any) => socket.write(frame(8, Buffer.from([0x03, 0xe9]))), 1001]] as [string, (socket: any) => void, number][]) {
     const path = `/live-${id}`, relay = wsHelper.start(relayCfg(path, id))
     running.add(relay)
     await until(() => devs.has(path) && rooms.has(legOf(id)), `both legs (${id})`)
@@ -724,42 +724,42 @@ async function publicRelayFailures() {
 }
 
 async function bridgeChecks() {
-  const control = row => frame(1, JSON.stringify(row)), ready = control({ t: 'ready' }), credit = n => control({ t: 'credit', n, nonce: 'N'.repeat(24) })
-  let attack
+  const control = (row: any) => frame(1, JSON.stringify(row)), ready = control({ t: 'ready' }), credit = (n: number) => control({ t: 'credit', n, nonce: 'N'.repeat(24) })
+  let attack: any
   const fixture = track(http.createServer())
-  fixture.on('upgrade', (req, socket, head) => { handshake(req, socket); attack(socket, head) })
+  fixture.on('upgrade', (req: http.IncomingMessage, socket: any, head: any) => { handshake(req, socket); attack(socket, head) })
   const url = `http://127.0.0.1:${await listen(fixture)}/api/rooms/${ROOM}/previews/${PID}/tunnel`
   for (const bytes of [frame(2, 'before ready'), Buffer.concat([ready, ready]), Buffer.concat([ready, credit(1)]), Buffer.concat([ready, frame(2, 'a'), frame(2, 'b')]), Buffer.concat([ready, frame(2, 'a'), credit(2)]), Buffer.concat([ready, control({ t: 'fin' }), control({ t: 'fin' })]), Buffer.concat([ready, control({ t: 'unknown' })]), Buffer.concat([ready, frame(1, 'x'.repeat(257))]), Buffer.concat([ready, control({ t: 'check', nonce: 'short' })]), Buffer.concat([ready, control({ t: 'check', n: 1, nonce: 'C'.repeat(24) })])]) {
-    const states = []
-    attack = socket => socket.write(bytes)
+    const states: any[] = []
+    attack = (socket: any) => socket.write(bytes)
     const listener = await helper.start({ ...dummy(await freePort()), url }, { emit: row => states.push(row) })
     running.add(listener)
-    const client = await wire(listener.port)
+    const client = await wire(listener.port!)
     await until(() => client.closed, 'invalid DATA/control closes TCP')
     assert.ok(states.some(row => row.state === 'channel-error' && row.code === 'PROTOCOL'), JSON.stringify(states))
     await listener.close(); running.delete(listener)
   }
   // A policy close is not proof of bad credentials; only HTTP 401/403 is.
-  for (const [code, expected] of [[1008, 'CONNECT'], [1013, 'BUSY']]) {
-    const states = []
-    attack = socket => { const bytes = Buffer.alloc(2); bytes.writeUInt16BE(code); socket.end(Buffer.concat([ready, frame(8, bytes)])) }
+  for (const [code, expected] of [[1008, 'CONNECT'], [1013, 'BUSY']] as [number, string][]) {
+    const states: any[] = []
+    attack = (socket: any) => { const bytes = Buffer.alloc(2); bytes.writeUInt16BE(code); socket.end(Buffer.concat([ready, frame(8, bytes)])) }
     const listener = await helper.start({ ...dummy(await freePort()), url }, { emit: row => states.push(row) })
     running.add(listener)
-    const client = await wire(listener.port)
+    const client = await wire(listener.port!)
     await until(() => client.closed, `policy close ${code}`)
     assert.ok(states.some(row => row.state === 'channel-error' && row.code === expected), JSON.stringify(states))
     assert.ok(!states.some(row => row.state === 'error' || row.code === 'AUTH'))
     await listener.close(); running.delete(listener)
   }
-  let roomSocket, received = [], noCredit = true
-  attack = (socket, head) => {
+  let roomSocket: any, received: any[] = [], noCredit = true
+  attack = (socket: any, head: any) => {
     roomSocket = socket
-    readFrames(socket, head, (op, bytes) => received.push({ op, bytes }))
+    readFrames(socket, head, (op: any, bytes: Buffer) => received.push({ op, bytes }))
     socket.write(Buffer.concat([ready, frame(2, 'reply')]))
   }
-  const states = [], listener = await helper.start({ ...dummy(await freePort()), url }, { emit: row => states.push(row) })
+  const states: any[] = [], listener = await helper.start({ ...dummy(await freePort()), url }, { emit: row => states.push(row) })
   running.add(listener)
-  const client = await wire(listener.port)
+  const client = await wire(listener.port!)
   await until(() => client.bytes.length === 5, 'raw DATA delivered to TCP')
   await pause(30)
   assert.equal(received.length, 0, 'receiver cannot guess ACK without server challenge')
@@ -778,34 +778,34 @@ async function bridgeChecks() {
   await listener.close(); running.delete(listener)
 
   // Even a 1000 close is abnormal if the TCP halves did not finish.
-  const disconnectedStates = []
-  attack = socket => socket.end(Buffer.concat([ready, frame(8, Buffer.from([3, 232]))]))
+  const disconnectedStates: any[] = []
+  attack = (socket: any) => socket.end(Buffer.concat([ready, frame(8, Buffer.from([3, 232]))]))
   const disconnected = await helper.start({ ...dummy(await freePort()), url }, { emit: row => disconnectedStates.push(row) })
   running.add(disconnected)
-  const oldTCP = await wire(disconnected.port)
+  const oldTCP = await wire(disconnected.port!)
   await until(() => oldTCP.closed, 'WS disconnect destroys unfinished TCP')
   assert.ok(disconnectedStates.some(row => row.code === 'CONNECT'))
   await disconnected.close(); running.delete(disconnected)
 
-  let targetSocket
+  let targetSocket: any
   const target = track(net.createServer(socket => { targetSocket = socket; socket.on('end', () => socket.end()) }))
-  const targetPort = await listen(target), timeoutStates = []
+  const targetPort = await listen(target), timeoutStates: any[] = []
   attack = () => {} // WS upgrade succeeds, but the room never pairs it.
   const timedHost = tcpRelay.startHost({ port: targetPort, room: url.replace(/^http/, 'ws').replace(`/previews/${PID}/tunnel`, '/ws/HHHHHHHHHHHH'), token: CAP, version: VERSION }, { emit: row => timeoutStates.push(row), timeoutMs: 80 })
   await timedHost.closed
   await until(() => targetSocket?.destroyed, 'host timeout closes loopback target')
   assert.deepEqual(timeoutStates, [{ state: 'error', code: 'TIMEOUT' }])
 
-  const sent = [], payload = randomBytes(300 * 1024 + 37)
+  const sent: any[] = [], payload = randomBytes(300 * 1024 + 37)
   let forwarding = false, incomingACK = false, closing = false
-  attack = (socket, head) => {
+  attack = (socket: any, head: any) => {
     roomSocket = socket
-    readFrames(socket, head, (op, bytes) => {
+    readFrames(socket, head, (op: any, bytes: Buffer) => {
       if (op === 2) {
         sent.push(Buffer.from(bytes))
         if (forwarding) socket.write(control({ t: 'ack', n: bytes.length, nonce: randomBytes(18).toString('base64url') }))
       } else if (op === 1) {
-        const row = JSON.parse(bytes)
+        const row = JSON.parse(bytes.toString())
         if (row.t === 'ack') incomingACK = true
         if (row.t === 'fin' && !closing) { closing = true; socket.end(Buffer.concat([control({ t: 'fin' }), frame(8, Buffer.from([3, 232]))])) }
       }
@@ -814,7 +814,7 @@ async function bridgeChecks() {
   }
   const windowRun = await helper.start({ ...dummy(await freePort()), url }, { emit: () => {} })
   running.add(windowRun)
-  const windowClient = await wire(windowRun.port); windowClient.client.end(payload)
+  const windowClient = await wire(windowRun.port!); windowClient.client.end(payload)
   await until(() => sent.length === 4, 'four-frame outstanding window')
   await pause(50)
   assert.equal(sent.length, 4, 'no fifth frame before ACK')
@@ -832,24 +832,24 @@ async function bridgeChecks() {
 }
 
 async function workerChecks() {
-  const notices = [], upgrades = [], peers = new Map(), localSockets = new Set()
+  const notices: any[] = [], upgrades: any[] = [], peers = new Map(), localSockets = new Set()
   let holdRejects = false
   const fixture = track(http.createServer((req, res) => {
-    const chunks = []
+    const chunks: any[] = []
     req.on('data', data => chunks.push(data))
     req.on('end', () => {
-      notices.push({ path: req.url, headers: req.headers, body: JSON.parse(Buffer.concat(chunks)) })
+      notices.push({ path: req.url, headers: req.headers, body: JSON.parse(Buffer.concat(chunks).toString()) })
       if (!holdRejects) res.end('{}')
     })
   }))
-  fixture.on('upgrade', (req, socket, head) => {
+  fixture.on('upgrade', (req: http.IncomingMessage, socket: any, head: any) => {
     upgrades.push({ path: req.url, headers: req.headers })
     peers.set(req.url, socket)
     socket.once('close', () => { if (peers.get(req.url) === socket) peers.delete(req.url) })
     handshake(req, socket)
-    readFrames(socket, head, (op, payload) => { if (op === 8) socket.end(frame(8, payload)) })
+    readFrames(socket, head, (op: any, payload: any) => { if (op === 8) socket.end(frame(8, payload)) })
     // Half are paired, half wait: both kinds count against the worker's cap.
-    if (Number(req.url.split('/').at(-1).slice(2)) < 32) socket.write(frame(1, '{"t":"ready"}'))
+    if (Number(req.url!.split('/').at(-1)!.slice(2)) < 32) socket.write(frame(1, '{"t":"ready"}'))
   })
   const room = `http://127.0.0.1:${await listen(fixture)}/api/rooms/${ROOM}`
   const controlToken = randomBytes(32).toString('hex'), cfg = { room, token: CAP, controlToken, version: VERSION }
@@ -864,13 +864,13 @@ async function workerChecks() {
   assert.equal(check.headers.connection, 'close')
   assert.deepEqual(JSON.parse(check.body), { ok: true })
   // Unfinished headers and bodies share the same eight-socket hard deadline.
-  const stalled = []
+  const stalled: any[] = []
   for (let i = 0; i < 8; i++) {
-    const connection = await wire(host.port)
+    const connection = await wire(host.port!)
     connection.client.write(i < 4 ? 'POST / HTTP/1.1\r\n' : `POST / HTTP/1.1\r\nHost: 127.0.0.1:${host.port}\r\nAuthorization: Bearer ${host.controlToken}\r\nContent-Type: application/json\r\nContent-Length: 99\r\n\r\n{`)
     stalled.push(connection)
   }
-  const excessControl = await wire(host.port)
+  const excessControl = await wire(host.port!)
   await until(() => excessControl.closed, 'ninth control socket refused')
   assert.match(excessControl.bytes.toString(), /^HTTP\/1\.1 503 Service Unavailable\r\n/, 'the ninth is answered 503 at once')
   assert.ok(stalled.every(s => !s.closed))
@@ -878,18 +878,18 @@ async function workerChecks() {
   assert.equal(refusedOpen.status, 503, 'a whole command on a refused socket is answered 503')
   await until(() => stalled.every(s => s.closed), 'slow headers/bodies time out', 3500)
   assert.equal((await ipc(host, { op: 'close-preview', pid: 'pv1' })).status, 200)
-  const oversizedHeader = await wire(host.port)
+  const oversizedHeader = await wire(host.port!)
   oversizedHeader.client.write(`POST / HTTP/1.1\r\nX-Large: ${'a'.repeat(9000)}\r\n\r\n`)
   await until(() => oversizedHeader.closed, 'oversized control headers refused')
   assert.match(oversizedHeader.bytes.toString(), /^HTTP\/1\.1 400/)
 
   const missing = 'MISSING00000', began = Date.now()
   assert.equal((await ipc(host, { ...row, id: missing })).status, 200, 'open accepts before localhost connects')
-  await until(() => host.rows.some(r => r.state === 'closed' && r.id === missing), 'failed local TCP releases reservation')
+  await until(() => host.rows.some((r: any) => r.state === 'closed' && r.id === missing), 'failed local TCP releases reservation')
   await until(() => notices.some(r => r.path === `/api/rooms/${ROOM}/ws/${missing}/reject`), 'failed TCP rejects pending remote channel')
   assert.ok(Date.now() - began < 2000, 'local failure does not wait for the pairing deadline')
   assert.ok(!upgrades.some(r => r.path.endsWith(missing)), 'never fake-pair before localhost connects')
-  assert.deepEqual(host.rows.find(r => r.id === missing), { state: 'closed', id: missing, code: 'CONNECT' })
+  assert.deepEqual(host.rows.find((r: any) => r.id === missing), { state: 'closed', id: missing, code: 'CONNECT' })
   assert.deepEqual(notices.at(-1).body, { code: 'CONNECT' })
   assert.equal(notices.at(-1).headers.authorization, `Bearer ${CAP}`)
   assert.equal(notices.at(-1).headers['x-shared-session-version'], VERSION)
@@ -899,7 +899,7 @@ async function workerChecks() {
   const beforeRejects = notices.length, nobody = await freePort()
   for (let i = 0; i < 80; i++) assert.equal((await ipc(host, { op: 'open', id: `RJ${String(i).padStart(10, '0')}`, pid: 'pv1', port: nobody })).status, 200)
   await until(() => notices.length >= beforeRejects + 64, 'reject notification bound exercised')
-  await until(() => host.rows.filter(r => r.state === 'closed' && r.id.startsWith('RJ')).length === 80, 'every refused open released')
+  await until(() => host.rows.filter((r: any) => r.state === 'closed' && r.id.startsWith('RJ')).length === 80, 'every refused open released')
   assert.equal(notices.length, beforeRejects + 64, 'no unbounded reject queue')
   await pause(2100)
   holdRejects = false
@@ -921,7 +921,7 @@ async function workerChecks() {
   await until(() => notices.some(r => r.path.endsWith('/OVERFLOW0000/reject') && r.body.code === 'BUSY'), 'full worker rejects pending room channel')
   assert.equal(localSockets.size, 64, 'full worker creates no local peer')
   assert.equal((await ipc(host, { op: 'close-preview', pid: 'pv1' })).status, 200)
-  const closed = id => host.rows.filter(r => r.state === 'closed' && r.id === id)
+  const closed = (id: string) => host.rows.filter((r: any) => r.state === 'closed' && r.id === id)
   await until(() => commands.filter(c => c.pid === 'pv1').every(c => closed(c.id).length === 1), 'only selected preview releases')
   assert.ok(commands.filter(c => c.pid === PID).every(c => closed(c.id).length === 0), 'other preview is untouched')
   assert.equal((await ipc(host, commands[0])).status, 200, 'a released id can be admitted afresh')
@@ -933,9 +933,9 @@ async function workerChecks() {
   // Its control port is free again. The kernel can hold it a moment after the
   // process is gone (a kept-alive client here not yet told), so bind until it frees.
   await rebindable('127.0.0.1', host.port)
-  assert.deepEqual(host.rows.filter(r => r.state === 'ready'), [{ state: 'ready', port: host.port }])
+  assert.deepEqual(host.rows.filter((r: any) => r.state === 'ready'), [{ state: 'ready', port: host.port }])
   assert.ok(!host.stdout.includes(host.controlToken) && !host.stdout.includes(CAP))
-  assert.ok(!host.rows.some(r => r.id === 'REFUSED00000') && !notices.some(r => r.path.includes('REFUSED00000')), 'the open refused 503 never ran')
+  assert.ok(!host.rows.some((r: any) => r.id === 'REFUSED00000') && !notices.some(r => r.path.includes('REFUSED00000')), 'the open refused 503 never ran')
   console.log('ok production worker bootstrap/IPC auth/Host/Origin 403, schema 400, body 413, header/socket deadlines (the ninth 503, its command never run), duplicate ids, 64-peer cap, bounded rejects, setup failure, preview isolation and owned shutdown')
 }
 
@@ -967,7 +967,7 @@ async function listenerChecks() {
   for (const host of [undefined, '0.0.0.0']) {
     const label = host ?? 'listen(P) without a host'
     const owner = track(net.createServer(s => s.end('wildcard owner')))
-    const ownerPort = await new Promise((resolve, reject) => {
+    const ownerPort = await new Promise<number>((resolve, reject) => {
       owner.once('error', reject)
       owner.listen(host ? { host, port: 0 } : { port: 0 }, () => { owner.removeListener('error', reject); resolve(owner.address().port) })
     })
@@ -988,8 +988,8 @@ async function listenerChecks() {
   // The knock: a connection, or ~300 ms without an answer, means taken; only a
   // refusal (or no IPv6 at all) means free. Port 0 knocks only on ::1 (below).
   // The behaviors are the requested port's (`only`); any other number is free.
-  const knocks = []
-  const knock = (v4, v6, only) => ({ host, port }) => {
+  const knocks: any[] = []
+  const knock = (v4: any, v6: any, only?: any) => ({ host, port }: any): any => {
     knocks.push({ host, port })
     const behavior = only !== undefined && port !== only ? 'ECONNREFUSED' : host === '::1' ? v6 : v4, socket = new net.Socket()
     if (behavior !== 'silent') setImmediate(() => behavior === 'answer' ? socket.emit('connect') : socket.destroy(Object.assign(new Error('knock'), { code: behavior })))
@@ -1009,23 +1009,23 @@ async function listenerChecks() {
     const moved = knocks.filter(k => k.port !== wanted)
     if (free) assert.deepEqual(moved, [])
     else {
-      assert.ok(moved.length >= 1 && moved.every(k => k.host === '::1'), JSON.stringify(moved))
+      assert.ok(moved.length >= 1 && moved.every((k: any) => k.host === '::1'), JSON.stringify(moved))
       assert.equal(moved.at(-1).port, run.port)
     }
     if (v4 === 'silent' || v6 === 'silent') assert.ok(Date.now() - began >= 280, 'an unanswered knock waits out its deadline')
     else assert.ok(Date.now() - began < 280, 'knocks run in parallel and answer at once')
     await run.close()
   }
-  const strictStates = []
+  const strictStates: any[] = []
   await assert.rejects(helper.start(dummy(await fixedPort()), { emit: row => strictStates.push(row), connect: knock('ECONNREFUSED', 'silent') }), { code: 'EADDRINUSE' })
   assert.deepEqual(strictStates, [{ state: 'error', code: 'EADDRINUSE' }], 'strict reports a taken port exactly as a bind conflict')
   // Port 0's own number is knocked on ::1 alone, after the IPv4 bind and
   // before the exact ::1 bind: the IPv4 allocator passes over an IPv6-only
   // listener's port ([::]:P), which macOS would let ::1:P sit beside. A number
   // answering there is rolled back and passed over for another.
-  const knockedAt = []
-  let answering
-  const v6Owner = ({ host, port }) => {
+  const knockedAt: any[] = []
+  let answering: any
+  const v6Owner = ({ host, port }: any): any => {
     knockedAt.push({ host, port })
     answering ??= port
     const socket = new net.Socket()
@@ -1045,10 +1045,10 @@ async function listenerChecks() {
   for (const host of ipv6 ? ['127.0.0.1', '::1'] : ['127.0.0.1']) await assert.rejects(listen(track(net.createServer()), host, ephemeral.port), { code: 'EADDRINUSE' })
   assert.ok(!ephemeral.stdout.includes(CAP))
   await stop(ephemeral)
-  let made = 0, firstPort
+  let made = 0, firstPort: any
   const retried = await helper.start({ ...dummy(0), strict: false }, { emit: () => {}, createServer: (...args) => {
     const server = net.createServer(...args), index = ++made
-    if (index === 1) server.once('listening', () => { firstPort = server.address().port })
+    if (index === 1) server.once('listening', () => { firstPort = (server.address() as net.AddressInfo).port })
     // The ::1 half of the first OS-assigned port conflicts: roll back, ask again.
     if (index === 2) server.listen = () => { queueMicrotask(() => server.emit('error', Object.assign(new Error(), { code: 'EADDRINUSE' }))); return server }
     return server
@@ -1066,10 +1066,10 @@ async function listenerChecks() {
   const again = await ready(cfg); await stop(again)
   // A requested port is cancelled during its knock; port 0 during a late 'listening'.
   for (const request of [dummy(await freePort()), { ...dummy(0), strict: false }]) {
-    const states = [], controller = new AbortController()
+    const states: any[] = [], controller = new AbortController()
     const cancelled = helper.start(request, { signal: controller.signal, emit: row => states.push(row), createServer: (...args) => {
       const server = net.createServer(...args), native = server.listen.bind(server)
-      server.listen = (...args) => { setTimeout(() => native(...args), 30); return server }
+      server.listen = ((...args: any[]) => { setTimeout(() => (native as any)(...args), 30); return server }) as any
       return server
     } })
     controller.abort()
@@ -1078,7 +1078,7 @@ async function listenerChecks() {
   }
   // Only a genuinely unsupported IPv6 bind permits IPv4-only operation.
   let number = 0
-  const v4states = []
+  const v4states: any[] = []
   const v4only = await helper.start(dummy(await freePort()), { emit: row => v4states.push(row), createServer: (...args) => {
     const server = net.createServer(...args)
     if (++number === 2) server.listen = () => { queueMicrotask(() => server.emit('error', Object.assign(new Error(), { code: 'EAFNOSUPPORT' }))); return server }
@@ -1091,16 +1091,16 @@ async function listenerChecks() {
   // on either family, is DENIED and never STARTUP: strict reports it (the plugin
   // falls back as for a taken port); non-strict moves on as for a taken one.
   for (const [code, family] of [['EACCES', '127.0.0.1'], ['EPERM', '::1']]) {
-    const wanted = await fixedPort(), refuse = (...args) => {
+    const wanted = await fixedPort(), refuse = (...args: any[]) => {
       const server = net.createServer(...args), native = server.listen.bind(server)
       server.listen = options => options.host === family && options.port === wanted ? (queueMicrotask(() => server.emit('error', Object.assign(new Error(), { code }))), server) : native(options)
       return server
     }
-    const states = []
+    const states: any[] = []
     await assert.rejects(helper.start(dummy(wanted), { emit: row => states.push(row), createServer: refuse }), { code: 'DENIED' })
     assert.deepEqual(states, [{ state: 'error', code: 'DENIED' }], `strict ${code} on ${family}`)
     const rebind = track(net.createServer()); await listen(rebind, '127.0.0.1', wanted); await close(rebind)
-    const moved = [], elsewhere = await helper.start({ ...dummy(wanted), strict: false }, { emit: row => moved.push(row), createServer: refuse })
+    const moved: any[] = [], elsewhere = await helper.start({ ...dummy(wanted), strict: false }, { emit: row => moved.push(row), createServer: refuse })
     assert.notEqual(elsewhere.port, wanted, `non-strict ${code} on ${family} moves to a free port`)
     assert.deepEqual(moved, [{ state: 'ready', port: elsewhere.port, ipv6: elsewhere.ipv6 }])
     await elsewhere.close()
@@ -1111,23 +1111,23 @@ async function listenerChecks() {
 
 async function listenerCapacity() {
   let accepted = 0, paired = false
-  const channels = []
+  const channels: any[] = []
   const fixture = track(http.createServer())
-  fixture.on('upgrade', (req, socket, head) => {
+  fixture.on('upgrade', (req: http.IncomingMessage, socket: any, head: any) => {
     accepted++
     channels.push(socket)
     handshake(req, socket)
-    readFrames(socket, head, (op, payload) => { if (op === 8) socket.end(frame(8, payload)) })
+    readFrames(socket, head, (op: any, payload: any) => { if (op === 8) socket.end(frame(8, payload)) })
     if (paired) socket.write(frame(1, '{"t":"ready"}'))
   })
   const url = `http://127.0.0.1:${await listen(fixture)}/api/rooms/${ROOM}/previews/${PID}/tunnel`
   for (paired of [false, true]) {
-    const states = [], clients = [], before = accepted
+    const states: any[] = [], clients: any[] = [], before = accepted
     const listener = await helper.start({ ...dummy(await freePort()), url }, { emit: row => states.push(row) })
     running.add(listener)
-    for (let i = 0; i < 32; i++) clients.push(await wire(listener.port, ipv6 && i % 2 ? '::1' : '127.0.0.1'))
+    for (let i = 0; i < 32; i++) clients.push(await wire(listener.port!, ipv6 && i % 2 ? '::1' : '127.0.0.1'))
     await until(() => accepted === before + 32, '32 accepted/pending channels across both families')
-    const extra = await wire(listener.port)
+    const extra = await wire(listener.port!)
     await until(() => extra.closed, '33rd guest socket fails alone')
     assert.equal(extra.bytes.length, 0, 'BUSY never fabricates an HTTP reply')
     assert.ok(states.some(row => row.state === 'channel-error' && row.code === 'BUSY'))
@@ -1136,7 +1136,7 @@ async function listenerCapacity() {
     assert.equal(accepted, before + 32, 'over-capacity guest never opens a room WS')
     channels[before].end(frame(8, Buffer.from([3, 240])))
     await until(() => clients[0].closed, 'guest slot closed')
-    const again = await wire(listener.port)
+    const again = await wire(listener.port!)
     await until(() => accepted === before + 33, 'guest slot reusable without listener restart')
     assert.equal(states.filter(row => row.state === 'ready').length, 1)
     const beforeCancel = states.length
@@ -1148,7 +1148,7 @@ async function listenerCapacity() {
 }
 
 async function realChain() {
-  let origin
+  let origin: any
   if (process.env.EXTERNAL_SERVER === '1') {
     assert.ok(process.env.SHARE_SERVER, 'SHARE_SERVER is required with EXTERNAL_SERVER=1')
     origin = new URL(process.env.SHARE_SERVER).origin
@@ -1157,7 +1157,7 @@ async function realChain() {
     workerd.add(server)
     origin = server.origin
   }
-  async function api(path, token, body, expected = 200) {
+  async function api(path: string, token: string | null, body?: any, expected = 200): Promise<any> {
     const res = await fetch(`${origin}${path}`, { method: 'POST', signal: AbortSignal.timeout(15_000), headers: { 'content-type': 'application/json', 'x-shared-session-version': VERSION, ...(token ? { authorization: `Bearer ${token}` } : {}) }, body: JSON.stringify(body ?? {}) })
     const result = await res.json()
     assert.equal(res.status, expected, JSON.stringify(result))
@@ -1171,8 +1171,8 @@ async function realChain() {
   // down. It passes each write on at once (no Nagle): holding a second small
   // write for the first's ACK, which Linux delays 40 ms, made every exchange
   // past it some 80 ms, and the 20,000-frame check below ran out of time on CI.
-  async function faultGate() {
-    const active = new Set(), clients = new Set()
+  async function faultGate(): Promise<any> {
+    const active = new Set<any>(), clients = new Set<any>()
     let online = true, refused = 0
     const server = track(net.createServer({ allowHalfOpen: true, noDelay: true }, client => {
       if (!online) { refused++; client.destroy(); return }
@@ -1194,14 +1194,14 @@ async function realChain() {
   }
   const guestGate = interruptible ? await faultGate() : null, hostGate = interruptible ? await faultGate() : null
   const guestOrigin = guestGate?.origin ?? origin, hostOrigin = hostGate?.origin ?? origin
-  const seenTCP = [], hostLogs = [], sharedPorts = new Map(), commandFailures = []
-  let hostWorker, startingWorker, hostControl = Promise.resolve()
+  const seenTCP: any[] = [], hostLogs: any[] = [], sharedPorts = new Map(), commandFailures: any[] = []
+  let hostWorker: any, startingWorker, hostControl = Promise.resolve()
   async function ensureWorker() {
     if (hostWorker && !hostWorker.exit) return hostWorker
     startingWorker ??= worker(`${hostOrigin}${base}`, room.token).then(log => { hostWorker = log; hostLogs.push(log); return log }).finally(() => { startingWorker = undefined })
     return startingWorker
   }
-  function openHost(ask) {
+  function openHost(ask: any) {
     hostControl = hostControl.then(async () => {
       assert.match(ask.id, /^[A-Za-z0-9_-]{8,40}$/)
       assert.equal(sharedPorts.get(ask.port), ask.pid, 'driver rechecks authorized port/pid')
@@ -1212,7 +1212,7 @@ async function realChain() {
     }).catch(error => { commandFailures.push(error) })
     return hostControl
   }
-  const activeHost = () => (hostWorker.ids?.size ?? 0) - hostWorker.rows.filter(row => row.state === 'closed').length
+  const activeHost = () => (hostWorker.ids?.size ?? 0) - hostWorker.rows.filter((row: any) => row.state === 'closed').length
   await ensureWorker()
   async function subscribe() {
     const state = { ready: false, closed: false }
@@ -1244,15 +1244,15 @@ async function realChain() {
     return { request: req, get closed() { return state.closed } }
   }
   let stream = await subscribe()
-  async function share(port) {
+  async function share(port: number) {
     const pid = (await api(`${base}/previews`, room.token, { port, tcp: true })).pid
     sharedPorts.set(port, pid)
     return pid
   }
   // A guest's listener for a preview: its seat's own token, which each
   // connection's room socket carries, and the host's port to ask for first.
-  function forwarding(pid, member = guest.token) {
-    const port = [...sharedPorts].find(([, shared]) => shared === pid)[0]
+  function forwarding(pid: string, member = guest.token) {
+    const port = [...sharedPorts].find(([, shared]) => shared === pid)![0]
     return { port, strict: false, url: `${guestOrigin}${base}/previews/${pid}/tunnel`, token: member }
   }
   const echo = track(net.createServer({ allowHalfOpen: true }, socket => {
@@ -1263,16 +1263,16 @@ async function realChain() {
   const echoPort = await listen(echo), echoPid = await share(echoPort), echoCfg = forwarding(echoPid)
   const raw = await ready(echoCfg)
   assert.notEqual(raw.port, echoPort, 'guest default auto-selects when the host port is busy on this machine')
-  const bytes = randomBytes(4 * 1024 * 1024 + 37), rawWire = await wire(raw.port)
+  const bytes = randomBytes(4 * 1024 * 1024 + 37), rawWire = await wire(raw.port!)
   rawWire.client.end(bytes)
   await until(() => rawWire.closed, 'multi-frame binary + bidirectional FIN', 20_000)
   assert.deepEqual(rawWire.bytes, Buffer.concat([bytes, Buffer.from([0, 255, 70, 73, 78])]))
   const headers = Buffer.from('POST /callback?code=once HTTP/1.1\r\nHost: other-origin.test\r\nCookie: session=A; cs_pv=application-cookie\r\nCookie: extra=1\r\nAuthorization: Bearer application-auth\r\nOrigin: https://oauth-provider.test\r\nConnection: close, x-keep\r\nX-Keep: unchanged\r\nContent-Length: 4\r\n\r\n\x00\xffhi', 'latin1')
-  const rawHeaders = await wire(raw.port); rawHeaders.client.end(headers)
+  const rawHeaders = await wire(raw.port!); rawHeaders.client.end(headers)
   await until(() => rawHeaders.closed, 'raw HTTP headers')
   assert.deepEqual(rawHeaders.bytes.subarray(0, headers.length), headers)
   if (ipv6) {
-    const v6guest = await wire(raw.port, '::1'); v6guest.client.end('ipv6 guest')
+    const v6guest = await wire(raw.port!, '::1'); v6guest.client.end('ipv6 guest')
     await until(() => v6guest.closed, 'IPv6 guest')
     assert.ok(v6guest.bytes.subarray(0, 10).equals(Buffer.from('ipv6 guest')))
     const v6app = track(net.createServer({ allowHalfOpen: true }, socket => { socket.on('data', b => socket.write(b)); socket.on('end', () => socket.end()) }))
@@ -1285,7 +1285,7 @@ async function realChain() {
     }
     const v6cfg = forwarding(await share(v6port))
     const v6run = await ready({ ...v6cfg, port: await freePort(), strict: true })
-    const v6host = await wire(v6run.port); v6host.client.end('host IPv6 fallback')
+    const v6host = await wire(v6run.port!); v6host.client.end('host IPv6 fallback')
     await until(() => v6host.closed, 'IPv6-only host fallback')
     assert.equal(v6host.bytes.toString(), 'host IPv6 fallback')
     await stop(v6run)
@@ -1309,10 +1309,10 @@ async function realChain() {
   {
     const FRAMES = 21_000, began = Date.now()
     let paced = Date.now()
-    const pace = async i => { if (i % 50 === 49) { await pause(Math.max(0, paced + 62.5 - Date.now())); paced = Date.now() } }
-    const ping = await wire(raw.port, '127.0.0.1', false)
-    let echoed = 0, arrived
-    ping.client.on('data', bytes => { echoed += bytes.length; arrived?.() })
+    const pace = async (i: number) => { if (i % 50 === 49) { await pause(Math.max(0, paced + 62.5 - Date.now())); paced = Date.now() } }
+    const ping = await wire(raw.port!, '127.0.0.1', false)
+    let echoed = 0, arrived: any
+    ping.client.on('data', (bytes: Buffer) => { echoed += bytes.length; arrived?.() })
     await moving((async () => {
       for (let i = 0; i < FRAMES; i++) {
         const back = new Promise(resolve => (arrived = resolve))
@@ -1331,31 +1331,31 @@ async function realChain() {
       more()
     }))
     const dripRun = await ready(forwarding(await share(await listen(drip))))
-    const oneWay = await wire(dripRun.port, '127.0.0.1', false)
+    const oneWay = await wire(dripRun.port!, '127.0.0.1', false)
     let dripped = 0
     paced = Date.now()
-    oneWay.client.on('data', async bytes => {
+    oneWay.client.on('data', async (bytes: Buffer) => {
       for (let i = 0; i < bytes.length; i++) { await pace(dripped++); more() }
     })
     // The channel closing is this step's end: whether it closed early, the count says.
     await moving(until(() => oneWay.closed, 'one way past 20,000 frames', 300_000), 'one way past 20,000 frames', () => dripped, () => false).catch(error => { throw new Error(`${error.message}: ${dripped} arrived`) })
     assert.equal(dripped, FRAMES)
-    assert.ok(!dripRun.rows.some(row => row.state === 'channel-error') && !hostWorker.rows.some(row => row.state === 'error'), JSON.stringify([...dripRun.rows, ...hostWorker.rows].filter(row => row.state?.includes('error'))))
+    assert.ok(!dripRun.rows.some((row: any) => row.state === 'channel-error') && !hostWorker.rows.some((row: any) => row.state === 'error'), JSON.stringify([...dripRun.rows, ...hostWorker.rows].filter(row => row.state?.includes('error'))))
     await stop(dripRun)
     console.log(`ok one connection past 20,000 frames: ${FRAMES} request/response exchanges and ${FRAMES} one-way frames (${((Date.now() - began) / 1000).toFixed(1)} s)`)
   }
 
-  const appRequests = [], upgrades = [], largeResponses = [], LARGE = 24 * 1024 * 1024 + 11, chunk = Buffer.alloc(65536, 0x6a)
+  const appRequests: any[] = [], upgrades: any[] = [], largeResponses: any[] = [], LARGE = 24 * 1024 * 1024 + 11, chunk = Buffer.alloc(65536, 0x6a)
   let largeWritten = 0
   const app = track(http.createServer(async (req, res) => {
     const parts = []; for await (const bytes of req) parts.push(bytes)
     const body = Buffer.concat(parts), seen = { method: req.method, url: req.url, headers: req.headers, rawHeaders: req.rawHeaders, body: body.toString('base64') }
     appRequests.push(seen)
-    const url = new URL(req.url, 'http://fixture.test')
+    const url = new URL(req.url!, 'http://fixture.test')
     if (url.pathname === '/drop') return req.socket.destroy()
     if (url.pathname === '/hold') { req.socket.once('end', () => req.socket.destroy()); return }
     if (url.pathname === '/binary') { res.writeHead(200, { 'content-length': body.length, 'set-cookie': ['one=1', 'two=2', 'cs_pv=app-owned'], 'x-keep': 'unchanged' }); return res.end(body) }
-    if (url.pathname === '/redirect') { res.writeHead(302, { location: url.searchParams.get('to'), 'set-cookie': 'state=A; Path=/; HttpOnly; SameSite=Lax' }); return res.end() }
+    if (url.pathname === '/redirect') { res.writeHead(302, { location: url.searchParams.get('to')!, 'set-cookie': 'state=A; Path=/; HttpOnly; SameSite=Lax' }); return res.end() }
     if (url.pathname.startsWith('/status/')) { res.writeHead(Number(url.pathname.split('/').at(-1))); return res.end('app response') }
     if (url.pathname === '/large') {
       const response = { path: req.url, written: 0 }
@@ -1365,7 +1365,7 @@ async function realChain() {
         for (let at = 0; at < LARGE && !res.destroyed; at += chunk.length) {
           const b = chunk.subarray(0, Math.min(chunk.length, LARGE - at))
           largeWritten += b.length; response.written += b.length
-          if (!res.write(b)) await new Promise(resolve => {
+          if (!res.write(b)) await new Promise<void>(resolve => {
             const done = () => { res.removeListener('drain', done); res.removeListener('close', done); resolve() }
             res.once('drain', done); res.once('close', done)
           })
@@ -1381,10 +1381,10 @@ async function realChain() {
     }
     res.setHeader('content-type', 'application/json'); res.end(JSON.stringify(seen))
   }))
-  app.on('upgrade', (req, socket, head) => {
+  app.on('upgrade', (req: http.IncomingMessage, socket: any, head: any) => {
     upgrades.push({ headers: req.headers, rawHeaders: req.rawHeaders, head: Buffer.from(head) })
     handshake(req, socket, 'Set-Cookie: cs_pv=application-cookie\r\n')
-    readFrames(socket, head, (op, payload) => {
+    readFrames(socket, head, (op: any, payload: any) => {
       if (op === 8) return socket.end(frame(8, payload))
       socket.write(frame(op, payload))
     })
@@ -1419,13 +1419,13 @@ async function realChain() {
 
   const browserHeaders = { origin: provider, cookie: 'session=A; cs_pv=application-cookie', authorization: 'Bearer app-WS' }
   async function openAppWS(localPort = port) {
-    const state = { opened: false, closed: undefined, messages: [] }
-    const socket = connect(`ws://localhost:${localPort}/ws`, browserHeaders, { open: () => (state.opened = true), message: (data, binary) => state.messages.push({ data, binary }), close: code => (state.closed = code) })
+    const state: any = { opened: false, closed: undefined, messages: [] }
+    const socket = connect(`ws://localhost:${localPort}/ws`, browserHeaders, { open: () => (state.opened = true), message: (data: any, binary: string) => state.messages.push({ data, binary }), close: (code: any) => (state.closed = code) })
     await until(() => state.opened || state.closed !== undefined, 'application WS through TCP')
     assert.equal(state.opened, true)
     return { socket, state }
   }
-  async function appEcho(ws, data, binary = false) {
+  async function appEcho(ws: any, data: any, binary = false) {
     assert.equal(ws.state.closed, undefined, 'old application WS must still be connected')
     const count = ws.state.messages.length
     assert.equal(ws.socket.send(data, binary), true)
@@ -1433,9 +1433,9 @@ async function realChain() {
     assert.deepEqual(ws.state.messages.slice(count), [{ data, binary }])
   }
   async function events() {
-    let firstEvent, finished = false, received = ''
+    let firstEvent: any, finished = false, received = ''
     const first = new Promise(resolve => (firstEvent = resolve))
-    const pending = request(port, '/events', { host: 'localhost', onData: bytes => { received += bytes; if (received.includes('data: 0')) firstEvent() } }).then(result => { finished = true; return result })
+    const pending = request(port, '/events', { host: 'localhost', onData: (bytes: Buffer) => { received += bytes; if (received.includes('data: 0')) firstEvent() } }).then(result => { finished = true; return result })
     await Promise.race([first, pending])
     assert.equal(finished, false, 'SSE first event arrives before the response ends')
     const result = await pending
@@ -1455,7 +1455,7 @@ async function realChain() {
   await until(() => largeWritten > 0, 'large response begins')
   await pause(150)
   assert.ok(largeWritten < LARGE, 'slow consumer bounds upstream instead of buffering the whole response')
-  slow.client.on('data', bytes => slow.parts.push(bytes)); slow.client.resume()
+  slow.client.on('data', (bytes: Buffer) => slow.parts.push(bytes)); slow.client.resume()
   await until(() => slow.closed, '24 MiB slow response drains', 30_000)
   const response = slow.bytes, end = response.indexOf('\r\n\r\n') + 4
   assert.equal(response.length - end, LARGE)
@@ -1471,7 +1471,7 @@ async function realChain() {
   // preview's streams alone, all on the room's one Host worker.
   {
     const frontPort = await freePort(), dataPort = await freePort()
-    let finishSSE
+    let finishSSE: any
     const releaseSSE = new Promise(resolve => { finishSSE = resolve })
     const backend = track(http.createServer(async (req, res) => {
       if (req.url === '/events') {
@@ -1480,18 +1480,18 @@ async function realChain() {
       }
       res.setHeader('content-type', 'application/json'); res.end(JSON.stringify({ service: 'separate backend', url: req.url }))
     }))
-    backend.on('upgrade', (req, socket, head) => {
+    backend.on('upgrade', (req: http.IncomingMessage, socket: any, head: any) => {
       handshake(req, socket)
-      readFrames(socket, head, (op, payload) => op === 8 ? socket.end(frame(8, payload)) : socket.write(frame(op, payload)))
+      readFrames(socket, head, (op: any, payload: any) => op === 8 ? socket.end(frame(8, payload)) : socket.write(frame(op, payload)))
     })
     const backendPort = await listen(backend)
     const html = `<!doctype html><title>Page fixture</title><script>fetch('http://127.0.0.1:${dataPort}/data');new WebSocket('ws://127.0.0.1:${dataPort}/ws')</script>`
-    const frontend = track(http.createServer((req, res) => { res.setHeader('content-type', 'text/html'); res.end(html) }))
+    const frontend = track(http.createServer((_req, res) => { res.setHeader('content-type', 'text/html'); res.end(html) }))
     const frontendPort = await listen(frontend)
     const database = track(net.createServer({ allowHalfOpen: true }, socket => { socket.on('data', bytes => socket.write(bytes)); socket.on('end', () => socket.end()) }))
     const databasePort = await listen(database)
     const webPid = await share(frontendPort), dataPid = await share(backendPort), dbPid = await share(databasePort)
-    const fixed = async (pid, port, seat = guest.token) => ({ ...forwarding(pid, seat), port, strict: true })
+    const fixed = async (pid: string, port: number, seat = guest.token) => ({ ...forwarding(pid, seat), port, strict: true })
     const workerIdentity = hostWorker.child.pid
     const dataCfg = await fixed(dataPid, dataPort)
     const blocker = track(net.createServer(socket => socket.end('unrelated fixed-port owner')))
@@ -1506,16 +1506,16 @@ async function realChain() {
     assert.equal(frontRun.port, frontPort)
     assert.equal((await request(frontPort, '/nested?fixture=page')).body.toString(), html)
     assert.equal(JSON.parse((await request(dataPort, '/data')).body).service, 'separate backend')
-    let firstData, firstBody = '', sseFinished = false
+    let firstData: any, firstBody = '', sseFinished = false
     const firstSSE = new Promise(resolve => (firstData = resolve))
-    const pendingSSE = request(dataPort, '/events', { onData: bytes => { firstBody += bytes.toString(); if (firstBody.includes('data: first')) firstData() } }).then(result => { sseFinished = true; return result })
+    const pendingSSE = request(dataPort, '/events', { onData: (bytes: Buffer) => { firstBody += bytes.toString(); if (firstBody.includes('data: first')) firstData() } }).then(result => { sseFinished = true; return result })
     await Promise.race([firstSSE, pendingSSE]); assert.equal(sseFinished, false)
     // Finish only after the first event arrives: scheduling may coalesce any timed gap.
     finishSSE()
     assert.equal((await pendingSSE).body.toString(), 'data: first\n\ndata: last\n\n')
     const dataWS = await openAppWS(dataPort)
     await appEcho(dataWS, 'separate dependency WS')
-    const databaseWire = await wire(dbRun.port); databaseWire.client.write('raw backend bytes')
+    const databaseWire = await wire(dbRun.port!); databaseWire.client.write('raw backend bytes')
     await until(() => databaseWire.bytes.toString() === 'raw backend bytes', 'non-HTTP backend')
     // Another guest on this machine: its fixed attempt meets this guest's listener; a free port is its own.
     const peer = await api(`${base}/join`, null, { name: 'Second guest' })
@@ -1550,12 +1550,12 @@ async function realChain() {
   // which routes the Host's port numbers to Guest helpers on OS-assigned
   // ports. Guest-owned servers hold the same numbers on [::1] and an unshared
   // port on 127.0.0.1; none of them may see a connection.
-  const probed = []
-  const realWindow = async (name, binary, start) => {
+  const probed: any[] = []
+  const realWindow = async (name: string, binary: string, start: any) => {
     const version = await promisify(execFile)(binary, ['--version'], { timeout: 15_000 }).then(({ stdout }) => stdout.trim(), () => 'unknown version')
     const E = await freePort(), D = await freePort(), U = await freePort(), marker = randomBytes(8).toString('hex')
-    const counts = { hostE: 0, hostD: 0, ownE: 0, ownD: 0, ownU: 0 }, reports = [], dependency = [], upstreamTargets = []
-    const bodyOf = req => new Promise(resolve => { const parts = []; req.on('data', bytes => parts.push(bytes)); req.on('end', () => resolve(Buffer.concat(parts).toString())) })
+    const counts: Record<string, number> = { hostE: 0, hostD: 0, ownE: 0, ownD: 0, ownU: 0 }, reports: any[] = [], dependency: any[] = [], upstreamTargets: any[] = []
+    const bodyOf = (req: http.IncomingMessage) => new Promise<string>(resolve => { const parts: any[] = []; req.on('data', (bytes: Buffer) => parts.push(bytes)); req.on('end', () => resolve(Buffer.concat(parts).toString())) })
     const page = `<!doctype html><meta charset="utf-8"><title>Shared preview</title><script>
 (async () => {
   const dep = 'http://127.0.0.1:${D}', result = { origin: location.origin, secure: isSecureContext }
@@ -1587,7 +1587,7 @@ async function realChain() {
         return res.end(page)
       }
       if (req.url === '/cookies') { res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' }); return res.end(JSON.stringify({ cookie: req.headers.cookie ?? '' })) }
-      if (req.method === 'POST' && req.url.startsWith('/report')) { reports.push({ path: req.url, cookie: req.headers.cookie ?? '', body: JSON.parse(text) }); res.writeHead(204); return res.end() }
+      if (req.method === 'POST' && req.url!.startsWith('/report')) { reports.push({ path: req.url, cookie: req.headers.cookie ?? '', body: JSON.parse(text) }); res.writeHead(204); return res.end() }
       res.writeHead(404); res.end()
     }))
     app.on('connection', () => counts.hostE++)
@@ -1604,14 +1604,14 @@ async function realChain() {
       res.writeHead(404, cors); res.end()
     }))
     dependencyServer.on('connection', () => counts.hostD++)
-    dependencyServer.on('upgrade', (req, socket, head) => {
+    dependencyServer.on('upgrade', (req: http.IncomingMessage, socket: any, head: any) => {
       dependency.push({ url: req.url, origin: req.headers.origin, upgrade: true })
       handshake(req, socket)
-      readFrames(socket, head, (op, payload) => op === 8 ? socket.end(frame(8, payload)) : socket.write(frame(op, payload)))
+      readFrames(socket, head, (op: any, payload: any) => op === 8 ? socket.end(frame(8, payload)) : socket.write(frame(op, payload)))
     })
     await listen(app, '127.0.0.1', E)
     await listen(dependencyServer, '127.0.0.1', D)
-    const own = key => { const server = track(http.createServer((_req, res) => res.end('the Guest\'s own service'))); server.on('connection', () => counts[key]++); return server }
+    const own = (key: string) => { const server = track(http.createServer((_req, res) => res.end('the Guest\'s own service'))); server.on('connection', () => counts[key]++); return server }
     if (ipv6) { await listen(own('ownE'), '::1', E); await listen(own('ownD'), '::1', D) }
     await listen(own('ownU'), '127.0.0.1', U)
     // The browser's own background traffic goes to a refusing upstream, not the internet.
@@ -1638,11 +1638,11 @@ async function realChain() {
     const [{ port: socksPort, control: controlPort }] = socks.rows
     assert.equal((await ipc({ port: controlPort, controlToken }, { op: 'routes', routes: { [E]: helperE.port, [D]: helperD.port }, startable: [] })).status, 200)
     const profile = await mkdtemp(`${scratch}/${name.toLowerCase()}-`)
-    let browserLog = '', early
+    let browserLog = '', early: any
     const browser = await start({ socksPort, profile, url: `http://localhost:${E}/` })
-    const exited = new Promise(resolve => browser.once('exit', (code, signal) => { early = { code, signal }; resolve() }))
-    browser.once('error', error => { early = { error: error.message } })
-    for (const stream of [browser.stdout, browser.stderr]) stream.on('data', bytes => { browserLog = (browserLog + bytes).slice(-6000) })
+    const exited = new Promise<void>(resolve => browser.once('exit', (code: any, signal: any) => { early = { code, signal }; resolve() }))
+    browser.once('error', (error: any) => { early = { error: error.message } })
+    for (const stream of [browser.stdout, browser.stderr]) stream.on('data', (bytes: Buffer) => { browserLog = (browserLog + bytes).slice(-6000) })
     try {
       await until(() => reports.some(r => r.path === '/report-final') || early, 'the page reports through the proxy', 90_000)
       assert.ok(!early, `${name} stopped early ${JSON.stringify(early)}: ${browserLog}`)
@@ -1658,14 +1658,14 @@ async function realChain() {
         assert.match(cookies, /(^|; )pagejs=J1(;|$)/, 'the page cookie round-trips')
       }
       assert.equal(final.body.unshared, 'refused', 'an unshared loopback port is refused')
-      await until(() => socks.rows.some(r => r.state === 'blocked' && r.port === U), 'blocked reported for the unshared port')
-      for (const port of [E, D, U]) assert.equal(socks.rows.filter(r => r.state === 'seen' && r.port === port).length, 1, `seen once for ${port}`)
-      assert.deepEqual(socks.rows.filter(r => r.state === 'blocked' || r.state === 'want'), [{ state: 'blocked', port: U }])
+      await until(() => socks.rows.some((r: any) => r.state === 'blocked' && r.port === U), 'blocked reported for the unshared port')
+      for (const port of [E, D, U]) assert.equal(socks.rows.filter((r: any) => r.state === 'seen' && r.port === port).length, 1, `seen once for ${port}`)
+      assert.deepEqual(socks.rows.filter((r: any) => r.state === 'blocked' || r.state === 'want'), [{ state: 'blocked', port: U }])
       assert.ok(['/api', '/events'].every(url => dependency.some(hit => hit.url === url)) && dependency.some(hit => hit.upgrade && hit.url === '/ws'))
       assert.ok(dependency.every(hit => hit.origin === `http://localhost:${E}`), 'the dependency sees the page origin unchanged')
       // Every Host-side connection is one the worker opened for a tunnel channel.
       await until(() => counts.hostE === seenTCP.filter(t => t.pid === pidE).length && counts.hostD === seenTCP.filter(t => t.pid === pidD).length, 'Host apps see only tunnel connections')
-      assert.ok([helperE, helperD].every(log => log.rows.some(r => r.state === 'channel-ready')), 'both helpers carried channels')
+      assert.ok([helperE, helperD].every(log => log.rows.some((r: any) => r.state === 'channel-ready')), 'both helpers carried channels')
       assert.deepEqual([counts.ownE, counts.ownD, counts.ownU], [0, 0, 0], "the Guest's own servers got zero connections")
       assert.ok(upstreamTargets.every(target => !/^(localhost|127\.|\[::1\]|\[::ffff:|\[::\]|0\.0\.0\.0)/i.test(target)), 'loopback never goes upstream')
       for (const target of upstreamTargets) assert.ok(!socks.stdout.includes(target.replace(/:[0-9]+$/, '')), 'proxy stdout carries no outbound names')
@@ -1707,33 +1707,33 @@ async function realChain() {
 
   const unavailablePort = await freePort(), unavailablePid = await share(unavailablePort)
   const unavailable = await ready({ ...forwarding(unavailablePid), port: await freePort(), strict: true })
-  const refusedAt = Date.now(), unavailableWire = await wire(unavailable.port)
+  const refusedAt = Date.now(), unavailableWire = await wire(unavailable.port!)
   unavailableWire.client.end('not paired')
   await until(() => unavailableWire.closed, 'host localhost failure rejects pending channel promptly', 3000)
   assert.ok(Date.now() - refusedAt < 3000)
   assert.equal(unavailableWire.bytes.length, 0)
-  assert.ok(unavailable.rows.some(row => row.state === 'channel-error' && row.code === 'CONNECT'))
-  assert.ok(!unavailable.rows.some(row => row.state === 'error'))
+  assert.ok(unavailable.rows.some((row: any) => row.state === 'channel-error' && row.code === 'CONNECT'))
+  assert.ok(!unavailable.rows.some((row: any) => row.state === 'error'))
   const nowAvailable = track(net.createServer({ allowHalfOpen: true }, socket => { socket.on('data', bytes => socket.write(bytes)); socket.on('end', () => socket.end()) }))
   await listen(nowAvailable, '127.0.0.1', unavailablePort)
-  const retried = await wire(unavailable.port); retried.client.end('a new independent request')
+  const retried = await wire(unavailable.port!); retried.client.end('a new independent request')
   await until(() => retried.closed, 'same listener works after localhost becomes available')
   assert.equal(retried.bytes.toString(), 'a new independent request')
-  assert.equal(unavailable.rows.filter(row => row.state === 'ready').length, 1)
-  assert.ok(unavailable.rows.some(row => row.state === 'channel-ready'))
+  assert.equal(unavailable.rows.filter((row: any) => row.state === 'ready').length, 1)
+  assert.ok(unavailable.rows.some((row: any) => row.state === 'channel-ready'))
   await stop(unavailable)
   await api(`${base}/previews/${unavailablePid}/end`, room.token)
 
-  const oneWorker = hostWorker.child.pid, halfTargets = [], halfClients = []
+  const oneWorker = hostWorker.child.pid, halfTargets: any[] = [], halfClients: any[] = []
   const halfApp = track(net.createServer({ allowHalfOpen: true }, socket => {
-    const state = { socket, data: [], ended: false }
+    const state: any = { socket, data: [], ended: false }
     halfTargets.push(state)
     socket.on('data', bytes => state.data.push(bytes))
     socket.on('end', () => { state.ended = true }) // Keep the response half open.
   }))
   // halfApp counts raw connections; on one machine a knock on its (Host) port would be one.
   const halfPid = await share(await listen(halfApp)), halfRun = await ready({ ...forwarding(halfPid), port: 0 })
-  for (let i = 0; i < 6; i++) { const client = await wire(halfRun.port); client.client.end(`half-${i}`); halfClients.push(client) }
+  for (let i = 0; i < 6; i++) { const client = await wire(halfRun.port!); client.client.end(`half-${i}`); halfClients.push(client) }
   await until(() => halfTargets.length === 6 && halfTargets.every(s => s.ended), 'six held half-closes reached app unchanged')
   assert.ok(halfClients.every(client => !client.closed && !client.ended))
   const longWS = await openAppWS(), heldParallel = []
@@ -1764,7 +1764,7 @@ async function realChain() {
   const second = await ready(forwarding(appPid, guest2.token)), third = await ready(forwarding(echoPid, guest3.token))
   const peerWS = await openAppWS(second.port), keptWS = await openAppWS()
   await appEcho(peerWS, 'another guest, same preview')
-  const anotherPreview = await wire(third.port); anotherPreview.client.end('third guest, other preview')
+  const anotherPreview = await wire(third.port!); anotherPreview.client.end('third guest, other preview')
   await until(() => anotherPreview.closed, 'another preview is isolated')
   assert.equal(anotherPreview.bytes.subarray(0, -5).toString(), 'third guest, other preview')
   const heldCapacity = []
@@ -1777,14 +1777,14 @@ async function realChain() {
   const localFull = await wire(port)
   await until(() => localFull.closed, 'local guest capacity fails only new connection')
   assert.equal(localFull.bytes.length, 0)
-  assert.ok(live.rows.some(row => row.state === 'channel-error' && row.code === 'BUSY'))
+  assert.ok(live.rows.some((row: any) => row.state === 'channel-error' && row.code === 'BUSY'))
   // A second listener bypasses the local 32 socket cap, not the seat's quota.
   const overflow = await ready(forwarding(appPid))
-  const seatFull = await wire(overflow.port)
+  const seatFull = await wire(overflow.port!)
   await until(() => seatFull.closed, 'room seat capacity returns BUSY')
   assert.equal(seatFull.bytes.length, 0)
-  assert.ok(overflow.rows.some(row => row.state === 'channel-error' && row.code === 'BUSY'), JSON.stringify(overflow.rows))
-  assert.ok(!overflow.rows.some(row => row.state === 'error' || row.code === 'AUTH'))
+  assert.ok(overflow.rows.some((row: any) => row.state === 'channel-error' && row.code === 'BUSY'), JSON.stringify(overflow.rows))
+  assert.ok(!overflow.rows.some((row: any) => row.state === 'error' || row.code === 'AUTH'))
   await appEcho(keptWS, 'old WS still alive when this guest is full')
   await appEcho(peerWS, 'other guest is unaffected by capacity')
   assert.equal((await request(second.port, '/guest-two', { headers: { cookie: 'guest=two' } })).status, 200)
@@ -1792,8 +1792,8 @@ async function realChain() {
   heldCapacity[0].client.destroy()
   await until(() => activeHost() < beforeRelease, 'one full-seat channel released')
   assert.equal((await request(overflow.port, '/after-capacity-release')).status, 200, 'same listener and token recover when a slot frees')
-  assert.equal(overflow.rows.filter(row => row.state === 'ready').length, 1)
-  assert.ok(overflow.rows.some(row => row.state === 'channel-ready'))
+  assert.equal(overflow.rows.filter((row: any) => row.state === 'ready').length, 1)
+  assert.ok(overflow.rows.some((row: any) => row.state === 'channel-ready'))
   await appEcho(keptWS, 'same WS after capacity release')
   for (const held of heldCapacity) held.client.destroy()
   keptWS.socket.close(); peerWS.socket.close()
@@ -1829,7 +1829,7 @@ async function realChain() {
       assert.equal(live.exit, null, 'the guest helper stays running throughout recovery')
       assert.equal(live.child.pid, identity)
       assert.equal(live.port, port)
-      assert.deepEqual(live.rows.filter(row => row.state === 'ready'), [{ state: 'ready', port, ipv6: live.ipv6 }])
+      assert.deepEqual(live.rows.filter((row: any) => row.state === 'ready'), [{ state: 'ready', port, ipv6: live.ipv6 }])
     }
     for (const [side, gate] of [['guest', guestGate], ['host', hostGate]]) {
       const marker = randomBytes(8).toString('hex'), path = `/hold?outage=${side}-${marker}`, body = `state=${marker}&code=once`
@@ -1917,13 +1917,13 @@ async function realChain() {
   await pause(50)
   assert.equal(appRequests.filter(row => row.url === crashPath).length, 1, 'worker restart never replays an accepted POST')
   assert.equal(oldWS.state.messages.length, 1, 'old application WS is not resumed')
-  assert.equal(live.rows.filter(row => row.state === 'ready').length, 1, 'guest listener survives worker restart')
+  assert.equal(live.rows.filter((row: any) => row.state === 'ready').length, 1, 'guest listener survives worker restart')
   console.log('ok host worker crash fails old POST/WS without replay; only a new request starts one replacement worker')
 
-  async function denied(cfg) {
-    const states = [], deniedRun = await helper.start({ ...cfg, port: await freePort(), strict: true }, { emit: row => states.push(row) })
+  async function denied(cfg: any) {
+    const states: any[] = [], deniedRun = await helper.start({ ...cfg, port: await freePort(), strict: true }, { emit: row => states.push(row) })
     running.add(deniedRun)
-    const deniedWire = await wire(deniedRun.port); deniedWire.client.end('must never reach an app')
+    const deniedWire = await wire(deniedRun.port!); deniedWire.client.end('must never reach an app')
     await until(() => deniedWire.closed, 'denied TCP destroyed')
     assert.equal(deniedWire.bytes.length, 0)
     assert.ok(states.some(row => row.state === 'channel-error' && row.code === 'AUTH'), JSON.stringify(states))
@@ -1940,14 +1940,14 @@ async function realChain() {
   await until(() => appRequests.length === appCount + 1, 'active stop channel')
   await api(`${base}/previews/${appPid}/end`, room.token)
   await until(() => stopWire.closed, 'server Stop revokes active channel')
-  const leaveWire = await wire(raw.port); leaveWire.client.write('before leaving')
+  const leaveWire = await wire(raw.port!); leaveWire.client.write('before leaving')
   await until(() => leaveWire.bytes.length, 'active leave channel')
   await api(`${base}/leave`, guest.token)
   await until(() => leaveWire.closed, "server Leave closes the seat's active channel")
   await stop(raw); await stop(live)
   const finalGuest = await api(`${base}/join`, null, { name: 'Last guest' })
   const finalRun = await ready(forwarding(echoPid, finalGuest.token))
-  const finalWire = await wire(finalRun.port); finalWire.client.write('before room End')
+  const finalWire = await wire(finalRun.port!); finalWire.client.write('before room End')
   await until(() => finalWire.bytes.length, 'active room End channel')
   await api(`${base}/end`, room.token)
   await until(() => finalWire.closed, 'server End revokes active channel')
@@ -1958,10 +1958,10 @@ async function realChain() {
   await stop(hostWorker)
   assert.equal(hostLogs.length, 2, 'one original worker and one intentional crash replacement')
   for (const log of hostLogs) {
-    const closed = log.rows.filter(row => row.state === 'closed')
-    assert.equal(new Set(closed.map(row => row.id)).size, closed.length, 'worker releases an id once')
-    assert.ok(closed.every(row => log.ids.has(row.id)))
-    assert.deepEqual(log.rows.filter(row => row.state === 'ready'), [{ state: 'ready', port: log.port }])
+    const closed = log.rows.filter((row: any) => row.state === 'closed')
+    assert.equal(new Set(closed.map((row: any) => row.id)).size, closed.length, 'worker releases an id once')
+    assert.ok(closed.every((row: any) => log.ids.has(row.id)))
+    assert.deepEqual(log.rows.filter((row: any) => row.state === 'ready'), [{ state: 'ready', port: log.port }])
     assert.equal(log.stderr, '')
   }
   for (const gate of [guestGate, hostGate].filter(Boolean)) {
@@ -2004,19 +2004,19 @@ async function webrtcChecks() {
     // turnViaProxy: TURN connections the proxy began; turnProxied: those of them that
     // connected, counted as the TURN server counts (on connect), so the difference
     // from `turn` is what reached TURN directly, whatever the browser abandoned.
-    const counts = { stun: 0, peer: 0, peerTcp: 0, turn: 0, turnViaProxy: 0, turnProxied: 0 }, datagrams = []
-    const udp = async key => {
+    const counts: Record<string, number> = { stun: 0, peer: 0, peerTcp: 0, turn: 0, turnViaProxy: 0, turnProxied: 0 }, datagrams: any[] = []
+    const udp = async (key: string) => {
       const socket = dgram.createSocket('udp4')
       datagrams.push(socket)
       socket.on('message', () => counts[key]++)
-      await new Promise((resolve, reject) => { socket.once('error', reject); socket.bind(0, lan, () => { socket.removeListener('error', reject); resolve() }) })
+      await new Promise<void>((resolve, reject) => { socket.once('error', reject); socket.bind(0, lan, () => { socket.removeListener('error', reject); resolve() }) })
       socket.on('error', () => {})
       return socket.address().port
     }
-    const tcp = key => listen(track(net.createServer(socket => { counts[key]++; setTimeout(() => socket.destroy(), 500) })), lan)
+    const tcp = (key: string) => listen(track(net.createServer(socket => { counts[key]++; setTimeout(() => socket.destroy(), 500) })), lan)
     const STUN = await udp('stun'), PEER = await udp('peer'), TURN = await tcp('turn'), PEER_TCP = await tcp('peerTcp')
     // launched, served, firstTurn: when the browser started, the page went out and the proxy began its first TURN connection.
-    let report, launched = 0, served = 0, firstTurn = 0
+    let report: any, launched = 0, served = 0, firstTurn = 0
     const page = `<!doctype html><meta charset="utf-8"><title>WebRTC</title><script>
 (async () => {
   // gathering: each ICE gathering state with its ms since the page began, for a failure's report.
@@ -2039,7 +2039,7 @@ async function webrtcChecks() {
 })()
 </script>`
     const app = track(http.createServer((req, res) => {
-      if (req.url === '/report') { const parts = []; req.on('data', bytes => parts.push(bytes)); req.on('end', () => { report = JSON.parse(Buffer.concat(parts)); res.end('ok') }); return }
+      if (req.url === '/report') { const parts: any[] = []; req.on('data', bytes => parts.push(bytes)); req.on('end', () => { report = JSON.parse(Buffer.concat(parts).toString()); res.end('ok') }); return }
       if (req.url === '/') served ||= Date.now()
       res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })
       res.end(page)
@@ -2049,7 +2049,7 @@ async function webrtcChecks() {
     // to the page, the TURN address to the TURN listener (counted), the rest refused.
     const standIn = track(net.createServer(client => {
       let buffer = Buffer.alloc(0), greeted = false
-      const data = chunk => {
+      const data = (chunk: Buffer) => {
         buffer = Buffer.concat([buffer, chunk])
         if (!greeted) {
           if (buffer.length < 2 || buffer.length < 2 + buffer[1]) return
@@ -2073,12 +2073,12 @@ async function webrtcChecks() {
       client.on('data', data)
     }))
     const socksPort = await listen(standIn), profile = await mkdtemp(`${scratch}/webrtc-${name.toLowerCase()}-`)
-    let early, browserLog = ''
+    let early: any, browserLog = ''
     launched = Date.now()
     const browser = await start({ socksPort, profile, url: `http://localhost:${APP}/` })
-    const exited = new Promise(resolve => browser.once('exit', (code, signal) => { early = { code, signal }; resolve() }))
-    browser.once('error', error => { early = { error: error.message } })
-    for (const stream of [browser.stdout, browser.stderr]) stream.on('data', bytes => { browserLog = (browserLog + bytes).slice(-6000) })
+    const exited = new Promise<void>(resolve => browser.once('exit', (code: any, signal: any) => { early = { code, signal }; resolve() }))
+    browser.once('error', (error: any) => { early = { error: error.message } })
+    for (const stream of [browser.stdout, browser.stderr]) stream.on('data', (bytes: Buffer) => { browserLog = (browserLog + bytes).slice(-6000) })
     try {
       await until(() => report || early, `the ${name} WebRTC page reports`, 60_000)
       assert.ok(report, `${name} stopped early ${JSON.stringify(early)}: ${browserLog}`)

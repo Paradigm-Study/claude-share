@@ -10,7 +10,7 @@ You need Node.js 22.18 or later on macOS or Linux. You do not need a Claude acco
 npm install                  # once
 npm run check                # type checks, lint, format
 npm test                     # the Vitest suites in test/
-node test/local-preview.mjs  # the preview suite, not yet on Vitest
+node test/local-preview.ts   # the preview suite, a node script, not on Vitest
 ```
 
 These are the same checks CI runs. If you changed the plugin (`plugin/`), also run [the plugin's checks](#work-on-the-plugin). If you changed sharing, joining, or transcripts, also run [the end-to-end test](#the-end-to-end-test).
@@ -18,7 +18,7 @@ These are the same checks CI runs. If you changed the plugin (`plugin/`), also r
 | You changed | Run |
 | --- | --- |
 | anything | `npm run check`, `npm test` |
-| previews, forwarding, the preview window | `node test/local-preview.mjs` |
+| previews, forwarding, the preview window | `node test/local-preview.ts` |
 | `plugin/` | the plugin's checks below |
 | sharing, joining, transcripts | the end-to-end test below |
 

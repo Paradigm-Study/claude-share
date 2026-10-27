@@ -55,7 +55,7 @@ npm run format                                          # oxfmt over server/, sc
 claude plugin validate --strict plugin                  # what the engine and the plugin directory check
 claude plugin test plugin                               # plugin/tests: the UI tests (band.test.tsx, desktop and terminal) and the pure modules' (window, preview, proxy, upstream)
 npm run typecheck:test && npm test                      # the suites moved to Vitest (test/*.test.ts), strictly typed: setup (setup.ts against a fake CLI and a temporary home, the deploy order included), and peer, mailbox, discover, browser-proxy, tcp-worker, previews, teams, cloud, security and traces (below; traces' end to end only with TRACES_DATABASE_URL)
-node test/local-preview.mjs                             # TCP helpers through the real Workers under wrangler dev; real Chrome and Firefox preview windows and their WebRTC when installed
+node test/local-preview.ts                              # TCP helpers through the real Workers under wrangler dev; real Chrome and Firefox preview windows and their WebRTC when installed
 #   test/browser-proxy.test.ts                          # the preview window's SOCKS5 helper, its DNS-over-HTTPS against a local TLS fixture (openssl for the test CA)
 #   test/discover.test.ts                               # same-project service discovery, and who holds a port
 #   test/tcp-worker.test.ts                             # the Worker's TCP lifecycle and hibernation, its public link, files and preview keys
