@@ -11,12 +11,19 @@
 // letting it reach the page. The grant keeps that token (encrypted by the
 // provider), so signing out, or leaving a team, holds at the next MCP call.
 //
+// It runs in the page's own tab: the sign-in's Continue comes back to
+// /oauth/continue, which draws the page again with Allow on. Two tabs lost
+// people: the sign-in's last page reads as the end, and Allow, the one press
+// that reaches Claude Code, was in a tab they'd left. The consent handle that
+// redraw needs waits in a cookie of this browser's, never in KV.
+//
 // Only a client that redirects to an app on this computer (Claude Code), or
 // to Claude's own site, is let through: dynamic registration lets anyone
 // register a client, and a page that ended on another site would hand that
 // site this person's traces.
 
 import { Hono } from 'hono'
+import { getCookie } from 'hono/cookie'
 import { OAuthProvider } from '@cloudflare/workers-oauth-provider'
 import type { ConsentDescription } from '@cloudflare/workers-oauth-provider'
 import { brandPage, escapeHtml } from '../core/index.ts'
@@ -43,7 +50,14 @@ const secret = () =>
     .replace(/=+$/, '')
 const codeOf = (login: string) => `${login.slice(0, 4)}-${login.slice(4, 8)}`.toUpperCase()
 const signInKey = (id: string) => `traces-signin:${id}`
-type SignIn = { verifier: string; handle: string; token?: string; account?: string; name?: string }
+const SIGN_IN_ID = /^[A-Za-z0-9_-]{40,64}$/
+// The consent handle, for /oauth/continue to draw Allow again in this browser.
+const handleCookie = (id: string) => `__Host-traces-${id}`
+const keepHandle = (id: string, handle: string) => `${handleCookie(id)}=${handle}; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=${SIGN_IN_TTL}`
+const dropHandle = (id: string) => `${handleCookie(id)}=; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=0`
+// What the page says, kept so /oauth/continue can say it again.
+type Asker = { client: string; host: string; loopback: boolean }
+type SignIn = Asker & { verifier: string; handle: string; token?: string; account?: string; name?: string }
 
 // The page's one script: it asks every two seconds whether the sign-in it
 // opened is done, then shows who signed in and lets Allow be pressed.
@@ -98,43 +112,52 @@ app.get('/oauth/authorize', async c => {
       403,
     )
   const { handle, headers } = await helpers.beginConsent(request)
-  const verifier = secret(),
-    login = await sha256(verifier),
-    id = secret()
-  await c.env.OAUTH_KV!.put(signInKey(id), JSON.stringify({ verifier, handle: await sha256(handle) } satisfies SignIn), { expirationTtl: SIGN_IN_TTL })
-  const links = Object.keys(providersFrom(c.env))
-    .map(
-      p =>
-        `<a class="btn-primary" href="/auth/${p}/start?login=${login}" target="_blank" rel="noopener">Sign in with ${escapeHtml(PROVIDER_NAMES[p] ?? p)}</a>`,
-    )
+  const id = secret()
+  const entry: SignIn = {
+    verifier: secret(),
+    handle: await sha256(handle),
+    client: consent.clientName,
+    host: consent.redirectHost,
+    loopback: consent.redirectIsLoopback,
+  }
+  await c.env.OAUTH_KV!.put(signInKey(id), JSON.stringify(entry), { expirationTtl: SIGN_IN_TTL })
+  headers.append('set-cookie', keepHandle(id, handle))
+  return consentPage(c.env, id, handle, entry, headers)
+})
+
+// The page: who asks, where the sign-in goes, the sign-in itself, then
+// Allow. Signed in already (back from the sign-in), Allow is on and nothing
+// polls; otherwise its script polls until the sign-in is done.
+async function consentPage(env: TracesEnv, id: string, handle: string, entry: SignIn, headers?: Headers) {
+  const login = await sha256(entry.verifier)
+  const back = encodeURIComponent(`/oauth/continue?id=${id}`)
+  const links = Object.keys(providersFrom(env))
+    .map(p => `<a class="btn-primary" href="/auth/${p}/start?login=${login}&amp;then=${back}">Sign in with ${escapeHtml(PROVIDER_NAMES[p] ?? p)}</a>`)
     .join(' ')
-  const where = consent.redirectIsLoopback ? `${escapeHtml(consent.redirectHost)}, an app on this computer` : escapeHtml(consent.redirectHost)
+  const where = entry.loopback ? `${escapeHtml(entry.host)}, an app on this computer` : escapeHtml(entry.host)
+  const name = entry.token ? (entry.name ?? '') : ''
   const body = `
-    <p class="sub-copy"><b>${escapeHtml(consent.clientName || 'An app')}</b> asks to search the traces of the shared sessions you can read: your teams' and your own. It can't change anything.</p>
+    <p class="sub-copy"><b>${escapeHtml(entry.client || 'An app')}</b> asks to search the traces of the shared sessions you can read: your teams' and your own. It can't change anything.</p>
     <p class="sub-copy">When you allow it, your sign-in goes to <b>${where}</b>.</p>
-    <div id="signin" data-id="${id}">
-      <p class="sub-copy first">First, sign in. The sign-in page shows the code <b>${codeOf(login)}</b>: continue there only if it matches.</p>
+    <div id="signin" data-id="${id}"${name ? ' hidden' : ''}>
+      <p class="sub-copy first">First, sign in. The sign-in page shows the code <b>${codeOf(login)}</b>: continue there only if it matches. It brings you back here to press Allow.</p>
       <p class="cta">${links || 'This server has no sign-in set up.'}</p>
     </div>
     <form method="post" action="/oauth/authorize">
-      <p class="sub-copy first" id="done" hidden>Signed in as <b id="who"></b>.</p>
+      <p class="sub-copy first" id="done"${name ? '' : ' hidden'}>Signed in as <b id="who">${escapeHtml(name)}</b>.</p>
       <input type="hidden" name="handle" value="${escapeHtml(handle)}">
       <input type="hidden" name="id" value="${id}">
-      <p class="cta"><button class="btn-primary" id="allow" name="decision" value="allow" disabled>Allow</button><button class="btn-ghost" name="decision" value="deny">Deny</button></p>
+      <p class="cta"><button class="btn-primary" id="allow" name="decision" value="allow"${name ? '' : ' disabled'}>Allow</button><button class="btn-ghost" name="decision" value="deny">Deny</button></p>
     </form>`
-  return page(`Let ${consent.clientName || 'this app'} search session traces`, body, { script: true, headers })
-})
+  return page(`Let ${entry.client || 'this app'} search session traces`, body, { script: !name, headers })
+}
 
-// Whether the page's sign-in is done; once it is, the account token is
-// collected here and kept with the sign-in, never sent to the page.
-app.post('/oauth/poll', async c => {
-  const { id } = await c.req.json<{ id?: string }>().catch(() => ({ id: undefined }))
-  if (typeof id !== 'string' || !/^[A-Za-z0-9_-]{40,64}$/.test(id)) return c.json({ status: 'expired' })
-  const kv = c.env.OAUTH_KV!
-  const entry = await kv.get<SignIn>(signInKey(id), 'json')
-  if (!entry) return c.json({ status: 'expired' })
-  if (entry.token) return c.json({ status: 'done', name: entry.name })
-  const res = await directory(c.env).fetch('https://directory.internal/api/auth/poll', {
+// Collects the account token once the page's sign-in is done, and keeps it
+// with the sign-in, never sending it to the page. `waiting` until then, null
+// once the sign-in is over.
+async function collect(env: TracesEnv, id: string, entry: SignIn): Promise<SignIn | 'waiting' | null> {
+  if (entry.token) return entry
+  const res = await directory(env).fetch('https://directory.internal/api/auth/poll', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ verifier: entry.verifier }),
@@ -143,13 +166,36 @@ app.post('/oauth/poll', async c => {
   // The directory knows a sign-in only once its link is opened, and says
   // `expired` before that: this page's own record (SIGN_IN_TTL) says when
   // it's over.
-  if (polled.status !== 'done' || !polled.token) return c.json({ status: 'waiting' })
-  const who = await whoIs(c.env, polled.token)
-  if (!who) return c.json({ status: 'expired' })
-  await kv.put(signInKey(id), JSON.stringify({ ...entry, token: polled.token, account: who.account.id, name: who.account.name } satisfies SignIn), {
-    expirationTtl: SIGN_IN_TTL,
-  })
-  return c.json({ status: 'done', name: who.account.name })
+  if (polled.status !== 'done' || !polled.token) return 'waiting'
+  const who = await whoIs(env, polled.token)
+  if (!who) return null
+  const done: SignIn = { ...entry, token: polled.token, account: who.account.id, name: who.account.name }
+  await env.OAUTH_KV!.put(signInKey(id), JSON.stringify(done), { expirationTtl: SIGN_IN_TTL })
+  return done
+}
+
+// Whether the page's sign-in is done, for a page whose sign-in ran elsewhere.
+app.post('/oauth/poll', async c => {
+  const { id } = await c.req.json<{ id?: string }>().catch(() => ({ id: undefined }))
+  if (typeof id !== 'string' || !SIGN_IN_ID.test(id)) return c.json({ status: 'expired' })
+  const entry = await c.env.OAUTH_KV!.get<SignIn>(signInKey(id), 'json')
+  const got = entry && (await collect(c.env, id, entry))
+  if (!got) return c.json({ status: 'expired' })
+  if (got === 'waiting') return c.json({ status: 'waiting' })
+  return c.json({ status: 'done', name: got.name })
+})
+
+// Back from the sign-in (its Continue sends the browser here): the page
+// again, Allow on. Only the browser that opened the page has its handle.
+app.get('/oauth/continue', async c => {
+  const id = c.req.query('id') ?? ''
+  const handle = SIGN_IN_ID.test(id) ? (getCookie(c, handleCookie(id)) ?? '') : ''
+  const entry = handle ? await c.env.OAUTH_KV!.get<SignIn>(signInKey(id), 'json') : null
+  if (!entry || entry.handle !== (await sha256(handle)))
+    return sorry('This sign-in has ended', 'It took too long, or it started in another browser. Connect again from Claude Code.')
+  const got = await collect(c.env, id, entry)
+  if (!got) return sorry('This sign-in has ended', 'Connect again from Claude Code.')
+  return consentPage(c.env, id, handle, got === 'waiting' ? entry : got, new Headers({ 'cache-control': 'no-store' }))
 })
 
 app.post('/oauth/authorize', async c => {
@@ -160,12 +206,13 @@ app.post('/oauth/authorize', async c => {
   try {
     if (form.decision !== 'allow') {
       const denied = await helpers.denyConsent(c.req.raw, handle)
+      if (SIGN_IN_ID.test(id)) denied.headers.append('set-cookie', dropHandle(id))
       return new Response(null, { status: 302, headers: denied.headers })
     }
-    const entry = /^[A-Za-z0-9_-]{40,64}$/.test(id) ? await c.env.OAUTH_KV!.get<SignIn>(signInKey(id), 'json') : null
+    const entry = SIGN_IN_ID.test(id) ? await c.env.OAUTH_KV!.get<SignIn>(signInKey(id), 'json') : null
     // The sign-in must be the one this page started, for this consent.
     if (!entry?.token || !entry.account || entry.handle !== (await sha256(handle)))
-      return sorry('Sign in first', 'Sign in on the previous page, then press Allow. Or connect again from Claude Code.')
+      return sorry('Sign in first', 'Sign in on that page, then press Allow. Or connect again from Claude Code.')
     const approved = await helpers.approveConsent(c.req.raw, handle, { scope: [SCOPE] })
     await c.env.OAUTH_KV!.delete(signInKey(id))
     const props: GrantProps = { token: entry.token, account: entry.account }
@@ -178,6 +225,7 @@ app.post('/oauth/authorize', async c => {
     })
     const headers = new Headers(approved.headers)
     headers.set('location', redirectTo)
+    headers.append('set-cookie', dropHandle(id))
     return new Response(null, { status: 302, headers })
   } catch {
     return sorry('This sign-in has ended', 'It was used already, or it took too long. Connect again from Claude Code.')

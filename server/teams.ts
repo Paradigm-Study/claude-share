@@ -177,6 +177,12 @@ function page(eyebrow: string, heading: string, lines: string | string[], more: 
 }
 const startAgain = 'Start again from Claude Code: press <b>Team</b> above the prompt, or type <code>/team</code>.'
 const alreadyIn = () => page('Signed in', "You're already signed in", 'Go back to Claude Code. You can close this tab.')
+// Where a sign-in started from a page of this server's goes once it's done:
+// the session traces' consent page (server/traces/oauth.ts), in the same
+// tab. Only that path, so a start link can't send a browser anywhere else.
+const BACK_PATH = /^\/oauth\/continue\?id=[A-Za-z0-9_-]{40,64}$/
+const goBack = (back: string) => new Response(null, { status: 303, headers: { location: back, 'cache-control': 'no-store' } })
+const doneAnswer = (rec: { back?: string }) => (rec.back ? goBack(rec.back) : alreadyIn())
 
 // The confirmation page's Continue starts disabled, and this enables it once
 // the page has been shown and focused for 400 ms and the pointer has moved
@@ -800,8 +806,10 @@ export class Directory {
     const login = url.searchParams.get('login') ?? ''
     if (!LOGIN_ID.test(login)) return page('Sign-in', "This sign-in link isn't complete", startAgain)
     const invite = url.searchParams.get('invite') ?? ''
+    const then = url.searchParams.get('then') ?? ''
+    const back = BACK_PATH.test(then) ? then : ''
     const known = await this.kv.get(`login:${login}`)
-    if (known?.status === 'done') return alreadyIn()
+    if (known?.status === 'done') return doneAnswer(known)
     // Sign-ins nobody finished or collected go after their ten minutes.
     for (const prefix of ['login:', 'state:']) for (const [key, rec] of await this.kv.list(prefix)) if (rec.exp < now) await this.kv.delete(key)
     await this.kv.put(`login:${login}`, { status: 'pending', exp: now + LOGIN_MS })
@@ -818,10 +826,10 @@ export class Directory {
         emailVerified: Boolean(email),
         githubOrgs: url.searchParams.get('orgs') ?? '',
       }
-      return this.ask(identity, login, invite, now)
+      return this.ask(identity, login, invite, now, back)
     }
     const state = token(18)
-    await this.kv.put(`state:${state}`, { provider, login, invite, exp: now + LOGIN_MS })
+    await this.kv.put(`state:${state}`, { provider, login, invite, back, exp: now + LOGIN_MS })
     const p = PROVIDERS[provider]!
     const q = new URLSearchParams({ client_id: this.providers[provider]!.id ?? '', redirect_uri: `${origin}/auth/${provider}/callback`, scope: p.scope, state })
     if (provider === 'google') {
@@ -839,7 +847,7 @@ export class Directory {
     if (!code) return page('Sign-in', 'Sign-in cancelled', 'Nothing changed. Sign in from Claude Code whenever you like.')
     try {
       const identity = await this.identity(provider, code, `${origin}/auth/${provider}/callback`)
-      return await this.ask(identity, state.login, state.invite, now)
+      return await this.ask(identity, state.login, state.invite, now, state.back ?? '')
     } catch (error) {
       return page('Sign-in', "Sign-in didn't work", [esc(String((error as Error | null)?.message ?? error).slice(0, 200)), startAgain])
     }
@@ -850,22 +858,24 @@ export class Directory {
   // `login`), so someone who opened another person's start link can tell
   // it isn't theirs, and only its Continue, a POST carrying this page's
   // nonce, goes on (CONTINUE_SCRIPT: not a click timed for it).
-  async ask(identity: Identity, login: string, invite: string, now: number) {
+  async ask(identity: Identity, login: string, invite: string, now: number, back = '') {
     const known = await this.kv.get(`login:${login}`)
-    if (known?.status === 'done') return alreadyIn()
+    if (known?.status === 'done') return doneAnswer(known)
     const nonce = token(18)
-    await this.kv.put(`login:${login}`, { status: 'confirm', identity, invite, nonce, exp: now + LOGIN_MS })
+    await this.kv.put(`login:${login}`, { status: 'confirm', identity, invite, back, nonce, exp: now + LOGIN_MS })
     const email = clean(identity.email, 120)
     const name = clean(identity.name || identity.login || email.split('@')[0] || 'teammate')
     const team = invite ? await this.inviteTeam(invite) : null
     const code = `${login.slice(0, 4)}-${login.slice(4, 8)}`.toUpperCase()
-    const who = `Claude Code is signing in as ${esc(name)}${email ? ` (${esc(email)})` : ''}.`
+    const as = `${esc(name)}${email ? ` (${esc(email)})` : ''}`
+    // Started from a page of this server's, that page showed the code.
+    const who = back ? `You're signing in as ${as}. The page you came from` : `Claude Code is signing in as ${as}. It`
     return guarded(
       page(
         'Sign-in',
         'Finish signing in',
         [
-          `${who} It shows the code <b>${code}</b>. Continue only if you started signing in from Claude Code just now and the codes match.`,
+          `${who} shows the code <b>${code}</b>. Continue only if you started signing in from Claude Code just now and the codes match.`,
           ...(team ? [`Continuing also joins you to the team <b>${esc(team.name)}</b>.`] : []),
         ],
         {
@@ -886,7 +896,7 @@ export class Directory {
       if (rec) await this.kv.delete(`login:${login}`)
       return page('Sign-in', 'This sign-in expired', ['A sign-in waits ten minutes.', startAgain], { status: 410 })
     }
-    if (rec.status === 'done') return alreadyIn()
+    if (rec.status === 'done') return doneAnswer(rec)
     if (rec.status !== 'confirm' || !rec.nonce || form.get('nonce') !== rec.nonce) {
       return page(
         'Sign-in',
@@ -895,19 +905,21 @@ export class Directory {
         { status: 403 },
       )
     }
-    return this.finish(rec.identity, login, rec.invite, now)
+    return this.finish(rec.identity, login, rec.invite, now, rec.back ?? '')
   }
 
   // Signs the confirmed identity in and takes its invite. No token yet:
   // storage never holds one, so it's made as Claude Code collects it (poll).
-  async finish(identity: Identity, login: string, invite: string, now: number) {
+  async finish(identity: Identity, login: string, invite: string, now: number, back = '') {
     const account = await this.signIn(identity, now)
     let joined: { id: string; name: string } | null = null
     if (invite) {
       const res = await this.acceptInvite(account, invite, now)
       if (res.ok) joined = ((await res.json()) as { team?: { id: string; name: string } }).team ?? null
     }
-    await this.kv.put(`login:${login}`, { status: 'done', account: account.id, joined: joined?.id ?? null, exp: now + LOGIN_MS })
+    await this.kv.put(`login:${login}`, { status: 'done', account: account.id, joined: joined?.id ?? null, back, exp: now + LOGIN_MS })
+    // Back to the page the sign-in started from, whose own press finishes it.
+    if (back) return goBack(back)
     return page('Signed in', `You're signed in, ${account.name}`, [
       ...(joined ? [`You're in <b>${esc(joined.name)}</b> now: its live sessions show in your Team panel.`] : []),
       'Go back to Claude Code: it has picked up the sign-in. You can close this tab.',
