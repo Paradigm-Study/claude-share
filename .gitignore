@@ -10,3 +10,10 @@ rooms.json.tcp
 wrangler.selfhost.toml
 .DS_Store
 *.log
+# Credentials kept beside a checkout: GitHub and Google OAuth ids and secrets,
+# database URLs, Claude tokens. wrangler reads .dev.vars and .env for wrangler dev.
+.env
+.env.*
+!.env.example
+.dev.vars
+.dev.vars.*
