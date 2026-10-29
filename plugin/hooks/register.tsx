@@ -3467,6 +3467,28 @@ async function copyText($: $, text: string, done: string, surface?: RenderSurfac
   else $.ui.log(text)
 }
 
+// Invite, at the top of the Room: what it can do now, said every time, since
+// a press that changes nothing on screen reads as broken. Signed out, it opens
+// the Team panel's sign-in; with no teammate to ask on this server, it copies
+// the link instead; otherwise the People tab, each teammate with an Invite.
+async function pressInvite($: $, url: string, surface?: RenderSurface) {
+  const t = await read($, teamsA)
+  if (!t.account) {
+    $.ui.toast('Sign in to invite teammates: the Team panel shows how')
+    return openTeam($)
+  }
+  const people = await read($, peopleA)
+  const mates = (t.teammates ?? []).filter(m => !people.some(p => p.online && p.name === m.name))
+  if (!mates.length) {
+    const copied = await $.ui.copy({ text: url, surface }).catch(() => ({ isCopied: false }))
+    $.ui.toast(copied.isCopied ? 'No teammates to invite here yet · link copied' : 'No teammates to invite here yet: share the link instead')
+    if (!copied.isCopied) $.ui.log(`The share link: ${url}`)
+    return
+  }
+  await update($, roomTabA, () => 'people')
+  $.ui.toast(`Invite ${mates.length === 1 ? (mates[0]?.name ?? 'your teammate') : `any of ${mates.length} teammates`} below`)
+}
+
 async function copyLink($: $, url: string, surface?: RenderSurface) {
   const copied = await $.ui.copy({ text: url, surface }).catch(() => ({ isCopied: false }))
   if (copied.isCopied) $.ui.toast('Link copied')
@@ -10708,15 +10730,43 @@ function joinFailure(error: unknown, server: string): string {
 }
 
 // What a guest may do here, in a line.
-function rulesLine(policy: SharePolicy, host: string): string {
-  if (policy.prompts === 'watch') return `◎ Watch-only: you follow along and chat; ${host} prompts Claude`
+// Who may do what in the room, as its host reads it: one sentence.
+function hostRules(policy: SharePolicy, team: string | null): string {
+  const who = team ?? 'Anyone with the link'
+  if (policy.prompts === 'watch') return `${who} can watch and chat. Only you prompt.`
   const asks =
     policy.approvals === 'none'
-      ? 'nothing asks first'
+      ? 'Nothing asks you first.'
       : policy.approvals === 'all'
-        ? `every tool asks ${host} first`
-        : `anything beyond reading the project asks ${host} first`
-  return `✎ Everyone can prompt · ${asks}`
+        ? 'Every tool asks you first.'
+        : 'Anything beyond reading the project asks you first.'
+  return `${who} can prompt Claude. ${asks}`
+}
+
+// Whether a server keeps shared sessions' turns, asked once a module: the
+// Room draws from what's known, and redraws when the answer comes.
+const keepsBy = new Map<string, boolean>()
+const keepsAsked = new Set<string>()
+function keptHere($: $, server: string): boolean | undefined {
+  if (!keepsAsked.has(server)) {
+    keepsAsked.add(server)
+    void api<{ traces?: boolean }>($, server, '/api/version')
+      .then(info => keepsBy.set(server, info.traces === true))
+      .catch(() => keepsAsked.delete(server))
+      .then(() => $.ui.invalidate('ui.render'))
+  }
+  return keepsBy.get(server)
+}
+
+function rulesLine(policy: SharePolicy, host: string): string {
+  if (policy.prompts === 'watch') return `You watch and chat. Only ${host} prompts Claude.`
+  const asks =
+    policy.approvals === 'none'
+      ? 'Nothing asks first.'
+      : policy.approvals === 'all'
+        ? `Every tool asks ${host} first.`
+        : `Anything beyond reading the project asks ${host} first.`
+  return `Everyone can prompt Claude. ${asks}`
 }
 
 const shownGlyph = (item: ShareShown) => (item.kind === 'preview' ? '◍' : item.kind === 'widget' ? '◆' : item.kind === 'link' ? '↗' : '◧')
@@ -10770,7 +10820,7 @@ type Tab<T extends string> = { id: T; label: string; count?: number; news?: bool
 function tabsOf<T extends string>(el: UI, tabs: readonly Tab<T>[], current: T, pick: (id: T) => void) {
   const { Box, Button, Text } = el
   return (
-    <Box flexDirection="row" gap={1} flexWrap="wrap">
+    <Box flexDirection="row" gap={2} flexWrap="wrap">
       {tabs.map((t, i) => {
         const on = t.id === current
         return (
@@ -10801,8 +10851,16 @@ function headingOf(el: UI, title: string, right?: RenderChildren) {
   const { Box, Text } = el
   return (
     <Box flexDirection="row" justifyContent="space-between" alignItems="center" gap={1}>
-      <Text bold>{title}</Text>
-      {typeof right === 'string' ? <Text dimColor>{right}</Text> : (right ?? null)}
+      <Text size="heading" weight="semibold">
+        {title}
+      </Text>
+      {typeof right === 'string' ? (
+        <Text size="caption" dimColor>
+          {right}
+        </Text>
+      ) : (
+        (right ?? null)
+      )}
     </Box>
   )
 }
@@ -10813,7 +10871,9 @@ function settingOf(el: UI, label: string, picker: RenderChildren) {
   return (
     <Box flexDirection="row" alignItems="center" gap={1}>
       <Box width="40%" flexShrink={0}>
-        <Text dimColor>{label}</Text>
+        <Text size="footnote" dimColor>
+          {label}
+        </Text>
       </Box>
       <Box flexGrow={1}>{picker}</Box>
     </Box>
@@ -10903,18 +10963,8 @@ function nowOf(el: UI, v: View, colors: Map<string, string>) {
       </Text>
     )
   }
-  if (v.policy.prompts === 'watch')
-    return (
-      <Text dimColor wrap="truncate-end">
-        {v.mode === 'host' ? 'watch-only' : `watch-only: ${host} prompts, you chat`}
-      </Text>
-    )
-  const here = presence(v)
-  return here ? (
-    <Text dimColor wrap="truncate-end">
-      {here}
-    </Text>
-  ) : null
+  // Nothing under way: the row says the room's facts instead.
+  return null
 }
 
 // ---------------------------------------------------------------------------
@@ -13389,8 +13439,12 @@ export const register: Register = (on, options) => {
       return (
         <Box flexDirection="column" gap={1}>
           {Svg ? <Svg key="clover" source={cloverSvg(96)} alt="Clover" width={96} height={54} /> : null}
-          <Text bold>Share with your team</Text>
-          <Text dimColor>Sign in, and your teammates' live sessions show up here, a press from joining. What you share goes to them.</Text>
+          <Text size="title" weight="semibold">
+            Share with your team
+          </Text>
+          <Text size="footnote" dimColor>
+            Sign in, and your teammates' live sessions show up here, a press from joining. What you share goes to them.
+          </Text>
           {t.invite ? <Text color="claude">Your invite is waiting: you join the team as soon as you're signed in.</Text> : null}
           {t.error ? <Text color="error">{t.error}</Text> : null}
           {signing ? (
@@ -13432,9 +13486,7 @@ export const register: Register = (on, options) => {
           <Box flexDirection="row" gap={1} alignItems="center" flexShrink={1} minWidth={0}>
             {faceOf(el, e.surface, { name: invite.from.name, online: true, color })}
             <Box flexDirection="column" flexShrink={1} minWidth={0}>
-              <Text bold wrap="truncate-end">
-                {tidyTitle(invite.room.title)}
-              </Text>
+              <Text wrap="truncate-end">{tidyTitle(invite.room.title)}</Text>
               <Text wrap="truncate-end">
                 <Text color={color}>{invite.from.name}</Text>
                 <Text dimColor>{` invited you · ${ago(invite.at, now)}`}</Text>
@@ -13451,6 +13503,7 @@ export const register: Register = (on, options) => {
     const accountRow = (
       <Box flexDirection="row" gap={1} alignItems="center" justifyContent="space-between">
         <Text
+          size="footnote"
           dimColor
           wrap="truncate-end"
         >{`Signed in as ${account.name}${account.login && account.login !== account.name ? ` (${account.login})` : ''} · ${providerName(account.provider)}`}</Text>
@@ -13476,7 +13529,7 @@ export const register: Register = (on, options) => {
 
     if (!team) {
       return (
-        <Box flexDirection="column" gap={2}>
+        <Box flexDirection="column" gap="lg">
           {invites.length ? (
             <Box flexDirection="column" gap={1}>
               {headingOf(el, 'Invited you')}
@@ -13484,8 +13537,12 @@ export const register: Register = (on, options) => {
             </Box>
           ) : null}
           <Box flexDirection="column" gap={1}>
-            <Text bold>Make your team</Text>
-            <Text dimColor>Name it, then send its invite link to teammates. Got a link from someone? Paste it as your message instead.</Text>
+            <Text size="title" weight="semibold">
+              Make your team
+            </Text>
+            <Text size="footnote" dimColor>
+              Name it, then send its invite link to teammates. Got a link from someone? Paste it as your message instead.
+            </Text>
           </Box>
           {newTeam(true)}
           {t.error ? <Text color="error">{t.error}</Text> : null}
@@ -13514,7 +13571,7 @@ export const register: Register = (on, options) => {
           <Box flexDirection="row" gap={1} alignItems="center" flexShrink={1} minWidth={0}>
             {faceOf(el, e.surface, { name: s.host, online: s.hostOnline, color })}
             <Box flexDirection="column" flexShrink={1} minWidth={0}>
-              <Text bold={s.hostOnline} dimColor={!s.hostOnline} wrap="truncate-end">
+              <Text dimColor={!s.hostOnline} wrap="truncate-end">
                 {tidyTitle(s.title)}
               </Text>
               <Text wrap="truncate-end">
@@ -13582,8 +13639,8 @@ export const register: Register = (on, options) => {
     // and this session's own place in it; a newer release and its Update.
     const teamUpdate = await updateRow($, el, true)
     const header = (
-      <Box flexDirection="column" gap={1}>
-        <Box flexDirection="row" gap={1} justifyContent="space-between" alignItems="center">
+      <Box flexDirection="column" gap="sm">
+        <Box flexDirection="row" gap={2} justifyContent="space-between" alignItems="center">
           {t.teams.length > 1 && Select ? (
             <Select
               key="team-pick"
@@ -13592,10 +13649,19 @@ export const register: Register = (on, options) => {
               onSelect={(value: string) => void setCurrentTeam($, value)}
             />
           ) : (
-            <Text bold>{team.name}</Text>
+            <Text size="title" weight="semibold" wrap="truncate-end">
+              {team.name}
+            </Text>
           )}
-          <Text dimColor>{team.access === 'link' ? 'anyone with a link joins' : 'members only'}</Text>
+          <Text size="caption" dimColor tabular>
+            {`${t.members.length} ${t.members.length === 1 ? 'person' : 'people'} · ${team.access === 'link' ? 'anyone with a link' : 'members only'}`}
+          </Text>
         </Box>
+        {keptHere($, t.server ?? (await serverOf($))) ? (
+          <Text size="footnote" dimColor>
+            Sessions shared with the team keep their turns: everyone in it can search them.
+          </Text>
+        ) : null}
         {teamUpdate}
         {Select
           ? settingOf(
@@ -13611,7 +13677,7 @@ export const register: Register = (on, options) => {
           : null}
         {room && mode === 'host' ? (
           <Box flexDirection="row" gap={1} alignItems="center" justifyContent="space-between">
-            <Text dimColor wrap="truncate-end">
+            <Text size="footnote" dimColor wrap="truncate-end">
               {room.team ? `This session: shared with ${room.team.name}` : 'This session: shared by link'}
             </Text>
             {room.team ? (
@@ -13638,7 +13704,7 @@ export const register: Register = (on, options) => {
     )
 
     const livePage = (
-      <Box flexDirection="column" gap={2}>
+      <Box flexDirection="column" gap="lg">
         {invites.length ? (
           <Box flexDirection="column" gap={1}>
             {headingOf(el, 'Invited you')}
@@ -13668,18 +13734,24 @@ export const register: Register = (on, options) => {
 
     const memberColors = colorsFor(t.members.map(m => m.name))
     const peoplePage = (
-      <Box flexDirection="column" gap={2}>
+      <Box flexDirection="column" gap="lg">
         <Box flexDirection="column" gap={1}>
           {t.members.map(m => (
             <Box key={`member-${m.id}`} flexDirection="row" gap={1} alignItems="center" justifyContent="space-between">
               <Box flexDirection="row" gap={1} alignItems="center" flexShrink={1} minWidth={0}>
                 {faceOf(el, e.surface, { name: m.name, online: true, color: memberColors.get(m.name) })}
-                <Text bold color={memberColors.get(m.name)} wrap="truncate-end">
+                <Text color={memberColors.get(m.name)} wrap="truncate-end">
                   {m.name}
                 </Text>
-                {m.login && m.login !== m.name ? <Text dimColor>{m.login}</Text> : null}
+                {m.login && m.login !== m.name ? (
+                  <Text size="footnote" dimColor>
+                    {m.login}
+                  </Text>
+                ) : null}
               </Box>
-              <Text dimColor>{[m.role === 'owner' ? 'owner' : '', m.id === account.id ? 'you' : ''].filter(Boolean).join(' · ')}</Text>
+              <Text size="caption" dimColor>
+                {[m.role === 'owner' ? 'owner' : '', m.id === account.id ? 'you' : ''].filter(Boolean).join(' · ')}
+              </Text>
             </Box>
           ))}
         </Box>
@@ -13704,7 +13776,7 @@ export const register: Register = (on, options) => {
     )
 
     const settingsPage = (
-      <Box flexDirection="column" gap={2}>
+      <Box flexDirection="column" gap="lg">
         {owner ? (
           <Box flexDirection="column" gap={1}>
             {headingOf(el, `Everyone in ${team.name}`, '')}
@@ -13789,7 +13861,7 @@ export const register: Register = (on, options) => {
     )
 
     return (
-      <Box flexDirection="column" gap={2}>
+      <Box flexDirection="column" gap="lg">
         {header}
         {tabs}
         {tab === 'people' ? peoplePage : tab === 'settings' ? settingsPage : livePage}
@@ -14035,30 +14107,53 @@ export const register: Register = (on, options) => {
       </Text>
     )
 
-    // On top: Live and for how long, the session's name, who's here, the
-    // link, and (for the host) the one main action, Invite.
-    const stack = stackSvg(people, { size: 26, max: 7 })
+    // On top, the panel's first three bands: the state word and the title
+    // (age and size on the right), then who may do what and whether the
+    // turns are kept, then the link and at most two buttons.
+    const stack = stackSvg(people, { size: 22, max: 7 })
+    const signedIn = isHost && Boolean((await read($, teamsA)).account)
+    const keeps = isHost ? keptHere($, room.server) : undefined
+    const kept =
+      keeps === true ? (signedIn ? `Turns are kept for ${room.team ? room.team.name : 'you'} to search.` : "Turns aren't kept: you aren't signed in here.") : ''
     const header = (
-      <Box flexDirection="column" gap="xs">
-        <Box flexDirection="row" alignItems="center" gap={1}>
-          {live && Svg ? <Svg key="room-live-dot" source={liveSvg()} alt="Live" width={12} height={12} /> : null}
-          <Text size="caption" weight="semibold" color={live ? 'claude' : 'warning'}>
-            {live ? (Svg ? 'Live' : '● Live') : '● Reconnecting'}
-          </Text>
-          <Text size="caption" dimColor tabular>
-            {`· ${ago(room.since, now).replace(' ago', '')} · ${turns.length} turn${turns.length === 1 ? '' : 's'}`}
+      <Box flexDirection="column" gap="sm">
+        <Box flexDirection="column" gap="xs">
+          <Box flexDirection="row" alignItems="center" justifyContent="space-between" gap={2}>
+            <Box flexDirection="row" alignItems="center" gap={1} flexShrink={1} minWidth={0}>
+              {live && Svg ? <Svg key="room-live-dot" source={liveSvg()} alt="Live" width={12} height={12} /> : null}
+              {live ? Svg ? null : <Text color="success">●</Text> : <Text color="warning">○</Text>}
+              <Text size="heading" weight="semibold" color={live ? undefined : 'warning'}>
+                {!live ? 'Reconnecting' : isHost ? 'Sharing' : 'Joined'}
+              </Text>
+              <Text size="footnote" dimColor wrap="truncate-end">
+                {[isHost ? (room.team ? `with ${room.team.name}` : '') : `${room.host}'s session`, v.policy.prompts === 'watch' ? 'watch-only' : '']
+                  .filter(Boolean)
+                  .map(f => `· ${f}`)
+                  .join(' ')}
+              </Text>
+            </Box>
+            <Box flexDirection="row" alignItems="center" gap={1} flexShrink={0}>
+              {Svg ? <Svg key="room-faces" source={stack.source} alt={`With ${people.map(p => p.name).join(', ')}`} width={stack.width} height={22} /> : null}
+              <Text size="caption" dimColor tabular>
+                {`${ago(room.since, now).replace(' ago', '')} · ${turns.length} turn${turns.length === 1 ? '' : 's'}`}
+              </Text>
+            </Box>
+          </Box>
+          <Text size="title" weight="semibold" wrap="truncate-end">
+            {tidyTitle(room.title)}
           </Text>
         </Box>
-        <Text size="title" weight="semibold" wrap="truncate-end">
-          {tidyTitle(room.title)}
-        </Text>
-        <Box flexDirection="row" gap={1} alignItems="center">
-          {Svg ? <Svg key="room-faces" source={stack.source} alt={`With ${people.map(p => p.name).join(', ')}`} width={stack.width} height={26} /> : null}
-          <Text size="footnote" dimColor wrap="truncate-end">
-            {`${isHost ? `You're sharing${room.team ? ` with ${room.team.name}` : ''}` : `${room.host}'s session${room.team ? ` · ${room.team.name}` : ''}`} · ${online} of ${people.length} here`}
+        <Box flexDirection="column">
+          <Text size="footnote" dimColor>
+            {isHost ? hostRules(v.policy, room.team?.name ?? null) : rulesLine(v.policy, room.host)}
           </Text>
+          {kept ? (
+            <Text size="footnote" dimColor>
+              {kept}
+            </Text>
+          ) : null}
         </Box>
-        <Box flexDirection="row" alignItems="center" gap={1}>
+        <Box flexDirection="row" alignItems="center" gap={2}>
           <Box flexGrow={1} flexShrink={1} minWidth={0}>
             <Text size="footnote" mono dimColor wrap="truncate-middle">
               {room.url.replace(/^https?:\/\//, '')}
@@ -14071,14 +14166,16 @@ export const register: Register = (on, options) => {
               plain
               onPress={press => void copyLink($, room.url, press.surface).then(() => flashCopied($))}
             />
-            {isHost ? <Button key="room-invite" label="Invite" variant="primary" onPress={() => pick('people')} /> : null}
+            {isHost ? (
+              <Button
+                key="room-invite"
+                label={signedIn ? 'Invite' : 'Sign in to invite'}
+                variant="primary"
+                onPress={press => void pressInvite($, room.url, press.surface)}
+              />
+            ) : null}
           </Box>
         </Box>
-        {isHost ? null : (
-          <Text size="footnote" dimColor>
-            {rulesLine(v.policy, room.host)}
-          </Text>
-        )}
       </Box>
     )
 
@@ -14087,7 +14184,6 @@ export const register: Register = (on, options) => {
     const w = v.working
     const nowBlock = w ? (
       <Box key="room-now" flexDirection="row" gap={1}>
-        <Text color={colorOf(w.by)}>{'▎\n▎'}</Text>
         {w.waitingFor ? (
           <Text color="permission" wrap="truncate-end">
             {isHost ? `${waitingWho(w)} is waiting for your OK on ${w.waitingFor}` : `Waiting for ${room.host} to allow ${w.waitingFor}`}
@@ -14142,7 +14238,7 @@ export const register: Register = (on, options) => {
       ) : !p.online ? (
         <Text dimColor>away</Text>
       ) : behind(p) ? (
-        <Text color="warning">{`on ${p.version}, needs an update`}</Text>
+        <Text color="warning">{`on ${p.version} · update to ${latest}`}</Text>
       ) : (
         <Text dimColor wrap="truncate-end">
           {[
@@ -14216,66 +14312,61 @@ export const register: Register = (on, options) => {
     const invited = isHost ? await read($, invitedA) : {}
     const mates = (teamsNow?.teammates ?? []).filter(m => !people.some(p => p.online && p.name === m.name))
     const shownTeam = teamsNow?.teams.find(x => x.id === teamsNow.current) ?? null
-    const inviteBlock = !isHost ? null : !teamsNow?.account ? (
-      <Box flexDirection="row" gap={1} alignItems="center" justifyContent="space-between">
-        <Text dimColor wrap="truncate-end">
-          Sign in to invite teammates into this session.
-        </Text>
-        <Button key="room-invite-signin" label="Team" plain onPress={() => void openTeam($)} />
-      </Box>
-    ) : mates.length ? (
-      <Box flexDirection="column" gap={1}>
-        {headingOf(el, 'Invite teammates', 'it shows in their Claude Code')}
-        {mates.slice(0, 8).map(m => (
-          <Box key={`mate-${m.id}`} flexDirection="row" gap={1} alignItems="center" justifyContent="space-between">
-            <Box flexDirection="row" gap={1} alignItems="center" flexShrink={1} minWidth={0}>
-              {faceOf(el, e.surface, { name: m.name, online: false })}
-              <Text wrap="truncate-end">{m.login && m.login !== m.name ? `${m.name} (${m.login})` : m.name}</Text>
-            </Box>
-            {/* Invited, and still not here: asked again, it shows in their Claude
+    // Signed out, the header's button says so ("Sign in to invite"): nothing here.
+    const inviteBlock =
+      !isHost || !teamsNow?.account ? null : mates.length ? (
+        <Box flexDirection="column" gap={1}>
+          {headingOf(el, 'Invite teammates', 'it shows in their Claude Code')}
+          {mates.slice(0, 8).map(m => (
+            <Box key={`mate-${m.id}`} flexDirection="row" gap={1} alignItems="center" justifyContent="space-between">
+              <Box flexDirection="row" gap={1} alignItems="center" flexShrink={1} minWidth={0}>
+                {faceOf(el, e.surface, { name: m.name, online: false })}
+                <Text wrap="truncate-end">{m.login && m.login !== m.name ? `${m.name} (${m.login})` : m.name}</Text>
+              </Box>
+              {/* Invited, and still not here: asked again, it shows in their Claude
                 Code anew (and notifies them again), even if they'd set it aside. */}
-            <Box flexDirection="row" gap={1} alignItems="center" flexShrink={0}>
-              {invited[m.id] ? <Text color="success">{`Invited ${ago(invited[m.id] ?? now, now)}`}</Text> : null}
-              <Button
-                key={`invite-${m.id}`}
-                label={invited[m.id] ? 'Invite again' : 'Invite'}
-                plain
-                dimColor={Boolean(invited[m.id])}
-                onPress={() =>
-                  void inviteToRoom($, [m.id])
-                    .then(text => $.ui.toast(text))
-                    .catch(error => $.ui.toast(`Couldn't invite: ${String(error?.message ?? error)}`))
-                }
-              />
+              <Box flexDirection="row" gap={1} alignItems="center" flexShrink={0}>
+                {invited[m.id] ? <Text color="success">{`Invited ${ago(invited[m.id] ?? now, now)}`}</Text> : null}
+                <Button
+                  key={`invite-${m.id}`}
+                  label={invited[m.id] ? 'Invite again' : 'Invite'}
+                  plain
+                  dimColor={Boolean(invited[m.id])}
+                  onPress={() =>
+                    void inviteToRoom($, [m.id])
+                      .then(text => $.ui.toast(text))
+                      .catch(error => $.ui.toast(`Couldn't invite: ${String(error?.message ?? error)}`))
+                  }
+                />
+              </Box>
             </Box>
-          </Box>
-        ))}
-        {mates.length > 8 ? <Text dimColor>{`And ${mates.length - 8} more: /invite <name>`}</Text> : null}
-      </Box>
-    ) : (
-      <Box flexDirection="column" gap={1}>
-        {headingOf(el, 'Invite teammates')}
-        <Text dimColor>
-          {shownTeam
-            ? `Nobody else is in ${shownTeam.name} yet. Send them its invite link; once they're in, invite them here.`
-            : 'Make a team first, then invite teammates straight into this session.'}
-        </Text>
-        <Box flexDirection="row" gap={1}>
-          {shownTeam && teamsNow ? (
-            <Button
-              key="room-team-invite"
-              label="Copy team invite link"
-              plain
-              onPress={press => void copyText($, inviteUrl(teamsNow, shownTeam), 'Team invite link copied', press.surface)}
-            />
-          ) : null}
-          <Button key="room-open-team" label="Team" plain dimColor onPress={() => void openTeam($)} />
+          ))}
+          {mates.length > 8 ? <Text dimColor>{`And ${mates.length - 8} more: /invite <name>`}</Text> : null}
         </Box>
-      </Box>
-    )
+      ) : (
+        <Box flexDirection="column" gap={1}>
+          {headingOf(el, 'Invite teammates')}
+          <Text dimColor>
+            {shownTeam
+              ? `Nobody else is in ${shownTeam.name} yet. Send them its invite link; once they're in, invite them here.`
+              : 'Make a team first, then invite teammates straight into this session.'}
+          </Text>
+          <Box flexDirection="row" gap={1}>
+            {shownTeam && teamsNow ? (
+              <Button
+                key="room-team-invite"
+                label="Copy team invite link"
+                plain
+                onPress={press => void copyText($, inviteUrl(teamsNow, shownTeam), 'Team invite link copied', press.surface)}
+              />
+            ) : null}
+            <Button key="room-open-team" label="Team" plain dimColor onPress={() => void openTeam($)} />
+          </Box>
+        </Box>
+      )
     const longest = turns.reduce((m, t) => Math.max(m, t.ms ?? 0), 0)
+    // The header says the turns; these are what it doesn't.
     const stats: [string, string][] = [
-      ['Turns', String(turns.length)],
       ['Tool calls', String(calls)],
       [
         'Files changed',
@@ -14287,22 +14378,24 @@ export const register: Register = (on, options) => {
       <Box flexDirection="column" gap="lg">
         <Box flexDirection="column" gap="sm">
           {people.map(personRow)}
-          {isHost && people.length <= 1 ? <Text dimColor>No one yet. Send the link to a teammate; it opens in their Claude Code.</Text> : null}
+          {isHost && people.length <= 1 ? <Text dimColor>Nobody else here yet. The link opens this session in their Claude Code.</Text> : null}
         </Box>
         {inviteBlock}
-        <Box key="room-stats" flexDirection="column" gap="xs">
-          {label('This session')}
-          {stats.map(([k, value]) => (
-            <Box key={`stat-${k}`} flexDirection="row" justifyContent="space-between">
-              <Text size="footnote" dimColor>
-                {k}
-              </Text>
-              <Text size="footnote" weight="medium" tabular>
-                {value}
-              </Text>
-            </Box>
-          ))}
-        </Box>
+        {turns.length ? (
+          <Box key="room-stats" flexDirection="column" gap="xs">
+            {label('This session')}
+            {stats.map(([k, value]) => (
+              <Box key={`stat-${k}`} flexDirection="row" justifyContent="space-between">
+                <Text size="footnote" dimColor>
+                  {k}
+                </Text>
+                <Text size="footnote" weight="medium" tabular>
+                  {value}
+                </Text>
+              </Box>
+            ))}
+          </Box>
+        ) : null}
       </Box>
     )
 
@@ -14425,25 +14518,27 @@ export const register: Register = (on, options) => {
               {mark}
             </Text>
             <Text wrap="truncate-end">
-              <Text bold color={colorOf(a.who)}>
-                {a.who}
-              </Text>
+              <Text color={colorOf(a.who)}>{a.who}</Text>
               <Text dimColor>{rest}</Text>
             </Text>
           </Box>
           <Box flexShrink={0}>
-            <Text dimColor>{ago(a.ts, now)}</Text>
+            <Text size="caption" dimColor tabular>
+              {ago(a.ts, now)}
+            </Text>
           </Box>
         </Box>
       )
     }
     const chatRow = (c: ShareChat, i: number) => (
       <Box key={`chat-${c.ts}-${i}`} flexDirection="column">
-        <Box flexDirection="row" gap={1} justifyContent="space-between">
-          <Text bold color={colorOf(c.who)}>
+        <Box flexDirection="row" gap={2} justifyContent="space-between">
+          <Text weight="medium" color={colorOf(c.who)}>
             {c.seat === v.me ? 'You' : c.who}
           </Text>
-          <Text dimColor>{ago(c.ts, now)}</Text>
+          <Text size="caption" dimColor tabular>
+            {ago(c.ts, now)}
+          </Text>
         </Box>
         <Text>{c.text}</Text>
       </Box>
@@ -14471,7 +14566,9 @@ export const register: Register = (on, options) => {
     // Shown: what Claude showed, newest first.
     const shownPage = (
       <Box flexDirection="column" gap={1}>
-        <Text dimColor>{isHost ? 'What Claude showed everyone' : `What ${room.host}'s Claude showed`}</Text>
+        <Text size="footnote" dimColor>
+          {isHost ? 'What Claude showed everyone' : `What ${room.host}'s Claude showed`}
+        </Text>
         {shownDrawn(shown)
           .reverse()
           .map(item => {
@@ -14499,7 +14596,9 @@ export const register: Register = (on, options) => {
                     <Text wrap="truncate-end" dimColor={item.closed}>{`${item.name}${item.closed ? ' · ended' : ''}`}</Text>
                   </Box>
                   <Box flexDirection="row" gap={1} alignItems="center" flexShrink={0}>
-                    <Text dimColor>{ago(item.ts, now)}</Text>
+                    <Text size="caption" dimColor tabular>
+                      {ago(item.ts, now)}
+                    </Text>
                     {!isHost && !item.closed && !usedBy && item.kind !== 'widget' && item.kind !== 'link' ? (
                       <Button key={`open-${item.key}`} label="Open" plain onPress={press => void openShown($, item, press.surface)} />
                     ) : null}
@@ -14580,7 +14679,7 @@ export const register: Register = (on, options) => {
           : null
     const versionRow = await updateRow($, el, false)
     const settingsPage = (
-      <Box flexDirection="column" gap={2}>
+      <Box flexDirection="column" gap="lg">
         {versionRow}
         {pinRefused ? (
           <Box flexDirection="row" gap={1} alignItems="center" justifyContent="space-between">
@@ -14872,17 +14971,14 @@ export const register: Register = (on, options) => {
         return row(
           [
             faceOf(el, e.surface, { name: invite.from.name, online: true, color }),
-            <Box key="what" flexDirection="column" flexShrink={1} minWidth={0}>
-              <Text wrap="truncate-end">
-                <Text bold color={color}>
-                  {invite.from.name}
-                </Text>
-                <Text bold>{' invites you'}</Text>
+            // One row: who, then the session, cut first.
+            <Text key="what" wrap="truncate-end">
+              <Text bold color={color}>
+                {invite.from.name}
               </Text>
-              <Text dimColor wrap="truncate-end">
-                {`${tidyTitle(invite.room.title)}${invites.length > 1 ? ` · ${invites.length - 1} more in Team` : ''}`}
-              </Text>
-            </Box>,
+              <Text>{' invites you'}</Text>
+              <Text dimColor>{` · ${tidyTitle(invite.room.title)}${invites.length > 1 ? ` · ${invites.length - 1} more in Team` : ''}`}</Text>
+            </Text>,
           ],
           [
             // No Join while this session's own room is being taken back (its first 10 s).
@@ -14936,13 +15032,20 @@ export const register: Register = (on, options) => {
     const live = v.connection === 'live'
     const stopping = v.confirming === 'stop'
     const approving = await read($, approvingA)
-    // Live: Claude's orange dot, its ring widening; Reconnecting in the warning color.
+    // The room's mark: a dot, green while it's live (Desktop's ring widening),
+    // Reconnecting in the warning color. The state's words follow it.
     const liveMark = (
       <Box key="live" flexDirection="row" gap={1} alignItems="center" flexShrink={0}>
         {live && Svg ? <Svg source={liveSvg()} alt="Live" width={12} height={12} /> : null}
-        <Text weight="semibold" color={live ? 'claude' : 'warning'}>
-          {live ? (Svg ? 'Live' : '● Live') : '● Reconnecting'}
-        </Text>
+        {live ? (
+          Svg ? null : (
+            <Text color="success">●</Text>
+          )
+        ) : (
+          <Text weight="semibold" color="warning">
+            ○ Reconnecting
+          </Text>
+        )}
       </Box>
     )
 
@@ -15070,7 +15173,17 @@ export const register: Register = (on, options) => {
     if (openable) void windowChoice($, false).catch(() => {})
 
     const stack = stackSvg(people, { size: 24, max: 5 })
-    const roomLabel = v.unread ? `Room · ${v.unread} new` : `Room · ${people.filter(p => p.online).length}`
+    const here = people.filter(p => p.online).length
+    const roomLabel = v.unread ? `Room · ${v.unread} new` : 'Room'
+    // What the room is, after the state word: one line of dim facts, the
+    // first thing a narrow row cuts.
+    const facts = [
+      isHost ? (v.room?.team ? `with ${v.room.team.name}` : '') : `${v.room?.host}'s session`,
+      v.policy.prompts === 'watch' ? 'watch-only' : '',
+      `${here} here`,
+    ]
+      .filter(Boolean)
+      .join(' · ')
     // While Claude works (and nothing waits on an OK): for whom, for how
     // long, what it's doing, moving on the surface's own clock.
     const Client = clientOf(el)
@@ -15095,7 +15208,6 @@ export const register: Register = (on, options) => {
         </Box>
       ) : null
     const pin = !stopping && e.surface === 'desktop' && (await read($, pinRefusedA))
-    const signedIn = isHost && Boolean((await read($, teamsA)).account)
     // An invite to another session waits here too (every session may be in a
     // room): a button in the row, in place of the two it can spare.
     const invites = stopping ? [] : await read($, invitesA)
@@ -15104,27 +15216,23 @@ export const register: Register = (on, options) => {
       row(
         [
           liveMark,
-          Svg ? (
-            <Svg key="faces" source={stack.source} alt={`With ${people.map(p => p.name).join(', ')}`} width={stack.width} height={24} />
-          ) : (
-            // A terminal: a dot per person, in their colors.
-            <Text key="faces">
-              {people.slice(0, 8).map(p => (
-                <Text key={p.name} color={p.color}>
-                  {p.online ? '●' : '○'}
-                </Text>
-              ))}
+          Svg ? <Svg key="faces" source={stack.source} alt={`With ${people.map(p => p.name).join(', ')}`} width={stack.width} height={24} /> : null,
+          live ? (
+            <Text key="what" bold>
+              {isHost ? 'Sharing' : 'Joined'}
             </Text>
-          ),
-          <Text key="what" bold wrap="truncate-end">
-            {isHost ? (v.room?.team ? `Sharing with ${v.room.team.name}` : 'Sharing') : `${v.room?.host}'s session`}
-          </Text>,
+          ) : null,
           stopping ? (
             <Text key="now" color="error" wrap="truncate-end">
               Press again to end the room for everyone
             </Text>
           ) : (
-            (ticking ?? nowOf(el, v, colors))
+            (ticking ??
+            nowOf(el, v, colors) ?? (
+              <Text key="now" dimColor wrap="truncate-end">
+                {`· ${facts}`}
+              </Text>
+            ))
           ),
         ],
         [
@@ -15145,18 +15253,17 @@ export const register: Register = (on, options) => {
           ) : null,
           pin ? <Button key="band-allow-pin" label="Pin" plain onPress={() => void allowDeskTools($)} /> : null,
           openable ? <Button key="open-preview" label="Open preview" plain onPress={press => void openShown($, openable, press.surface)} /> : null,
-          signedIn && !stopping && !invite ? <Button key="invite" label="Invite" plain onPress={() => void openRoom($, 'people')} /> : null,
-          isHost && !stopping && !invite ? (
-            <Button key="copy" label="Copy link" plain dimColor onPress={press => void (v.room ? copyLink($, v.room.url, press.surface) : undefined)} />
-          ) : null,
-          <Button key="room" label={roomLabel} plain dimColor={!v.unread} onPress={() => void openRoom($)}>
-            {v.unread ? [<Text key="name">Room </Text>, <Text key="count" bold color="claude">{`● ${v.unread} new`}</Text>] : null}
+          <Button key="room" label={roomLabel} plain onPress={() => void openRoom($)}>
+            {v.unread ? [<Text key="name">Room </Text>, <Text key="count" bold color="claude">{`· ${v.unread} new`}</Text>] : null}
           </Button>,
+          isHost && !stopping && !invite ? (
+            <Button key="copy" label="Copy link" plain onPress={press => void (v.room ? copyLink($, v.room.url, press.surface) : undefined)} />
+          ) : null,
           isHost ? (
             stopping ? (
               <Button key="stop-sharing" label="Stop for everyone?" variant="primary" onPress={() => void confirmStop($)} />
             ) : (
-              <Button key="stop-sharing" label="Stop sharing" plain dimColor onPress={() => void confirmStop($)} />
+              <Button key="stop-sharing" label="Stop" plain dimColor onPress={() => void confirmStop($)} />
             )
           ) : (
             <Button key="leave" label="Leave" plain dimColor onPress={() => void closeRoom($, 'leave')} />
