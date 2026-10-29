@@ -14771,7 +14771,7 @@ test("a refusal Open preview can't reopen points to the Room's Open for it", asy
   const asked = threeWorld(on, [API_SHOWN, DOCS_SHOWN])
   await $.prompt.submit({ text: LINK, origin: { kind: 'composer' }, wait: false })
   await asked.clock.advance(10)
-  const ui = await $.ui.mount(band('desktop'))
+  await $.ui.mount(band('desktop'))
   const pane = await $.ui.mount(roomPane())
   await pane.press({ key: 'tab-shown' })
   await asked.clock.advance(10)

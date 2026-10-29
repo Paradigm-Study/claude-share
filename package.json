@@ -13,6 +13,7 @@
     "typecheck:relay": "tsc -p plugin/relay/tsconfig.json",
     "typecheck:test": "wrangler types test/worker-runtime.d.ts --include-env=false >/dev/null && tsc -p test/tsconfig.json",
     "typecheck:plugin": "cd plugin && tsc -p .",
+    "lint:plugin": "oxlint --type-aware plugin/hooks/ plugin/tests/ plugin/types/",
     "lint": "wrangler types server/worker-configuration.d.ts >/dev/null && wrangler types test/worker-runtime.d.ts --include-env=false >/dev/null && oxlint --type-aware server/ scripts/ plugin/relay/ test/ vitest.config.ts",
     "format": "oxfmt server/ scripts/ plugin/hooks/ plugin/relay/ plugin/tests/ plugin/types/ plugin/tsconfig.json test/ vitest.config.ts",
     "format:check": "oxfmt --check server/ scripts/ plugin/hooks/ plugin/relay/ plugin/tests/ plugin/types/ plugin/tsconfig.json test/ vitest.config.ts",

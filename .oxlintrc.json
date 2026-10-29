@@ -3,7 +3,8 @@
 // (oxlint-tsgolint, the TypeScript the tsconfigs name), the rules about
 // promises a Durable Object, or a helper's socket, can't afford to drop. Not plugin/hooks: their types are
 // the engine's (plugin/.claude/types, copied in from a Claude Code session and
-// git-ignored), so on CI every engine type would read as any.
+// git-ignored), so on CI every engine type would read as any. With those types
+// copied in, npm run lint:plugin lints them locally.
 {
   "$schema": "./node_modules/oxlint/configuration_schema.json",
   "rules": {
