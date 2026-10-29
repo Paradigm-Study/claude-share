@@ -1,11 +1,12 @@
-// Session traces as an MCP server, over Streamable HTTP: `claude mcp add
-// --transport http shared-session-traces <server>/mcp`. The protocol is the
-// MCP SDK's (@modelcontextprotocol/server: a fresh McpServer a request, no
-// session); this file is the four tools. The OAuth provider (oauth.ts) lets a
-// call through only with its access token, and hands over what the person's
-// sign-in left in the grant (`props`); every call reads only the traces that
-// account may read now, its teams' and its own, as the directory says at that
-// call.
+// Session traces as an MCP server, over Streamable HTTP at <server>/mcp. The
+// plugin reaches it through its own MCP server (plugin/relay/traces-mcp.mts)
+// with the plugin's sign-in; a client without the plugin, claude.ai, adds it
+// itself and signs in by OAuth. The protocol is the MCP SDK's
+// (@modelcontextprotocol/server: a fresh McpServer a request, no session);
+// this file is the four tools. oauth.ts lets a call through only with the
+// plugin's account token or an OAuth access token, and hands over who signed
+// in (`props`); every call reads only the traces that account may read now,
+// its teams' and its own, as the directory says at that call.
 
 import { McpServer, createMcpHandler } from '@modelcontextprotocol/server'
 import type { CallToolResult } from '@modelcontextprotocol/server'
@@ -14,7 +15,9 @@ import { searchTraces, sessionOf, sessionsOf, turnOf, whoIs } from './index.ts'
 import type { TracesEnv } from './index.ts'
 import { timeOf } from './time.ts'
 
-export type GrantProps = { token: string; account: string }
+// What a request reads as: an OAuth grant's (the account it was made for), or
+// the plugin's own sign-in (`account` absent: whoever the token is now).
+export type GrantProps = { token: string; account?: string }
 
 const SERVER = { name: 'shared-session-traces', version: '0.2.0' }
 
@@ -86,7 +89,7 @@ export async function handleMcp(req: Request, env: TracesEnv, props: GrantProps 
   // The sign-in behind the grant, as it is now: one signed out or deleted
   // since reads nothing, and the client is sent to sign in again.
   const who = props?.token ? await whoIs(env, props.token) : null
-  if (!who?.account?.id || who.account.id !== props?.account) {
+  if (!who?.account?.id || (props?.account !== undefined && who.account.id !== props.account)) {
     return Response.json(
       { error: 'invalid_token', error_description: 'The sign-in behind this token has ended.' },
       { status: 401, headers: { 'www-authenticate': 'Bearer error="invalid_token"' } },

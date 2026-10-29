@@ -1352,7 +1352,9 @@ test('Share makes the host row; Stop sharing asks once, then ends it', async ($,
     await ui.press({ key: 'share' })
     await ui.press({ key: 'share-prompt' })
     expect((await ui.find({ type: 'Text', text: /^Sharing$/ }))?.props.bold).toBe(true)
-    expect(await ui.find({ type: 'Text', text: 'waiting for people to join' })).toBeDefined()
+    // Nothing under way: the room's facts, dim, after the state word.
+    expect(await ui.find({ type: 'Text', text: '· 1 here' })).toBeDefined()
+    expect((await ui.find({ key: 'stop-sharing' }))?.props.label).toBe('Stop')
     // Desktop draws the live dot and faces as vector art; the terminal, letters.
     expect(Boolean(await ui.find({ type: 'Svg' }))).toBe(surface === 'desktop')
     expect(await ui.find({ key: 'copy' })).toBeDefined()
@@ -1378,9 +1380,9 @@ test('a link typed in Desktop joins, and the row names the host', async ($, on) 
   expect(asked).toContain('POST /api/rooms/room0000000000000001/join')
   for (const surface of SURFACES) {
     const ui = await $.ui.mount(band(surface))
-    expect((await ui.find({ type: 'Text', text: /Sam's session/ }))?.props.bold).toBe(true)
-    expect(await ui.find({ type: 'Text', text: 'with Alex' })).toBeDefined()
-    expect((await ui.find({ key: 'room' }))?.props.label).toBe('Room · 3')
+    expect((await ui.find({ type: 'Text', text: /^Joined$/ }))?.props.bold).toBe(true)
+    expect(await ui.find({ type: 'Text', text: "· Sam's session · 3 here" })).toBeDefined()
+    expect((await ui.find({ key: 'room' }))?.props.label).toBe('Room')
     expect(await ui.find({ key: 'leave' })).toBeDefined()
     await ui.unmount()
   }
@@ -2338,8 +2340,8 @@ test('the Room shows the session on top, then its pages: people, chat, settings'
     // Names stand in a little room of their own (the pill they light up as).
     const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text?.trim())
     expect(Boolean(await ui.find({ type: 'Svg' }))).toBe(surface === 'desktop')
-    expect(await ui.find({ type: 'Text', text: /Live/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /Sam's session · 3 of 3 here/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^Joined$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /· Sam's session/ })).toBeDefined()
     // People first: everyone, each in their own color.
     for (const name of ['Sam', 'scott', 'Alex']) expect(texts).toContain(name)
     const colors = new Set((await ui.findAll({ type: 'Text' })).filter(t => ['Sam', 'scott', 'Alex'].includes(t.text?.trim() ?? '')).map(t => t.props.color))
@@ -3530,8 +3532,8 @@ test('the Room says who runs an older plugin, and the host hears it once with th
   await ui.press({ key: 'share-prompt' })
   await asked.clock.advance(20_000)
   const pane = await $.ui.mount({ plugin: 'shared-session', surface: 'desktop', component: 'Pane', requestId: 'shared-room', props: PANE })
-  expect(await pane.find({ type: 'Text', text: 'on 0.6.0, needs an update' })).toBeDefined()
-  expect(await pane.find({ type: 'Text', text: 'on 0.7.1, needs an update' })).toBeUndefined()
+  expect(await pane.find({ type: 'Text', text: /^on 0\.6\.0 · update to / })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /^on 0\.7\.1 · update to / })).toBeUndefined()
   const said = asked.logged.filter(l => l.startsWith('Alex runs Shared Sessions 0.6.0'))
   expect(said.length).toBe(1)
   expect(said[0]).toContain('claude plugin marketplace update claude-share')
@@ -6852,7 +6854,7 @@ test("the Team panel lists the team's live sessions; Join in a fresh session joi
   await eventually(asked.clock, () => asked.submitted.some(p => p.text === "Join Sam's session"))
   expect(asked.submitted.some(p => p.text === "Join Sam's session")).toBe(true)
   const row = await $.ui.mount(band('desktop'))
-  expect((await row.find({ type: 'Text', text: /Sam's session/ }))?.props.bold).toBe(true)
+  expect((await row.find({ type: 'Text', text: /^Joined$/ }))?.props.bold).toBe(true)
 })
 
 test('Join all from a session in use opens a new Claude Desktop session, and each that joins opens the next', async ($, on) => {
@@ -6927,7 +6929,7 @@ test('a long history comes in pages: the join asks for them, and reads every one
   // Every read of the room's events asks for pages the engine can carry.
   expect(asked.urls.filter(u => u.includes('/events?')).every(u => u.includes('max='))).toBe(true)
   const row = await $.ui.mount(band('desktop'))
-  expect((await row.find({ type: 'Text', text: /Sam's session/ }))?.props.bold).toBe(true)
+  expect((await row.find({ type: 'Text', text: /^Joined$/ }))?.props.bold).toBe(true)
 })
 
 test('a join that fails after the seat was taken gives the seat back', async ($, on) => {
@@ -7002,7 +7004,10 @@ test('a host signed in has Invite in the row, and an empty team says how to fill
   await row.press({ key: 'share' })
   await row.press({ key: 'share-prompt' })
   await asked.clock.advance(50)
-  expect((await row.find({ key: 'invite' }))?.props.label).toBe('Invite')
+  // Invite lives in the Room's header, the row's three words are Room, Copy link and Stop.
+  expect(await row.find({ key: 'invite' })).toBeUndefined()
+  const pane = await $.ui.mount({ plugin: 'shared-session', surface: 'desktop', component: 'Pane', requestId: 'shared-room', props: PANE })
+  expect((await pane.find({ key: 'room-invite' }))?.props.label).toBe('Invite')
 })
 
 test('a new invite raises one desktop notification for the machine, not again at the next look', async ($, on) => {
@@ -7061,8 +7066,10 @@ test('a long invite title is cut to fit beside Join, its paths shortened, never 
   await $.command.run({ command: 'team', args: 'invites' } as never)
   void asked
   const row = await $.ui.mount(band('desktop'))
-  const title = await row.find({ type: 'Text', text: /^interview-prep-handoff-c305f4: interview-prep-notes\.md read this/ })
-  expect(title?.props.wrap).toBe('truncate-end')
+  // One row: who, then the title, its paths shortened; the whole line is what's cut.
+  expect(await row.find({ type: 'Text', text: /^ · interview-prep-handoff-c305f4: interview-prep-notes\.md read this/ })).toBeDefined()
+  const line = (await row.findAll({ type: 'Text' })).find(t => /invites you · interview-prep-handoff/.test(t.text ?? ''))
+  expect(line?.props.wrap).toBe('truncate-end')
   // The words sit in a column that may shrink to nothing; the buttons keep their width.
   const tree = JSON.stringify(await row.drawn())
   expect(tree).toContain('"minWidth":0')
@@ -7350,7 +7357,7 @@ test('the row above the prompt stays one row: a refused pin is a button in it, n
   const tree = (await ui.drawn()) as { props: { flexDirection?: string } }
   expect(tree.props.flexDirection).toBe('row')
   expect((await ui.find({ key: 'band-allow-pin' }))?.props.label).toBe('Pin')
-  expect(await ui.find({ type: 'Text', text: /Live/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^(Sharing|Joined)$/ })).toBeDefined()
 })
 
 // The host's Claude, standing in: a step that thinks, says a line, then writes a file.
@@ -12291,8 +12298,8 @@ test('a service on five ports is asked about three ports a question, each port f
     await eventually(asked.clock, () => asked.state.hostAsk?.related[0]?.port === ports[0])
     expect(asked.state.hostAsk?.related.map(s => s.port)).toEqual(ports)
     const drawn = await wordsColumns(ui)
-    expect(drawn.before).toBe('● Live')
-    expect(drawn.width).toBe(41)
+    expect(drawn.before).toBe('●')
+    expect(drawn.width).toBe(46)
     expect(drawn.words).toBe(words)
     // Every port the yes forwards, before anything a narrow row cuts.
     expect(drawn.words.indexOf(' too?')).toBeLessThanOrEqual(drawn.width)

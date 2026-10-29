@@ -190,7 +190,18 @@ describe.skipIf(!url)('end to end, against Postgres (TRACES_DATABASE_URL)', () =
   // Deny), and the client trades the code for tokens with its PKCE verifier.
   const REDIRECT = 'http://127.0.0.1:33418/callback'
   // What a sign-in went through, step by step, for the checks to read.
-  type Steps = { csp?: string; before?: any; codeMatches?: boolean; early?: number; after?: any; again?: number; state?: boolean }
+  type Steps = {
+    csp?: string
+    before?: any
+    codeMatches?: boolean
+    early?: number
+    back?: string
+    allowOn?: boolean
+    stranger?: string
+    after?: any
+    again?: number
+    state?: boolean
+  }
   async function connect(email: string, name: string, { redirect = REDIRECT, decision = 'allow', steps = {} as Steps } = {}): Promise<any> {
     const reg = await call('/oauth/register', {
       method: 'POST',
@@ -236,7 +247,15 @@ describe.skipIf(!url)('end to end, against Postgres (TRACES_DATABASE_URL)', () =
       headers: { 'content-type': 'application/x-www-form-urlencoded', cookie },
       body: new URLSearchParams({ handle, id, decision: 'allow' }),
     }).then(r => r.status)
-    await continueAs(login, email, name)
+    // The page's own link, in the same tab: the sign-in's Continue comes
+    // back to the page, drawn again with Allow on, for this browser alone.
+    const link = (/href="(\/auth\/test\/start\?[^"]+)"/.exec(html)?.[1] ?? '').replace(/&amp;/g, '&')
+    const asks = String((await call(`${link}&email=${encodeURIComponent(email)}&name=${name}`)).data)
+    const nonce = /name="nonce" value="([^"]*)"/.exec(asks)?.[1] ?? ''
+    steps.back = (await call('/auth/confirm', { method: 'POST', form: { login, nonce } })).headers.get('location') ?? ''
+    const again = await fetch(new URL(steps.back, S), { headers: { cookie }, redirect: 'manual' }).then(r => r.text())
+    steps.allowOn = /id="allow" name="decision" value="allow">/.test(again) && again.includes(`Signed in as <b id="who">${name}</b>`)
+    steps.stranger = await fetch(new URL(steps.back, S), { redirect: 'manual' }).then(r => r.text())
     steps.after = await poll()
     const press = () =>
       fetch(`${S}/oauth/authorize`, {
@@ -328,13 +347,20 @@ describe.skipIf(!url)('end to end, against Postgres (TRACES_DATABASE_URL)', () =
 
     const alice = await signIn('alice@acme.com', 'Alice')
     const bob = await signIn('bob@other.com', 'Bob')
-    ok((await mcp(alice, 'initialize', {})).status === 401, 'an account token from /team is no MCP token')
+    ok((await mcp(alice, 'initialize', {})).status === 200, "an account token from /team reads over MCP: the plugin's MCP server signs in with it")
+    ok((await mcp('ssa_not-a-token', 'initialize', {})).status === 401, 'an account token the directory never made reads nothing')
 
     const steps: Steps = {}
     const a = await connect('alice@acme.com', 'Alice', { steps })
     ok(
       steps.before?.status === 'waiting' && steps.codeMatches && steps.early === 400,
       "the page shows the sign-in's code, waits for it, and Allow before signing in does nothing",
+    )
+    ok(
+      /^\/oauth\/continue\?id=[A-Za-z0-9_-]{40,64}$/.test(steps.back ?? '') &&
+        steps.allowOn === true &&
+        String(steps.stranger).includes('This sign-in has ended'),
+      "the sign-in's Continue comes back to the page with Allow on, and only in the browser that opened it",
     )
     ok(
       steps.after?.status === 'done' && steps.after.name === 'Alice' && !JSON.stringify(steps.after).includes('ssa_'),
@@ -506,6 +532,10 @@ describe.skipIf(!url)('end to end, against Postgres (TRACES_DATABASE_URL)', () =
     ok(session?.turns.length === 4 && session.turns[0].prompt.startsWith('把服务部署'), "get_session lists the session's prompts in order")
     const sessions = (await tool(a.access, 'list_sessions', {}))?.structuredContent?.sessions
     ok(sessions?.length === 1 && sessions[0].turns === 4, 'list_sessions lists it')
+    ok(
+      (await tool(alice, 'list_sessions', {}))?.structuredContent?.sessions?.length === 1,
+      "and Alice's /team sign-in, as the plugin's MCP server sends it, lists the same",
+    )
 
     // -- MCP, as Bob, who isn't in Acme -----------------------------------------
     const b = await connect('bob@other.com', 'Bob')

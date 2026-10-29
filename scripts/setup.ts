@@ -380,6 +380,26 @@ function configuredServer(claude: string, plugins: Plugin[]) {
   return null
 }
 
+// Claude Code's own MCP list: $CLAUDE_CONFIG_DIR/.claude.json when that's
+// set, else ~/.claude.json. The names of the servers it adds there, for
+// every project or for one, that reach this server's traces. The plugin's
+// own `traces` does that already: one more lists the same tools twice.
+function separateTraces(server: string) {
+  const file = process.env.CLAUDE_CONFIG_DIR?.trim() ? join(CONFIG_DIR, '.claude.json') : join(homedir(), '.claude.json')
+  type Servers = Record<string, { url?: unknown }> | undefined
+  let config: { mcpServers?: Servers; projects?: Record<string, { mcpServers?: Servers }> } = {}
+  try {
+    config = JSON.parse(readFileSync(file, 'utf8'))
+  } catch {
+    return []
+  }
+  const names = new Set<string>()
+  for (const servers of [config.mcpServers, ...Object.values(config.projects ?? {}).map(p => p?.mcpServers)])
+    for (const [name, entry] of Object.entries(servers ?? {}))
+      if (typeof entry?.url === 'string' && entry.url.replace(/\/+$/, '') === `${server}/mcp`) names.add(name)
+  return [...names]
+}
+
 function defaultServer() {
   // Read the same build default as the plugin, including forks changed by
   // set-server.ts. Read as text, not imported: setup runs from a copy of
@@ -572,6 +592,10 @@ async function check(claude: string) {
   ok('the server can create a room, let a seat in over HTTP, serve its link page and end it')
   if (trip.stream === true) ok('the server streams room changes, so quiet rooms cost no requests')
   else note(`the server has no stream (${trip.stream}); Claude Code will poll it instead. Deploy the current server to fix that`)
+  for (const name of separateTraces(server))
+    note(
+      `the MCP server ${name} reaches ${server}/mcp, as the plugin's own traces does, so Claude lists the same tools twice: run \`claude mcp remove ${name}\``,
+    )
 
   if (!flag('live')) return
   // Real Claude Code sessions in a throwaway folder: one shares with this
