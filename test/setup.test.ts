@@ -117,6 +117,7 @@ type Scenario = {
   settings?: Record<string, unknown>
   rawSettings?: string
   homeSettings?: Record<string, unknown>
+  claudeJson?: Record<string, unknown>
   [flag: string]: unknown
 }
 // One line of the log the fakes write.
@@ -149,6 +150,8 @@ function setup(args: string[], scenario: Scenario = {}) {
     if (scenario.settings) writeFileSync(settingsPath, JSON.stringify(scenario.settings))
     if (scenario.rawSettings) writeFileSync(settingsPath, scenario.rawSettings)
     if (scenario.homeSettings) writeFileSync(homeSettingsPath, JSON.stringify(scenario.homeSettings))
+    // Claude Code's MCP list: beside its settings under CLAUDE_CONFIG_DIR, else ~/.claude.json.
+    if (scenario.claudeJson) writeFileSync(join(scenario.configDir ? configDir : dir, '.claude.json'), JSON.stringify(scenario.claudeJson))
     const env: Record<string, string> = Object.fromEntries(
       Object.entries(process.env).filter(([key]) => !key.startsWith('CLAUDE') && !key.startsWith('SHARED_SESSION') && key !== 'NODE_OPTIONS') as [
         string,
@@ -312,6 +315,22 @@ test("a live check's leftover room that ended already is no failure; one on plai
   assert.match(plain.out, /FAIL the check's session left a room open on http:\/\/stray\.example\.invalid, not https/)
   assert(!requests(plain).some(r => r.url.startsWith('http://stray.example.invalid')), JSON.stringify(requests(plain)))
   assert.deepEqual(plain.rooms, [])
+})
+
+test("check names an MCP server that reaches the traces the plugin's own traces already reaches", () => {
+  const traces = { type: 'http', url: 'https://saved.example.invalid/mcp' }
+  const claudeJson = {
+    mcpServers: { 'shared-session-traces': traces, other: { type: 'http', url: 'https://else.example.invalid/mcp' } },
+    projects: { '/p': { mcpServers: { mine: traces } } },
+  }
+  const home = setup(['check'], { saved: 'https://saved.example.invalid', claudeJson })
+  assert.equal(home.code, 0, home.out)
+  assert.match(home.out, /NOTE the MCP server shared-session-traces reaches https:\/\/saved\.example\.invalid\/mcp.*claude mcp remove shared-session-traces/)
+  assert.match(home.out, /NOTE the MCP server mine /)
+  assert.doesNotMatch(home.out, /NOTE the MCP server other /)
+  const moved = setup(['check'], { saved: 'https://saved.example.invalid', configDir: 'config', claudeJson })
+  assert.match(moved.out, /NOTE the MCP server shared-session-traces /, 'read under CLAUDE_CONFIG_DIR when set')
+  assert.doesNotMatch(setup(['check'], { saved: 'https://saved.example.invalid' }).out, /NOTE the MCP server/)
 })
 
 test('explicit non-live server checks may differ from the saved setting', () => {

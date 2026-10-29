@@ -1,11 +1,12 @@
-// Session traces as an MCP server, over Streamable HTTP: `claude mcp add
-// --transport http shared-session-traces <server>/mcp`. The protocol is the
-// MCP SDK's (@modelcontextprotocol/server: a fresh McpServer a request, no
-// session); this file is the four tools. The OAuth provider (oauth.ts) lets a
-// call through only with its access token, and hands over what the person's
-// sign-in left in the grant (`props`); every call reads only the traces that
-// account may read now, its teams' and its own, as the directory says at that
-// call.
+// Session traces as an MCP server, over Streamable HTTP at <server>/mcp. The
+// plugin reaches it through its own MCP server (plugin/relay/traces-mcp.mts)
+// with the plugin's sign-in; a client without the plugin, claude.ai, adds it
+// itself and signs in by OAuth. The protocol is the MCP SDK's
+// (@modelcontextprotocol/server: a fresh McpServer a request, no session);
+// this file is the four tools. oauth.ts lets a call through only with the
+// plugin's account token or an OAuth access token, and hands over who signed
+// in (`props`); every call reads only the traces that account may read now,
+// its teams' and its own, as the directory says at that call.
 
 import { McpServer, createMcpHandler } from '@modelcontextprotocol/server'
 import type { CallToolResult } from '@modelcontextprotocol/server'
