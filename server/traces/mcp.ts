@@ -14,7 +14,9 @@ import { searchTraces, sessionOf, sessionsOf, turnOf, whoIs } from './index.ts'
 import type { TracesEnv } from './index.ts'
 import { timeOf } from './time.ts'
 
-export type GrantProps = { token: string; account: string }
+// What a request reads as: an OAuth grant's (the account it was made for), or
+// the plugin's own sign-in (`account` absent: whoever the token is now).
+export type GrantProps = { token: string; account?: string }
 
 const SERVER = { name: 'shared-session-traces', version: '0.2.0' }
 
@@ -86,7 +88,7 @@ export async function handleMcp(req: Request, env: TracesEnv, props: GrantProps 
   // The sign-in behind the grant, as it is now: one signed out or deleted
   // since reads nothing, and the client is sent to sign in again.
   const who = props?.token ? await whoIs(env, props.token) : null
-  if (!who?.account?.id || who.account.id !== props?.account) {
+  if (!who?.account?.id || (props?.account !== undefined && who.account.id !== props.account)) {
     return Response.json(
       { error: 'invalid_token', error_description: 'The sign-in behind this token has ended.' },
       { status: 401, headers: { 'www-authenticate': 'Bearer error="invalid_token"' } },

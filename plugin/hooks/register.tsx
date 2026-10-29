@@ -637,6 +637,11 @@ async function catchUpFromInstalled($: $) {
 // for a host who is signed in. Asked as Share asks; false when it can't be told.
 async function serverKeeps($: $): Promise<boolean> {
   if (!(await read($, teamsA)).account) return false
+  return serverTraces($)
+}
+
+// Whether the share server keeps shared sessions' turns at all, signed in or not.
+async function serverTraces($: $): Promise<boolean> {
   try {
     return (await api<{ traces?: boolean }>($, await serverOf($), '/api/version')).traces === true
   } catch {
@@ -11102,7 +11107,11 @@ const codeSaid = (code: string) => `Your browser will show the code ${code}: con
 // Opens the server's sign-in in the browser with the hash of a secret kept
 // here, then asks for the sign-in with that secret every 2 s for ten minutes.
 // `said`: the caller says the code itself (a command's reply); else a toast.
-async function startSignIn($: $, provider: string, opts: { said?: boolean } = {}): Promise<{ url: string; code: string }> {
+async function startSignIn(
+  $: $,
+  provider: string,
+  opts: { said?: boolean; /** Run once signed in (from a timer, never a command's dispatch). */ then?: () => Promise<void> } = {},
+): Promise<{ url: string; code: string }> {
   const server = await serverOf($)
   const verifier = randomSecret()
   const t = await read($, teamsA)
@@ -11132,6 +11141,7 @@ async function startSignIn($: $, provider: string, opts: { said?: boolean } = {}
       await update($, teamsA, x => ({ ...x, signingIn: null, invite: null }))
       $.ui.toast(`Signed in as ${r.account.name}`)
       await refreshTeams($)
+      if (opts.then) await opts.then()
       return
     }
     $.clock.after(2_000, () => void tick().catch(() => {}))
@@ -11808,18 +11818,67 @@ async function shareCommand($: $, e: { args: string }): Promise<{ text: string }
   // `link`: by link alone, not to the team. `watch`: watch-only from the start.
   const byLink = words.includes('link')
   const watch = words.includes('watch')
+  // `signin [provider]`: sign in first, then share. `unkept`: share without
+  // signing in, its turns not kept (signedOutShare).
+  const keep = words.includes('signin') ? 'signin' : words.includes('unkept') ? 'unkept' : ''
+  const after = keep === 'signin' ? (words[words.indexOf('signin') + 1] ?? '') : ''
+  const provider = ['all', 'new', 'link', 'watch', 'unkept'].includes(after) ? '' : after
   // In its turn: a Share under way finishes first, and this is then a
   // session sharing already.
-  return inShareTurn($, () => shareAsked($, choice, byLink, watch))
+  return inShareTurn($, () => shareAsked($, choice, byLink, watch, keep, provider))
 }
 
-async function shareAsked($: $, choice: string, byLink: boolean, watch: boolean): Promise<{ text: string }> {
+// A server that keeps shared sessions' turns (server/traces) keeps them only
+// for a host it knows: they're filed under the host's account or team, the
+// only ones who can read them back (the plugin's MCP server, signed in the
+// same way). Signed out, Share would make a room whose turns nobody keeps, and
+// say nothing: so it asks first. `signin` signs in, then shares as asked;
+// `unkept` shares as before. Null: nothing to ask, share.
+async function signedOutShare($: $, choice: string, byLink: boolean, watch: boolean, keep: string, provider: string): Promise<{ text: string } | null> {
+  if (keep === 'unkept' || (await read($, modeA)) !== 'idle') return null
+  const server = await serverOf($)
+  if ((await signInFor($, server)) || !(await serverTraces($))) return null
+  await refreshTeams($).catch(() => {})
+  const providers = (await read($, teamsA)).providers
+  const rest = `${choice ? ` ${choice}` : ''}${byLink ? ' link' : ''}${watch ? ' watch' : ''}`
+  const chosen = provider || (providers.length === 1 ? (providers[0]?.id ?? '') : '')
+  if (keep !== 'signin' || !providers.some(p => p.id === chosen)) {
+    const signIns = providers.length
+      ? providers.map(p => `- \`/share-session${rest} signin ${p.id}\` signs in with ${p.label}, then shares`)
+      : ['- this server offers no sign-in']
+    return {
+      text: [
+        `${server} keeps shared sessions' turns for search, but only a signed-in host's: you'd read them back later with the same sign-in. You aren't signed in there.`,
+        '',
+        ...signIns,
+        `- \`/share-session${rest} unkept\` shares without keeping its turns`,
+      ].join('\n'),
+    }
+  }
+  const { url, code } = await startSignIn($, chosen, {
+    said: true,
+    // Signed in: Share as asked, its answer in the transcript.
+    then: async () => {
+      const done = await inShareTurn($, () => shareAsked($, choice, byLink, watch, 'unkept', ''))
+      $.ui.log(done.text)
+    },
+  })
+  return {
+    text: `Sign in with ${providers.find(p => p.id === chosen)?.label ?? chosen} in your browser; this session shares once you're done. ${codeSaid(code)} If no browser opened: ${url}`,
+  }
+}
+
+async function shareAsked($: $, choice: string, byLink: boolean, watch: boolean, keep = '', provider = ''): Promise<{ text: string }> {
   try {
     // A room being left finishes first: then the mode says whether to ask.
     // A room being taken back is waited for, not given up: asking gives
     // nothing up, and `share` does as it makes a room. Late, on its way
     // back still, the mode isn't read (as in `requestShare`).
     await roomClosed($, { keep: true })
+    if (takingBack === null) {
+      const asked = await signedOutShare($, choice, byLink, watch, keep, provider)
+      if (asked) return asked
+    }
     if (!choice && (takingBack !== null || (await read($, modeA)) === 'idle')) {
       const prompts = await earlierPrompts($)
       if (prompts > 0) {

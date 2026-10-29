@@ -237,7 +237,16 @@ app.notFound(c => c.json({ error: 'Not found' }, 404))
 // One provider an origin: its metadata names the origin it was reached at
 // (PUBLIC_URL, or the request's own), which tests and a deploy differ in.
 const providers = new Map<string, OAuthProvider<TracesEnv>>()
+// The plugin's own sign-in (an account token, ssa_…, from /team) reads
+// traces too: the plugin's MCP server (plugin/relay/traces-mcp.mts) sends it,
+// so the sign-in that makes a shared session someone's also reads it back.
+// It's checked at each call as a grant's is (handleMcp); OAuth stays for
+// clients without the plugin.
+const accountToken = (req: Request) => /^Bearer\s+(ssa_[A-Za-z0-9_-]+)$/i.exec(req.headers.get('authorization') ?? '')?.[1]
+
 export function tracesFetch(req: Request, env: TracesEnv, ctx: ExecutionContext, origin: string) {
+  const token = new URL(req.url).pathname === '/mcp' ? accountToken(req) : undefined
+  if (token) return handleMcp(req, env, { token })
   let provider = providers.get(origin)
   if (!provider) {
     provider = new OAuthProvider<TracesEnv>({

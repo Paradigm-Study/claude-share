@@ -347,7 +347,8 @@ describe.skipIf(!url)('end to end, against Postgres (TRACES_DATABASE_URL)', () =
 
     const alice = await signIn('alice@acme.com', 'Alice')
     const bob = await signIn('bob@other.com', 'Bob')
-    ok((await mcp(alice, 'initialize', {})).status === 401, 'an account token from /team is no MCP token')
+    ok((await mcp(alice, 'initialize', {})).status === 200, "an account token from /team reads over MCP: the plugin's MCP server signs in with it")
+    ok((await mcp('ssa_not-a-token', 'initialize', {})).status === 401, 'an account token the directory never made reads nothing')
 
     const steps: Steps = {}
     const a = await connect('alice@acme.com', 'Alice', { steps })
@@ -531,6 +532,10 @@ describe.skipIf(!url)('end to end, against Postgres (TRACES_DATABASE_URL)', () =
     ok(session?.turns.length === 4 && session.turns[0].prompt.startsWith('把服务部署'), "get_session lists the session's prompts in order")
     const sessions = (await tool(a.access, 'list_sessions', {}))?.structuredContent?.sessions
     ok(sessions?.length === 1 && sessions[0].turns === 4, 'list_sessions lists it')
+    ok(
+      (await tool(alice, 'list_sessions', {}))?.structuredContent?.sessions?.length === 1,
+      "and Alice's /team sign-in, as the plugin's MCP server sends it, lists the same",
+    )
 
     // -- MCP, as Bob, who isn't in Acme -----------------------------------------
     const b = await connect('bob@other.com', 'Bob')
