@@ -574,7 +574,9 @@ describe.skipIf(!url)('end to end, against Postgres (TRACES_DATABASE_URL)', () =
       return {
         me: async () => (await go('/api/dash/me')).json() as Promise<any>,
         search: async (query: string) =>
-          (await go('/api/dash/search', { method: 'POST', headers: { origin: S, 'content-type': 'application/json' }, body: JSON.stringify({ query }) })).json() as Promise<any>,
+          (
+            await go('/api/dash/search', { method: 'POST', headers: { origin: S, 'content-type': 'application/json' }, body: JSON.stringify({ query }) })
+          ).json() as Promise<any>,
       }
     }
     const aliceWeb = await dashSignIn('alice@acme.com', 'Alice')
