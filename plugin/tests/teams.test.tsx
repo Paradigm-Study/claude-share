@@ -685,6 +685,10 @@ test('the Team panel stops a session of yours by your sign-in, after asking once
   // The sign-in, not a room token: the session that shared it may be gone.
   expect(end?.headers['x-shared-session-account']).toBe(TEAM_TOKEN)
   expect(end?.headers.authorization).toBeUndefined()
+  // Stopped: its row goes.
+  await asked.clock.advance(10)
+  expect(await pane.find({ key: 'ts-room0000000000000101' })).toBeUndefined()
+  expect(await pane.find({ key: 'ts-room0000000000000102' })).toBeDefined()
 })
 
 test('a link to a room another session here is in opens that one; pasted again, it joins here too', async ($, on) => {

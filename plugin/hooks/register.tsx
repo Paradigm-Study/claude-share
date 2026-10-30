@@ -10810,9 +10810,10 @@ function faceOf(el: UI, surface: RenderSurface, f: Face, size = 24) {
   return Svg ? <Svg source={avatarSvg({ ...f, color }, size)} alt={f.name} width={size} height={size} /> : <Text color={color}>{f.online ? '●' : '○'}</Text>
 }
 
-// A panel's pages, side by side: the one showing drawn as the pressed
-// button, a count beside a label (in Claude's orange when it's news), each a
-// digit from picked where the panel holds the keys.
+// A panel's pages, side by side: the one showing bold and underlined, at
+// full strength, a count beside a label (in Claude's orange when it's news),
+// each a digit from picked where the panel holds the keys. Every tab is the
+// same plain button, so a hovered one's background is the size of any other's.
 type Tab<T extends string> = { id: T; label: string; count?: number; news?: boolean }
 function tabsOf<T extends string>(el: UI, tabs: readonly Tab<T>[], current: T, pick: (id: T) => void) {
   const { Box, Button, Text } = el
@@ -10825,12 +10826,13 @@ function tabsOf<T extends string>(el: UI, tabs: readonly Tab<T>[], current: T, p
             key={`tab-${t.id}`}
             label={t.count ? `${t.label} ${t.count}` : t.label}
             hotkey={String(i + 1)}
-            variant={on ? 'secondary' : undefined}
-            plain={on ? undefined : true}
+            plain
             dimColor={!on && !t.news}
             onPress={() => pick(t.id)}
           >
-            <Text bold={on}>{t.label}</Text>
+            <Text bold={on} underline={on}>
+              {t.label}
+            </Text>
             {t.count ? (
               <Text color={t.news ? 'claude' : undefined} dimColor={!t.news} bold={t.news}>
                 {` ${t.count}`}
@@ -10862,7 +10864,8 @@ function headingOf(el: UI, title: string, right?: RenderChildren) {
   )
 }
 
-// A setting: its name in a fixed column, the picker beside it.
+// A setting: its name in a fixed column, the picker beside it, stretched to
+// the column's width so every picker on a page is as wide as the others.
 function settingOf(el: UI, label: string, picker: RenderChildren) {
   const { Box, Text } = el
   return (
@@ -10872,7 +10875,9 @@ function settingOf(el: UI, label: string, picker: RenderChildren) {
           {label}
         </Text>
       </Box>
-      <Box flexGrow={1}>{picker}</Box>
+      <Box flexGrow={1} flexDirection="column" alignItems="stretch">
+        {picker}
+      </Box>
     </Box>
   )
 }
@@ -11429,16 +11434,20 @@ async function stopFromTeam($: $, roomId: string) {
   const server = await serverOf($)
   const saved = await signInFor($, server)
   if (!saved) return void $.ui.toast('Sign in first: /team')
+  let over = true
   try {
     await api($, server, `/api/rooms/${roomId}/end`, { method: 'POST', account: saved.token })
     $.ui.toast('Stopped sharing. The link no longer works.')
   } catch (error) {
     // Already over: it only had to leave the list.
     if (!(error instanceof ApiError && (error.status === 404 || error.status === 410))) {
+      over = false
       $.ui.toast("Couldn't stop it")
       $.ui.log(`Couldn't stop sharing: ${error instanceof Error ? error.message : String(error)}`)
     }
   }
+  // Off the list at once, not after the panel's refresh comes back.
+  if (over) await update($, teamsA, t => ({ ...t, sessions: t.sessions.filter(s => s.id !== roomId) }))
   await refreshTeams($)
 }
 
@@ -14160,7 +14169,7 @@ export const register: Register = (on, options) => {
             <Button
               key="room-copy"
               label={copied ? 'Copied ✓' : 'Copy link'}
-              plain
+              variant="secondary"
               onPress={press => void copyLink($, room.url, press.surface).then(() => flashCopied($))}
             />
             {isHost ? (
@@ -14353,11 +14362,11 @@ export const register: Register = (on, options) => {
               <Button
                 key="room-team-invite"
                 label="Copy team invite link"
-                plain
+                variant="secondary"
                 onPress={press => void copyText($, inviteUrl(teamsNow, shownTeam), 'Team invite link copied', press.surface)}
               />
             ) : null}
-            <Button key="room-open-team" label="Team" plain dimColor onPress={() => void openTeam($)} />
+            <Button key="room-open-team" label="Team" variant="secondary" onPress={() => void openTeam($)} />
           </Box>
         </Box>
       )

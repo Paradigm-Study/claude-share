@@ -932,6 +932,8 @@ export function world(
     return <Text>{e.props.text}</Text>
   })
   const posted: { type: string; body: Record<string, unknown> }[] = []
+  // Rooms ended by their host's sign-in (the Team panel's Stop): off their team's list, as on the server.
+  const endedBySignIn = new Set<string>()
   // What went to another session beneath the plugin (the engine's own delivery).
   const peerSends: { to: string; text: string }[] = []
   on('session.send', ($, e) => {
@@ -1068,6 +1070,7 @@ export function world(
       { id: 'seat1', name: 'scott', role: 'guest', online: true },
       { id: 'seat2', name: 'Alex', role: 'guest', online: true },
     ]
+    if (method === 'POST' && headers['x-shared-session-account'] && /^\/api\/rooms\/[^/]+\/end$/.test(path)) endedBySignIn.add(path.split('/')[3] ?? '')
     let body: unknown = { ok: true }
     const signedIn = headers.authorization === `Bearer ${TEAM_TOKEN}`
     const team = { id: 'team0001', name: 'Acme', role: 'owner', access: opts.team?.access ?? 'members', domains: [], githubOrgs: [], invite: 'invite0001' }
@@ -1090,7 +1093,8 @@ export function world(
     } else if (path === '/api/me' || path.startsWith('/api/teams') || path.startsWith('/api/invites/')) {
       if (!signedIn) return { value: { status: 401, ok: false, headers: {}, text: '{"error":"Sign in first"}' } }
       if (path === '/api/me') body = { account: ME, teams: [team], teammates: [{ id: 'acct-kim', name: 'Kim', login: 'kimk' }] }
-      else if (path === '/api/teams/team0001/sessions') body = { sessions: opts.team?.sessions ?? [] }
+      else if (path === '/api/teams/team0001/sessions')
+        body = { sessions: (opts.team?.sessions ?? []).filter(x => !endedBySignIn.has((x as { id?: string }).id ?? '')) }
       else if (path === '/api/teams/team0001') body = { team, members: [{ id: ME.id, name: ME.name, role: 'owner' }] }
       else if (path.startsWith('/api/invites/')) body = { team, joined: true }
     } else if (method === 'POST' && path === '/api/rooms') {
