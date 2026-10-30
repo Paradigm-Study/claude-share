@@ -77,9 +77,9 @@ claude plugin validate --strict plugin
 claude plugin test plugin
 ```
 
-`claude plugin test` runs every file in `plugin/tests/`. `band.test.tsx` holds the UI tests for the desktop and terminal surfaces. The other files test the pure modules beside `register.tsx`.
+`claude plugin test` runs every file in `plugin/tests/`. The `*.test.tsx` files hold the UI tests for the desktop and terminal surfaces, one file for each area: `share`, `previews`, `sessions`, `approvals`, `teams`, `preview-window`, `leaving`, `forwarding`, `preview-open`, `room-pane` and `cloud`. They share the stand-in world in `tests/support/world.tsx`. A helper that only one file uses stays in that file. The `*.test.ts` files test the pure modules beside `register.tsx`.
 
-`claude plugin test plugin` takes about 140 seconds. Four tests in `band.test.tsx` wait 10 to 12 seconds each in real time, because a hook's 10-second budget cannot run on the tests' mocked clock.
+`claude plugin test plugin` takes about 60 seconds. It runs every file at the same time, each in its own child process. Four tests wait 10 to 12 seconds each in real time, because a hook's 10-second budget cannot run on the tests' mocked clock. A test that steps the mocked clock many times is slow in real time while the other files run, so it takes `{ timeoutMs: 20_000 }`.
 
 CI does not run these checks, because they need Claude Code. Run them yourself.
 

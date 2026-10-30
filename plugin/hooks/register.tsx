@@ -3421,7 +3421,7 @@ async function makeRoom($: $, surface: RenderSurface | undefined, opts: ShareOpt
     team: created.team ?? null,
   }
   // Its scope, before the room is anyone's to see.
-  const s = openScope(room, 'host')
+  openScope(room, 'host')
   await update($, roomA, () => room)
   await update($, modeA, () => 'host')
   await update($, invitedA, () => ({}))
@@ -5056,9 +5056,6 @@ async function takeCopiedToken($: $): Promise<boolean> {
   // Not on the clipboard any longer than needed.
   void sh($, 'if command -v pbcopy >/dev/null 2>&1; then printf "" | pbcopy; fi\n', 5_000).catch(() => {})
   return true
-}
-async function forgetCloudToken($: $) {
-  await sh($, `rm -f ${sq(await cloudTokenPath($))}\n`)
 }
 
 // The packed session: the project as git sees it (tracked, and untracked not
@@ -7106,7 +7103,7 @@ async function startLocalPreview($: $, room: ShareRoom, pid: string, run: LocalP
           run.saying?.clear()
           run.scope.window.stopSaid.delete(pid)
         }
-        await $.ui.invalidate('ui.render')
+        $.ui.invalidate('ui.render')
       } else if (message.state === 'channel-error') {
         // Browsers cancel individual sockets during navigation: a failed
         // channel doesn't stop the run or any of its other channels.
@@ -7122,7 +7119,7 @@ async function startLocalPreview($: $, room: ShareRoom, pid: string, run: LocalP
         if (run.started) {
           run.failed = true
           await runTrouble($, room, pid, run, 'failed')
-          await $.ui.invalidate('ui.render')
+          $.ui.invalidate('ui.render')
           void syncBrowserRoutes($, run.scope)
         }
       }
@@ -7137,7 +7134,7 @@ async function startLocalPreview($: $, room: ShareRoom, pid: string, run: LocalP
     if (runs.get(pid) === run && !run.stopping) {
       runs.delete(pid)
       if (run.started && !run.failed && run.scope.live) await runTrouble($, room, pid, run, 'stopped')
-      await $.ui.invalidate('ui.render')
+      $.ui.invalidate('ui.render')
       void syncBrowserRoutes($, run.scope)
     }
   }
@@ -7159,7 +7156,7 @@ async function runTrouble($: $, room: ShareRoom, pid: string, run: LocalPreviewR
   if (!error || run.channelError === error) return
   run.channelError = error
   $.ui.toast(error)
-  await $.ui.invalidate('ui.render')
+  $.ui.invalidate('ui.render')
 }
 
 // A channel of the window's own tunnel failed (`code`; `error`, its words).
@@ -7187,7 +7184,7 @@ function windowChannel($: $, room: ShareRoom, pid: string, run: LocalPreviewRun,
     if (run.scope.children.listeners.get(pid) !== run || run.channelError === error) return
     run.channelError = error
     $.ui.toast(error)
-    await $.ui.invalidate('ui.render')
+    $.ui.invalidate('ui.render')
   })
 }
 
@@ -7227,7 +7224,7 @@ async function closeLocalPreview($: $, pid: string) {
     saved = await read($, localPreviewsA)
   const port = forwarded.find(f => f.pid === pid)?.port ?? saved.find(p => p.pid === pid)?.port ?? 0
   for (const p of [pid, ...(await onlyUsedBy($, s, { pid, port }))]) await closeMapping($, s, p)
-  await $.ui.invalidate('ui.render')
+  $.ui.invalidate('ui.render')
 }
 
 // What a page uses that goes with it here (its Close, the host's Stop of it):
@@ -7728,7 +7725,7 @@ async function runBrowserProxy($: $, proxy: BrowserProxy) {
           proxy.scope.live && w?.room === proxy.key && (w.opened.length || forget(w)) ? { ...w, opened: [], ...(forget(w) ? { port: 0 } : {}) } : w,
         )
       }
-      await $.ui.invalidate('ui.render')
+      $.ui.invalidate('ui.render')
     } catch {}
   }
 }
@@ -8389,7 +8386,7 @@ async function launchWindow($: $, open: WindowOpen, proxy: BrowserProxy): Promis
     asks.late = async () => {
       if (!stillInRoom(room, s) || proxy.stopped || s.children.windowProxy !== proxy) return
       await windowOpened($, open, port, !pageStopped(open))
-      await $.ui.invalidate('ui.render')
+      $.ui.invalidate('ui.render')
     }
     $.ui.toast(`${choice.name} didn't open a preview window within 10 seconds. ${await windowRemedy($, open.why, true)}`)
     return 'done'
@@ -8602,7 +8599,7 @@ async function windowCheckpoint($: $, room: ShareRoom): Promise<Pick<Joined, 'pr
 
 async function setPreviewOpen($: $, value: string) {
   await $.store.set(PREVIEW_OPEN_KEY, value === 'pane' || value === 'browser' || value === 'window' ? value : (await isDesktop($)) ? 'pane' : 'browser')
-  await $.ui.invalidate('ui.render')
+  $.ui.invalidate('ui.render')
 }
 
 // ---------------------------------------------------------------------------

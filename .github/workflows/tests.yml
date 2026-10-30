@@ -60,7 +60,7 @@ jobs:
       # WebRTC) drive a headless browser the runner image has, and print SKIP
       # for those checks where they find none. With both Chrome and Firefox,
       # local-preview takes 3 to 5 minutes whole; split, each group is shorter.
-      # The plugin's own tests (plugin/tests: band.test.tsx, window.test.ts,
+      # The plugin's own tests (plugin/tests: the UI tests' *.test.tsx, window.test.ts,
       # preview.test.ts, proxy.test.ts, upstream.test.ts) need Claude Code and
       # run with `claude plugin test plugin`, not here; see CONTRIBUTING.md.
       - run: node test/${{ matrix.suite }}.ts --only ${{ matrix.group }}
