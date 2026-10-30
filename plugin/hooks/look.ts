@@ -102,9 +102,6 @@ const MOTION = `<style>
 @media (prefers-reduced-motion: reduce){.breathe .dot{animation:none}}
 .more{fill:#73726c}@media (prefers-color-scheme: dark){.more{fill:#9c9a92}}
 .edge{stroke:#fff}@media (prefers-color-scheme: dark){.edge{stroke:#30302e}}
-.ring{transform-box:fill-box;transform-origin:center;animation:ring 2s cubic-bezier(.32,.72,0,1) infinite}
-@keyframes ring{0%{transform:scale(.6);opacity:.55}100%{transform:scale(1.7);opacity:0}}
-@media (prefers-reduced-motion: reduce){.ring{animation:none;opacity:0}}
 </style>`
 
 // A filled dot in the person's color with their initial knocked out in white;
@@ -154,10 +151,10 @@ export function stackSvg(faces: readonly Face[], opts: { size?: number; max?: nu
   }
 }
 
-/** Live: Claude's orange dot, a ring around it that widens and fades (still under reduced motion). */
+/** Live: Claude's orange dot, still: a ring that widened past the image was clipped to a box. */
 export function liveSvg(color = '#d97757', size = 12): string {
   const c = size / 2
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}">${MOTION}<circle class="ring" cx="${c}" cy="${c}" r="${c - 1}" fill="none" stroke="${color}" stroke-width="1.2"/><circle cx="${c}" cy="${c}" r="${c / 2.4}" fill="${color}"/></svg>`
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}"><circle cx="${c}" cy="${c}" r="${c / 2.4}" fill="${color}"/></svg>`
 }
 
 /** Clover, Paradigm's cat, for the one empty screen it brightens. */

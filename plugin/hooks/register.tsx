@@ -11432,16 +11432,20 @@ async function stopFromTeam($: $, roomId: string) {
   const server = await serverOf($)
   const saved = await signInFor($, server)
   if (!saved) return void $.ui.toast('Sign in first: /team')
+  let over = true
   try {
     await api($, server, `/api/rooms/${roomId}/end`, { method: 'POST', account: saved.token })
     $.ui.toast('Stopped sharing. The link no longer works.')
   } catch (error) {
     // Already over: it only had to leave the list.
     if (!(error instanceof ApiError && (error.status === 404 || error.status === 410))) {
+      over = false
       $.ui.toast("Couldn't stop it")
       $.ui.log(`Couldn't stop sharing: ${error instanceof Error ? error.message : String(error)}`)
     }
   }
+  // Off the list at once, not after the panel's refresh comes back.
+  if (over) await update($, teamsA, t => ({ ...t, sessions: t.sessions.filter(s => s.id !== roomId) }))
   await refreshTeams($)
 }
 
