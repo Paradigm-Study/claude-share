@@ -17,3 +17,5 @@ wrangler.selfhost.toml
 !.env.example
 .dev.vars
 .dev.vars.*
+# The dashboard as Vite builds it (npm run build:web; wrangler deploy and dev run it).
+web/dist/

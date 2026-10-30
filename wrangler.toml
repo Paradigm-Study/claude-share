@@ -4,6 +4,19 @@ compatibility_date = "2026-04-01"
 # Session traces' Postgres driver (pg, through Hyperdrive) needs Node's APIs.
 compatibility_flags = ["nodejs_compat"]
 
+# The dashboard at /app (web/, server/worker/dash.ts): built by every
+# `wrangler deploy` and `wrangler dev` (npm install first, for Vite), served
+# from Workers Static Assets. The Worker runs first for every path, so its
+# own routes stay its own and only /app reaches the files.
+[build]
+command = "npm run build:web"
+watch_dir = "web/src"
+
+[assets]
+directory = "web/dist"
+binding = "ASSETS"
+run_worker_first = true
+
 [vars]
 # "off" stops new rooms at once (joining existing links still works):
 #   npx wrangler deploy --var NEW_ROOMS:off

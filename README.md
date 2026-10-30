@@ -72,6 +72,8 @@ The room server receives the shared transcript, tool results, chat and files. Tr
 
 Only a server that turns on traces keeps a session's turns for its team to search. The public server does not.
 
+A browser signed in to the server's dashboard (`/app`) keeps its sign-in in a cookie. The server keeps only its hash. A browser sign-in lasts 30 days. Signing out, or deleting your account, ends it at once.
+
 A preview page left open in a browser can reach the previews of a session that browser opens next. Close previews from a session you do not trust before you open another one's.
 
 A session moved to the cloud sends your project files, conversation and Claude token to a container. The container is deleted when you bring the session home, the room ends, or a week passes.

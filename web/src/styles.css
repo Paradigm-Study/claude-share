@@ -1,0 +1,248 @@
+/* The site's look (server/core/pages.ts PAGE_CSS): paper and ink, a faint
+   dot grid, mono eyebrows, a serif display face; dark is ink paper. System
+   fonts only: the page loads nothing from elsewhere. */
+:root {
+  --ink: #011121;
+  --muted: #4b5563;
+  --faint: #8a8883;
+  --line: #dde1e7;
+  --bg: #faf8f7;
+  --surface: #fffdfc;
+  --accent: #2c4a7b;
+  --accent-wash: #e4ecf7;
+  --rose: #b4433a;
+  --good: #2e7d32;
+  --grid: rgba(1, 17, 33, 0.05);
+  --display: 'Iowan Old Style', Georgia, serif;
+  --body: system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --ink: #f3f1ee;
+    --muted: #a3abb5;
+    --faint: #7d8590;
+    --line: #223247;
+    --bg: #011121;
+    --surface: #0b1726;
+    --accent: #b9cdeb;
+    --accent-wash: #16263d;
+    --rose: #e58f87;
+    --good: #6fbf7a;
+    --grid: rgba(255, 255, 255, 0.055);
+    color-scheme: dark;
+  }
+}
+* {
+  box-sizing: border-box;
+}
+html,
+body {
+  margin: 0;
+}
+body {
+  min-height: 100vh;
+  font: 15px/1.5 var(--body);
+  color: var(--ink);
+  background-color: var(--bg);
+  background-image: radial-gradient(circle, var(--grid) 1px, transparent 1.4px);
+  background-size: 22px 22px;
+  -webkit-font-smoothing: antialiased;
+}
+a {
+  color: inherit;
+}
+.wrap {
+  max-width: 880px;
+  margin: 0 auto;
+  padding: 0 16px 64px;
+}
+.nav {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 24px 0 8px;
+  flex-wrap: wrap;
+}
+.brand {
+  text-decoration: none;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 10px;
+}
+.brand .word {
+  font-family: var(--display);
+  font-weight: 700;
+  font-size: 21px;
+}
+.brand .sub,
+.eyebrow {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+.who {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: var(--muted);
+}
+.tabs {
+  display: flex;
+  gap: 20px;
+  border-bottom: 1px solid var(--line);
+  margin: 12px 0 24px;
+}
+.tabs a {
+  text-decoration: none;
+  padding: 8px 0;
+  color: var(--muted);
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+}
+.tabs a.on {
+  color: var(--ink);
+  border-bottom-color: var(--ink);
+}
+.card {
+  margin-top: 48px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 28px;
+}
+h1 {
+  font-family: var(--display);
+  font-size: 30px;
+  line-height: 1.2;
+  margin: 6px 0 12px;
+}
+h2 {
+  font-family: var(--display);
+  font-size: 19px;
+  margin: 0 0 10px;
+}
+.code {
+  font-family: var(--mono);
+  letter-spacing: 0.06em;
+}
+.cta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.btn-primary,
+.btn-ghost {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 36px;
+  padding: 0 14px;
+  border-radius: 8px;
+  font: inherit;
+  font-weight: 600;
+  text-decoration: none;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.btn-primary {
+  background: var(--ink);
+  color: var(--bg);
+  border: 1px solid var(--ink);
+}
+.btn-ghost {
+  background: transparent;
+  color: var(--ink);
+  border: 1px solid var(--line);
+}
+button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.team {
+  margin-bottom: 28px;
+}
+.rows,
+.hits {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+}
+.rows li,
+.hits li {
+  padding: 12px 16px;
+  border-top: 1px solid var(--line);
+}
+.rows li:first-child,
+.hits li:first-child {
+  border-top: 0;
+}
+.row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.row .what {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.row .title {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.row.away .title {
+  color: var(--muted);
+}
+.facts {
+  color: var(--muted);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+.snippet {
+  margin-top: 4px;
+  overflow-wrap: anywhere;
+}
+.search {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 20px;
+  flex-wrap: wrap;
+}
+.search input,
+.search select {
+  font: inherit;
+  min-height: 36px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--ink);
+}
+.search input {
+  flex: 1 1 240px;
+  min-width: 0;
+}
+.quiet {
+  color: var(--muted);
+}
+.small {
+  font-size: 13px;
+}
+.error {
+  color: var(--rose);
+}
+code {
+  font-family: var(--mono);
+  font-size: 0.92em;
+}

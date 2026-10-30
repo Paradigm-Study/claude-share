@@ -26,6 +26,8 @@ export type ServerEnv = Omit<TracesEnv, 'DIRECTORY'> & {
   GATE?: DurableObjectNamespace
   DIRECTORY?: DurableObjectNamespace<DirectoryObject>
   HOSTS?: DurableObjectNamespace
+  // The dashboard's built files (web/dist, wrangler.toml's [assets]): the main Worker's alone.
+  ASSETS?: Fetcher
 }
 // Session traces (server/traces): loaded only where a database is bound.
 export const tracesOn = (env: ServerEnv | undefined) => Boolean(env?.TRACES_DB && env?.OAUTH_KV)
