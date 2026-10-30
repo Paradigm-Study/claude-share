@@ -1,4 +1,4 @@
-import { utf8Length, token } from './http.ts'
+import { utf8Length, token, newBearer } from './http.ts'
 import {
   PAGE_BYTES_CAP,
   MAX_TEXT,
@@ -17,6 +17,7 @@ import { cloudSummary } from './cloud.ts'
 import { revokeMatches } from './tcp.ts'
 import type {
   Auth,
+  Bearer,
   Cloud,
   FileMeta,
   FileStore,
@@ -29,6 +30,12 @@ import type {
   RevokeFilter,
   RoomData,
   RoomEvent,
+  GuestEventType,
+  HostEventType,
+  RoomEventBodies,
+  RoomEventType,
+  RoomId,
+  SeatId,
   RoomTeam,
   Seat,
   Settle,
@@ -76,11 +83,24 @@ export const maxOf = (url: URL) => {
 // `declined` answers a guest prompt the host's policy turned away. `react` is
 // someone's reaction to one of Claude's replies, and `seen` the replies that
 // came on someone's screen, each filed under the reply's key.
-export const HOST_TYPES = new Set(['row', 'delta', 'turn', 'approval', 'title', 'policy', 'declined', 'chat', 'artifact', 'react', 'seen', 'ask'])
+export const HOST_TYPES = new Set<HostEventType>([
+  'row',
+  'delta',
+  'turn',
+  'approval',
+  'title',
+  'policy',
+  'declined',
+  'chat',
+  'artifact',
+  'react',
+  'seen',
+  'ask',
+])
 // `answer`: the cloud host's approver answering an `ask`; `set`: the approver
 // changing the cloud host's settings, which the host's own Room changes at
 // home. Both from the approver's seats alone.
-export const GUEST_TYPES = new Set(['prompt', 'stop', 'chat', 'react', 'seen', 'answer', 'set'])
+export const GUEST_TYPES = new Set<GuestEventType>(['prompt', 'stop', 'chat', 'react', 'seen', 'answer', 'set'])
 const REACTIONS = new Set(['👍', '🎉', '👀'])
 const REPLY_KEY = /^[a-z0-9]{1,16}\.\d{1,5}$/
 
@@ -143,7 +163,7 @@ function fitBody(body: unknown): JsonObject {
 export type Person = { id: string; name: string; role: 'host' | 'guest'; online: boolean; seats: string[]; version?: string; account?: string; cloud?: boolean }
 
 export class Room {
-  id: string
+  id: RoomId
   title: string
   host: Host
   createdAt: number
@@ -156,9 +176,10 @@ export class Room {
   events: RoomEvent[]
   eventBytes: number
   liveBytes: number
-  seats: Map<string, Seat>
-  away: Map<string, Seat>
-  leftElsewhere: Map<string, number>
+  // By bearer: a seat's id is another thing, and the brands keep them apart.
+  seats: Map<Bearer, Seat>
+  away: Map<Bearer, Seat>
+  leftElsewhere: Map<Bearer, number>
   live: RoomEvent[]
   posts: Windows
   waiters: Set<Waiter>
@@ -204,15 +225,15 @@ export class Room {
     this.eventBytes = this.events.reduce((n, e) => n + sizeOf(e), 0)
     this.trimEvents()
     this.liveBytes = 0
-    this.seats = new Map(Object.entries(data.seats ?? {}))
+    this.seats = new Map(Object.entries(data.seats ?? {}) as [Bearer, Seat][])
     // Seats let go after their grace (a laptop asleep, a network gap), by
     // token: one that comes back is seated again as it was, so a plugin that
     // was only away isn't told the session ended. Leaving isn't kept here.
-    this.away = new Map(Object.entries(data.away ?? {}))
+    this.away = new Map(Object.entries(data.away ?? {}) as [Bearer, Seat][])
     // Seats their person left from elsewhere (the Team panel's Leave), by
     // token → when: a session still using one hears it left (410), instead of
     // taking a new seat as it does when only let go. The newest hundred.
-    this.leftElsewhere = new Map(Object.entries(data.leftElsewhere ?? {}))
+    this.leftElsewhere = new Map(Object.entries(data.leftElsewhere ?? {}) as [Bearer, number][])
     this.live = []
     this.posts = new Windows() // posts this minute, counted exactly here
     this.waiters = new Set()
@@ -298,12 +319,12 @@ export class Room {
     account?: string | null
   }) {
     return new Room({
-      id,
+      id: id as RoomId,
       title:
         String(title ?? '')
           .trim()
           .slice(0, 120) || 'Claude Code session',
-      host: { name: clampName(name), token: token(24), lastSeen: now, version: version ?? undefined, account: account ?? undefined },
+      host: { name: clampName(name), token: newBearer(), lastSeen: now, version: version ?? undefined, account: account ?? undefined },
       createdAt: now,
       fromNow: fromNow === true,
       team: team ?? null,
@@ -354,7 +375,7 @@ export class Room {
     return sent ? 'delivered' : 'offline'
   }
 
-  auth(bearer: string, now = Date.now()): Auth | null {
+  auth(bearer: Bearer, now = Date.now()): Auth | null {
     if (!bearer) return null
     if (bearer === this.host.token) return { role: 'host', seat: 'host', name: this.host.name }
     const seat = this.seats.get(bearer) ?? this.comeBack(bearer, now)
@@ -362,7 +383,7 @@ export class Room {
   }
 
   // A seat let go for being quiet, back: seated again, the same seat.
-  comeBack(bearer: string, now: number) {
+  comeBack(bearer: Bearer, now: number) {
     const seat = this.away.get(bearer)
     if (!seat || this.endedAt || this.seats.size >= ROOM_SEATS_MAX) return null
     this.away.delete(bearer)
@@ -434,8 +455,8 @@ export class Room {
     return false
   }
 
-  append(from: From, type: string, body: unknown, now: number) {
-    const event: RoomEvent = { seq: ++this.seq, type, from, ts: now, body: fitBody(body) }
+  append<T extends RoomEventType>(from: From, type: T, body: RoomEventBodies[T] | undefined, now: number) {
+    const event = { seq: ++this.seq, type, from, ts: now, body: fitBody(body) } as RoomEvent
     if (LIVE_TYPES.has(type)) {
       this.live.push(event)
       this.liveBytes += sizeOf(event)
@@ -509,8 +530,15 @@ export class Room {
   // A person already here by another session (the same account) comes and
   // goes quietly: no second "joined", no "left" while one session stays.
   join(name: unknown, now: number, version: string | null = null, account: string | null = null) {
-    const seatToken = token(24)
-    const seat: Seat = { id: token(6), name: clampName(name), joinedAt: now, lastSeen: now, ...(version ? { version } : {}), ...(account ? { account } : {}) }
+    const seatToken = newBearer()
+    const seat: Seat = {
+      id: token(6) as SeatId,
+      name: clampName(name),
+      joinedAt: now,
+      lastSeen: now,
+      ...(version ? { version } : {}),
+      ...(account ? { account } : {}),
+    }
     const already = this.hasAccount(account)
     this.seats.set(seatToken, seat)
     if (!already) this.append({ seat: seat.id, name: seat.name, role: 'guest' }, 'join', {}, now)
@@ -518,7 +546,7 @@ export class Room {
     return { token: seatToken, seat }
   }
 
-  leave(bearer: string, reason: string, now: number) {
+  leave(bearer: Bearer, reason: string, now: number) {
     const seat = this.seats.get(bearer) ?? this.away.get(bearer)
     if (!seat) return
     const stays = this.hasAccount(seat.account, bearer)

@@ -1,6 +1,6 @@
 import { JSON_BODY_MAX, MAX_BODY, FILE_MAX, BOUNDED_BODY, LIMITS, type LimitKind } from './limits.ts'
 import type { Room } from './room.ts'
-import type { Auth, JsonObject, RoomContext } from './types.ts'
+import type { Auth, Bearer, JsonObject, RoomContext } from './types.ts'
 import manifest from '../../plugin/.claude-plugin/plugin.json' with { type: 'json' }
 
 // A string's size in UTF-8, what the limit counts.
@@ -35,7 +35,10 @@ export const json = (data: unknown, status = 200) =>
     headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' },
   })
 
-export const bearerOf = (req: Request) => (req.headers.get('authorization') ?? '').replace(/^Bearer\s+/i, '').trim()
+// Where a bearer starts being one: minted here, or read off a request (the
+// room still looks it up).
+export const bearerOf = (req: Request) => (req.headers.get('authorization') ?? '').replace(/^Bearer\s+/i, '').trim() as Bearer
+export const newBearer = () => token(24) as Bearer
 
 // A body refused: its status goes with it (413, 400).
 export type BodyError = Error & { status: number }

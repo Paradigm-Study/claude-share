@@ -38,6 +38,7 @@ export {
 } from './limits.ts'
 export {
   token,
+  bearerOf,
   json,
   readBody,
   streamedRoomBody,

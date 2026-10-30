@@ -31,6 +31,7 @@ import {
 import { BODY_CHARS } from '../server/teams.ts'
 import worker, { RoomObject } from '../server/worker/index.ts'
 import type { ServerEnv } from '../server/worker/index.ts'
+import type { Bearer, RoomId } from '../server/core/types.ts'
 
 const NativeResponse = globalThis.Response,
   nativeNow = Date.now
@@ -153,7 +154,7 @@ const ctx = {} as ExecutionContext
 const fetchWorker = (request: Request, env: object) => worker.fetch(request, env as ServerEnv, ctx)
 const roomObject = (state: State, env: object = {}) => new RoomObject(state as unknown as DurableObjectState, env as ServerEnv) as unknown as Obj
 // A room, its object, and the tokens and preview the checks use.
-type World = { state: State; obj: Obj; id: string; key: string; host: string; member: string; seat: string; pid: string; control: Socket }
+type World = { state: State; obj: Obj; id: string; key: string; host: Bearer; member: Bearer; seat: string; pid: string; control: Socket }
 function namespace(...worlds: World[]) {
   const empty = roomObject(new State())
   return {
@@ -600,7 +601,7 @@ describe('on the Worker, with stdlib stubs', () => {
     const w = await world(),
       env = { ROOMS: { idFromName: (id: string) => id, get: () => w.obj }, PREVIEW_URL: 'https://preview.test' }
     const outer = (held: any) => fetchWorker(new Request(`https://share.test/api/rooms${new URL(held.request.url).pathname}`, held.request), env)
-    for (const bearer of ['', 'invalid', w.member]) {
+    for (const bearer of ['', 'invalid', w.member] as Bearer[]) {
       const held = heldBody(w, 'previews', bearer)
       held.request.headers.set('content-length', String(1_000_000))
       assert.equal((await outer(held)).status, bearer === w.member ? 403 : 401)
@@ -642,7 +643,7 @@ describe('on the Worker, with stdlib stubs', () => {
     const sharing = heldBody(w, 'previews'),
       applying = outer(sharing)
     await sharing.reading
-    w.obj.room!.host.token = token(24)
+    w.obj.room!.host.token = token(24) as Bearer
     sharing.release({ port: 43180, tcp: true })
     assert.equal((await applying).status, 401)
     const wrong = heldBody({ ...w, id: token(16) }, 'previews')
@@ -734,7 +735,7 @@ describe('on the Worker, with stdlib stubs', () => {
   // The budget pays for bytes carried: a browser's thousands of short
   // connections give back what they reserved and didn't use.
   test('refunds: thousands of short connections, a lifetime budget barely touched', async () => {
-    const room = new Room({ id: 'r', title: 't', host: { name: 'H', token: 'h', lastSeen: 0 }, createdAt: 0 })
+    const room = new Room({ id: 'r' as RoomId, title: 't', host: { name: 'H', token: 'h' as Bearer, lastSeen: 0 }, createdAt: 0 })
     for (let i = 0; i < 5000; i++) {
       const half = { remaining: 0 }
       assert(tcpReserve(room, half as Parameters<typeof tcpReserve>[1]))
@@ -796,7 +797,7 @@ describe('on the Worker, with stdlib stubs', () => {
     assert.equal(w.obj.room!.tcpStats.refunded, 2 * TCP_LIMITS.reserveBytes - 4 - 32_768)
     assert.equal(w.obj.room!.seq, resumedSeq) // resume advances seq, data never appends
     assert.equal(
-      w.obj.room!.events.some(e => e.type === 'tcp'),
+      w.obj.room!.events.some(e => (e.type as string) === 'tcp'),
       false,
     )
     const used = w.obj.room!.tcpStats.used,
@@ -1090,7 +1091,7 @@ describe('on the Worker, with stdlib stubs', () => {
     assert.equal((await w.obj.fetch(req(w, `ws/${ready.id}/reject`, w.host, 'POST', { code: 'BUSY' }))).status, 409)
     assert.equal(ready.guest.closes.length, 0)
     assert.equal(
-      w.obj.room!.events.some(e => e.type === 'tcp'),
+      w.obj.room!.events.some(e => (e.type as string) === 'tcp'),
       false,
     )
     assert.equal(w.obj.room!.seq, resumedSeq)
@@ -1120,7 +1121,7 @@ describe('on the Worker, with stdlib stubs', () => {
       revoked = heldReject(w, changed.id),
       unauthorized = w.obj.fetch(revoked.request)
     await revoked.reading
-    w.obj.room!.host.token = token(24)
+    w.obj.room!.host.token = token(24) as Bearer
     revoked.release()
     assert.equal((await unauthorized).status, 401)
     assert.equal(changed.guest.closes.length, 0)

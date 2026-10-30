@@ -44,9 +44,10 @@ import {
 } from '../server/core/index.ts'
 import { metaOf } from '../server/worker/index.ts'
 import { WEB_SESSION_DAYS } from '../server/teams.ts'
+import type { Bearer, From, JsonObject, SeatId } from '../server/core/types.ts'
 
 // A room, its two seats' tokens, and whether its object is the current one.
-type World = { room: Room; host: string; guest: string; current: boolean }
+type World = { room: Room; host: Bearer; guest: Bearer; current: boolean }
 function world(): World {
   const room = Room.create({ id: token(16), name: 'Host', title: undefined, now: Date.now(), version: PLUGIN_LATEST })
   const joined = room.join('Guest', Date.now(), PLUGIN_LATEST)
@@ -163,7 +164,8 @@ test("previews: a page, then forwarding on the same preview; a guest's own seat 
   w.room.events = []
   assert.equal(tcpTarget(w, forwarded).port, 43601)
   // A guest's seat token alone: never the host's, nor anything else.
-  for (const bearer of ['', 'invalid', w.host]) assert.deepEqual(tcpTarget(w, page, bearer), { ok: false, status: 401, error: 'Not a guest of this session.' })
+  for (const bearer of ['', 'invalid', w.host] as Bearer[])
+    assert.deepEqual(tcpTarget(w, page, bearer), { ok: false, status: 401, error: 'Not a guest of this session.' })
   const copy = Room.resume(structuredClone(w.room.toJSON()), Date.now())
   assert.deepEqual(
     [...copy.previews.values()].map(p => [p.port, p.tcp === true]),
@@ -178,7 +180,7 @@ test("previews: a page, then forwarding on the same preview; a guest's own seat 
   const ticket = (await api(w, `previews/${page}/ticket`, w.guest, 'POST', {})).url
   assert.match(ticket, /^https:\/\/preview\.test\/__share\/enter\?/)
   const before = w.room.seq
-  for (const bearer of [w.guest, 'invalid']) {
+  for (const bearer of [w.guest, 'invalid'] as Bearer[]) {
     const body = held(w, `previews/${page}/end`, bearer)
     assert.equal((await send(w, body.req)).status, bearer === w.guest ? 403 : 401)
     assert.equal(body.reads, 0)
@@ -241,7 +243,7 @@ test("a seat's own token connects while it's here or away within its grace, seat
 
 test('bounded bodies before buffering or EOF, host-only shares and post-body room, seat and preview checks', async () => {
   const w = world()
-  for (const bearer of ['invalid', w.guest]) {
+  for (const bearer of ['invalid', w.guest] as Bearer[]) {
     const body = held(w, 'previews', bearer)
     assert.equal((await send(w, body.req)).status, bearer === w.guest ? 403 : 401)
     assert.equal(body.reads, 0)
@@ -272,7 +274,7 @@ test('bounded bodies before buffering or EOF, host-only shares and post-body roo
       pending = held(r, 'previews'),
       sending = send(r, pending.req)
     await pending.reading
-    if (race === 'host token') r.room.host.token = token(24)
+    if (race === 'host token') r.room.host.token = token(24) as Bearer
     if (race === 'room end') r.room.end(Date.now())
     if (race === 'room identity') r.current = false
     pending.release({ port: 43701, tcp: true })
@@ -348,7 +350,7 @@ test('need: host stream only, never stored or broadcast; 403/401/400/413/410/429
   assert.equal(w.room.seq, seq)
   assert.equal(w.room.events.length, events)
   assert.equal(JSON.stringify(w.room.toJSON()), saved, 'nothing stored')
-  for (const bearer of [w.host, 'invalid']) {
+  for (const bearer of [w.host, 'invalid'] as Bearer[]) {
     const body = held(w, 'need', bearer)
     assert.equal((await send(w, body.req)).status, bearer === w.host ? 403 : 401)
     assert.equal(body.reads, 0)
@@ -1109,8 +1111,8 @@ test("a connection refused for the seat's minute spends nothing of the room's; J
 test('events bounded in bytes: nested strings and depth clamped; a guest past 128 KB refused whole, a host cut and kept; history 16 MB and live bounded', async () => {
   const w = world(),
     post = (bearer: string | null, events: any) => call(w, 'events', bearer, 'POST', { events }),
-    fromHost = { seat: 'host', name: 'Host', role: 'host' as const }
-  const rows = () => w.room.events.filter(e => e.type === 'row' || e.type === 'chat')
+    fromHost: From = { seat: 'host', name: 'Host', role: 'host' }
+  const rows = () => w.room.events.filter(e => e.type === 'row' || e.type === 'chat') as { body: JsonObject }[]
   const longRow = { kind: 'assistant', text: `Answer 1. ${'帮我看看这个问题，然后修一下。'.repeat(700)}` }
   const reply = { kind: 'assistant', text: '界'.repeat(32_000) }
   assert.equal(
@@ -1175,7 +1177,7 @@ test('events bounded in bytes: nested strings and depth clamped; a guest past 12
   assert(h.room.live.reduce((n, e) => n + Buffer.byteLength(JSON.stringify(e)) + 1, 0) <= 2 * 1024 * 1024)
   // A room saved with more (before the bound) is cut to it as it loads.
   const saved = h.room.toJSON()
-  saved.events = Array.from({ length: 1000 }, (_, i) => ({ seq: i + 1, type: 'row', from: fromHost, ts: 0, body: { ...big, i } }))
+  saved.events = Array.from({ length: 1000 }, (_, i) => ({ seq: i + 1, type: 'row' as const, from: fromHost, ts: 0, body: { ...big, i } }))
   const loaded = Room.resume(saved, Date.now())
   assert(loaded.eventBytes <= HISTORY_BYTES && loaded.events.at(-1)!.body.i === 999)
 })
@@ -1241,7 +1243,7 @@ test('link pages percent-encoded outside printable ASCII and capped at 2048 byte
 test("What's kept with a room in its one Durable Object value (`meta`, 2 MB at most) stays under 1 MiB with every cap at its maximum (D2-8, server-4, server-missed-2 and -3): links (128,", async () => {
   const worst = (n: number) => '\ud800'.repeat(n) // a lone surrogate: six bytes in JSON
   const room = Room.create({ id: token(16), name: worst(80), title: worst(200), now: Date.now(), version: PLUGIN_LATEST, account: 'a'.repeat(64) })
-  const w = { room, host: room.host.token, current: true } as World
+  const w = { room, host: room.host.token, current: true } as unknown as World
   for (let round = 0; round < 7; round++) {
     for (let i = room.seats.size; i < ROOM_SEATS_MAX; i++) room.join(worst(80), Date.now(), PLUGIN_LATEST, 'b'.repeat(64))
     if (round < 6) room.sweep(Date.now() + SEAT_TIMEOUT_MS + 1) // all away, kept to the newest 100
@@ -1314,7 +1316,7 @@ test('a room keeps its newest 256 browser sessions; clearing links count toward 
   for (let i = 0; i < PUBLIC_LIMITS.roomSessions; i++) w.room.previewSessions.set(`old${i}`, { pid, exp: Date.now() + 60_000 + i, seat: `seat${i}` })
   const live = (sid: string) =>
     previewSocketTarget(w.room, new Request('https://preview.test/live', { headers: { cookie: `cs_pv=${w.room.previewKey}.${sid}` } }), Date.now()).ok
-  w.room.seats.set('extra', { id: 'seat0', name: 'Old', joinedAt: 0, lastSeen: Date.now() })
+  w.room.seats.set('extra' as Bearer, { id: 'seat0' as SeatId, name: 'Old', joinedAt: 0, lastSeen: Date.now() })
   assert(live('old0'))
   const fresh = cookieOf(await admit(w, await enterLink(w, pid)))
   assert.equal(w.room.previewSessions.size, PUBLIC_LIMITS.roomSessions)
