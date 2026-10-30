@@ -116,119 +116,289 @@ export async function roomRequest(room: Room, req: Request, rest: string, now: n
 
 const versionsOf = (room: Room) => [room.host.version, ...[...room.seats.values()].map(s => s.version)].join(' ')
 
+// One request, as a route sees it.
+type RouteArgs = { room: Room; req: Request; rest: string; url: URL; now: number; origin: string; ctx: RoomContext }
+// A seated member's, once its token is known.
+type MemberArgs = RouteArgs & { auth: Auth }
+// `when`: what the route asks beyond its method and path.
+type Route<Args> = { name: string; method: string; rest: string; when?: (args: Args) => boolean; handle: (args: Args) => Promise<RouteResult> }
+// A set of paths another module answers, null when it isn't theirs.
+type RouteSet = { name: string; routes: (args: MemberArgs) => Promise<RouteResult | null> }
+
+const matches = <Args extends RouteArgs>(route: Route<Args>, args: Args) =>
+  route.method === args.req.method && route.rest === args.rest && (route.when?.(args) ?? true)
+
+async function landing({ room, now, origin, ctx }: RouteArgs): Promise<RouteResult> {
+  // A team's session says up front when only its people can join.
+  const access = room.team && ctx.directory ? await ctx.directory.teamAccess(room.team.id).catch(() => null) : null
+  return { response: landingPage(room, shareUrl(origin, room.id), now, { access }) }
+}
+
+async function roomInfo({ room, now }: RouteArgs): Promise<RouteResult> {
+  return {
+    response: json({
+      id: room.id,
+      title: room.title,
+      host: room.host.name,
+      people: room.people(now),
+      ended: Boolean(room.endedAt),
+      hostVersion: room.host.version,
+      team: teamOf(room),
+      cloud: cloudSummary(room),
+    }),
+  }
+}
+
+async function joinRoom({ room, req, url, now, ctx }: RouteArgs): Promise<RouteResult> {
+  if (room.endedAt) return { response: json({ error: 'This session is no longer shared.' }, 410) }
+  const outdated = outdatedClient(req)
+  if (outdated) return { response: outdated }
+  const directory = ctx.directory
+  if (room.team && !directory) return { response: json({ error: `This session is for ${room.team.name}, and this server can't check who's in it.` }, 503) }
+  if (room.seats.size >= ROOM_SEATS_MAX) return { response: json({ error: `This session is full: ${ROOM_SEATS_MAX} people have joined.` }, 403) }
+  const body = await readJson(req)
+  const account = await whoIs(req, ctx)
+  // Shared with a team: its access setting, as it is now, says who joins,
+  // asked after the waits above (a body held open, the sign-in's look) and
+  // again if the team let someone go meanwhile, so a removal while this
+  // join waited never ends in a seat.
+  for (let tries = 0; room.team && directory; tries++) {
+    const team = room.team
+    const gen = room.teamGen
+    const check = await directory.joinCheck(team.id, accountOf(req))
+    if (!check.ok)
+      return { response: json({ error: check.error, team: team.name, signIn: check.status === 401 || undefined }, check.status === 401 ? 403 : check.status) }
+    if (room.teamGen === gen) break
+    if (tries >= 2) return { response: json({ error: 'Who is in the team changed while you joined. Try again.' }, 409) }
+  }
+  if (room.endedAt) return { response: json({ error: 'This session is no longer shared.' }, 410) }
+  if (room.seats.size >= ROOM_SEATS_MAX) return { response: json({ error: `This session is full: ${ROOM_SEATS_MAX} people have joined.` }, 403) }
+  const { token: seatToken, seat } = room.join(body.name, now, clientVersion(req), account)
+  // A long history in pages (see PAGE_BYTES_CAP): the first here, the rest
+  // from events?after=historySeq.
+  const max = maxOf(url)
+  const page = max ? pageOf(room.events, max) : { events: newestOf(room.events, PAGE_BYTES_CAP), more: false }
+  return {
+    changed: true,
+    response: json({
+      token: seatToken,
+      seat: seat.id,
+      name: seat.name,
+      title: room.title,
+      host: room.host.name,
+      seq: room.seq,
+      history: page.events,
+      more: page.more || undefined,
+      historySeq: page.more ? page.events.at(-1)?.seq : undefined,
+      people: room.people(now),
+      fromNow: room.fromNow || undefined,
+      latest: PLUGIN_LATEST,
+      team: teamOf(room),
+      // What's shared now, whatever history was pruned.
+      previews: room.previewList(),
+      cloud: cloudSummary(room),
+    }),
+  }
+}
+
+// The operator ends a room (abuse): its admin token, checked by the host.
+async function adminEnd({ room, now, ctx }: RouteArgs): Promise<RouteResult> {
+  if (!ctx.admin) return { response: json({ error: 'Not found' }, 404) }
+  room.end(now)
+  await ended(room, ctx)
+  await endCloud(room, ctx)
+  return { changed: true, response: json({ ok: true }) }
+}
+
+// The host's sign-in ends it too, with no room token: the Team panel's Stop,
+// from any session or computer, even after the session that shared it
+// closed without saving its token.
+async function endBySignIn({ room, req, now, ctx }: RouteArgs): Promise<RouteResult> {
+  const who = await whoIs(req, ctx)
+  if (!who || (who !== room.host.account && who !== room.team?.account)) return { response: json({ error: 'Only the host can stop sharing.' }, 403) }
+  room.end(now)
+  // Off its team's list, and its invites gone, as every end takes them (`ended`).
+  await ended(room, ctx)
+  // A session in the cloud: its runner goes with the room.
+  await endCloud(room, ctx)
+  return { changed: true, response: json({ ok: true }) }
+}
+
+// A person leaves by their sign-in, with no seat token: the Team panel's
+// Leave, for every session of theirs in it, here or on another computer.
+async function leaveBySignIn({ room, req, now, ctx }: RouteArgs): Promise<RouteResult> {
+  const who = await whoIs(req, ctx)
+  if (!who) return { response: json({ error: 'Sign in first: /team' }, 403) }
+  const left = room.leaveAccount(who, now)
+  return { changed: left > 0, response: json({ ok: true, left }) }
+}
+
+async function readEvents({ room, url, now, auth }: MemberArgs): Promise<RouteResult> {
+  const after = Number(url.searchParams.get('after') ?? 0) || 0
+  const wait = Math.min(Number(url.searchParams.get('wait') ?? POLL_WAIT_MS) || 0, 25_000)
+  room.touch(auth, now)
+  await room.wait(after, wait, auth.seat)
+  // Let go while it waited (removed from the room's team): nothing more.
+  if (auth.role !== 'host' && !room.seated(auth.seat)) return { response: json({ error: 'Not a member of this session.' }, 401) }
+  const at = Date.now()
+  room.touch(auth, at)
+  const max = maxOf(url)
+  const page = max ? pageOf(room.since(after), max) : { events: room.since(after), more: false }
+  return {
+    response: json({
+      // Cut short, the cursor stops at the last event sent.
+      seq: page.more ? page.events.at(-1)?.seq : room.seq,
+      more: page.more || undefined,
+      events: page.events,
+      people: room.people(at),
+      previews: room.previewList(),
+      ended: Boolean(room.endedAt),
+      title: room.title,
+      team: room.team?.name,
+      cloud: cloudSummary(room),
+    }),
+  }
+}
+
+async function postEvents({ room, req, now, auth }: MemberArgs): Promise<RouteResult> {
+  if (room.endedAt) return { response: json({ error: 'This session is no longer shared.' }, 410) }
+  if (!room.posts.hit('events', 'all', now)) return { response: limitedResponse('events') }
+  const body = await readJson(req)
+  const allowed = auth.role === 'host' ? HOST_TYPES : GUEST_TYPES
+  const from = { seat: auth.seat, name: auth.name, role: auth.role }
+  // The approver's prompt says so: their own session in the cloud, which
+  // the cloud host's watch-only setting keeps to teammates.
+  const approver = isApprover(room, auth)
+  room.touch(auth, now)
+  const items: { type: PostedEventType; body?: JsonObject }[] = (Array.isArray(body.events) ? body.events.slice(0, 200) : []).filter(
+    (item: JsonObject | null) => item && allowed.has(item.type),
+  )
+  // A guest's event past EVENT_BYTES, clamped, is refused, and the post with
+  // it (nothing a guest's plugin sends is that big); a host's is cut.
+  if (auth.role !== 'host' && items.some(item => bodyBytes(clampBody(item.body)) > EVENT_BYTES)) {
+    return { response: json({ error: `An event is limited to ${EVENT_BYTES / 1024} KB.` }, 413) }
+  }
+  let changed = false
+  for (const item of items) {
+    if (item.type === 'title' && typeof item.body?.title === 'string') {
+      room.title = item.body.title.slice(0, 120)
+    }
+    // Only the approver answers the cloud host's questions, one answer each.
+    if (item.type === 'answer') {
+      const answer = cloudAnswer(room, auth, item.body)
+      if (answer) room.append(from, 'answer', answer, now)
+      if (answer) changed = true
+      continue
+    }
+    if (item.type === 'set') {
+      const set = cloudSet(room, auth, item.body)
+      if (set) room.append(from, 'set', set, now)
+      if (set) changed = true
+      continue
+    }
+    if (item.type === 'prompt' && approver) {
+      room.append({ ...from, approver: true }, 'prompt', item.body, now)
+      changed = true
+      continue
+    }
+    if (item.type === 'react' || item.type === 'seen') {
+      const mark = tidyMark(item.type, item.body)
+      if (mark) room.append(from, item.type, mark, now)
+      if (mark) changed = true
+      continue
+    }
+    room.append(from, item.type, item.body, now)
+    if (!LIVE_TYPES.has(item.type)) changed = true
+  }
+  room.wake()
+  return { changed, response: json({ seq: room.seq }) }
+}
+
+async function leaveRoom({ room, req, now, auth }: MemberArgs): Promise<RouteResult> {
+  if (auth.role === 'guest') room.leave(bearerOf(req), 'left', now)
+  return { changed: true, response: json({ ok: true }) }
+}
+
+async function endRoom({ room, now, ctx, auth }: MemberArgs): Promise<RouteResult> {
+  if (auth.role !== 'host' && !isApprover(room, auth)) return { response: json({ error: 'Only the host can stop sharing.' }, 403) }
+  room.end(now)
+  await ended(room, ctx)
+  await endCloud(room, ctx)
+  return { changed: true, response: json({ ok: true }) }
+}
+
+// The host invites teammates by account (the host signed in): each sees it
+// in their own Claude Code, no link to pass on.
+async function inviteAccounts({ room, req, now, origin, ctx, auth }: MemberArgs): Promise<RouteResult> {
+  if (auth.role !== 'host') return { response: json({ error: 'Only the host invites people.' }, 403) }
+  if (room.endedAt) return { response: json({ error: 'This session is no longer shared.' }, 410) }
+  const directory = ctx.directory
+  if (!directory) return { response: json({ error: "This share server doesn't have accounts." }, 400) }
+  if (!room.posts.hit('events', 'all', now)) return { response: limitedResponse('events') }
+  const body = await readJson(req)
+  const result = await directory.sessionInvite(
+    accountOf(req),
+    { id: room.id, url: shareUrl(origin, room.id), title: room.title, host: room.host.name },
+    body.to,
+  )
+  if (!result.ok) return { response: json({ error: result.error }, result.status) }
+  return { response: json({ invited: result.invited, refused: result.refused }) }
+}
+
+// The host shares an open room with a team, another one, or the link alone
+// (`team: null`). Everyone already in stays.
+async function shareWithTeam({ room, req, origin, ctx, auth }: MemberArgs): Promise<RouteResult> {
+  if (auth.role !== 'host') return { response: json({ error: 'Only the host chooses who it is shared with.' }, 403) }
+  if (room.endedAt) return { response: json({ error: 'This session is no longer shared.' }, 410) }
+  const body = await readJson(req)
+  const team = body.team ? await teamFor(req, body.team, ctx) : null
+  if (team && 'error' in team) return { response: team.error }
+  await unlist(room, ctx)
+  room.team = team
+  if (team) await listWithTeam(room, team, origin, ctx)
+  room.wake()
+  return { changed: true, response: json({ team: teamOf(room) ?? null }) }
+}
+
+const bySignIn = ({ req }: RouteArgs) => !bearerOf(req) && Boolean(accountOf(req))
+
+// The routes, in the order they're looked at, which is a security rule. These
+// need no seat. A sign-in's end and leave take only a request with no bearer,
+// and come before the check of a left seat's token and the seat's own routes.
+export const OPEN_ROUTES: Route<RouteArgs>[] = [
+  { name: 'page', method: 'GET', rest: 'page', handle: landing },
+  { name: 'info', method: 'GET', rest: '', handle: roomInfo },
+  { name: 'join', method: 'POST', rest: 'join', handle: joinRoom },
+  { name: 'admin-end', method: 'POST', rest: 'admin-end', handle: adminEnd },
+  { name: 'end by sign-in', method: 'POST', rest: 'end', when: bySignIn, handle: endBySignIn },
+  { name: 'leave by sign-in', method: 'POST', rest: 'leave', when: bySignIn, handle: leaveBySignIn },
+]
+
+// These need a seat, here or away (`room.auth`). Files, previews and the cloud
+// answer their own paths, ahead of the room's events and its controls.
+export const MEMBER_ROUTES: (Route<MemberArgs> | RouteSet)[] = [
+  { name: 'files', routes: ({ room, req, rest, auth, now }) => fileRoutes(room, req, rest, auth, now) },
+  { name: 'previews', routes: ({ room, req, rest, auth, now, ctx }) => previewRoutes(room, req, rest, auth, now, ctx) },
+  { name: 'need', method: 'POST', rest: 'need', handle: ({ room, req, auth, now, ctx }) => needRoute(room, req, auth, now, ctx) },
+  { name: 'peer', method: 'POST', rest: 'peer', handle: ({ room, req, auth, now, ctx }) => peerRoute(room, req, auth, now, ctx) },
+  { name: 'cloud', routes: ({ room, req, rest, auth, now, ctx, origin }) => cloudRoutes(room, req, rest, auth, now, ctx, origin) },
+  { name: 'read events', method: 'GET', rest: 'events', handle: readEvents },
+  { name: 'post events', method: 'POST', rest: 'events', handle: postEvents },
+  { name: 'leave', method: 'POST', rest: 'leave', handle: leaveRoom },
+  { name: 'end', method: 'POST', rest: 'end', handle: endRoom },
+  { name: 'invite', method: 'POST', rest: 'invite', handle: inviteAccounts },
+  { name: 'team', method: 'POST', rest: 'team', handle: shareWithTeam },
+]
+
 async function handleRoom(room: Room, req: Request, rest: string, now: number, origin: string, ctx: RoomContext): Promise<RouteResult> {
-  const method = req.method
-  const url = new URL(req.url)
+  const args: RouteArgs = { room, req, rest, url: new URL(req.url), now, origin, ctx }
+  for (const route of OPEN_ROUTES) if (matches(route, args)) return route.handle(args)
 
-  if (rest === 'page' && method === 'GET') {
-    // A team's session says up front when only its people can join.
-    const access = room.team && ctx.directory ? await ctx.directory.teamAccess(room.team.id).catch(() => null) : null
-    return { response: landingPage(room, shareUrl(origin, room.id), now, { access }) }
-  }
-
-  if (rest === '' && method === 'GET') {
-    return {
-      response: json({
-        id: room.id,
-        title: room.title,
-        host: room.host.name,
-        people: room.people(now),
-        ended: Boolean(room.endedAt),
-        hostVersion: room.host.version,
-        team: teamOf(room),
-        cloud: cloudSummary(room),
-      }),
-    }
-  }
-
-  if (rest === 'join' && method === 'POST') {
-    if (room.endedAt) return { response: json({ error: 'This session is no longer shared.' }, 410) }
-    const outdated = outdatedClient(req)
-    if (outdated) return { response: outdated }
-    const directory = ctx.directory
-    if (room.team && !directory) return { response: json({ error: `This session is for ${room.team.name}, and this server can't check who's in it.` }, 503) }
-    if (room.seats.size >= ROOM_SEATS_MAX) return { response: json({ error: `This session is full: ${ROOM_SEATS_MAX} people have joined.` }, 403) }
-    const body = await readJson(req)
-    const account = await whoIs(req, ctx)
-    // Shared with a team: its access setting, as it is now, says who joins,
-    // asked after the waits above (a body held open, the sign-in's look) and
-    // again if the team let someone go meanwhile, so a removal while this
-    // join waited never ends in a seat.
-    for (let tries = 0; room.team && directory; tries++) {
-      const team = room.team
-      const gen = room.teamGen
-      const check = await directory.joinCheck(team.id, accountOf(req))
-      if (!check.ok)
-        return { response: json({ error: check.error, team: team.name, signIn: check.status === 401 || undefined }, check.status === 401 ? 403 : check.status) }
-      if (room.teamGen === gen) break
-      if (tries >= 2) return { response: json({ error: 'Who is in the team changed while you joined. Try again.' }, 409) }
-    }
-    if (room.endedAt) return { response: json({ error: 'This session is no longer shared.' }, 410) }
-    if (room.seats.size >= ROOM_SEATS_MAX) return { response: json({ error: `This session is full: ${ROOM_SEATS_MAX} people have joined.` }, 403) }
-    const { token: seatToken, seat } = room.join(body.name, now, clientVersion(req), account)
-    // A long history in pages (see PAGE_BYTES_CAP): the first here, the rest
-    // from events?after=historySeq.
-    const max = maxOf(url)
-    const page = max ? pageOf(room.events, max) : { events: newestOf(room.events, PAGE_BYTES_CAP), more: false }
-    return {
-      changed: true,
-      response: json({
-        token: seatToken,
-        seat: seat.id,
-        name: seat.name,
-        title: room.title,
-        host: room.host.name,
-        seq: room.seq,
-        history: page.events,
-        more: page.more || undefined,
-        historySeq: page.more ? page.events.at(-1)?.seq : undefined,
-        people: room.people(now),
-        fromNow: room.fromNow || undefined,
-        latest: PLUGIN_LATEST,
-        team: teamOf(room),
-        // What's shared now, whatever history was pruned.
-        previews: room.previewList(),
-        cloud: cloudSummary(room),
-      }),
-    }
-  }
-
-  // The operator ends a room (abuse): its admin token, checked by the host.
-  if (rest === 'admin-end' && method === 'POST') {
-    if (!ctx.admin) return { response: json({ error: 'Not found' }, 404) }
-    room.end(now)
-    await ended(room, ctx)
-    await endCloud(room, ctx)
-    return { changed: true, response: json({ ok: true }) }
-  }
-
-  // The host's sign-in ends it too, with no room token: the Team panel's Stop,
-  // from any session or computer, even after the session that shared it
-  // closed without saving its token.
-  if (rest === 'end' && method === 'POST' && !bearerOf(req) && accountOf(req)) {
-    const who = await whoIs(req, ctx)
-    if (!who || (who !== room.host.account && who !== room.team?.account)) return { response: json({ error: 'Only the host can stop sharing.' }, 403) }
-    room.end(now)
-    // Off its team's list, and its invites gone, as every end takes them (`ended`).
-    await ended(room, ctx)
-    // A session in the cloud: its runner goes with the room.
-    await endCloud(room, ctx)
-    return { changed: true, response: json({ ok: true }) }
-  }
-
-  // A person leaves by their sign-in, with no seat token: the Team panel's
-  // Leave, for every session of theirs in it, here or on another computer.
-  if (rest === 'leave' && method === 'POST' && !bearerOf(req) && accountOf(req)) {
-    const who = await whoIs(req, ctx)
-    if (!who) return { response: json({ error: 'Sign in first: /team' }, 403) }
-    const left = room.leaveAccount(who, now)
-    return { changed: left > 0, response: json({ ok: true, left }) }
-  }
   // A seat its person left from elsewhere: told so, never seated again.
   if (room.leftElsewhere.has(bearerOf(req))) return { response: leftResponse() }
 
   // An away seat can still deliberately leave even when all seats are full.
-  if (rest === 'leave' && method === 'POST' && room.away.has(bearerOf(req))) {
+  if (rest === 'leave' && req.method === 'POST' && room.away.has(bearerOf(req))) {
     room.leave(bearerOf(req), 'left', now)
     return { changed: true, response: json({ ok: true }) }
   }
@@ -238,142 +408,13 @@ async function handleRoom(room: Room, req: Request, rest: string, now: number, o
   // Room says who needs to update.
   noteVersion(room, req, auth)
 
-  const files = await fileRoutes(room, req, rest, auth, now)
-  if (files) return files
-  const previews = await previewRoutes(room, req, rest, auth, now, ctx)
-  if (previews) return previews
-  if (rest === 'need' && method === 'POST') return needRoute(room, req, auth, now, ctx)
-  if (rest === 'peer' && method === 'POST') return peerRoute(room, req, auth, now, ctx)
-  const cloud = await cloudRoutes(room, req, rest, auth, now, ctx, origin)
-  if (cloud) return cloud
-
-  if (rest === 'events' && method === 'GET') {
-    const after = Number(url.searchParams.get('after') ?? 0) || 0
-    const wait = Math.min(Number(url.searchParams.get('wait') ?? POLL_WAIT_MS) || 0, 25_000)
-    room.touch(auth, now)
-    await room.wait(after, wait, auth.seat)
-    // Let go while it waited (removed from the room's team): nothing more.
-    if (auth.role !== 'host' && !room.seated(auth.seat)) return { response: json({ error: 'Not a member of this session.' }, 401) }
-    const at = Date.now()
-    room.touch(auth, at)
-    const max = maxOf(url)
-    const page = max ? pageOf(room.since(after), max) : { events: room.since(after), more: false }
-    return {
-      response: json({
-        // Cut short, the cursor stops at the last event sent.
-        seq: page.more ? page.events.at(-1)?.seq : room.seq,
-        more: page.more || undefined,
-        events: page.events,
-        people: room.people(at),
-        previews: room.previewList(),
-        ended: Boolean(room.endedAt),
-        title: room.title,
-        team: room.team?.name,
-        cloud: cloudSummary(room),
-      }),
-    }
+  const member: MemberArgs = { ...args, auth }
+  for (const route of MEMBER_ROUTES) {
+    if ('routes' in route) {
+      const answered = await route.routes(member)
+      if (answered) return answered
+    } else if (matches(route, member)) return route.handle(member)
   }
-
-  if (rest === 'events' && method === 'POST') {
-    if (room.endedAt) return { response: json({ error: 'This session is no longer shared.' }, 410) }
-    if (!room.posts.hit('events', 'all', now)) return { response: limitedResponse('events') }
-    const body = await readJson(req)
-    const allowed = auth.role === 'host' ? HOST_TYPES : GUEST_TYPES
-    const from = { seat: auth.seat, name: auth.name, role: auth.role }
-    // The approver's prompt says so: their own session in the cloud, which
-    // the cloud host's watch-only setting keeps to teammates.
-    const approver = isApprover(room, auth)
-    room.touch(auth, now)
-    const items: { type: PostedEventType; body?: JsonObject }[] = (Array.isArray(body.events) ? body.events.slice(0, 200) : []).filter(
-      (item: JsonObject | null) => item && allowed.has(item.type),
-    )
-    // A guest's event past EVENT_BYTES, clamped, is refused, and the post with
-    // it (nothing a guest's plugin sends is that big); a host's is cut.
-    if (auth.role !== 'host' && items.some(item => bodyBytes(clampBody(item.body)) > EVENT_BYTES)) {
-      return { response: json({ error: `An event is limited to ${EVENT_BYTES / 1024} KB.` }, 413) }
-    }
-    let changed = false
-    for (const item of items) {
-      if (item.type === 'title' && typeof item.body?.title === 'string') {
-        room.title = item.body.title.slice(0, 120)
-      }
-      // Only the approver answers the cloud host's questions, one answer each.
-      if (item.type === 'answer') {
-        const answer = cloudAnswer(room, auth, item.body)
-        if (answer) room.append(from, 'answer', answer, now)
-        if (answer) changed = true
-        continue
-      }
-      if (item.type === 'set') {
-        const set = cloudSet(room, auth, item.body)
-        if (set) room.append(from, 'set', set, now)
-        if (set) changed = true
-        continue
-      }
-      if (item.type === 'prompt' && approver) {
-        room.append({ ...from, approver: true }, 'prompt', item.body, now)
-        changed = true
-        continue
-      }
-      if (item.type === 'react' || item.type === 'seen') {
-        const mark = tidyMark(item.type, item.body)
-        if (mark) room.append(from, item.type, mark, now)
-        if (mark) changed = true
-        continue
-      }
-      room.append(from, item.type, item.body, now)
-      if (!LIVE_TYPES.has(item.type)) changed = true
-    }
-    room.wake()
-    return { changed, response: json({ seq: room.seq }) }
-  }
-
-  if (rest === 'leave' && method === 'POST') {
-    if (auth.role === 'guest') room.leave(bearerOf(req), 'left', now)
-    return { changed: true, response: json({ ok: true }) }
-  }
-
-  if (rest === 'end' && method === 'POST') {
-    if (auth.role !== 'host' && !isApprover(room, auth)) return { response: json({ error: 'Only the host can stop sharing.' }, 403) }
-    room.end(now)
-    await ended(room, ctx)
-    await endCloud(room, ctx)
-    return { changed: true, response: json({ ok: true }) }
-  }
-
-  // The host invites teammates by account (the host signed in): each sees it
-  // in their own Claude Code, no link to pass on.
-  if (rest === 'invite' && method === 'POST') {
-    if (auth.role !== 'host') return { response: json({ error: 'Only the host invites people.' }, 403) }
-    if (room.endedAt) return { response: json({ error: 'This session is no longer shared.' }, 410) }
-    const directory = ctx.directory
-    if (!directory) return { response: json({ error: "This share server doesn't have accounts." }, 400) }
-    if (!room.posts.hit('events', 'all', now)) return { response: limitedResponse('events') }
-    const body = await readJson(req)
-    const result = await directory.sessionInvite(
-      accountOf(req),
-      { id: room.id, url: shareUrl(origin, room.id), title: room.title, host: room.host.name },
-      body.to,
-    )
-    if (!result.ok) return { response: json({ error: result.error }, result.status) }
-    return { response: json({ invited: result.invited, refused: result.refused }) }
-  }
-
-  // The host shares an open room with a team, another one, or the link alone
-  // (`team: null`). Everyone already in stays.
-  if (rest === 'team' && method === 'POST') {
-    if (auth.role !== 'host') return { response: json({ error: 'Only the host chooses who it is shared with.' }, 403) }
-    if (room.endedAt) return { response: json({ error: 'This session is no longer shared.' }, 410) }
-    const body = await readJson(req)
-    const team = body.team ? await teamFor(req, body.team, ctx) : null
-    if (team && 'error' in team) return { response: team.error }
-    await unlist(room, ctx)
-    room.team = team
-    if (team) await listWithTeam(room, team, origin, ctx)
-    room.wake()
-    return { changed: true, response: json({ team: teamOf(room) ?? null }) }
-  }
-
   return { response: json({ error: 'Not found' }, 404) }
 }
 
