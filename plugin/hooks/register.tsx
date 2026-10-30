@@ -10810,10 +10810,10 @@ function faceOf(el: UI, surface: RenderSurface, f: Face, size = 24) {
   return Svg ? <Svg source={avatarSvg({ ...f, color }, size)} alt={f.name} width={size} height={size} /> : <Text color={color}>{f.online ? '●' : '○'}</Text>
 }
 
-// A panel's pages, side by side: the one showing in bold at full strength,
-// a count beside a label (in Claude's orange when it's news), each a digit
-// from picked where the panel holds the keys. Every tab is the same plain
-// button, so a hovered one's background is the size of any other's.
+// A panel's pages, side by side: the one showing bold and underlined, at
+// full strength, a count beside a label (in Claude's orange when it's news),
+// each a digit from picked where the panel holds the keys. Every tab is the
+// same plain button, so a hovered one's background is the size of any other's.
 type Tab<T extends string> = { id: T; label: string; count?: number; news?: boolean }
 function tabsOf<T extends string>(el: UI, tabs: readonly Tab<T>[], current: T, pick: (id: T) => void) {
   const { Box, Button, Text } = el
@@ -10830,7 +10830,9 @@ function tabsOf<T extends string>(el: UI, tabs: readonly Tab<T>[], current: T, p
             dimColor={!on && !t.news}
             onPress={() => pick(t.id)}
           >
-            <Text bold={on}>{t.label}</Text>
+            <Text bold={on} underline={on}>
+              {t.label}
+            </Text>
             {t.count ? (
               <Text color={t.news ? 'claude' : undefined} dimColor={!t.news} bold={t.news}>
                 {` ${t.count}`}
@@ -14167,7 +14169,7 @@ export const register: Register = (on, options) => {
             <Button
               key="room-copy"
               label={copied ? 'Copied ✓' : 'Copy link'}
-              plain
+              variant="secondary"
               onPress={press => void copyLink($, room.url, press.surface).then(() => flashCopied($))}
             />
             {isHost ? (
@@ -14360,11 +14362,11 @@ export const register: Register = (on, options) => {
               <Button
                 key="room-team-invite"
                 label="Copy team invite link"
-                plain
+                variant="secondary"
                 onPress={press => void copyText($, inviteUrl(teamsNow, shownTeam), 'Team invite link copied', press.surface)}
               />
             ) : null}
-            <Button key="room-open-team" label="Team" plain dimColor onPress={() => void openTeam($)} />
+            <Button key="room-open-team" label="Team" variant="secondary" onPress={() => void openTeam($)} />
           </Box>
         </Box>
       )
