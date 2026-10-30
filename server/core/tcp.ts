@@ -1,7 +1,7 @@
 import { TCP_LIMITS, SERVE_LIMITS } from './limits.ts'
 import { utf8Length, token } from './http.ts'
 import type { Room } from './room.ts'
-import type { RevokeFilter, TCPStats } from './types.ts'
+import type { Bearer, RevokeFilter, TCPStats } from './types.ts'
 
 // What a revocation is matched against: a TCP half, a public pair, a browser session.
 type Revocable = { pid?: string; ownerSeat?: string; session?: string }
@@ -85,7 +85,7 @@ export function tcpSocketTarget(
   now: number,
   active: { ownerSeat?: string }[] = [],
 ): ({ ok: true } & TCPTarget) | { ok: false; status: number; error: string } {
-  const bearer = /^Bearer\s+([A-Za-z0-9_-]+)$/i.exec(req.headers.get('authorization') ?? '')?.[1]
+  const bearer = /^Bearer\s+([A-Za-z0-9_-]+)$/i.exec(req.headers.get('authorization') ?? '')?.[1] as Bearer | undefined
   const seat = bearer ? (room.seats.get(bearer) ?? room.away.get(bearer)) : null
   if (!seat) return { ok: false, status: 401, error: 'Not a guest of this session.' }
   const preview = room.previews.get(pid)

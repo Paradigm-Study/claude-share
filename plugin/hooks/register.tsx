@@ -67,6 +67,7 @@ import type {
 import { fit, isModern } from './fit'
 import { BAD, GOOD, ago, avatarSvg, cloverSvg, colorFor, colorsFor, labelsFor, stackSvg, toolGlyph } from './look'
 import { REACTS, diffOf, mentionsOf, patchOf, replyKey, took, writeOf } from './room'
+import type { PostedEventType, RoomEvent } from '../types/protocol'
 import type { Patch } from './room'
 import type { Face } from './look'
 import { attachmentsOf, delivered, neutralize, PEER_ID, rowsFromMessage, rowsToMarkdown, splitSpeaker, summarizeTool } from './rows'
@@ -340,14 +341,7 @@ let pastedAgain: { id: string; at: number } | null = null
 // A team's invite link (`/i/<code>`), pasted as a message.
 const INVITE = /^\s*(https?:\/\/[^\s]+?)\/i\/([A-Za-z0-9_-]{8,40})\/?\s*$/
 
-type ServerEvent = {
-  seq: number
-  type: string
-  /** `approver`: a prompt from the cloud host's approver, as the room says. */
-  from: { seat: string; name: string; role: 'host' | 'guest'; approver?: boolean }
-  ts: number
-  body: Record<string, unknown>
-}
+type ServerEvent = RoomEvent
 
 type EventsPage = {
   seq: number
@@ -1341,7 +1335,7 @@ async function roomStillShared($: $, room: ShareRoom): Promise<boolean> {
 // The kind of a live piece: what Claude writes, thinks, or a call it drafts.
 const deltaKind = (body: Record<string, unknown>) => (typeof body.text === 'string' ? 'text' : typeof body.thinking === 'string' ? 'thinking' : 'drafting')
 
-function send($: $, type: string, body: Record<string, unknown>) {
+function send($: $, type: PostedEventType, body: Record<string, unknown>) {
   const last = outbox.at(-1)
   if (type === 'delta' && last?.type === 'delta' && last.body.turnId === body.turnId && deltaKind(last.body) === deltaKind(body)) {
     // Pieces waiting for the next post join up; a draft's newest line replaces the last.

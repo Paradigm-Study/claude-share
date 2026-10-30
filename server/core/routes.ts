@@ -22,7 +22,7 @@ import { landingPage } from './pages.ts'
 import { ROOM_SEATS_MAX, PAGE_BYTES_CAP, POLL_WAIT_MS, EVENT_BYTES, FILE_UPLOADS, FILE_MAX, ROOM_FILES_MAX, ROOM_FILES_COUNT, PEER_LIMIT } from './limits.ts'
 import { previewRoutes, needRoute } from './previews.ts'
 import { serveReserve, SERVED_ALL } from './tcp.ts'
-import type { Auth, FileMeta, JsonObject, RoomContext, RoomTeam, RouteResult } from './types.ts'
+import type { Auth, FileMeta, JsonObject, RoomContext, RoomTeam, RouteResult, PostedEventType } from './types.ts'
 
 // POST /api/rooms: the host's Share. Returns the room and the host's token.
 // Shared with a team (`team`, the host signed in), the room goes on the
@@ -284,7 +284,7 @@ async function handleRoom(room: Room, req: Request, rest: string, now: number, o
     // the cloud host's watch-only setting keeps to teammates.
     const approver = isApprover(room, auth)
     room.touch(auth, now)
-    const items: { type: string; body?: JsonObject }[] = (Array.isArray(body.events) ? body.events.slice(0, 200) : []).filter(
+    const items: { type: PostedEventType; body?: JsonObject }[] = (Array.isArray(body.events) ? body.events.slice(0, 200) : []).filter(
       (item: JsonObject | null) => item && allowed.has(item.type),
     )
     // A guest's event past EVENT_BYTES, clamped, is refused, and the post with

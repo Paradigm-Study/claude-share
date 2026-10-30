@@ -1,4 +1,4 @@
-import { json, readBody, clientVersion, token, shareUrl, PLUGIN_LATEST, bearerOf, sha256, statusOf } from './http.ts'
+import { json, readBody, clientVersion, token, newBearer, shareUrl, PLUGIN_LATEST, bearerOf, sha256, statusOf } from './http.ts'
 import { CLOUD_CONFIG_MAX, CLOUD_MAX_MS, CLOUD_CHANGES_MAX } from './limits.ts'
 import type { Room } from './room.ts'
 import type { Auth, CloudAuth, FileMeta, From, JsonObject, RoomContext, RouteResult } from './types.ts'
@@ -106,7 +106,7 @@ export async function cloudRoutes(
     const was = room.host.token
     // The mover goes on as a guest (one of the host's own sessions, by account).
     const { token: seatToken, seat } = room.join(room.host.name, now, clientVersion(req), room.host.account ?? null)
-    const runner = token(24)
+    const runner = newBearer()
     const ticket = token(32)
     room.host.token = runner
     room.cloud = {
@@ -154,7 +154,7 @@ export async function cloudRoutes(
     if (!isApprover(room, auth)) return { response: json({ error: `Only ${room.cloud.approver.name} brings this session home.` }, 403) }
     const changes = room.cloud.state === 'stopped' ? (room.cloud.changes ?? null) : await stopCloud(room, ctx, now, 'home')
     // Their seat is the host again, with a token of its own.
-    const host = token(24)
+    const host = newBearer()
     room.host.token = host
     room.host.lastSeen = now
     room.seats.delete(bearerOf(req))
@@ -184,7 +184,7 @@ export async function stopCloud(room: Room, ctx: RoomContext, now: number, why: 
     room.cloud.state = 'stopped'
     room.cloud.changes = changes
     // No one holds the host's token now.
-    room.host.token = token(24)
+    room.host.token = newBearer()
     room.append(fromHost(room), 'cloud', { state: 'stopped', why, changes: changes?.id ?? null }, now)
     room.wake()
   }

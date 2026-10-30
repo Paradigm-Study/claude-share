@@ -43,8 +43,9 @@ import {
   chargeControl,
   mergeTCPStats,
   leftResponse,
+  bearerOf,
 } from '../core/index.ts'
-import type { CloudHosts, FileMeta, RevokeFilter, RoomContext, RoomData, RoomEvent, TCPFrame, TCPHalf, TCPStats } from '../core/index.ts'
+import type { SeatId, CloudHosts, FileMeta, RevokeFilter, RoomContext, RoomData, RoomEvent, TCPFrame, TCPHalf, TCPStats } from '../core/index.ts'
 import type { RoomInfo } from '../teams.ts'
 import type { TracesEnv } from '../traces/index.ts'
 import type { Turn } from '../traces/turns.ts'
@@ -312,7 +313,7 @@ export class RoomObject extends DurableObject<ServerEnv> {
     if (req.headers.get('upgrade')?.toLowerCase() !== 'websocket') return json({ error: 'Expected a WebSocket.' }, 426)
     const room = this.live()
     const seated = room.seats.size
-    const bearer = (req.headers.get('authorization') ?? '').replace(/^Bearer\s+/i, '').trim()
+    const bearer = bearerOf(req)
     // Left from elsewhere (the Team panel's Leave): told so, never seated again.
     if (room.leftElsewhere.has(bearer)) return leftResponse()
     const auth = room.auth(bearer, now)
@@ -788,7 +789,7 @@ export class RoomObject extends DurableObject<ServerEnv> {
     } catch {}
     const att = attachmentOf(ws)
     if (!att || !this.room) return
-    if (att.seat && att.role) this.room.touch({ role: att.role, seat: att.seat, name: '' }, Date.now())
+    if (att.seat && att.role) this.room.touch({ role: att.role, seat: att.seat as SeatId, name: '' }, Date.now())
     await this.persist()
     await this.schedule()
   }

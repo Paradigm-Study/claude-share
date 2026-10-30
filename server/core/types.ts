@@ -4,15 +4,27 @@
 
 export type JsonObject = { [key: string]: any }
 
-export type Role = 'host' | 'guest'
-// Who a request is, once its token is known.
-export type Auth = { role: Role; seat: string; name: string }
-// Who an event is from, as the room stamps it.
-export type From = { seat: string; name: string; role: Role; approver?: boolean }
-export type RoomEvent = { seq: number; type: string; from: From; ts: number; body: JsonObject }
+// What the plugin and the room say to each other: both sides read these.
+export type {
+  Bearer,
+  EventFrom as From,
+  GuestEventType,
+  HostEventType,
+  PostedEventType,
+  Role,
+  RoomEvent,
+  RoomEventBodies,
+  RoomEventType,
+  RoomId,
+  SeatId,
+} from '../../plugin/types/protocol.d.ts'
+import type { Bearer, Role, RoomEvent, RoomId, SeatId } from '../../plugin/types/protocol.d.ts'
 
-export type Host = { name: string; token: string; lastSeen: number; version?: string; account?: string }
-export type Seat = { id: string; name: string; joinedAt: number; lastSeen: number; version?: string; account?: string }
+// Who a request is, once its token is known.
+export type Auth = { role: Role; seat: SeatId; name: string }
+
+export type Host = { name: string; token: Bearer; lastSeen: number; version?: string; account?: string }
+export type Seat = { id: SeatId; name: string; joinedAt: number; lastSeen: number; version?: string; account?: string }
 // Shared with a team: `account` is the host's, who shared it.
 export type RoomTeam = { id: string; name: string; account?: string }
 export type FileMeta = { id: string; name: string; type: string; size: number; ts: number }
@@ -37,7 +49,7 @@ export type RevokeFilter = { pid?: string; seat?: string; session?: string }
 
 // A room as it's saved, and loaded again.
 export type RoomData = {
-  id: string
+  id: RoomId
   title: string
   host: Host
   createdAt: number
