@@ -68,6 +68,16 @@ export class DirectoryObject extends DurableObject<ServerEnv> {
   unregister(teamId: string, roomId: string) {
     return this.directory.unregister(teamId, roomId)
   }
+  // What the dashboard asks (server/worker/dash.ts), with a browser's sign-in.
+  dashMe(tokenText: string) {
+    return this.directory.dashMe(tokenText)
+  }
+  dashLive(tokenText: string) {
+    return this.directory.dashLive(tokenText)
+  }
+  endWeb(tokenText: string) {
+    return this.directory.endWeb(tokenText)
+  }
 
   override async fetch(req: Request) {
     const path = new URL(req.url).pathname

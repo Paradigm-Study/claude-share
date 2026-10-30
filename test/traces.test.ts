@@ -542,6 +542,49 @@ describe.skipIf(!url)('end to end, against Postgres (TRACES_DATABASE_URL)', () =
     ok((await hits(b.access, '部署')).length === 0, "Bob, not in Acme, finds nothing of Acme's")
     ok((await tool(b.access, 'get_turn', { session: top.session, turn: top.turn }))?.isError === true, 'nor can he read one of its turns by its id')
     ok((await tool(b.access, 'list_sessions', {}))?.structuredContent?.sessions?.length === 0, 'nor list its sessions')
+    // -- the dashboard's search (server/worker/dash.ts), from a browser ---------
+    // Signed in there as on its page: the start links and the cookie, the
+    // sign-in page's Continue, and back to /app/continue for the session cookie.
+    const dashSignIn = async (email: string, name: string) => {
+      const cookies = new Map<string, string>()
+      const go = async (path: string, init: RequestInit = {}) => {
+        const res = await fetch(`${S}${path}`, {
+          ...init,
+          redirect: 'manual',
+          headers: { ...(init.headers as Record<string, string>), cookie: [...cookies].map(([k, v]) => `${k}=${v}`).join('; ') },
+        })
+        for (const c of res.headers.getSetCookie()) {
+          const [pair = ''] = c.split(';')
+          const at = pair.indexOf('=')
+          if (/max-age=0/i.test(c)) cookies.delete(pair.slice(0, at))
+          else cookies.set(pair.slice(0, at), pair.slice(at + 1))
+        }
+        return res
+      }
+      const start = (await (await go('/api/dash/signin', { method: 'POST', headers: { origin: S } })).json()) as { providers: { id: string; href: string }[] }
+      const href = start.providers.find(p => p.id === 'test')?.href ?? ''
+      const page = await (await go(`${href}&email=${encodeURIComponent(email)}&name=${name}`)).text()
+      const field = (n: string) => new RegExp(`name="${n}" value="([^"]*)"`).exec(page)?.[1] ?? ''
+      await go('/auth/confirm', {
+        method: 'POST',
+        headers: { 'content-type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ login: field('login'), nonce: field('nonce') }),
+      })
+      await go('/app/continue')
+      return {
+        me: async () => (await go('/api/dash/me')).json() as Promise<any>,
+        search: async (query: string) =>
+          (
+            await go('/api/dash/search', { method: 'POST', headers: { origin: S, 'content-type': 'application/json' }, body: JSON.stringify({ query }) })
+          ).json() as Promise<any>,
+      }
+    }
+    const aliceWeb = await dashSignIn('alice@acme.com', 'Alice')
+    ok((await aliceWeb.me()).traces === true, 'the dashboard says this server keeps traces')
+    const webHits = (await aliceWeb.search('数据库迁移')).hits ?? []
+    ok(webHits[0]?.prompt.startsWith('数据库迁移') && webHits[0].session === room.id, "Alice's browser finds Acme's turn, as her MCP search does")
+    const bobWeb = await dashSignIn('bob@other.com', 'Bob')
+    ok(((await bobWeb.search('数据库迁移')).hits ?? []).length === 0, "Bob's browser, not in Acme, finds nothing of Acme's")
     ok(
       (await call('/api/me', { method: 'DELETE', tok: bob })).status === 200 && (await mcp(b.access, 'tools/list', {})).status === 401,
       "once Bob's account is deleted, his MCP token reads nothing",

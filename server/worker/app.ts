@@ -38,6 +38,7 @@ import type { TracesEnv } from '../traces/index.ts'
 import type { ServerEnv } from './env.ts'
 import { tracesOn, traces, hasDirectory, directoryStub } from './env.ts'
 import type { RoomObject } from './room-object.ts'
+import { isDashPath, dashFetch } from './dash.ts'
 
 // The directory reads a body whole, so the Worker reads it first, bounded:
 // its characters at three bytes each.
@@ -89,7 +90,7 @@ async function previewFetch(req: Request, env: ServerEnv): Promise<Response> {
 }
 
 // The main Worker's routes, in the order they're looked at: what the server
-// says of itself, its home page, traces (when on), the directory's paths
+// says of itself, its home page, the dashboard, traces (when on), the directory's paths
 // (when it has one), then a room's. A preview Worker serves its rooms'
 // previews alone (previewFetch). Handlers never touch `c.res`, so Hono hands
 // back the Response a room gave, a WebSocket's upgrade included.
@@ -102,6 +103,9 @@ app.all('/api/version', c => versionInfo({ traces: tracesOn(c.env) }))
 const home = (c: Context<App>) => (c.req.raw.method === 'GET' ? homePage({ traces: tracesOn(c.env) }) : notFound())
 app.all('/', home)
 app.all('/privacy', home)
+
+// The dashboard (server/worker/dash.ts): /app and its JSON, /api/dash/*.
+app.use(async (c, next) => (isDashPath(new URL(c.req.url).pathname) ? dashFetch(c.req.raw, c.env) : next()))
 
 // Session traces over MCP, and its OAuth (server/traces/oauth.ts).
 app.use(async (c, next) => {

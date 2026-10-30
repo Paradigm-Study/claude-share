@@ -8,7 +8,15 @@ import { defineConfig } from 'vitest/config'
 // The suites that start the Workers under wrangler dev (startWorkerd): a
 // test there waits on real Workers, and on a loaded machine one of teams'
 // takes past 30 s, so these have minutes. A suite that starts them goes here.
-const WORKERD = ['test/peer.test.ts', 'test/teams.test.ts', 'test/traces.test.ts', 'test/cloud.test.ts', 'test/tcp-worker.test.ts', 'test/previews.test.ts']
+const WORKERD = [
+  'test/dashboard.test.ts',
+  'test/peer.test.ts',
+  'test/teams.test.ts',
+  'test/traces.test.ts',
+  'test/cloud.test.ts',
+  'test/tcp-worker.test.ts',
+  'test/previews.test.ts',
+]
 
 export default defineConfig({
   resolve: {
@@ -16,6 +24,8 @@ export default defineConfig({
   },
   test: {
     pool: 'forks',
+    // The dashboard built once, before the suites (test/support/global-setup.ts).
+    globalSetup: ['test/support/global-setup.ts'],
     teardownTimeout: 10_000,
     projects: [
       { extends: true, test: { name: 'unit', include: ['test/**/*.test.ts'], exclude: WORKERD, testTimeout: 30_000, hookTimeout: 30_000 } },

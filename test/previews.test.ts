@@ -43,6 +43,7 @@ import {
   homePage,
 } from '../server/core/index.ts'
 import { metaOf } from '../server/worker/index.ts'
+import { WEB_SESSION_DAYS } from '../server/teams.ts'
 
 // A room, its two seats' tokens, and whether its object is the current one.
 type World = { room: Room; host: string; guest: string; current: boolean }
@@ -1395,12 +1396,15 @@ test('the home page says when expired links and sessions go, that a new link ren
     'The page and Claude Code show the same code, and you continue only if they match.',
     "Claude Code's token is made when it picks up the sign-in, and the server keeps only its hash",
     "after ten minutes that sign-in stops working, and it's deleted then.",
+    'A browser sign-in lasts 30 days, and signing out there, or deleting your account, ends it at once.',
+    'the server keeps only its hash, with your account',
     "until it's joined, dismissed, ends, or 12 hours pass",
     'a connection closes if 1 MiB of control messages to one side goes unacknowledged (each acknowledgement covers everything sent before it), however long it lives',
     "A room sends out at most 8 GB a day of its files and of what its previews' links answer, and to any one seat at most 256 MB a minute of it",
     'keyed by a random key made for that day, with that count, until the day (UTC) ends; then all of it goes, the key too',
   ])
     assert(text.includes(said), said)
+  assert.equal(WEB_SESSION_DAYS, 30, "the home page's browser sign-in lasts what the directory keeps it")
   assert.deepEqual([SERVE_LIMITS.roomBytesPerDay, SERVE_LIMITS.seatBytesPerMinute, SERVE_LIMITS.periodMs], [8 * 1024 ** 3, 256 * 1024 ** 2, 60_000])
   assert.equal(
     [

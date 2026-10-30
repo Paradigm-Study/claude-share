@@ -10,10 +10,12 @@
 //
 // The configs are wrangler.toml and wrangler.preview.toml with what needs a
 // Cloudflare login left out (the cloud host's container image, kept in the
-// account's registry), so this runs without an account, as CI does.
+// account's registry), so this runs without an account, as CI does. The
+// dashboard's files (web/dist) are built once here (`buildWeb`), not by each
+// wrangler dev's [build], which would rebuild them under suites running at once.
 
-import { spawn } from 'node:child_process'
-import { existsSync } from 'node:fs'
+import { spawn, spawnSync } from 'node:child_process'
+import { existsSync, mkdirSync, rmSync } from 'node:fs'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:net'
 import type { AddressInfo } from 'node:net'
@@ -24,6 +26,35 @@ import { fileURLToPath } from 'node:url'
 
 const ROOT = fileURLToPath(new URL('../..', import.meta.url))
 const WRANGLER = join(ROOT, 'node_modules/wrangler/bin/wrangler.js')
+const WEB_PAGE = join(ROOT, 'web/dist/app/index.html')
+
+// The dashboard as wrangler.toml's [assets] serves it: built now when
+// `fresh` (vitest's global setup, once a run) or when it's missing, one
+// builder at a time (a lock folder; the others wait for its page).
+export function buildWeb({ fresh = false } = {}) {
+  if (!fresh && existsSync(WEB_PAGE)) return
+  const lock = join(ROOT, 'web/dist.lock')
+  try {
+    mkdirSync(lock, { recursive: false })
+  } catch {
+    const until = Date.now() + 60_000
+    while (!existsSync(WEB_PAGE) && Date.now() < until) spawnSync('sleep', ['0.2'])
+    return
+  }
+  try {
+    const built = spawnSync(
+      process.execPath,
+      [join(ROOT, 'node_modules/vite/bin/vite.js'), 'build', '--config', join(ROOT, 'web/vite.config.ts'), '--logLevel', 'warn'],
+      {
+        cwd: ROOT,
+        encoding: 'utf8',
+      },
+    )
+    if (built.status !== 0) throw new Error(`the dashboard did not build: ${built.stderr || built.stdout}`)
+  } finally {
+    rmSync(lock, { recursive: true, force: true })
+  }
+}
 
 export function freePort() {
   return new Promise<number>((resolve, reject) => {
@@ -36,7 +67,7 @@ export function freePort() {
   })
 }
 
-// A config's text with `main` made absolute (the config is written elsewhere)
+// A config's text with `main` and the dashboard's `directory` made absolute (the config is written elsewhere), its [build] left out (buildWeb)
 // and its [[containers]] block left out, or (`containers`) its image built
 // here from cloud/Dockerfile, which needs Docker and no account.
 function forTest(text: string, containers = false) {
@@ -44,13 +75,14 @@ function forTest(text: string, containers = false) {
   let skipping = false
   for (const line of text.split('\n')) {
     if (line.startsWith('[[containers]]')) skipping = !containers
+    else if (line.startsWith('[build]')) skipping = true
     else if (skipping && line.startsWith('[')) skipping = false
     if (skipping) continue
     if (line.startsWith('image = ')) {
       lines.push(`image = ${JSON.stringify(join(ROOT, 'cloud/Dockerfile'))}`, `image_build_context = ${JSON.stringify(ROOT)}`)
       continue
     }
-    lines.push(line.replace(/^main = "(.+)"$/, (_: string, path: string) => `main = ${JSON.stringify(join(ROOT, path))}`))
+    lines.push(line.replace(/^(main|directory) = "(.+)"$/, (_: string, key: string, path: string) => `${key} = ${JSON.stringify(join(ROOT, path))}`))
   }
   return lines.join('\n')
 }
@@ -77,6 +109,7 @@ async function ready(origin: string, child: ChildProcess, logs: () => string, ms
 // deploy or an eviction would; `stop()` ends them and deletes their storage.
 function checkTools() {
   if (!existsSync(WRANGLER)) throw new Error('wrangler is not installed: run npm install first')
+  buildWeb()
 }
 
 // The two Workers, running: where they answer, their output, and a restart or stop.

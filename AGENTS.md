@@ -12,7 +12,7 @@ The rules that shaped the design live in `docs/rules/`, one file an area: what t
 - Before you touch checkpoints, resuming, `closeRoom`, cancellation or updates in place: read [docs/rules/rooms.md](docs/rules/rooms.md).
 - Before you touch previews (what's shared and who decides, discovery, the public link, TCP forwarding, a guest's listeners, the separate window and its proxy): read [docs/rules/previews.md](docs/rules/previews.md).
 - Before you touch the cloud host (`HostContainer`, the runner, approvers, Move and Bring home, its image): read [docs/rules/cloud.md](docs/rules/cloud.md).
-- Before you touch `server/` (the Workers and Durable Objects, timers, bounds, seats, teams, sign-in, traces, the native pool, invites): read [docs/rules/server.md](docs/rules/server.md).
+- Before you touch `server/` (the Workers and Durable Objects, timers, bounds, seats, teams, sign-in, traces, the dashboard at `/app` and `web/`, the native pool, invites): read [docs/rules/server.md](docs/rules/server.md).
 
 ## Setting it up for someone
 
@@ -52,6 +52,7 @@ npm install                                             # wrangler: the suites t
 npm run check                                           # type checks (server, scripts, relay, test), oxlint and the format check: what CI's server types job runs
 npm run typecheck:plugin                                # the plugin against the engine's API (needs plugin/.claude/types, below)
 npm run lint:plugin                                     # the type-aware lint over plugin/hooks and plugin/tests (needs plugin/.claude/types too)
+npm run build:web                                       # the dashboard (web/) into web/dist/app: wrangler deploy and dev run it themselves ([build]), and the test suites build it once
 npm run format                                          # oxfmt over server/, scripts/ and the plugin's TypeScript (.oxfmtrc.json); test/ joins once its suites are on Vitest
 claude plugin validate --strict plugin                  # what the engine and the plugin directory check
 claude plugin test plugin                               # plugin/tests: the UI tests (*.test.tsx, one file an area, over tests/support/world.tsx; desktop and terminal) and the pure modules' (window, preview, proxy, upstream)
@@ -64,6 +65,7 @@ node test/local-preview.ts                              # TCP helpers through th
 #   test/mailbox.test.ts                                # the host's mailbox helper and relay/receipt.mts through real Unix sockets (macOS or Linux)
 #   test/previews.test.ts                               # preview shares, forwarding, Stop, needs, the public link, bounded bodies and events, a worst-case meta, the home page's claims
 #   test/teams.test.ts                                  # accounts and teams, the sign-in's confirmation, Continue in a real headless Chrome when there is one
+#   test/dashboard.test.ts                              # /app and its files, a browser's sign-in into its cookie, Live, and how its access ends; the preview host serves none of it
 #   test/cloud.test.ts                                  # the cloud host's handoff through the core; with CLOUD_DOCKER=1 and model access, a real runner in Docker under wrangler dev
 #   test/security.test.ts                               # where a room's files land on a teammate's computer (relay/save.sh) and where a guest's read really goes (relay/real.sh), through real links; names, the room page, what a seat holds open, uploads, and on the Worker team removals, what a room serves and the daily room count
 TRACES_DATABASE_URL=… npm test -- test/traces.test.ts   # traces end to end against a throwaway Postgres (its tables are dropped first): OAuth, keeping turns, keyword and meaning search
@@ -82,7 +84,7 @@ All but the e2e run without a model. Every project is strict and checked against
 
 1. Bump `plugin/.claude-plugin/plugin.json` `version`. Claude Code updates by version, not by commit: a push without a bump reaches nobody.
 2. Run the checks above.
-3. Push to `main`, then deploy the server, in that order. On an update, deploy the preview Worker first (`npx wrangler deploy -c wrangler.preview.toml`, then `npx wrangler deploy`), since it must already route what the new main Worker's rooms make; the first time, the main Worker goes first, since the preview Worker's `ROOMS` binding names its `RoomObject`. `node scripts/setup.ts deploy` does both in the right order, and on an update stops with FAIL before the main Worker if the preview Worker's deploy fails. The server reports the version it was deployed with as the newest, and plugins that update in place then download `main`, so `main` must already have it; the others show "Version X is out". Without updates in place: `claude plugin marketplace update claude-share && claude plugin update shared-session@claude-share`.
+3. Push to `main`, then deploy the server, in that order. A deploy of the main Worker builds the dashboard first (`wrangler.toml`'s `[build]`, `npm run build:web`), so it needs `npm install` done in that checkout; the preview Worker's has nothing to build. On an update, deploy the preview Worker first (`npx wrangler deploy -c wrangler.preview.toml`, then `npx wrangler deploy`), since it must already route what the new main Worker's rooms make; the first time, the main Worker goes first, since the preview Worker's `ROOMS` binding names its `RoomObject`. `node scripts/setup.ts deploy` does both in the right order, and on an update stops with FAIL before the main Worker if the preview Worker's deploy fails. The server reports the version it was deployed with as the newest, and plugins that update in place then download `main`, so `main` must already have it; the others show "Version X is out". Without updates in place: `claude plugin marketplace update claude-share && claude plugin update shared-session@claude-share`.
 4. When an older version must stop being used, raise `PLUGIN_MIN` in `server/core/http.ts` and deploy after the push: the server then turns that version away from sharing and joining, with the update command. A plugin that sends no `x-shared-session-version` counts as too old.
 5. Rolling the main Worker back to 0.11.24 or older loses the files of rooms made since 0.11.30: those Workers read file records from `meta`, which no longer lists them. Rooms last 24 hours.
 

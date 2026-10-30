@@ -8,6 +8,8 @@
 //                             (email: the address it's shown with; emailVerified: its newest sign-in proved it)
 //   ident:<provider>:<sub>    → account id; email:<address> → account id (verified emails only)
 //   tok:<sha256>              a signed-in Claude Code { account, at } (the token itself is never kept)
+//   web:<sha256>              a browser signed in to the dashboard (/app) { account, at, exp }, 30 days at most;
+//                             its token lives in the browser's cookie alone, and reads only (`webAccount`)
 //   login:<hash>              a sign-in under way (ten minutes): 'pending', then 'confirm' (who the provider
 //                             said, waiting for the browser's Continue), then 'done' (the account id, until
 //                             Claude Code collects it: its token is made then)
@@ -89,6 +91,10 @@ export type DirectoryOptions = {
 }
 
 const LOGIN_MS = 10 * 60 * 1000
+// How long a browser's dashboard sign-in lasts, from when it was made.
+export const WEB_SESSION_DAYS = 30
+export const WEB_SESSION_MS = WEB_SESSION_DAYS * 24 * 60 * 60 * 1000
+const WEB_TOKEN = /^ssw_[A-Za-z0-9_-]{20,80}$/
 const INVITE_MS = 12 * 60 * 60 * 1000 // a session invite lasts half a day at most
 // What Claude Code sends: the SHA-256 of its secret, in hex (anything else could never be collected).
 const LOGIN_ID = /^[0-9a-f]{64}$/
@@ -179,8 +185,9 @@ const startAgain = 'Start again from Claude Code: press <b>Team</b> above the pr
 const alreadyIn = () => page('Signed in', "You're already signed in", 'Go back to Claude Code. You can close this tab.')
 // Where a sign-in started from a page of this server's goes once it's done:
 // the session traces' consent page (server/traces/oauth.ts), in the same
-// tab. Only that path, so a start link can't send a browser anywhere else.
-const BACK_PATH = /^\/oauth\/continue\?id=[A-Za-z0-9_-]{40,64}$/
+// tab, or the dashboard's (server/worker/dash.ts), which collects it. Only
+// those paths, so a start link can't send a browser anywhere else.
+const BACK_PATH = /^(\/oauth\/continue\?id=[A-Za-z0-9_-]{40,64}|\/app\/continue)$/
 const goBack = (back: string) => new Response(null, { status: 303, headers: { location: back, 'cache-control': 'no-store' } })
 const doneAnswer = (rec: { back?: string }) => (rec.back ? goBack(rec.back) : alreadyIn())
 
@@ -340,6 +347,61 @@ export class Directory {
     const secret = `ssa_${token(24)}`
     await this.kv.put(`tok:${await sha256(secret)}`, { account: accountId, at: now })
     return secret
+  }
+
+  // -- the dashboard's browser sessions -------------------------------------
+  // A browser's sign-in (server/worker/dash.ts keeps it in an HttpOnly
+  // cookie): only its hash is kept, for WEB_SESSION_MS. It reads, through the
+  // methods below alone: accountOf never takes it, so it can't share, join,
+  // change a team or delete the account.
+  async mintWeb(accountId: string, now: number) {
+    const secret = `ssw_${token(24)}`
+    await this.kv.put(`web:${await sha256(secret)}`, { account: accountId, at: now, exp: now + WEB_SESSION_MS })
+    this.onDue(now + WEB_SESSION_MS)
+    return secret
+  }
+
+  // The account a browser's sign-in is now: null once it's ended, expired,
+  // or its account is gone.
+  async webAccount(tokenText: unknown, now = Date.now()): Promise<Account | null> {
+    const t = String(tokenText ?? '')
+    if (!WEB_TOKEN.test(t)) return null
+    const key = `web:${await sha256(t)}`
+    const rec = await this.kv.get(key)
+    if (!rec) return null
+    if (!(rec.exp > now)) {
+      await this.kv.delete(key)
+      return null
+    }
+    return (await this.kv.get(`acct:${rec.account}`)) ?? null
+  }
+
+  async endWeb(tokenText: unknown) {
+    const t = String(tokenText ?? '')
+    if (WEB_TOKEN.test(t)) await this.kv.delete(`web:${await sha256(t)}`)
+  }
+
+  // Who the browser is, and its teams as they are now.
+  async dashMe(tokenText: unknown, now = Date.now()) {
+    const account = await this.webAccount(tokenText, now)
+    return account ? { account: this.accountView(account), teams: (await this.teamsOf(account)).map(t => ({ id: t.id, name: t.name, role: t.role })) } : null
+  }
+
+  // Each of the browser's teams' live sessions, as the Team panel lists them.
+  async dashLive(tokenText: unknown, now = Date.now()) {
+    const account = await this.webAccount(tokenText, now)
+    if (!account) return null
+    const teams = []
+    for (const team of await this.teamsOf(account)) {
+      const sessions = (await this.sessions(team.id)).map(({ accounts, hostAccount, ...s }) => ({
+        ...s,
+        mine: hostAccount === account.id,
+        // In it already, from one of their own sessions somewhere.
+        inIt: hostAccount !== account.id && accounts.includes(account.id),
+      }))
+      teams.push({ id: team.id, name: team.name, sessions })
+    }
+    return { account: { id: account.id, name: account.name }, teams }
   }
 
   // Teams that take this account by its email's domain or its GitHub orgs.
@@ -513,10 +575,11 @@ export class Directory {
   }
 
   // What's due goes: invites past their 12 hours, sign-ins past their ten
-  // minutes. Returns when the next is due, or null.
+  // minutes, browsers' sign-ins past their 30 days. Returns when the next is
+  // due, or null.
   async sweep(now: number) {
     let next: number | null = await this.nativePool.sweep(now)
-    for (const prefix of ['sinv:', 'login:', 'state:']) {
+    for (const prefix of ['sinv:', 'login:', 'state:', 'web:']) {
       for (const [key, rec] of await this.kv.list(prefix)) {
         if (!(rec?.exp > now)) {
           const [, accountId = '', roomId = ''] = key.split(':')
@@ -781,6 +844,7 @@ export class Directory {
     for (const team of teams) for (const [key, entry] of await this.kv.list(`live:${team}:`)) if (entry?.hostAccount === account.id) await this.kv.delete(key)
     for (const team of teams) await this.removeMember(team, account.id, { remember: false })
     for (const [key, rec] of await this.kv.list('tok:')) if (rec.account === account.id) await this.kv.delete(key)
+    for (const [key, rec] of await this.kv.list('web:')) if (rec?.account === account.id) await this.kv.delete(key)
     // Invites to it, and those it sent, which carry its name.
     for (const [key, invite] of await this.kv.list('sinv:')) {
       const [, to = '', roomId = ''] = key.split(':')
@@ -875,7 +939,7 @@ export class Directory {
         'Sign-in',
         'Finish signing in',
         [
-          `${who} shows the code <b>${code}</b>. Continue only if you started signing in from Claude Code just now and the codes match.`,
+          `${who} shows the code <b>${code}</b>. Continue only if you started signing in ${back ? '' : 'from Claude Code '}just now and the codes match.`,
           ...(team ? [`Continuing also joins you to the team <b>${esc(team.name)}</b>.`] : []),
         ],
         {
@@ -943,6 +1007,9 @@ export class Directory {
     // hand over.
     const account = rec.account ? await this.kv.get(`acct:${rec.account}`) : null
     if (!account) return json({ status: 'expired' })
+    // The dashboard's collection (server/worker/dash.ts) takes a browser's
+    // sign-in instead: it lasts WEB_SESSION_MS, and only reads.
+    if (body.web === true) return json({ status: 'done', token: await this.mintWeb(account.id, now), account: this.accountView(account) })
     return json({
       status: 'done',
       token: await this.mint(account.id, now),
