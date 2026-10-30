@@ -59,3 +59,42 @@ export type PostedEventType = HostEventType | GuestEventType
 
 /** One event in a room's feed: its `type` says its `body`'s shape. */
 export type RoomEvent = { [T in RoomEventType]: { seq: number; type: T; from: EventFrom; ts: number; body: RoomEventBodies[T] } }[RoomEventType]
+
+/** Someone in the room: one entry however many seats they hold. */
+export type RoomPerson = { id: string; name: string; role: Role; online: boolean; version?: string; seats?: string[]; account?: string; cloud?: boolean }
+/** What a room's answers say of its host in the cloud. */
+export type RoomCloudSummary = { state: 'starting' | 'running' | 'stopped'; approver: string; since: number; until?: number }
+
+/** One read of the room: what happened after a cursor, and the room now. */
+export type EventsPage = {
+  /** Cut short (`more`), the cursor stops at the last event sent. */
+  seq: number
+  more?: boolean
+  events: RoomEvent[]
+  people: RoomPerson[]
+  /** What's shared now, whatever the history no longer holds. */
+  previews?: unknown
+  ended: boolean
+  title: string
+  team?: string
+  cloud?: RoomCloudSummary
+}
+
+/** The answer to a join: a seat, and the first page of the room's history. */
+export type JoinAnswer = {
+  token: string
+  seat: string
+  name: string
+  title: string
+  host: string
+  seq: number
+  history: RoomEvent[]
+  more?: boolean
+  historySeq?: number
+  people: RoomPerson[]
+  fromNow?: boolean
+  latest?: string
+  team?: { id: string; name: string }
+  previews?: unknown
+  cloud?: RoomCloudSummary
+}

@@ -8,6 +8,8 @@ export type JsonObject = { [key: string]: any }
 export type {
   Bearer,
   EventFrom as From,
+  EventsPage,
+  JoinAnswer,
   GuestEventType,
   HostEventType,
   PostedEventType,

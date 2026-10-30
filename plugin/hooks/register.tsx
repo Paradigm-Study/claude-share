@@ -67,7 +67,7 @@ import type {
 import { fit, isModern } from './fit'
 import { BAD, GOOD, ago, avatarSvg, cloverSvg, colorFor, colorsFor, labelsFor, stackSvg, toolGlyph } from './look'
 import { REACTS, diffOf, mentionsOf, patchOf, replyKey, took, writeOf } from './room'
-import type { PostedEventType, RoomEvent } from '../types/protocol'
+import type { EventsPage, JoinAnswer, PostedEventType, RoomCloudSummary, RoomEvent } from '../types/protocol'
 import type { Patch } from './room'
 import type { Face } from './look'
 import { attachmentsOf, delivered, neutralize, PEER_ID, rowsFromMessage, rowsToMarkdown, splitSpeaker, summarizeTool } from './rows'
@@ -343,18 +343,8 @@ const INVITE = /^\s*(https?:\/\/[^\s]+?)\/i\/([A-Za-z0-9_-]{8,40})\/?\s*$/
 
 type ServerEvent = RoomEvent
 
-type EventsPage = {
-  seq: number
-  events: ServerEvent[]
-  people: SharePerson[]
-  previews?: unknown
-  ended: boolean
-  title: string
-  more?: boolean
-  cloud?: CloudSummary
-}
 // What a room's pages say of its host in the cloud.
-type CloudSummary = { state: ShareCloud['state']; approver: string; since: number; until?: number }
+type CloudSummary = RoomCloudSummary
 
 // This session is a cloud host's (cloud/runner.mjs starts it so): nobody is
 // at its screen, so a teammate's call goes to the room's approver.
@@ -3934,17 +3924,7 @@ async function resumeJoined($: $) {
         if (!current()) return
         // The seat was let go: a new one, and what happened since the old one's last.
         try {
-          const joined = await api<{
-            token: string
-            seat: string
-            seq: number
-            title: string
-            history: ServerEvent[]
-            people: SharePerson[]
-            previews?: unknown
-            more?: boolean
-            historySeq?: number
-          }>($, room.server, `/api/rooms/${room.id}/join?max=${PAGE_BYTES}`, {
+          const joined = await api<JoinAnswer>($, room.server, `/api/rooms/${room.id}/join?max=${PAGE_BYTES}`, {
             method: 'POST',
             body: { name: await whoami($) },
             account: (await signInFor($, room.server))?.token,
@@ -5657,22 +5637,7 @@ async function joinRoom($: $, server: string, id: string) {
   const name = await whoami($)
   // Signed in to that server: a session shared with a team asks who this is.
   const signedIn = await signInFor($, server)
-  const joined = await api<{
-    token: string
-    seat: string
-    title: string
-    host: string
-    seq: number
-    history: ServerEvent[]
-    people: SharePerson[]
-    latest?: string
-    fromNow?: boolean
-    team?: { id: string; name: string }
-    more?: boolean
-    historySeq?: number
-    /** What's shared now, whatever the history no longer holds. */
-    previews?: unknown
-  }>($, server, `/api/rooms/${id}/join?max=${PAGE_BYTES}`, { method: 'POST', body: { name }, account: signedIn?.token })
+  const joined = await api<JoinAnswer>($, server, `/api/rooms/${id}/join?max=${PAGE_BYTES}`, { method: 'POST', body: { name }, account: signedIn?.token })
   try {
     // A long history comes in pages (the engine hands a plugin at most 4 MiB
     // of an answer): the rest of it, up to where the room stood at the join.
