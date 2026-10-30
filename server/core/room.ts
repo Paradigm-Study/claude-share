@@ -30,6 +30,7 @@ import type {
   RevokeFilter,
   RoomData,
   RoomEvent,
+  EventsPage,
   GuestEventType,
   HostEventType,
   RoomEventBodies,
@@ -499,7 +500,7 @@ export class Room {
       title: this.title,
       team: this.team?.name,
       cloud: cloudSummary(this),
-    }
+    } satisfies EventsPage
   }
 
   since(after: number) {

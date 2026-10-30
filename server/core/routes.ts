@@ -22,7 +22,7 @@ import { landingPage } from './pages.ts'
 import { ROOM_SEATS_MAX, PAGE_BYTES_CAP, POLL_WAIT_MS, EVENT_BYTES, FILE_UPLOADS, FILE_MAX, ROOM_FILES_MAX, ROOM_FILES_COUNT, PEER_LIMIT } from './limits.ts'
 import { previewRoutes, needRoute } from './previews.ts'
 import { serveReserve, SERVED_ALL } from './tcp.ts'
-import type { Auth, FileMeta, JsonObject, RoomContext, RoomTeam, RouteResult, PostedEventType } from './types.ts'
+import type { Auth, FileMeta, JsonObject, RoomContext, RoomTeam, RouteResult, PostedEventType, EventsPage, JoinAnswer } from './types.ts'
 
 // POST /api/rooms: the host's Share. Returns the room and the host's token.
 // Shared with a team (`team`, the host signed in), the room goes on the
@@ -197,7 +197,7 @@ async function joinRoom({ room, req, url, now, ctx }: RouteArgs): Promise<RouteR
       // What's shared now, whatever history was pruned.
       previews: room.previewList(),
       cloud: cloudSummary(room),
-    }),
+    } satisfies JoinAnswer),
   }
 }
 
@@ -247,7 +247,7 @@ async function readEvents({ room, url, now, auth }: MemberArgs): Promise<RouteRe
   return {
     response: json({
       // Cut short, the cursor stops at the last event sent.
-      seq: page.more ? page.events.at(-1)?.seq : room.seq,
+      seq: page.more ? page.events.at(-1)!.seq : room.seq,
       more: page.more || undefined,
       events: page.events,
       people: room.people(at),
@@ -256,7 +256,7 @@ async function readEvents({ room, url, now, auth }: MemberArgs): Promise<RouteRe
       title: room.title,
       team: room.team?.name,
       cloud: cloudSummary(room),
-    }),
+    } satisfies EventsPage),
   }
 }
 
