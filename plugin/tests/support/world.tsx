@@ -1235,6 +1235,12 @@ export function world(
 // sign-in's SHA-256): look again, the clock a step on each time.
 export async function eventually<T>(clock: { advance: (ms: number) => Promise<void> }, get: () => T, tries = 100): Promise<T> {
   for (let i = 0; i < tries && !get(); i++) await clock.advance(1)
+  // What isn't on the test's clock (crypto.subtle's digest, in a sign-in) takes
+  // real time, which a busy machine may not have given it in those ticks.
+  for (const end = performance.now() + 2_000; !get() && performance.now() < end;) {
+    await new Promise<void>(resolve => setTimeout(resolve, 1))
+    await clock.advance(1)
+  }
   return get()
 }
 
