@@ -10810,9 +10810,10 @@ function faceOf(el: UI, surface: RenderSurface, f: Face, size = 24) {
   return Svg ? <Svg source={avatarSvg({ ...f, color }, size)} alt={f.name} width={size} height={size} /> : <Text color={color}>{f.online ? '●' : '○'}</Text>
 }
 
-// A panel's pages, side by side: the one showing drawn as the pressed
-// button, a count beside a label (in Claude's orange when it's news), each a
-// digit from picked where the panel holds the keys.
+// A panel's pages, side by side: the one showing in bold at full strength,
+// a count beside a label (in Claude's orange when it's news), each a digit
+// from picked where the panel holds the keys. Every tab is the same plain
+// button, so a hovered one's background is the size of any other's.
 type Tab<T extends string> = { id: T; label: string; count?: number; news?: boolean }
 function tabsOf<T extends string>(el: UI, tabs: readonly Tab<T>[], current: T, pick: (id: T) => void) {
   const { Box, Button, Text } = el
@@ -10825,8 +10826,7 @@ function tabsOf<T extends string>(el: UI, tabs: readonly Tab<T>[], current: T, p
             key={`tab-${t.id}`}
             label={t.count ? `${t.label} ${t.count}` : t.label}
             hotkey={String(i + 1)}
-            variant={on ? 'secondary' : undefined}
-            plain={on ? undefined : true}
+            plain
             dimColor={!on && !t.news}
             onPress={() => pick(t.id)}
           >
@@ -10862,7 +10862,8 @@ function headingOf(el: UI, title: string, right?: RenderChildren) {
   )
 }
 
-// A setting: its name in a fixed column, the picker beside it.
+// A setting: its name in a fixed column, the picker beside it, stretched to
+// the column's width so every picker on a page is as wide as the others.
 function settingOf(el: UI, label: string, picker: RenderChildren) {
   const { Box, Text } = el
   return (
@@ -10872,7 +10873,9 @@ function settingOf(el: UI, label: string, picker: RenderChildren) {
           {label}
         </Text>
       </Box>
-      <Box flexGrow={1}>{picker}</Box>
+      <Box flexGrow={1} flexDirection="column" alignItems="stretch">
+        {picker}
+      </Box>
     </Box>
   )
 }
