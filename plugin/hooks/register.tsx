@@ -65,7 +65,7 @@ import type {
   ShareWorking,
 } from '../types'
 import { fit, isModern } from './fit'
-import { BAD, GOOD, ago, avatarSvg, cloverSvg, colorFor, colorsFor, labelsFor, liveSvg, stackSvg, toolGlyph } from './look'
+import { BAD, GOOD, ago, avatarSvg, cloverSvg, colorFor, colorsFor, labelsFor, stackSvg, toolGlyph } from './look'
 import { REACTS, diffOf, mentionsOf, patchOf, replyKey, took, writeOf } from './room'
 import type { Patch } from './room'
 import type { Face } from './look'
@@ -13606,7 +13606,7 @@ export const register: Register = (on, options) => {
                 stopping === `stop:${s.id}` ? (
                   <Button key={`stop-${s.id}`} label="Stop for everyone?" variant="primary" onPress={() => void stopFromTeam($, s.id)} />
                 ) : (
-                  <Button key={`stop-${s.id}`} label="Stop" plain dimColor onPress={() => void stopFromTeam($, s.id)} />
+                  <Button key={`stop-${s.id}`} label="Stop" plain onPress={() => void stopFromTeam($, s.id)} />
                 ),
               ]
             ) : inElsewhere ? (
@@ -13621,7 +13621,7 @@ export const register: Register = (on, options) => {
                 stopping === `leave:${s.id}` ? (
                   <Button key={`leave-${s.id}`} label="Leave everywhere?" variant="primary" onPress={() => void leaveFromTeam($, s.id)} />
                 ) : (
-                  <Button key={`leave-${s.id}`} label="Leave" plain dimColor onPress={() => void leaveFromTeam($, s.id)} />
+                  <Button key={`leave-${s.id}`} label="Leave" plain onPress={() => void leaveFromTeam($, s.id)} />
                 ),
               ]
             ) : here[s.id] ? (
@@ -14126,8 +14126,6 @@ export const register: Register = (on, options) => {
         <Box flexDirection="column" gap="xs">
           <Box flexDirection="row" alignItems="center" justifyContent="space-between" gap={2}>
             <Box flexDirection="row" alignItems="center" gap={1} flexShrink={1} minWidth={0}>
-              {live && Svg ? <Svg key="room-live-dot" source={liveSvg()} alt="Live" width={12} height={12} /> : null}
-              {live ? Svg ? null : <Text color="success">●</Text> : <Text color="warning">○</Text>}
               <Text size="heading" weight="semibold" color={live ? undefined : 'warning'}>
                 {!live ? 'Reconnecting' : isHost ? 'Sharing' : 'Joined'}
               </Text>
@@ -14168,7 +14166,7 @@ export const register: Register = (on, options) => {
           <Box flexDirection="row" gap="xs" flexShrink={0}>
             <Button
               key="room-copy"
-              label={copied ? 'Copied ✓' : 'Copy link'}
+              label={copied ? 'Copied ✓' : 'Copy'}
               variant="secondary"
               onPress={press => void copyLink($, room.url, press.surface).then(() => flashCopied($))}
             />
@@ -15038,20 +15036,13 @@ export const register: Register = (on, options) => {
     const live = v.connection === 'live'
     const stopping = v.confirming === 'stop'
     const approving = await read($, approvingA)
-    // The room's mark: a dot, green while it's live (Desktop's ring widening),
-    // Reconnecting in the warning color. The state's words follow it.
-    const liveMark = (
+    // The room's mark: nothing while it's live, the state's words say so;
+    // Reconnecting in the warning color while it isn't.
+    const liveMark = live ? null : (
       <Box key="live" flexDirection="row" gap={1} alignItems="center" flexShrink={0}>
-        {live && Svg ? <Svg source={liveSvg()} alt="Live" width={12} height={12} /> : null}
-        {live ? (
-          Svg ? null : (
-            <Text color="success">●</Text>
-          )
-        ) : (
-          <Text weight="semibold" color="warning">
-            ○ Reconnecting
-          </Text>
-        )}
+        <Text weight="semibold" color="warning">
+          Reconnecting
+        </Text>
       </Box>
     )
 
@@ -15269,10 +15260,10 @@ export const register: Register = (on, options) => {
             stopping ? (
               <Button key="stop-sharing" label="Stop for everyone?" variant="primary" onPress={() => void confirmStop($)} />
             ) : (
-              <Button key="stop-sharing" label="Stop" plain dimColor onPress={() => void confirmStop($)} />
+              <Button key="stop-sharing" label="Stop" plain onPress={() => void confirmStop($)} />
             )
           ) : (
-            <Button key="leave" label="Leave" plain dimColor onPress={() => void closeRoom($, 'leave')} />
+            <Button key="leave" label="Leave" plain onPress={() => void closeRoom($, 'leave')} />
           ),
         ],
       ),
@@ -15316,9 +15307,8 @@ function whoCard(el: UI, surface: RenderSurface, v: View, turns: ShareTurn[], no
   return (
     <Box flexDirection="column" gap="sm" borderStyle="round" borderDimColor paddingX={1}>
       <Box flexDirection="row" alignItems="center" gap={1}>
-        {Svg ? <Svg source={liveSvg()} alt="Live" width={12} height={12} /> : null}
         <Text size="caption" weight="semibold" color="claude">
-          {Svg ? 'Live' : '● Live'}
+          Live
         </Text>
         <Text size="caption" dimColor tabular>
           {`· ${ago(room.since, now).replace(' ago', '')}`}

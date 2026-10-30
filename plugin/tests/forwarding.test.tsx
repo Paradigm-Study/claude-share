@@ -882,7 +882,9 @@ const textOf = (node: unknown): string => (typeof node === 'string' ? node : ((n
 async function wordsColumns(ui: { drawn: () => Promise<unknown> }, columns = 80) {
   const row = (await ui.drawn()) as Drawn
   const [left, right] = row.children as [Drawn, Drawn]
-  const [before, words] = left.children as [Drawn, Drawn]
+  // A live room draws no mark before the words; a reconnecting one, its dot.
+  const marked = (left.children as Drawn[]).length > 1
+  const [before, words] = (marked ? left.children : [undefined, ...(left.children as Drawn[])]) as [Drawn | undefined, Drawn]
   const buttons = (right.children as Drawn[]).map(b => (b.props?.plain ? String(b.props.label).length : `[ ${String(b.props?.label)} ]`.length))
   const gap = (box: Drawn) => Number(box.props?.gap ?? 0)
   const width =
@@ -892,9 +894,8 @@ async function wordsColumns(ui: { drawn: () => Promise<unknown> }, columns = 80)
     gap(row) -
     buttons.reduce((a, b) => a + b, 0) -
     gap(right) * (buttons.length - 1) -
-    textOf(before).length -
-    gap(left)
-  return { width, words: textOf(words), before: textOf(before) }
+    (before ? textOf(before).length + gap(left) : 0)
+  return { width, words: textOf(words), before: before ? textOf(before) : '' }
 }
 
 test('a service on five ports is asked about three ports a question, each port first and inside what an 80-column terminal gives the words: each Share too forwards its own', async ($, on) => {
@@ -924,8 +925,8 @@ test('a service on five ports is asked about three ports a question, each port f
     await eventually(asked.clock, () => asked.state.hostAsk?.related[0]?.port === ports[0])
     expect(asked.state.hostAsk?.related.map(s => s.port)).toEqual(ports)
     const drawn = await wordsColumns(ui)
-    expect(drawn.before).toBe('●')
-    expect(drawn.width).toBe(46)
+    expect(drawn.before).toBe('')
+    expect(drawn.width).toBe(48)
     expect(drawn.words).toBe(words)
     // Every port the yes forwards, before anything a narrow row cuts.
     expect(drawn.words.indexOf(' too?')).toBeLessThanOrEqual(drawn.width)

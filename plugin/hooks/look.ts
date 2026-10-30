@@ -151,12 +151,6 @@ export function stackSvg(faces: readonly Face[], opts: { size?: number; max?: nu
   }
 }
 
-/** Live: Claude's orange dot, still: a ring that widened past the image was clipped to a box. */
-export function liveSvg(color = '#d97757', size = 12): string {
-  const c = size / 2
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}"><circle cx="${c}" cy="${c}" r="${c / 2.4}" fill="${color}"/></svg>`
-}
-
 /** Clover, Paradigm's cat, for the one empty screen it brightens. */
 export function cloverSvg(width = 96): string {
   const height = Math.round(width * 0.56)
